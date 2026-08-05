@@ -26,6 +26,8 @@ url = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 zeroize = { version = "1", features = ["derive", "serde"] }
 
+postgres-test-harness = "0.1.0"
+
 syrup-rail = { version = "0.1.0", path = "crates/syrup-rail" }
 syrup-rail-postgres = { version = "0.1.0", path = "crates/syrup-rail-postgres" }
 syrup-rail-nmi = { version = "0.1.0", path = "crates/syrup-rail-nmi" }

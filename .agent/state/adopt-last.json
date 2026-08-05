@@ -20,10 +20,36 @@
       "scripts/jig",
       "scripts/new-checkout.sh"
     ],
-    "backups": [],
-    "conflicts": [],
+    "backups": [
+      {
+        "backup_path": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01KZ9VJKZ5VC5VBV015VB6MDV4/.jig.toml",
+        "path": ".jig.toml"
+      },
+      {
+        "backup_path": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01KZ9VJKZ5VC5VBV015VB6MDV4/agent-map.md",
+        "path": "agent-map.md"
+      }
+    ],
+    "conflicts": [
+      {
+        "detail": "destination differs from the rendered template-managed path",
+        "kind": "modified_managed_path",
+        "path": ".jig.toml"
+      },
+      {
+        "detail": "destination differs from the rendered template-managed path",
+        "kind": "modified_managed_path",
+        "path": "agent-map.md"
+      }
+    ],
     "dry_run": false,
-    "files_created": [
+    "files_created": [],
+    "files_modified": [
+      ".jig.toml",
+      "agent-map.md"
+    ],
+    "files_removed": [],
+    "files_unchanged": [
       ".agent/.cache/.gitignore",
       ".agent/PLANS.md",
       ".agent/jig-contract.json",
@@ -34,30 +60,21 @@
       ".github/workflows/repo-policy.yml",
       ".github/workflows/rust-tests.yml",
       ".gitignore",
-      ".jig.toml",
       ".mcp.json",
       "AGENTS.md",
-      "agent-map.md",
       "scripts/install-jig.sh",
       "scripts/jig",
       "scripts/new-checkout.sh",
       ".agent/jig-managed-paths.json"
     ],
-    "files_modified": [],
-    "files_removed": [],
-    "files_unchanged": [],
     "managed_blocks_inserted": [],
-    "managed_blocks_rendered": [
-      ".gitattributes",
-      ".gitignore",
-      "AGENTS.md"
-    ],
+    "managed_blocks_rendered": [],
     "retired_managed_paths": []
   },
-  "backup_root": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01KZ9V5DK3ARPXQZCPQ4KDDBJZ",
+  "backup_root": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01KZ9VJKZ5VC5VBV015VB6MDV4",
   "canonical_receipt_path": ".agent/.cache/adopt/adopt-last.json",
   "command": "adopt",
-  "created_at_unix": 1785963132,
+  "created_at_unix": 1785963565,
   "destination": "/Users/aa/Documents/syrup-rail",
   "legacy_receipt_deprecated": true,
   "legacy_receipt_path": ".agent/state/adopt-last.json",

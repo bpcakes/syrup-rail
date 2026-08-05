@@ -13,8 +13,10 @@ Reusable subscription billing crates for Banana Pancakes applications.
 
 ## Development
 
-- `scripts/jig doctor --summary`
+- `scripts/jig doctor`
 - `scripts/jig check test`
 - `cargo test -p syrup-rail-nmi-client`
 
-Private consumers pin one exact Git revision through `git@github.com:bpcakes/syrup-rail.git`.
+Private Cargo consumers pin one exact Git revision with
+`git = "ssh://git@github.com/bpcakes/syrup-rail.git"` and set
+`CARGO_NET_GIT_FETCH_WITH_CLI=true` so authentication uses the system Git client.

@@ -1,5 +1,14 @@
 # Repository Guidelines
 
+## Security and privacy baseline
+
+- Read [docs/security/threat-model.md](./docs/security/threat-model.md) before
+  changing credential handling, payment evidence, financial retention, or
+  privileged operator workflows.
+- Host applications remain responsible for authenticating and authorizing a
+  subject before invoking Syrup Rail. These crates do not create an alternate
+  application security boundary.
+
 <!-- BEGIN JIG MANAGED BLOCK -->
 This repository uses the shared `jig.sh` workflow. Keep repo-local business rules and ownership guidance in crate-level guides; keep generic agent workflow and repo policy here.
 
@@ -27,8 +36,8 @@ This repository uses the shared `jig.sh` workflow. Keep repo-local business rule
 - Treat `crates` as Rust crate roots.
 - Add crate-level `AGENTS.md` files when a crate has meaningful ownership, entrypoint, or invariant guidance that should travel with that crate.
 
-- SQL migrations live under `migrations`.
-- SQLx metadata is committed in `.sqlx`.
+- SQL migrations live under `crates/syrup-rail-postgres/schema/v1`.
+- SQLx metadata is committed in `crates/syrup-rail-postgres/.sqlx`.
 
 - Keep transport logic thin and business logic in the owning crate.
 
