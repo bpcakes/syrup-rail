@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    env,
+    env, io,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
 };
@@ -26,22 +26,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PostgresHarness::start(HarnessConfig::new("syrup_sqlx_gate")?.with_connection_budget(2)?)
             .await?;
     let lease = harness.empty_database().await?;
+    let database_url = lease.database_url().to_owned();
 
-    let pool = PgPoolOptions::new()
-        .max_connections(2)
-        .connect(lease.database_url())
-        .await?;
-    if !install_sql.trim().is_empty() {
-        sqlx::raw_sql(&install_sql).execute(&pool).await?;
+    let gate_result = run_gate(&crate_root, &database_url, install_sql, mode).await;
+    let lease_cleanup = lease.cleanup().await;
+    let harness_shutdown = harness.shutdown().await;
+
+    let mut failures = Vec::new();
+    match gate_result {
+        Ok(status) if status.success() => {}
+        Ok(status) => failures.push(format!("cargo sqlx prepare exited with {status}")),
+        Err(error) => failures.push(error),
     }
-    pool.close().await;
-
-    let status = run_sqlx_prepare(&crate_root, lease.database_url(), mode)?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+    if let Err(error) = lease_cleanup {
+        failures.push(format!("failed to clean disposable database: {error}"));
+    }
+    if let Err(error) = harness_shutdown {
+        failures.push(format!("failed to stop owned PostgreSQL server: {error}"));
     }
 
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(failures.join("; ")).into())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -64,14 +72,53 @@ fn crate_root() -> Result<PathBuf, String> {
     Ok(manifest_dir)
 }
 
-fn load_install_sql(crate_root: &Path) -> Result<String, String> {
+fn load_install_sql(crate_root: &Path) -> Result<&'static str, String> {
     let install_path = crate_root.join("schema/v1/install.sql");
-    if install_path.is_file() {
-        std::fs::read_to_string(&install_path)
-            .map_err(|error| format!("failed to read {}: {error}", install_path.display()))
-    } else {
-        Ok(V1_INSTALL_SQL.to_owned())
+    match std::fs::read_to_string(&install_path) {
+        Ok(on_disk) if on_disk == V1_INSTALL_SQL => Ok(V1_INSTALL_SQL),
+        Ok(_) => Err(format!(
+            "{} differs from schema_contract::V1_INSTALL_SQL",
+            install_path.display()
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound && V1_INSTALL_SQL.is_empty() => {
+            Ok(V1_INSTALL_SQL)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(format!(
+            "{} is missing but schema_contract::V1_INSTALL_SQL is populated",
+            install_path.display()
+        )),
+        Err(error) => Err(format!(
+            "failed to read {}: {error}",
+            install_path.display()
+        )),
     }
+}
+
+async fn run_gate(
+    crate_root: &Path,
+    database_url: &str,
+    install_sql: &str,
+    mode: PrepareMode,
+) -> Result<ExitStatus, String> {
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(database_url)
+        .await
+        .map_err(|error| format!("failed to connect to disposable database: {error}"))?;
+
+    let install_result = if install_sql.trim().is_empty() {
+        Ok(())
+    } else {
+        sqlx::raw_sql(install_sql)
+            .execute(&pool)
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("failed to apply schema/v1/install.sql: {error}"))
+    };
+    pool.close().await;
+    install_result?;
+
+    run_sqlx_prepare(crate_root, database_url, mode)
 }
 
 fn run_sqlx_prepare(
