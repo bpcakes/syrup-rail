@@ -1,0 +1,21 @@
+[package]
+name = "syrup-rail-postgres"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+license.workspace = true
+description = "Canonical provider-neutral PostgreSQL schema contract and SQLx orchestration for Syrup Rail"
+publish = false
+
+[features]
+default = []
+schema-contract-test-support = []
+
+[dependencies]
+syrup-rail.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

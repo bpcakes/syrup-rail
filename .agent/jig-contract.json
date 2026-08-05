@@ -1,0 +1,65 @@
+{
+  "contract_version": 3,
+  "tool_namespace": "jig",
+  "jig_version": "0.2.0",
+  "required_commands": [
+    "bootstrap_command",
+    "rust_fmt_check_command",
+    "rust_clippy_command",
+    "rust_test_command",
+    "rust_test_locked_command",
+    "sqlx_check_command"
+  ],
+  "tools": [
+    {
+      "name": "jig.bootstrap",
+      "kind": "command",
+      "description": "Run the configured project bootstrap command.",
+      "command": "bootstrap_command"
+    },
+    {
+      "name": "jig.fmt_check",
+      "kind": "command",
+      "description": "Run the configured format check command.",
+      "command": "rust_fmt_check_command"
+    },
+    {
+      "name": "jig.clippy",
+      "kind": "command",
+      "description": "Run the configured clippy command.",
+      "command": "rust_clippy_command"
+    },
+    {
+      "name": "jig.test",
+      "kind": "command",
+      "description": "Run the configured default test command.",
+      "command": "rust_test_command"
+    },
+    {
+      "name": "jig.test_locked",
+      "kind": "command",
+      "description": "Run the configured locked test command.",
+      "command": "rust_test_locked_command"
+    },
+
+
+
+    {
+      "name": "jig.sqlx_check",
+      "kind": "command",
+      "description": "Run the configured SQLx check command.",
+      "command": "sqlx_check_command"
+    },
+    {
+      "name": "jig.migration_add",
+      "kind": "native",
+      "description": "Add timestamped SQL migration stubs."
+    },
+
+    {
+      "name": "jig.contract_check",
+      "kind": "native",
+      "description": "Run the native Jig contract check."
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/syrup-rail",
+  "crates/syrup-rail-postgres",
+  "crates/syrup-rail-nmi",
+  "crates/syrup-rail-nmi-client",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "LicenseRef-SyrupRail-Proprietary"
+
+[workspace.dependencies]
+futures-util = "0.3"
+h2 = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+roxmltree = "0.21"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "derive", "uuid", "json", "chrono"] }
+thiserror = "2"
+tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v7", "serde"] }
+zeroize = { version = "1", features = ["derive", "serde"] }
+
+syrup-rail = { version = "0.1.0", path = "crates/syrup-rail" }
+syrup-rail-postgres = { version = "0.1.0", path = "crates/syrup-rail-postgres" }
+syrup-rail-nmi = { version = "0.1.0", path = "crates/syrup-rail-nmi" }
+syrup-rail-nmi-client = { version = "0.1.0", path = "crates/syrup-rail-nmi-client" }

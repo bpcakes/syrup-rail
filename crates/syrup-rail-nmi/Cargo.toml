@@ -1,0 +1,13 @@
+[package]
+name = "syrup-rail-nmi"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+license.workspace = true
+description = "NMI gateway and lifecycle-evidence adapter for Syrup Rail"
+publish = false
+
+[dependencies]
+syrup-rail.workspace = true
+syrup-rail-nmi-client.workspace = true
+thiserror.workspace = true

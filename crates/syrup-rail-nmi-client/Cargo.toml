@@ -1,0 +1,24 @@
+[package]
+name = "syrup-rail-nmi-client"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+license.workspace = true
+description = "A bounded, retry-free client for NMI payment APIs"
+publish = false
+
+[dependencies]
+futures-util.workspace = true
+reqwest.workspace = true
+roxmltree.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+h2.workspace = true
+reqwest = { workspace = true, features = ["http2"] }
+tokio = { workspace = true, features = ["io-util"] }

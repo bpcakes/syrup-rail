@@ -1,0 +1,87 @@
+_commit = ""
+_src_path = "embedded:jig-sh"
+_template_mode = ""
+_template_local_path = ""
+repo_name = "syrup-rail"
+default_branch = "main"
+ci_github_runner = "ubuntu-latest"
+jig_version = "0.2.0"
+template_source_url = ""
+harness_footprint = "full"
+sqlx_enabled = true
+rust_crate_roots = ["crates"]
+
+rust_migration_dir = "migrations"
+rust_sqlx_metadata_dir = ".sqlx"
+
+schema_dump_enabled = false
+
+
+sqlx_check_command = "CARGO=cargo SQLX_OFFLINE=false SQLX_OFFLINE_DIR=.sqlx sqlx prepare --check --workspace -- --workspace --all-targets"
+
+# Command values are project-owned. Generated Cargo defaults skip cleanly when
+# no manifests are found; with nested manifests they run each one in turn.
+# Review them against this repo's workspace layout and replace them when custom
+# orchestration is needed.
+bootstrap_command = "if [ -f Cargo.toml ]; then cargo fetch; else printf '%s\\n' 'No Cargo.toml found; skipping cargo bootstrap.'; fi"
+
+rust_fmt_check_command = "if [ -f Cargo.toml ]; then cargo fmt --all -- --check; else printf '%s\\n' 'No Cargo.toml found; skipping cargo fmt.'; fi"
+rust_clippy_command = "if [ -f Cargo.toml ]; then cargo clippy --workspace --all-targets --locked -- -D warnings; else printf '%s\\n' 'No Cargo.toml found; skipping cargo clippy.'; fi"
+rust_test_command = "if [ -f Cargo.toml ]; then cargo test --workspace; else printf '%s\\n' 'No Cargo.toml found; skipping cargo test.'; fi"
+rust_test_locked_command = "if [ -f Cargo.toml ]; then cargo test --workspace --locked; else printf '%s\\n' 'No Cargo.toml found; skipping cargo test-locked.'; fi"
+web_package_manager = "bun"
+
+frontend_apps = []
+
+
+[vault]
+scope = "repo"
+scope_id = "01KZ9V5DK3VCKRGVNQ0PWGHFFW"
+allow_global = false
+
+
+[dev]
+proxy_port = 1355
+https_port = 1443
+https = false
+# HTTPS listener ALPN only; cleartext proxy traffic remains HTTP/1.1.
+http2 = true
+lan = false
+# Must be localhost, local, test, internal, or a subdomain below one of them.
+tld = "localhost"
+# Set true to discover JavaScript workspace packages that expose dev scripts.
+workspace_discovery = false
+
+
+
+
+[status]
+providers = []
+
+
+[[work.gates]]
+id = "contract"
+kind = "check"
+tool = "jig.contract_check"
+
+[[work.gates]]
+id = "tests"
+kind = "check"
+tool = "jig.test"
+
+
+
+[[work.gates]]
+id = "sqlx"
+kind = "check"
+tool = "jig.sqlx_check"
+
+
+
+
+
+[[agent_tooling.codex.marketplaces]]
+id = "jig-skills"
+source = "bpcakes/jig-skills"
+plugins = ["jig-rust@jig-skills", "jig-swift@jig-skills", "jig-typescript@jig-skills", "jig-exec-plans@jig-skills"]
+
