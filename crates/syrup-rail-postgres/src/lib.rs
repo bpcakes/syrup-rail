@@ -5,5 +5,5 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(feature = "schema-contract-test-support")]
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 pub mod schema_contract;

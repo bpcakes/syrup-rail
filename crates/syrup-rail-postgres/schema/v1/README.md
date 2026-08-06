@@ -1,8 +1,14 @@
 # Schema version 1
 
-`install.sql` will be the authoritative fresh-install DDL for the neutral
-billing contract. It is not present yet: the Milestone 0 specification in
-CreditKit's `docs/syrup-rail/schema-v1-specification.md` remains an outline
-pending the exact column, constraint, index, function, and trigger inventory.
+`install.sql` is the authoritative fresh-install DDL for the provider-neutral
+billing contract. Hosts copy it byte-for-byte into one immutable migration,
+then add host identity, actor, credential, and target bindings in a separate
+host migration.
 
-Milestone 1 encodes the approved specification here after that gate passes.
+`schema_contract::V1_INSTALL_SQL` embeds this exact file. The shared
+read-only conformance entrypoint checks the canonical catalog fingerprint while
+allowing explicitly host-prefixed tables, indexes, triggers, and foreign keys.
+The package's fresh-install fixtures separately prove canonical locking,
+function, trigger, nullable-shape, and bounded-provider-text behavior. Do not
+edit version 1 after a host materializes it; introduce `schema/v2/` and forward
+host migrations instead.
