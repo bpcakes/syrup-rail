@@ -26,7 +26,7 @@ url = "2"
 uuid = { version = "1", features = ["v7", "serde"] }
 zeroize = { version = "1", features = ["derive", "serde"] }
 
-postgres-test-harness = "0.1.0"
+postgres-test-harness = { git = "https://github.com/bpcakes/postgres-test-harness.git", rev = "473d280772672a435cafd81901eee6e6db0f32e4" }
 
 syrup-rail = { version = "0.1.0", path = "crates/syrup-rail" }
 syrup-rail-postgres = { version = "0.1.0", path = "crates/syrup-rail-postgres" }

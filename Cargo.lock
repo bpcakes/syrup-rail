@@ -1707,9 +1707,8 @@ dependencies = [
 
 [[package]]
 name = "postgres-test-harness"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c60e5dfbcd8835a9ac591d4e08951d634057f2728cc6f5a858b1225a429ba5de"
+version = "0.1.1"
+source = "git+https://github.com/bpcakes/postgres-test-harness.git?rev=473d280772672a435cafd81901eee6e6db0f32e4#473d280772672a435cafd81901eee6e6db0f32e4"
 dependencies = [
  "libc",
  "postgres",
@@ -1717,6 +1716,7 @@ dependencies = [
  "testcontainers",
  "thiserror",
  "tokio",
+ "tokio-postgres",
  "url",
  "uuid",
 ]
