@@ -207,6 +207,14 @@ pub enum PaymentAttemptKind {
 }
 
 impl PaymentAttemptKind {
+    pub const ALL: [Self; 5] = [
+        Self::HostCharge,
+        Self::SubscriptionInitial,
+        Self::SubscriptionRenewal,
+        Self::SubscriptionRecovery,
+        Self::SubscriptionPaymentMethodUpdate,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::HostCharge => "host_charge",
@@ -214,6 +222,25 @@ impl PaymentAttemptKind {
             Self::SubscriptionRenewal => "subscription_renewal",
             Self::SubscriptionRecovery => "subscription_recovery",
             Self::SubscriptionPaymentMethodUpdate => "subscription_payment_method_update",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("unknown payment attempt kind")]
+pub struct PaymentAttemptKindParseError;
+
+impl FromStr for PaymentAttemptKind {
+    type Err = PaymentAttemptKindParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "host_charge" => Ok(Self::HostCharge),
+            "subscription_initial" => Ok(Self::SubscriptionInitial),
+            "subscription_renewal" => Ok(Self::SubscriptionRenewal),
+            "subscription_recovery" => Ok(Self::SubscriptionRecovery),
+            "subscription_payment_method_update" => Ok(Self::SubscriptionPaymentMethodUpdate),
+            _ => Err(PaymentAttemptKindParseError),
         }
     }
 }
@@ -229,6 +256,15 @@ pub enum PaymentAttemptStatus {
 }
 
 impl PaymentAttemptStatus {
+    pub const ALL: [Self; 6] = [
+        Self::Pending,
+        Self::Approved,
+        Self::Declined,
+        Self::Unknown,
+        Self::ReviewRequired,
+        Self::Failed,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -246,6 +282,26 @@ impl PaymentAttemptStatus {
 
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Approved | Self::Declined | Self::Failed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("unknown payment attempt status")]
+pub struct PaymentAttemptStatusParseError;
+
+impl FromStr for PaymentAttemptStatus {
+    type Err = PaymentAttemptStatusParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "approved" => Ok(Self::Approved),
+            "declined" => Ok(Self::Declined),
+            "unknown" => Ok(Self::Unknown),
+            "review_required" => Ok(Self::ReviewRequired),
+            "failed" => Ok(Self::Failed),
+            _ => Err(PaymentAttemptStatusParseError),
+        }
     }
 }
 
@@ -283,6 +339,13 @@ mod tests {
             PaymentAttemptKind::SubscriptionPaymentMethodUpdate.as_str(),
             "subscription_payment_method_update"
         );
+        for kind in PaymentAttemptKind::ALL {
+            assert_eq!(kind.as_str().parse(), Ok(kind));
+        }
+        for status in PaymentAttemptStatus::ALL {
+            assert_eq!(status.as_str().parse(), Ok(status));
+        }
+        assert!("order_sale".parse::<PaymentAttemptKind>().is_err());
     }
 
     #[test]
