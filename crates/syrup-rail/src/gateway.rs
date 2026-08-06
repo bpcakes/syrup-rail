@@ -129,6 +129,18 @@ impl GatewayStorePaymentMethodRequest {
         }
     }
 
+    pub const fn payment_token(&self) -> &PaymentToken {
+        &self.payment_token
+    }
+
+    pub const fn order_id(&self) -> &GatewayOrderId {
+        &self.order_id
+    }
+
+    pub const fn billing_contact(&self) -> Option<&BillingContact> {
+        self.billing_contact.as_ref()
+    }
+
     pub fn into_parts(self) -> (PaymentToken, GatewayOrderId, Option<BillingContact>) {
         (self.payment_token, self.order_id, self.billing_contact)
     }
