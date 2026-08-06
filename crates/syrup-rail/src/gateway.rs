@@ -627,18 +627,34 @@ pub enum GatewayTransactionReport {
     Quarantine(GatewayLifecycleQuarantine),
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum GatewayError {
-    #[error("gateway rejected the query request")]
+    #[error("gateway rejected the request before processing")]
     RequestRejected(GatewayDiagnostic),
-    #[error("gateway returned a malformed query response")]
+    #[error("gateway response was malformed")]
     Malformed(GatewayDiagnostic),
-    #[error("gateway query configuration is invalid")]
+    #[error("gateway configuration is invalid")]
     Configuration(GatewayDiagnostic),
-    #[error("gateway query service is unavailable")]
+    #[error("gateway is unavailable")]
     Unavailable(GatewayDiagnostic),
-    #[error("gateway query was rate limited")]
+    #[error("gateway rate limit exceeded")]
     RateLimited(GatewayDiagnostic),
+}
+
+impl fmt::Debug for GatewayError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (variant, detail) = match self {
+            Self::RequestRejected(detail) => ("RequestRejected", detail),
+            Self::Malformed(detail) => ("Malformed", detail),
+            Self::Configuration(detail) => ("Configuration", detail),
+            Self::Unavailable(detail) => ("Unavailable", detail),
+            Self::RateLimited(detail) => ("RateLimited", detail),
+        };
+        formatter
+            .debug_struct(variant)
+            .field("has_detail", &(!detail.is_empty()))
+            .finish()
+    }
 }
 
 impl GatewayError {
@@ -653,7 +669,7 @@ impl GatewayError {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum GatewayNotSubmittedError {
     #[error("gateway rejected the mutation request")]
     RequestRejected(GatewayDiagnostic),
@@ -665,6 +681,22 @@ pub enum GatewayNotSubmittedError {
     Unavailable(GatewayDiagnostic),
     #[error("gateway mutation was rate limited before submission")]
     RateLimited(GatewayDiagnostic),
+}
+
+impl fmt::Debug for GatewayNotSubmittedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (variant, detail) = match self {
+            Self::RequestRejected(detail) => ("RequestRejected", detail),
+            Self::Malformed(detail) => ("Malformed", detail),
+            Self::Configuration(detail) => ("Configuration", detail),
+            Self::Unavailable(detail) => ("Unavailable", detail),
+            Self::RateLimited(detail) => ("RateLimited", detail),
+        };
+        formatter
+            .debug_struct(variant)
+            .field("has_detail", &(!detail.is_empty()))
+            .finish()
+    }
 }
 
 impl GatewayNotSubmittedError {
@@ -679,7 +711,7 @@ impl GatewayNotSubmittedError {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum GatewayMutationError {
     #[error("gateway mutation was not submitted")]
     NotSubmitted(#[source] GatewayNotSubmittedError),
@@ -687,6 +719,24 @@ pub enum GatewayMutationError {
     RateLimitedIndeterminate(GatewayDiagnostic),
     #[error("gateway mutation outcome is indeterminate")]
     Indeterminate(GatewayDiagnostic),
+}
+
+impl fmt::Debug for GatewayMutationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotSubmitted(error) => {
+                formatter.debug_tuple("NotSubmitted").field(error).finish()
+            }
+            Self::RateLimitedIndeterminate(detail) => formatter
+                .debug_struct("RateLimitedIndeterminate")
+                .field("has_detail", &(!detail.is_empty()))
+                .finish(),
+            Self::Indeterminate(detail) => formatter
+                .debug_struct("Indeterminate")
+                .field("has_detail", &(!detail.is_empty()))
+                .finish(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -972,5 +1022,56 @@ mod tests {
             GatewayTransactionId::from_correlation("bad selector"),
             Err(GatewayReferenceValueError::UnsupportedCorrelationCharacter)
         );
+    }
+
+    #[test]
+    fn gateway_errors_preserve_value_free_debug_and_stable_messages() {
+        const SENTINEL: &str = "gateway-error-detail-sentinel";
+        let query_errors = [
+            (
+                GatewayError::RequestRejected(GatewayDiagnostic::new(SENTINEL)),
+                "RequestRejected",
+                "gateway rejected the request before processing",
+            ),
+            (
+                GatewayError::Malformed(GatewayDiagnostic::new(SENTINEL)),
+                "Malformed",
+                "gateway response was malformed",
+            ),
+            (
+                GatewayError::Configuration(GatewayDiagnostic::new(SENTINEL)),
+                "Configuration",
+                "gateway configuration is invalid",
+            ),
+            (
+                GatewayError::Unavailable(GatewayDiagnostic::new(SENTINEL)),
+                "Unavailable",
+                "gateway is unavailable",
+            ),
+            (
+                GatewayError::RateLimited(GatewayDiagnostic::new(SENTINEL)),
+                "RateLimited",
+                "gateway rate limit exceeded",
+            ),
+        ];
+        for (error, variant, message) in query_errors {
+            assert_eq!(error.to_string(), message);
+            let debug = format!("{error:?}");
+            assert!(debug.starts_with(variant));
+            assert!(debug.contains("has_detail: true"));
+            assert!(!debug.contains(SENTINEL));
+        }
+
+        let not_submitted = GatewayNotSubmittedError::Malformed(GatewayDiagnostic::new(SENTINEL));
+        let debug = format!("{not_submitted:?}");
+        assert!(debug.starts_with("Malformed"));
+        assert!(debug.contains("has_detail: true"));
+        assert!(!debug.contains(SENTINEL));
+
+        let mutation = GatewayMutationError::Indeterminate(GatewayDiagnostic::new(SENTINEL));
+        let debug = format!("{mutation:?}");
+        assert!(debug.starts_with("Indeterminate"));
+        assert!(debug.contains("has_detail: true"));
+        assert!(!debug.contains(SENTINEL));
     }
 }
