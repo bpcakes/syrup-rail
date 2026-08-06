@@ -8,5 +8,10 @@ description = "Validated domain types and lifecycle policy for Syrup Rail billin
 publish = false
 
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+icu_properties.workspace = true
+regex.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
+zeroize.workspace = true

@@ -8,6 +8,13 @@ description = "NMI gateway and lifecycle-evidence adapter for Syrup Rail"
 publish = false
 
 [dependencies]
+async-trait.workspace = true
+chrono.workspace = true
 syrup-rail.workspace = true
 syrup-rail-nmi-client.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+uuid.workspace = true

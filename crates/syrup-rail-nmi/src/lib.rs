@@ -2,4 +2,10 @@
 
 #![forbid(unsafe_code)]
 
+mod adapter;
+mod lifecycle;
+mod reference;
+
+pub use adapter::NmiPaymentGateway;
+pub use reference::{NmiMutationNamespace, NmiMutationReferenceFactory, NmiNamespaceError};
 pub use syrup_rail_nmi_client as nmi_client;
