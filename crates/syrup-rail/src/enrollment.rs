@@ -146,7 +146,9 @@ impl SubscriptionEnrollmentExpectedCharge {
         }
         match (self, saved_discount) {
             (Self::FullPrice(expected), None) => expected == current_offer,
-            (Self::Discounted { snapshot, .. }, Some(saved)) => snapshot == saved,
+            (Self::Discounted { snapshot, .. }, Some(saved)) => {
+                snapshot.has_same_charge_terms(saved)
+            }
             _ => false,
         }
     }
@@ -487,6 +489,16 @@ mod tests {
         let expected =
             SubscriptionEnrollmentExpectedCharge::discounted(plan("basic"), saved.clone());
         assert!(expected.matches_locked_terms(&offer(plan("basic"), 1400), Some(&saved)));
+        let labeled = SubscriptionDiscountSnapshot::new(
+            saved.code().clone(),
+            Some("Internal campaign label".to_owned()),
+            saved.kind(),
+            saved.duration(),
+            saved.base_charge(),
+            saved.discounted_charge(),
+        )
+        .unwrap();
+        assert!(expected.matches_locked_terms(&offer(plan("basic"), 1400), Some(&labeled)));
         assert!(!expected.matches_locked_terms(&offer(plan("premium"), 1400), Some(&saved)));
         assert!(
             !expected

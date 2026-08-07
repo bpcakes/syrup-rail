@@ -672,6 +672,19 @@ impl SubscriptionDiscountSnapshot {
     pub const fn currency(&self) -> &CurrencyCode {
         self.base_charge.currency_code()
     }
+
+    /// Compares the customer-accepted economic terms of two snapshots.
+    ///
+    /// The optional label is presentation metadata captured durably for later
+    /// display, not part of the amount, duration, or discount identity accepted
+    /// at checkout.
+    pub fn has_same_charge_terms(&self, other: &Self) -> bool {
+        self.code == other.code
+            && self.kind == other.kind
+            && self.duration == other.duration
+            && self.base_charge == other.base_charge
+            && self.discounted_charge == other.discounted_charge
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
