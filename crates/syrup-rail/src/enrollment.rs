@@ -4,7 +4,8 @@ use crate::{
     BillingContact, BillingContactSnapshot, BillingScopeId, ChargeAmount, DiscountClaimId,
     DiscountCodeId, GatewayConfigurationId, GatewayOrderId, GatewayProviderKey, IdempotencyKey,
     PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentToken,
-    PlanKey, ResolvedGateway, SubscriberId, SubscriptionDiscountSnapshot, SubscriptionOffer,
+    PlanKey, ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountSnapshot,
+    SubscriptionOffer,
 };
 use thiserror::Error;
 
@@ -255,7 +256,7 @@ pub enum SubscriptionEnrollmentReservationBuildError {
 ///
 /// Construction binds the command to the exact provider-free resolver result
 /// and derives the provider order reference before any database lock is held.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionEnrollmentReservation {
     identity: PaymentAttemptIdentity,
     provider_key: GatewayProviderKey,
@@ -374,6 +375,39 @@ pub enum SubscriptionEnrollmentSubmissionOutcome {
         attempt: PaymentAttempt,
         reason: SubscriptionEnrollmentSubmissionRejection,
     },
+}
+
+/// Durable result of applying one initial-enrollment provider outcome.
+///
+/// `subscription` is present only after the approval, payment method, recurring
+/// economics, discount, processor charge, and host event have committed in one
+/// transaction. A review-required or unknown attempt therefore cannot be
+/// mistaken for locally applied subscription access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionEnrollmentPaymentResult {
+    attempt: PaymentAttempt,
+    subscription: Option<Subscription>,
+}
+
+impl SubscriptionEnrollmentPaymentResult {
+    pub const fn new(attempt: PaymentAttempt, subscription: Option<Subscription>) -> Self {
+        Self {
+            attempt,
+            subscription,
+        }
+    }
+
+    pub const fn attempt(&self) -> &PaymentAttempt {
+        &self.attempt
+    }
+
+    pub const fn subscription(&self) -> Option<&Subscription> {
+        self.subscription.as_ref()
+    }
+
+    pub fn into_parts(self) -> (PaymentAttempt, Option<Subscription>) {
+        (self.attempt, self.subscription)
+    }
 }
 
 #[cfg(test)]

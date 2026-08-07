@@ -1,7 +1,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use sqlx::{Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{PgConnection, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, CumulativeRefundCents,
     CurrencyCode, DiscountClaimId, DiscountCodeId, GatewayAccountId, GatewayConfigurationId,
@@ -520,6 +520,35 @@ pub async fn lock_payment_attempt_by_idempotency_in_transaction(
         .bind(subscriber_id.as_uuid())
         .bind(idempotency_key.expose())
         .fetch_optional(&mut **transaction)
+        .await?;
+    row.as_ref().map(payment_attempt_from_row).transpose()
+}
+
+pub(crate) async fn lock_payment_attempt_by_id_on_connection(
+    connection: &mut PgConnection,
+    billing_scope_id: BillingScopeId,
+    attempt_id: PaymentAttemptId,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    let query =
+        format!("{PAYMENT_ATTEMPT_SELECT} WHERE billing_scope_id = $1 AND id = $2 FOR UPDATE");
+    let row = sqlx::query(&query)
+        .bind(billing_scope_id.as_uuid())
+        .bind(attempt_id.as_uuid())
+        .fetch_optional(&mut *connection)
+        .await?;
+    row.as_ref().map(payment_attempt_from_row).transpose()
+}
+
+pub(crate) async fn find_payment_attempt_by_id_on_connection(
+    connection: &mut PgConnection,
+    billing_scope_id: BillingScopeId,
+    attempt_id: PaymentAttemptId,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    let query = format!("{PAYMENT_ATTEMPT_SELECT} WHERE billing_scope_id = $1 AND id = $2");
+    let row = sqlx::query(&query)
+        .bind(billing_scope_id.as_uuid())
+        .bind(attempt_id.as_uuid())
+        .fetch_optional(&mut *connection)
         .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
 }

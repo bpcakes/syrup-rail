@@ -16,6 +16,11 @@ and transaction orchestration.
 - `src/attempts.rs` — typed canonical payment-attempt loading, exact-owner
   idempotency row locking, and token-free initial-enrollment reservation/final
   submission admission.
+- `src/enrollment_application.rs` — committed one-shot initial-sale authority,
+  atomic approved application, recurring-discount insertion, permanent charge
+  observation, terminal-race handling, and approved-failure compensation.
+- `src/transactions.rs` — host-prepared billing transaction and typed event
+  projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
   caller-transaction protected-write guard.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
@@ -38,6 +43,12 @@ and transaction orchestration.
 - Change canonical attempt row parsing, idempotency locking, or initial
   enrollment reservation/final admission in `src/attempts.rs`; keep payment
   tokens and provider credentials outside the transaction and durable model.
+- Change initial provider submission, attempt/charge resolution, payment-method
+  and subscription creation, discount application, or approved-failure parking
+  in `src/enrollment_application.rs`; keep the complete application write set
+  on the host-prepared transaction.
+- Change the host transaction/event boundary in `src/transactions.rs`; do not
+  add arbitrary SQL callbacks or a production no-op event implementation.
 - Change reusable subscription access projection or protected-write admission
   in `src/entitlement.rs`; keep host authentication and gateway availability
   outside the query/guard.
@@ -69,6 +80,14 @@ and transaction orchestration.
 - Initial enrollment reserves a token-free attempt before provider I/O, then
   revalidates plan, claim, billing blockers, attempt fingerprint, and exact
   gateway configuration under locks immediately before submission admission.
+- Final admission must commit before it yields the non-cloneable one-shot sale
+  capability. No transaction or lock spans provider I/O, and an already
+  admitted attempt never yields another sale capability.
+- Initial approval begins with the host recipient lock, then the shared
+  payment-method domain and exact plan aggregate. Method, subscription,
+  discount/claim, attempt, processor charge, and `SubscriptionStarted` event
+  commit together. Pending confirmation requires a durable review attempt or
+  immutable processor-charge observation.
 - Subscriber scrubbing enters every affected gateway-account payment-method
   domain in deterministic order before mutating attempts or methods and never
   changes immutable processor-charge observations.

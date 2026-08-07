@@ -1,0 +1,2388 @@
+use std::{fmt, time::Duration};
+
+use chrono::{DateTime, Utc};
+use sqlx::{PgConnection, PgPool, Row};
+use syrup_rail::{
+    BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId, EnrollSubscription,
+    GatewayDiagnostic, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome,
+    GatewayPaymentStatus, GatewaySaleIntent, GatewaySaleRequest, GatewayTransactionId,
+    PaymentAttempt, PaymentAttemptKind, PaymentAttemptStatus, PaymentMethodId,
+    PaymentResolutionCode, PlanKey, ProcessorEvidence, ResolvedGateway, SubscriberId, Subscription,
+    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
+    SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
+    SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionStatus,
+    next_monthly_billing_period,
+};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::{
+    BillingTransactionCoordinator, BillingTransactionError, BillingTransactionSubjectState,
+    attempts::{
+        PaymentAttemptStoreError, find_payment_attempt_by_id_on_connection,
+        lock_payment_attempt_by_id_on_connection,
+    },
+};
+
+const BILLING_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
+const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
+const BILLING_OPERATION_TIMEOUT: &str = "5s";
+const APPROVED_EVIDENCE_WRITE_ATTEMPTS: usize = 3;
+const APPROVED_EVIDENCE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const INVALID_APPLICATION_STATE: &str = "canonical initial-enrollment application state is invalid";
+const CURRENT_SUBSCRIPTION_CONFLICT_TEXT: &str =
+    "Approved subscription enrollment conflicts with a current subscription.";
+const CURRENT_GRANT_CONFLICT_TEXT: &str =
+    "Approved subscription enrollment conflicts with an active subscription grant.";
+const INCOMPLETE_APPROVAL_TEXT: &str =
+    "Approved subscription enrollment is missing required processor identity.";
+const APPROVED_STORAGE_FAILURE_TEXT: &str =
+    "Approved subscription enrollment could not be applied; manual review is required.";
+const TERMINAL_APPROVAL_RACE_TEXT: &str =
+    "Approved processor evidence arrived after the enrollment attempt became terminal.";
+
+#[derive(Error)]
+pub enum SubscriptionEnrollmentApplicationError {
+    #[error("subscription enrollment application storage failed")]
+    Sql(#[from] sqlx::Error),
+    #[error("subscription enrollment attempt storage failed")]
+    Attempt(#[from] PaymentAttemptStoreError),
+    #[error("host billing transaction failed")]
+    Transaction(#[from] BillingTransactionError),
+    #[error("host billing event append failed")]
+    Event(#[from] crate::BillingEventWriteError),
+    #[error("approved subscription enrollment could not be durably applied or parked")]
+    ApprovedEvidenceNotDurable,
+    #[error("admitted subscription enrollment does not match the submission command or gateway")]
+    SubmissionIdentityMismatch,
+    #[error("{0}")]
+    InvalidState(&'static str),
+}
+
+impl fmt::Debug for SubscriptionEnrollmentApplicationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Sql(_) => formatter.write_str("SubscriptionEnrollmentApplicationError::Sql"),
+            Self::Attempt(_) => {
+                formatter.write_str("SubscriptionEnrollmentApplicationError::Attempt")
+            }
+            Self::Transaction(_) => {
+                formatter.write_str("SubscriptionEnrollmentApplicationError::Transaction")
+            }
+            Self::Event(_) => formatter.write_str("SubscriptionEnrollmentApplicationError::Event"),
+            Self::ApprovedEvidenceNotDurable => formatter
+                .write_str("SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable"),
+            Self::SubmissionIdentityMismatch => formatter
+                .write_str("SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch"),
+            Self::InvalidState(detail) => formatter
+                .debug_tuple("SubscriptionEnrollmentApplicationError::InvalidState")
+                .field(detail)
+                .finish(),
+        }
+    }
+}
+
+/// One committed final-admission result that authorizes exactly one immediate
+/// provider submission by consuming this value.
+pub struct AdmittedSubscriptionEnrollment {
+    reservation: SubscriptionEnrollmentReservation,
+    attempt: PaymentAttempt,
+}
+
+impl AdmittedSubscriptionEnrollment {
+    pub const fn attempt(&self) -> &PaymentAttempt {
+        &self.attempt
+    }
+}
+
+impl fmt::Debug for AdmittedSubscriptionEnrollment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmittedSubscriptionEnrollment")
+            .field("attempt", &self.attempt)
+            .field("has_submission_authority", &true)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum SubscriptionEnrollmentAdmissionOutcome {
+    Admitted(Box<AdmittedSubscriptionEnrollment>),
+    AlreadyAdmitted(PaymentAttempt),
+    Rejected {
+        attempt: PaymentAttempt,
+        reason: SubscriptionEnrollmentSubmissionRejection,
+    },
+}
+
+/// Owns and commits final enrollment admission before exposing a one-shot
+/// submission capability. A rolled-back transaction can never yield the
+/// capability consumed by [`submit_admitted_subscription_enrollment`].
+pub async fn admit_subscription_enrollment_submission(
+    pool: &PgPool,
+    offers: &dyn crate::SubscriptionOfferStore,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<SubscriptionEnrollmentAdmissionOutcome, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    let outcome = crate::admit_subscription_enrollment_submission_in_transaction(
+        &mut transaction,
+        offers,
+        reservation,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(match outcome {
+        SubscriptionEnrollmentSubmissionOutcome::Admitted(attempt) => {
+            SubscriptionEnrollmentAdmissionOutcome::Admitted(Box::new(
+                AdmittedSubscriptionEnrollment {
+                    reservation: reservation.clone(),
+                    attempt,
+                },
+            ))
+        }
+        SubscriptionEnrollmentSubmissionOutcome::AlreadyAdmitted(attempt) => {
+            SubscriptionEnrollmentAdmissionOutcome::AlreadyAdmitted(attempt)
+        }
+        SubscriptionEnrollmentSubmissionOutcome::Rejected { attempt, reason } => {
+            SubscriptionEnrollmentAdmissionOutcome::Rejected { attempt, reason }
+        }
+    })
+}
+
+/// Performs the one provider sale authorized by a committed final admission,
+/// then applies or durably parks its result.
+///
+/// This function holds no database transaction or lock across provider I/O.
+pub async fn submit_admitted_subscription_enrollment(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    admission: AdmittedSubscriptionEnrollment,
+    command: &EnrollSubscription,
+    gateway: &ResolvedGateway,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let reconstructed = SubscriptionEnrollmentReservation::from_command(command, gateway)
+        .map_err(|_| SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch)?;
+    if reconstructed != admission.reservation
+        || admission.attempt.identity().attempt_id() != command.attempt_id()
+        || admission.attempt.status() != PaymentAttemptStatus::Pending
+        || admission
+            .attempt
+            .state()
+            .timestamps()
+            .submitted_at()
+            .is_none()
+    {
+        return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
+    }
+
+    let charge = syrup_rail::ChargeAmount::new(
+        admission.attempt.request().amount().cents(),
+        admission.attempt.request().amount().currency(),
+    )
+    .map_err(|_| SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE))?;
+    let request = GatewaySaleRequest::new(
+        charge,
+        admission.attempt.request().gateway_order_id().clone(),
+        GatewaySaleIntent::InitialStoredCredential {
+            payment_token: command.payment_token().clone(),
+        },
+        Some(command.billing_contact().clone()),
+    );
+    match gateway.sale(request).await {
+        Ok(outcome) => {
+            apply_subscription_enrollment_gateway_outcome(
+                pool,
+                coordinator,
+                &admission.reservation,
+                &outcome,
+            )
+            .await
+        }
+        Err(GatewayMutationError::NotSubmitted(error)) => {
+            let evidence = mutation_error_evidence(error.detail());
+            resolve_non_approved_outcome(
+                pool,
+                &admission.reservation,
+                &evidence,
+                PaymentAttemptStatus::Failed,
+                Some(not_submitted_resolution_code(&error)),
+            )
+            .await
+        }
+        Err(
+            GatewayMutationError::RateLimitedIndeterminate(detail)
+            | GatewayMutationError::Indeterminate(detail),
+        ) => {
+            resolve_unknown_outcome(
+                pool,
+                &admission.reservation,
+                &mutation_error_evidence(&detail),
+            )
+            .await
+        }
+    }
+}
+
+/// Applies one initial-enrollment gateway outcome to the durable billing ledger.
+///
+/// Approved application begins through the host coordinator so its recipient
+/// authorization lock precedes every shared lock. If the atomic application
+/// fails, this operation returns pending confirmation only after either the
+/// review-required attempt or immutable processor charge has committed.
+pub async fn apply_subscription_enrollment_gateway_outcome(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionEnrollmentReservation,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    match outcome.status() {
+        GatewayPaymentStatus::Approved => {
+            if outcome.transaction_id().is_none() || outcome.payment_method_reference().is_none() {
+                return park_approved_outcome(
+                    pool,
+                    reservation,
+                    outcome.evidence(),
+                    INCOMPLETE_APPROVAL_TEXT,
+                )
+                .await;
+            }
+
+            match apply_approved_outcome(coordinator, reservation, outcome.evidence()).await {
+                Ok(result) => Ok(result),
+                Err(_) => {
+                    park_approved_outcome(
+                        pool,
+                        reservation,
+                        outcome.evidence(),
+                        APPROVED_STORAGE_FAILURE_TEXT,
+                    )
+                    .await
+                }
+            }
+        }
+        GatewayPaymentStatus::Declined => {
+            resolve_non_approved_outcome(
+                pool,
+                reservation,
+                outcome.evidence(),
+                PaymentAttemptStatus::Declined,
+                None,
+            )
+            .await
+        }
+        GatewayPaymentStatus::Failed => {
+            resolve_non_approved_outcome(
+                pool,
+                reservation,
+                outcome.evidence(),
+                PaymentAttemptStatus::Failed,
+                None,
+            )
+            .await
+        }
+        GatewayPaymentStatus::Unknown => {
+            resolve_unknown_outcome(pool, reservation, outcome.evidence()).await
+        }
+    }
+}
+
+async fn apply_approved_outcome(
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionEnrollmentReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let identity = reservation.identity();
+    let mut transaction = coordinator
+        .begin(
+            BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id()),
+            BILLING_LOCK_TIMEOUT,
+        )
+        .await?;
+
+    let subject_state = transaction.subject_state();
+    let application = apply_approved_on_connection(
+        transaction.connection(),
+        subject_state,
+        reservation,
+        evidence,
+    )
+    .await;
+    let (result, event) = match application {
+        Ok(application) => application,
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            return Err(error);
+        }
+    };
+    if let Some(event) = event.as_ref()
+        && let Err(error) = transaction.append_event(event).await
+    {
+        let _ = transaction.rollback().await;
+        return Err(error.into());
+    }
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn apply_approved_on_connection(
+    connection: &mut PgConnection,
+    subject_state: BillingTransactionSubjectState,
+    reservation: &SubscriptionEnrollmentReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<
+    (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
+    SubscriptionEnrollmentApplicationError,
+> {
+    set_application_timeouts(connection).await?;
+    let identity = reservation.identity();
+    lock_payment_method_domain(
+        connection,
+        identity.subscriber_id(),
+        identity.gateway_account_id().as_uuid(),
+    )
+    .await?;
+    lock_subscription_aggregate(connection, identity.subscriber_id(), reservation.plan_key())
+        .await?;
+    let attempt = lock_expected_attempt(connection, reservation).await?;
+
+    if attempt.status() == PaymentAttemptStatus::Approved {
+        let subscription = load_applied_subscription(connection, &attempt).await?;
+        let Some(subscription) = subscription else {
+            return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ));
+        };
+        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Applied)
+            .await?;
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+            None,
+        ));
+    }
+
+    if subject_state != BillingTransactionSubjectState::LiveRecipient {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            "a new subscription enrollment event requires a live recipient",
+        ));
+    }
+
+    if attempt.status().is_terminal() {
+        let observation = observe_processor_charge(
+            connection,
+            &attempt,
+            evidence,
+            ChargeProgression::ExternalReversalRequired,
+        )
+        .await?;
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            None,
+            TERMINAL_APPROVAL_RACE_TEXT,
+        )
+        .await?;
+        if let ObservedCharge::Owned(charge) = observation {
+            transition_charge(
+                connection,
+                charge.id,
+                ChargeProgression::ExternalReversalRequired,
+                None,
+            )
+            .await?;
+        }
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    }
+
+    let observation =
+        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Pending)
+            .await?;
+    let ObservedCharge::Owned(charge) = observation else {
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            None,
+            "The approved gateway transaction is already owned by another payment attempt.",
+        )
+        .await?;
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    };
+    if charge.role == ChargeRole::Additional {
+        transition_charge(
+            connection,
+            charge.id,
+            ChargeProgression::ExternalReversalRequired,
+            None,
+        )
+        .await?;
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            None,
+            "An additional approved charge requires manual reversal review.",
+        )
+        .await?;
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    }
+
+    if current_subscription_exists(connection, reservation).await? {
+        transition_charge(
+            connection,
+            charge.id,
+            ChargeProgression::ExternalReversalRequired,
+            Some(PaymentResolutionCode::SubscriptionInitialCurrentSubscriptionConflict),
+        )
+        .await?;
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            Some(PaymentResolutionCode::SubscriptionInitialCurrentSubscriptionConflict),
+            CURRENT_SUBSCRIPTION_CONFLICT_TEXT,
+        )
+        .await?;
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    }
+    if active_grant_exists(connection, reservation).await? {
+        transition_charge(
+            connection,
+            charge.id,
+            ChargeProgression::ExternalReversalRequired,
+            Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict),
+        )
+        .await?;
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict),
+            CURRENT_GRANT_CONFLICT_TEXT,
+        )
+        .await?;
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    }
+
+    let transaction_id =
+        evidence
+            .transaction_id()
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+    let method_id = upsert_payment_method(connection, &attempt, evidence).await?;
+    let period_start_at = attempt.state().timestamps().submitted_or_created_at();
+    let period = next_monthly_billing_period(period_start_at).map_err(|_| {
+        SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+    })?;
+    let subscription_id = SubscriptionId::new(Uuid::now_v7());
+    let recurring_cents = recurring_amount_after_initial(&attempt)?;
+    insert_subscription(
+        connection,
+        &attempt,
+        subscription_id,
+        method_id,
+        recurring_cents,
+        &period,
+        transaction_id,
+    )
+    .await?;
+    apply_initial_discount(connection, &attempt, subscription_id, period_start_at).await?;
+    mark_attempt_approved(connection, &attempt, evidence, subscription_id, method_id).await?;
+    transition_charge(connection, charge.id, ChargeProgression::Applied, None).await?;
+
+    let attempt = find_payment_attempt_by_id_on_connection(
+        connection,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let subscription = load_subscription(connection, identity.billing_scope_id(), subscription_id)
+        .await?
+        .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ))?;
+    let event = BillingEvent::SubscriptionStarted {
+        attempt_id: identity.attempt_id(),
+        subscription_id,
+        plan_key: reservation.plan_key().clone(),
+        charge: syrup_rail::ChargeAmount::new(
+            attempt.request().amount().cents(),
+            attempt.request().amount().currency(),
+        )
+        .map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })?,
+        period,
+    };
+    Ok((
+        SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+        Some(event),
+    ))
+}
+
+async fn resolve_non_approved_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionEnrollmentReservation,
+    evidence: &ProcessorEvidence,
+    status: PaymentAttemptStatus,
+    resolution_code: Option<PaymentResolutionCode>,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    lock_subscription_aggregate(
+        &mut transaction,
+        reservation.identity().subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    let attempt = lock_expected_attempt(&mut transaction, reservation).await?;
+    if attempt.status().is_resolvable() {
+        update_attempt_resolution(
+            &mut transaction,
+            &attempt,
+            evidence,
+            status,
+            resolution_code,
+            None,
+            None,
+            false,
+        )
+        .await?;
+    }
+    let attempt = find_payment_attempt_by_id_on_connection(
+        &mut transaction,
+        reservation.identity().billing_scope_id(),
+        reservation.identity().attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+fn mutation_error_evidence(detail: &GatewayDiagnostic) -> ProcessorEvidence {
+    ProcessorEvidence::new(
+        None,
+        None,
+        None,
+        None,
+        Some(detail.clone()),
+        None,
+        syrup_rail::GatewayPaymentDescriptor::default(),
+    )
+}
+
+const fn not_submitted_resolution_code(error: &GatewayNotSubmittedError) -> PaymentResolutionCode {
+    match error {
+        GatewayNotSubmittedError::RequestRejected(_) => {
+            PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission
+        }
+        GatewayNotSubmittedError::Malformed(_) => {
+            PaymentResolutionCode::GatewayMalformedBeforeSubmission
+        }
+        GatewayNotSubmittedError::Configuration(_) => {
+            PaymentResolutionCode::GatewayConfigurationBeforeSubmission
+        }
+        GatewayNotSubmittedError::Unavailable(_) => {
+            PaymentResolutionCode::GatewayUnavailableBeforeSubmission
+        }
+        GatewayNotSubmittedError::RateLimited(_) => {
+            PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
+        }
+    }
+}
+
+async fn resolve_unknown_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionEnrollmentReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    lock_subscription_aggregate(
+        &mut transaction,
+        reservation.identity().subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    let attempt = lock_expected_attempt(&mut transaction, reservation).await?;
+    if attempt.status().is_resolvable() {
+        update_attempt_resolution(
+            &mut transaction,
+            &attempt,
+            evidence,
+            PaymentAttemptStatus::Unknown,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await?;
+        if evidence_looks_approved(evidence) {
+            observe_processor_charge(
+                &mut transaction,
+                &attempt,
+                evidence,
+                ChargeProgression::Pending,
+            )
+            .await?;
+        }
+    }
+    let attempt = find_payment_attempt_by_id_on_connection(
+        &mut transaction,
+        reservation.identity().billing_scope_id(),
+        reservation.identity().attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn park_approved_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionEnrollmentReservation,
+    evidence: &ProcessorEvidence,
+    message: &'static str,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    match try_park_approved_outcome(pool, reservation, evidence, message).await {
+        Ok(result) => Ok(result),
+        Err(_) => {
+            observe_approved_evidence_with_retry(pool, reservation, evidence).await?;
+            let mut transaction = pool.begin().await?;
+            let attempt = find_payment_attempt_by_id_on_connection(
+                &mut transaction,
+                reservation.identity().billing_scope_id(),
+                reservation.identity().attempt_id(),
+            )
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+            let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+            transaction.commit().await?;
+            Ok(result)
+        }
+    }
+}
+
+async fn try_park_approved_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionEnrollmentReservation,
+    evidence: &ProcessorEvidence,
+    message: &'static str,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    lock_subscription_aggregate(
+        &mut transaction,
+        reservation.identity().subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    let attempt = lock_expected_attempt(&mut transaction, reservation).await?;
+    let attempt = if attempt.status() == PaymentAttemptStatus::Approved {
+        attempt
+    } else {
+        park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
+    };
+    let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn observe_approved_evidence_with_retry(
+    pool: &PgPool,
+    reservation: &SubscriptionEnrollmentReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let mut last_error = None;
+    for attempt_index in 0..APPROVED_EVIDENCE_WRITE_ATTEMPTS {
+        let result = async {
+            let mut transaction = pool.begin().await?;
+            set_application_timeouts(&mut transaction).await?;
+            let attempt = lock_expected_attempt(&mut transaction, reservation).await?;
+            observe_processor_charge(
+                &mut transaction,
+                &attempt,
+                evidence,
+                ChargeProgression::Pending,
+            )
+            .await?;
+            transaction.commit().await?;
+            Ok::<(), SubscriptionEnrollmentApplicationError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt_index + 1 < APPROVED_EVIDENCE_WRITE_ATTEMPTS
+                    && is_retryable_evidence_error(&error) =>
+            {
+                last_error = Some(error);
+                tokio::time::sleep(APPROVED_EVIDENCE_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let _ = last_error;
+    Err(SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable)
+}
+
+fn is_retryable_evidence_error(error: &SubscriptionEnrollmentApplicationError) -> bool {
+    let sqlstate = match error {
+        SubscriptionEnrollmentApplicationError::Sql(sqlx::Error::Database(error)) => error.code(),
+        SubscriptionEnrollmentApplicationError::Attempt(PaymentAttemptStoreError::Sql(
+            sqlx::Error::Database(error),
+        )) => error.code(),
+        _ => None,
+    };
+    matches!(
+        sqlstate.as_deref(),
+        Some("40001" | "40P01" | "55P03" | "57014")
+    )
+}
+
+async fn lock_expected_attempt(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    let identity = reservation.identity();
+    let attempt = lock_payment_attempt_by_id_on_connection(
+        connection,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let current = attempt.identity();
+    if current != identity
+        || attempt.kind() != PaymentAttemptKind::SubscriptionInitial
+        || attempt.request().target().plan_key() != Some(reservation.plan_key())
+        || attempt.request().gateway_order_id() != reservation.gateway_order_id()
+    {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(attempt)
+}
+
+async fn set_application_timeouts(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    )
+    .bind(BILLING_ROW_LOCK_TIMEOUT)
+    .bind(BILLING_OPERATION_TIMEOUT)
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn lock_payment_method_domain(
+    connection: &mut PgConnection,
+    subscriber_id: SubscriberId,
+    gateway_account_id: &Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",
+    )
+    .bind(gateway_account_id)
+    .bind(subscriber_id.as_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn lock_subscription_aggregate(
+    connection: &mut PgConnection,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(subscriber_id.as_uuid())
+        .bind(plan_key.as_str())
+        .execute(connection)
+        .await?;
+    Ok(())
+}
+
+async fn current_subscription_exists(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<bool, sqlx::Error> {
+    let identity = reservation.identity();
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM billing_subscriptions
+        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+            AND status IN ('active', 'past_due')
+        ORDER BY updated_at DESC, id DESC
+        FOR NO KEY UPDATE
+        "#,
+    )
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(reservation.plan_key().as_str())
+    .fetch_all(connection)
+    .await?;
+    Ok(!rows.is_empty())
+}
+
+async fn active_grant_exists(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<bool, sqlx::Error> {
+    let identity = reservation.identity();
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM billing_subscription_grants
+        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+            AND revoked_at IS NULL
+            AND starts_at <= clock_timestamp() AND ends_at > clock_timestamp()
+        ORDER BY ends_at DESC, id DESC
+        FOR UPDATE
+        "#,
+    )
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(reservation.plan_key().as_str())
+    .fetch_all(connection)
+    .await?;
+    Ok(!rows.is_empty())
+}
+
+async fn upsert_payment_method(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+) -> Result<PaymentMethodId, SubscriptionEnrollmentApplicationError> {
+    let identity = attempt.identity();
+    let reference = evidence.payment_method_reference().ok_or(
+        SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE),
+    )?;
+    let descriptor = evidence.descriptor();
+    let row_id: Uuid = sqlx::query_scalar(
+        r#"
+        INSERT INTO billing_payment_methods (
+            id, billing_scope_id, subscriber_id, gateway_account_id,
+            gateway_payment_method_reference, status, payment_type, card_brand,
+            card_last4, card_exp_month, card_exp_year, billing_name, billing_email
+        ) VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (gateway_account_id, subscriber_id, gateway_payment_method_reference)
+        DO UPDATE SET status = 'active', payment_type = EXCLUDED.payment_type,
+            card_brand = EXCLUDED.card_brand, card_last4 = EXCLUDED.card_last4,
+            card_exp_month = EXCLUDED.card_exp_month,
+            card_exp_year = EXCLUDED.card_exp_year,
+            billing_name = EXCLUDED.billing_name,
+            billing_email = EXCLUDED.billing_email,
+            updated_at = clock_timestamp()
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(reference.expose())
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .bind(attempt.request().billing_contact().name())
+    .bind(attempt.request().billing_contact().email())
+    .fetch_one(connection)
+    .await?;
+    Ok(PaymentMethodId::new(row_id))
+}
+
+async fn insert_subscription(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    subscription_id: SubscriptionId,
+    method_id: PaymentMethodId,
+    recurring_amount_cents: i32,
+    period: &BillingPeriod,
+    transaction_id: &GatewayTransactionId,
+) -> Result<(), sqlx::Error> {
+    let identity = attempt.identity();
+    let plan_key = attempt
+        .request()
+        .target()
+        .plan_key()
+        .expect("validated initial plan");
+    sqlx::query(
+        r#"
+        INSERT INTO billing_subscriptions (
+            id, billing_scope_id, subscriber_id, plan_key, status,
+            gateway_account_id, payment_method_id, amount_cents, currency,
+            current_period_start_at, current_period_end_at, next_renewal_at,
+            initial_transaction_id
+        ) VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $10, $11)
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(plan_key.as_str())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(method_id.as_uuid())
+    .bind(recurring_amount_cents)
+    .bind(attempt.request().amount().currency().as_str())
+    .bind(period.start_at())
+    .bind(period.end_at())
+    .bind(transaction_id.expose())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+fn recurring_amount_after_initial(
+    attempt: &PaymentAttempt,
+) -> Result<i32, SubscriptionEnrollmentApplicationError> {
+    let Some(discount) = attempt.request().target().enrollment_discount() else {
+        return Ok(attempt.request().amount().cents());
+    };
+    let snapshot = discount.snapshot();
+    Ok(match snapshot.duration() {
+        SubscriptionDiscountDuration::Indefinite => snapshot.discounted_charge().cents(),
+        SubscriptionDiscountDuration::LimitedMonths(months) if months.get() == 1 => {
+            snapshot.base_charge().cents()
+        }
+        SubscriptionDiscountDuration::LimitedMonths(_) => snapshot.discounted_charge().cents(),
+    })
+}
+
+async fn apply_initial_discount(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    subscription_id: SubscriptionId,
+    applied_at: DateTime<Utc>,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let Some(discount) = attempt.request().target().enrollment_discount() else {
+        return Ok(());
+    };
+    let identity = attempt.identity();
+    let snapshot = discount.snapshot();
+    let (amount_off_cents, percent_off_bps) = match snapshot.kind() {
+        SubscriptionDiscountKind::AmountOffCents(value) => (Some(value.get()), None),
+        SubscriptionDiscountKind::PercentOffBasisPoints(value) => {
+            (None, Some(i32::from(value.get())))
+        }
+    };
+    let (duration_months, periods_total, status, completed_at) = match snapshot.duration() {
+        SubscriptionDiscountDuration::Indefinite => (None, None, "active", None),
+        SubscriptionDiscountDuration::LimitedMonths(months) => {
+            let months = i32::from(months.get());
+            if months == 1 {
+                (Some(months), Some(months), "completed", Some(applied_at))
+            } else {
+                (Some(months), Some(months), "active", None)
+            }
+        }
+    };
+    sqlx::query(
+        r#"
+        INSERT INTO billing_subscription_discounts (
+            subscription_id, billing_scope_id, subscriber_id, plan_key,
+            discount_claim_id, discount_code_id, code_snapshot, label_snapshot,
+            discount_kind, amount_off_cents, percent_off_bps, currency, duration,
+            duration_months, base_amount_cents, discounted_amount_cents,
+            periods_total, periods_applied, status, applied_at, completed_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, 1, $18, $19, $20
+        )
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(
+        attempt
+            .request()
+            .target()
+            .plan_key()
+            .expect("validated plan")
+            .as_str(),
+    )
+    .bind(discount.claim_id().as_uuid())
+    .bind(discount.code_id().as_uuid())
+    .bind(snapshot.code().as_str())
+    .bind(snapshot.label())
+    .bind(snapshot.kind().as_str())
+    .bind(amount_off_cents)
+    .bind(percent_off_bps)
+    .bind(snapshot.currency().as_str())
+    .bind(snapshot.duration().as_str())
+    .bind(duration_months)
+    .bind(snapshot.base_charge().cents())
+    .bind(snapshot.discounted_charge().cents())
+    .bind(periods_total)
+    .bind(status)
+    .bind(applied_at)
+    .bind(completed_at)
+    .execute(&mut *connection)
+    .await?;
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE billing_subscription_discount_claims
+        SET status = 'applied', applied_subscription_id = $5,
+            applied_payment_attempt_id = $6, applied_at = $7
+        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+            AND plan_key = $4 AND status = 'saved'
+        "#,
+    )
+    .bind(discount.claim_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(
+        attempt
+            .request()
+            .target()
+            .plan_key()
+            .expect("validated plan")
+            .as_str(),
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(identity.attempt_id().as_uuid())
+    .bind(applied_at)
+    .execute(connection)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(())
+}
+
+async fn mark_attempt_approved(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    subscription_id: SubscriptionId,
+    method_id: PaymentMethodId,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    update_attempt_resolution(
+        connection,
+        attempt,
+        evidence,
+        PaymentAttemptStatus::Approved,
+        None,
+        Some(subscription_id),
+        Some(method_id),
+        false,
+    )
+    .await
+}
+
+async fn park_locked_attempt(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    resolution_code: Option<PaymentResolutionCode>,
+    message: &'static str,
+) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    update_attempt_resolution(
+        connection,
+        attempt,
+        evidence,
+        PaymentAttemptStatus::ReviewRequired,
+        resolution_code,
+        None,
+        None,
+        true,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET gateway_response_text = CASE
+                WHEN gateway_response_text IS NULL THEN $2
+                ELSE left($2 || ' ' || gateway_response_text, 512)
+            END,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+        "#,
+    )
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(message)
+    .execute(&mut *connection)
+    .await?;
+    find_payment_attempt_by_id_on_connection(
+        connection,
+        attempt.identity().billing_scope_id(),
+        attempt.identity().attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_attempt_resolution(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    status: PaymentAttemptStatus,
+    resolution_code: Option<PaymentResolutionCode>,
+    subscription_id: Option<SubscriptionId>,
+    payment_method_id: Option<PaymentMethodId>,
+    allow_terminal_approval_race: bool,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let descriptor = evidence.descriptor();
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = $2, subscription_id = $3, payment_method_id = $4,
+            gateway_transaction_id = $5,
+            gateway_payment_method_reference = $6,
+            gateway_response = $7, gateway_response_code = $8,
+            gateway_response_text = $9, gateway_condition = $10,
+            payment_type = $11, card_brand = $12, card_last4 = $13,
+            card_exp_month = $14, card_exp_year = $15,
+            resolution_code = $16,
+            resolved_at = CASE WHEN $2 IN ('approved', 'declined', 'failed')
+                THEN clock_timestamp() ELSE resolved_at END,
+            review_required_at = CASE WHEN $2 = 'review_required'
+                THEN COALESCE(review_required_at, clock_timestamp()) ELSE review_required_at END,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+            AND (
+                status IN ('pending', 'unknown', 'review_required')
+                OR ($17 AND status IN ('declined', 'failed'))
+            )
+        "#,
+    )
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(status.as_str())
+    .bind(subscription_id.map(SubscriptionId::into_uuid))
+    .bind(payment_method_id.map(PaymentMethodId::into_uuid))
+    .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .bind(resolution_code.map(PaymentResolutionCode::as_str))
+    .bind(allow_terminal_approval_race)
+    .execute(connection)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChargeRole {
+    Primary,
+    Additional,
+}
+
+impl ChargeRole {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Additional => "additional",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChargeProgression {
+    Pending,
+    ExternalReversalRequired,
+    Applied,
+}
+
+impl ChargeProgression {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::ExternalReversalRequired => "external_reversal_required",
+            Self::Applied => "applied",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChargeRecord {
+    id: Uuid,
+    role: ChargeRole,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ObservedCharge {
+    Owned(ChargeRecord),
+    OwnedByOtherAttempt,
+}
+
+async fn observe_processor_charge(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    initial_progression: ChargeProgression,
+) -> Result<ObservedCharge, SubscriptionEnrollmentApplicationError> {
+    let identity = attempt.identity();
+    let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
+    let has_primary: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1 AND charge_role = 'primary')",
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .fetch_one(&mut *connection)
+    .await?;
+    if let Some(transaction_id) = transaction_id {
+        if processor_charge_owned_by_other_attempt(connection, attempt, transaction_id).await? {
+            return Ok(ObservedCharge::OwnedByOtherAttempt);
+        }
+        if let Some(charge) =
+            identify_transactionless_charge(connection, attempt, evidence, transaction_id).await?
+        {
+            return Ok(ObservedCharge::Owned(charge));
+        }
+    }
+    let role = if has_primary {
+        ChargeRole::Additional
+    } else {
+        ChargeRole::Primary
+    };
+    let descriptor = evidence.descriptor();
+    let inserted = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO billing_processor_charges (
+            id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
+            gateway_transaction_id, gateway_payment_method_reference,
+            gateway_response, gateway_response_code, gateway_response_text,
+            gateway_condition, payment_type, card_brand, card_last4,
+            card_exp_month, card_exp_year, charge_role, progression_state,
+            reconciliation_required_at, external_reversal_required_at, applied_at,
+            attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+            $14, $15, $16, $17, $18,
+            CASE WHEN $18 = 'reconciliation_required' THEN clock_timestamp() END,
+            CASE WHEN $18 = 'external_reversal_required' THEN clock_timestamp() END,
+            CASE WHEN $18 = 'applied' THEN clock_timestamp() END,
+            $19, $20, NULL, $21, $22
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING id
+        "#,
+    )
+    .bind(Uuid::now_v7())
+    .bind(identity.attempt_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(attempt.request().gateway_order_id().expose())
+    .bind(transaction_id)
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .bind(role.as_str())
+    .bind(initial_progression.as_str())
+    .bind(attempt.kind().as_str())
+    .bind(attempt.request().target().plan_key().map(PlanKey::as_str))
+    .bind(attempt.request().amount().cents())
+    .bind(attempt.request().amount().currency().as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    if let Some(id) = inserted {
+        return Ok(ObservedCharge::Owned(ChargeRecord { id, role }));
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT id, charge_role,
+            gateway_payment_method_reference IS NOT DISTINCT FROM $3
+                AND gateway_response IS NOT DISTINCT FROM $4
+                AND gateway_response_code IS NOT DISTINCT FROM $5
+                AND gateway_response_text IS NOT DISTINCT FROM $6
+                AND gateway_condition IS NOT DISTINCT FROM $7
+                AND payment_type IS NOT DISTINCT FROM $8
+                AND card_brand IS NOT DISTINCT FROM $9
+                AND card_last4 IS NOT DISTINCT FROM $10
+                AND card_exp_month IS NOT DISTINCT FROM $11
+                AND card_exp_year IS NOT DISTINCT FROM $12 AS evidence_matches
+        FROM billing_processor_charges
+        WHERE attempt_id = $1
+            AND gateway_transaction_id IS NOT DISTINCT FROM $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .bind(transaction_id)
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .fetch_optional(&mut *connection)
+    .await?;
+    if let Some(row) = row {
+        if !row.try_get::<bool, _>("evidence_matches")? {
+            return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+                "processor charge replay evidence changed",
+            ));
+        }
+        let role = match row.try_get::<String, _>("charge_role")?.as_str() {
+            "primary" => ChargeRole::Primary,
+            "additional" => ChargeRole::Additional,
+            _ => {
+                return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+                    INVALID_APPLICATION_STATE,
+                ));
+            }
+        };
+        return Ok(ObservedCharge::Owned(ChargeRecord {
+            id: row.try_get("id")?,
+            role,
+        }));
+    }
+    if let Some(transaction_id) = transaction_id
+        && processor_charge_owned_by_other_attempt(connection, attempt, transaction_id).await?
+    {
+        return Ok(ObservedCharge::OwnedByOtherAttempt);
+    }
+    Err(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))
+}
+
+async fn processor_charge_owned_by_other_attempt(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    transaction_id: &str,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM billing_processor_charges
+            WHERE gateway_account_id = $1 AND gateway_transaction_id = $2
+                AND attempt_id <> $3
+        )
+        "#,
+    )
+    .bind(attempt.identity().gateway_account_id().as_uuid())
+    .bind(transaction_id)
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .fetch_one(connection)
+    .await
+}
+
+async fn identify_transactionless_charge(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    transaction_id: &str,
+) -> Result<Option<ChargeRecord>, SubscriptionEnrollmentApplicationError> {
+    let descriptor = evidence.descriptor();
+    let row = sqlx::query(
+        r#"
+        SELECT id, charge_role,
+            gateway_payment_method_reference IS NOT DISTINCT FROM $2
+                AND gateway_response IS NOT DISTINCT FROM $3
+                AND gateway_response_code IS NOT DISTINCT FROM $4
+                AND gateway_response_text IS NOT DISTINCT FROM $5
+                AND gateway_condition IS NOT DISTINCT FROM $6
+                AND payment_type IS NOT DISTINCT FROM $7
+                AND card_brand IS NOT DISTINCT FROM $8
+                AND card_last4 IS NOT DISTINCT FROM $9
+                AND card_exp_month IS NOT DISTINCT FROM $10
+                AND card_exp_year IS NOT DISTINCT FROM $11 AS evidence_matches
+        FROM billing_processor_charges
+        WHERE attempt_id = $1
+            AND billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL
+        FOR UPDATE
+        "#,
+    )
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if !row.try_get::<bool, _>("evidence_matches")? {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            "processor charge identification changed immutable evidence",
+        ));
+    }
+    let charge_id: Uuid = row.try_get("id")?;
+    sqlx::query(
+        "UPDATE billing_processor_charges SET gateway_transaction_id = $2, updated_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(charge_id)
+    .bind(transaction_id)
+    .execute(connection)
+    .await?;
+    let role = match row.try_get::<String, _>("charge_role")?.as_str() {
+        "primary" => ChargeRole::Primary,
+        "additional" => ChargeRole::Additional,
+        _ => {
+            return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ));
+        }
+    };
+    Ok(Some(ChargeRecord {
+        id: charge_id,
+        role,
+    }))
+}
+
+async fn transition_charge(
+    connection: &mut PgConnection,
+    charge_id: Uuid,
+    progression: ChargeProgression,
+    resolution_code: Option<PaymentResolutionCode>,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_processor_charges
+        SET progression_state = $2, state_code = COALESCE(state_code, $3),
+            reconciliation_required_at = CASE WHEN $2 = 'reconciliation_required'
+                THEN COALESCE(reconciliation_required_at, clock_timestamp())
+                ELSE reconciliation_required_at END,
+            external_reversal_required_at = CASE WHEN $2 = 'external_reversal_required'
+                THEN COALESCE(external_reversal_required_at, clock_timestamp())
+                ELSE external_reversal_required_at END,
+            applied_at = CASE WHEN $2 = 'applied'
+                THEN COALESCE(applied_at, clock_timestamp()) ELSE applied_at END,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+            AND progression_state IN ('pending', 'reconciliation_required',
+                'external_reversal_required', 'applied')
+        "#,
+    )
+    .bind(charge_id)
+    .bind(progression.as_str())
+    .bind(resolution_code.map(PaymentResolutionCode::as_str))
+    .execute(connection)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(())
+}
+
+fn evidence_looks_approved(evidence: &ProcessorEvidence) -> bool {
+    evidence.transaction_id().is_some()
+        && (evidence
+            .response()
+            .is_some_and(|value| syrup_rail::gateway_response_is_approved(Some(value.expose())))
+            || evidence
+                .condition()
+                .is_some_and(|value| syrup_rail::gateway_state_is_approved(value.expose())))
+}
+
+async fn payment_result_for_attempt(
+    connection: &mut PgConnection,
+    attempt: PaymentAttempt,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let subscription = if attempt.status() == PaymentAttemptStatus::Approved {
+        load_applied_subscription(connection, &attempt).await?
+    } else {
+        None
+    };
+    Ok(SubscriptionEnrollmentPaymentResult::new(
+        attempt,
+        subscription,
+    ))
+}
+
+async fn load_applied_subscription(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+) -> Result<Option<Subscription>, SubscriptionEnrollmentApplicationError> {
+    let Some(subscription_id) = attempt.request().target().subscription_id() else {
+        return Ok(None);
+    };
+    load_subscription(
+        connection,
+        attempt.identity().billing_scope_id(),
+        subscription_id,
+    )
+    .await
+}
+
+async fn load_subscription(
+    connection: &mut PgConnection,
+    billing_scope_id: BillingScopeId,
+    subscription_id: SubscriptionId,
+) -> Result<Option<Subscription>, SubscriptionEnrollmentApplicationError> {
+    let row = sqlx::query(
+        r#"
+        SELECT id, plan_key, status, payment_method_id, amount_cents, currency,
+            current_period_start_at, current_period_end_at, next_renewal_at
+        FROM billing_subscriptions
+        WHERE billing_scope_id = $1 AND id = $2
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscription_id.as_uuid())
+    .fetch_optional(connection)
+    .await?;
+    row.map(|row| subscription_from_row(&row)).transpose()
+}
+
+fn subscription_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<Subscription, SubscriptionEnrollmentApplicationError> {
+    let status = row
+        .try_get::<String, _>("status")?
+        .parse::<SubscriptionStatus>()
+        .map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })?;
+    let currency_value = row.try_get::<String, _>("currency")?;
+    let currency = syrup_rail::CurrencyCode::new(&currency_value).map_err(|_| {
+        SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+    })?;
+    let charge =
+        syrup_rail::ChargeAmount::new(row.try_get("amount_cents")?, currency).map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })?;
+    let period = BillingPeriod::new(
+        row.try_get("current_period_start_at")?,
+        row.try_get("current_period_end_at")?,
+    )
+    .map_err(|_| SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE))?;
+    Ok(Subscription::new(
+        SubscriptionId::new(row.try_get("id")?),
+        PlanKey::new(row.try_get::<String, _>("plan_key")?).map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })?,
+        status,
+        PaymentMethodId::new(row.try_get("payment_method_id")?),
+        charge,
+        period,
+        row.try_get("next_renewal_at")?,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        error::Error,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    use async_trait::async_trait;
+    use chrono::Duration as ChronoDuration;
+    use sqlx::{Postgres, Transaction};
+    use syrup_rail::{
+        BillingContact, BillingEventKey, ChargeAmount, CurrencyCode, EnrollSubscription,
+        GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayError,
+        GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy, GatewayMutationError,
+        GatewayMutationReferenceFactory, GatewayOrderId, GatewayPaymentDescriptor,
+        GatewayPaymentMethodReference, GatewayProviderKey, GatewayQueryRequest, GatewaySaleRequest,
+        GatewayStorePaymentMethodRequest, GatewayTransactionReport,
+        GatewayTransactionReportRequest, IdempotencyKey, PaymentAttemptId, PaymentGateway,
+        PaymentToken, PercentOffBasisPoints, ResolvedGateway, SubscriptionDiscountCode,
+        SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedCharge,
+        SubscriptionEnrollmentReservationOutcome,
+    };
+    use tokio::sync::Mutex;
+
+    use super::*;
+    use crate::{
+        BillingEventWriteError, BillingTransaction, SubscriptionOfferStore,
+        reserve_subscription_enrollment_in_transaction,
+        test_support::{TestDatabase, create_gateway_account},
+    };
+
+    #[derive(Debug, Error)]
+    #[error("injected host transaction failure")]
+    struct InjectedHostError;
+
+    struct TestReferenceFactory;
+
+    impl GatewayMutationReferenceFactory for TestReferenceFactory {
+        fn for_attempt(
+            &self,
+            _kind: PaymentAttemptKind,
+            attempt_id: PaymentAttemptId,
+        ) -> GatewayOrderId {
+            GatewayOrderId::from_generated_attempt(
+                format!("test_initial_{}", attempt_id.as_uuid().simple()),
+                attempt_id,
+            )
+            .expect("valid generated test order")
+        }
+    }
+
+    struct NeverCalledGateway;
+
+    #[async_trait]
+    impl PaymentGateway for NeverCalledGateway {
+        async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
+            panic!("application fixture construction must not call the provider")
+        }
+
+        async fn sale(
+            &self,
+            _request: GatewaySaleRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("application fixture construction must not call the provider")
+        }
+
+        async fn store_payment_method(
+            &self,
+            _request: GatewayStorePaymentMethodRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("application fixture construction must not call the provider")
+        }
+
+        async fn query_transaction(
+            &self,
+            _request: GatewayQueryRequest,
+        ) -> Result<Option<GatewayPaymentOutcome>, GatewayError> {
+            panic!("application fixture construction must not call the provider")
+        }
+
+        async fn query_transaction_reports(
+            &self,
+            _request: GatewayTransactionReportRequest,
+        ) -> Result<Vec<GatewayTransactionReport>, GatewayError> {
+            panic!("application fixture construction must not call the provider")
+        }
+    }
+
+    struct ScriptedGateway {
+        sale_calls: AtomicUsize,
+        sale_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
+    }
+
+    impl ScriptedGateway {
+        fn new(result: Result<GatewayPaymentOutcome, GatewayMutationError>) -> Self {
+            Self {
+                sale_calls: AtomicUsize::new(0),
+                sale_result: Mutex::new(Some(result)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PaymentGateway for ScriptedGateway {
+        async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
+            Ok(GatewayAccountMode::Live)
+        }
+
+        async fn sale(
+            &self,
+            _request: GatewaySaleRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            self.sale_calls.fetch_add(1, Ordering::SeqCst);
+            self.sale_result
+                .lock()
+                .await
+                .take()
+                .expect("submission capability permits one scripted sale")
+        }
+
+        async fn store_payment_method(
+            &self,
+            _request: GatewayStorePaymentMethodRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("initial enrollment must use sale")
+        }
+
+        async fn query_transaction(
+            &self,
+            _request: GatewayQueryRequest,
+        ) -> Result<Option<GatewayPaymentOutcome>, GatewayError> {
+            panic!("initial submission must not query")
+        }
+
+        async fn query_transaction_reports(
+            &self,
+            _request: GatewayTransactionReportRequest,
+        ) -> Result<Vec<GatewayTransactionReport>, GatewayError> {
+            panic!("initial submission must not query reports")
+        }
+    }
+
+    fn scripted_resolved_gateway(
+        account: crate::test_support::GatewayAccountFixture,
+        gateway: Arc<ScriptedGateway>,
+    ) -> ResolvedGateway {
+        ResolvedGateway::new(
+            BillingScopeId::new(account.billing_scope_id),
+            GatewayAccountId::new(account.gateway_account_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            GatewayProviderKey::new("nmi").unwrap(),
+            GatewayLifecycleQueryPolicy::new(
+                GatewayLifecycleCursorKey::new("test_cursor").unwrap(),
+                ChronoDuration::minutes(1),
+                10,
+                2,
+                2,
+                20,
+            )
+            .unwrap(),
+            Arc::new(TestReferenceFactory),
+            gateway,
+        )
+    }
+
+    struct TestOfferStore;
+
+    #[async_trait]
+    impl SubscriptionOfferStore for TestOfferStore {
+        async fn lock_current_offer(
+            &self,
+            connection: &mut PgConnection,
+            billing_scope_id: BillingScopeId,
+            plan_key: &PlanKey,
+        ) -> Result<Option<syrup_rail::SubscriptionOffer>, sqlx::Error> {
+            let row = sqlx::query_as::<_, (i32, String)>(
+                r#"
+                SELECT amount_cents, currency
+                FROM host_subscription_offers
+                WHERE billing_scope_id = $1 AND plan_key = $2
+                FOR UPDATE
+                "#,
+            )
+            .bind(billing_scope_id.as_uuid())
+            .bind(plan_key.as_str())
+            .fetch_optional(connection)
+            .await?;
+            row.map(|(amount_cents, currency)| {
+                Ok(syrup_rail::SubscriptionOffer::new(
+                    plan_key.clone(),
+                    ChargeAmount::new(amount_cents, CurrencyCode::new(&currency).unwrap()).unwrap(),
+                ))
+            })
+            .transpose()
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestCoordinator {
+        pool: PgPool,
+        events: Arc<Mutex<Vec<BillingEvent>>>,
+        fail_event: bool,
+    }
+
+    #[async_trait]
+    impl BillingTransactionCoordinator for TestCoordinator {
+        async fn begin(
+            &self,
+            _subject: BillingEventSubject,
+            _lock_timeout: Duration,
+        ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError> {
+            Ok(Box::new(TestTransaction {
+                transaction: Some(
+                    self.pool
+                        .begin()
+                        .await
+                        .map_err(BillingTransactionError::new)?,
+                ),
+                events: Arc::clone(&self.events),
+                fail_event: self.fail_event,
+            }))
+        }
+    }
+
+    struct TestTransaction {
+        transaction: Option<Transaction<'static, Postgres>>,
+        events: Arc<Mutex<Vec<BillingEvent>>>,
+        fail_event: bool,
+    }
+
+    #[async_trait]
+    impl BillingTransaction for TestTransaction {
+        fn connection(&mut self) -> &mut PgConnection {
+            &mut *self.transaction.as_mut().expect("active test transaction")
+        }
+
+        fn subject_state(&self) -> BillingTransactionSubjectState {
+            BillingTransactionSubjectState::LiveRecipient
+        }
+
+        async fn append_event(
+            &mut self,
+            event: &BillingEvent,
+        ) -> Result<(), BillingEventWriteError> {
+            if self.fail_event {
+                return Err(BillingEventWriteError::new(InjectedHostError));
+            }
+            self.events.lock().await.push(event.clone());
+            Ok(())
+        }
+
+        async fn commit(mut self: Box<Self>) -> Result<(), BillingTransactionError> {
+            self.transaction
+                .take()
+                .expect("active test transaction")
+                .commit()
+                .await
+                .map_err(BillingTransactionError::new)
+        }
+
+        async fn rollback(mut self: Box<Self>) -> Result<(), BillingTransactionError> {
+            self.transaction
+                .take()
+                .expect("active test transaction")
+                .rollback()
+                .await
+                .map_err(BillingTransactionError::new)
+        }
+    }
+
+    struct ApplicationFixture {
+        database: TestDatabase,
+        reservation: SubscriptionEnrollmentReservation,
+        coordinator: TestCoordinator,
+        command: EnrollSubscription,
+        gateway_account: crate::test_support::GatewayAccountFixture,
+        admission: Option<Box<AdmittedSubscriptionEnrollment>>,
+    }
+
+    impl ApplicationFixture {
+        async fn cleanup(self) -> Result<(), Box<dyn Error>> {
+            self.database.cleanup().await
+        }
+    }
+
+    async fn application_fixture(
+        project: &str,
+        discounted: bool,
+        fail_event: bool,
+    ) -> Result<ApplicationFixture, Box<dyn Error>> {
+        let database = TestDatabase::start(project).await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE host_subscription_offers (
+                billing_scope_id uuid NOT NULL,
+                plan_key text NOT NULL,
+                amount_cents integer NOT NULL,
+                currency text NOT NULL,
+                PRIMARY KEY (billing_scope_id, plan_key)
+            )
+            "#,
+        )
+        .execute(&database.pool)
+        .await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        sqlx::query(
+            "INSERT INTO host_subscription_offers VALUES ($1, 'base_subscription', 1000, 'USD')",
+        )
+        .bind(account.billing_scope_id)
+        .execute(&database.pool)
+        .await?;
+        let subscriber_id = Uuid::now_v7();
+        let expected_charge = if discounted {
+            let code_id = Uuid::now_v7();
+            sqlx::query(
+                r#"
+                INSERT INTO billing_subscription_discount_codes (
+                    id, billing_scope_id, plan_key, code_normalized, display_code,
+                    status, discount_kind, percent_off_bps, currency,
+                    duration, duration_months
+                ) VALUES (
+                    $1, $2, 'base_subscription', 'SAVE20', 'SAVE20',
+                    'active', 'percent_off', 2000, 'USD', 'limited_months', 3
+                )
+                "#,
+            )
+            .bind(code_id)
+            .bind(account.billing_scope_id)
+            .execute(&database.pool)
+            .await?;
+            sqlx::query(
+                r#"
+                INSERT INTO billing_subscription_discount_claims (
+                    id, billing_scope_id, subscriber_id, plan_key,
+                    discount_code_id, code_snapshot, discount_kind,
+                    percent_off_bps, currency, duration, duration_months,
+                    base_amount_cents, discounted_amount_cents, status
+                ) VALUES (
+                    $1, $2, $3, 'base_subscription', $4, 'SAVE20',
+                    'percent_off', 2000, 'USD', 'limited_months', 3,
+                    1000, 800, 'saved'
+                )
+                "#,
+            )
+            .bind(Uuid::now_v7())
+            .bind(account.billing_scope_id)
+            .bind(subscriber_id)
+            .bind(code_id)
+            .execute(&database.pool)
+            .await?;
+            SubscriptionEnrollmentExpectedCharge::discounted(
+                PlanKey::new("base_subscription")?,
+                SubscriptionDiscountSnapshot::new(
+                    SubscriptionDiscountCode::new("SAVE20")?,
+                    None,
+                    SubscriptionDiscountKind::PercentOffBasisPoints(PercentOffBasisPoints::new(
+                        2000,
+                    )?),
+                    SubscriptionDiscountDuration::LimitedMonths(
+                        syrup_rail::LimitedDiscountMonths::new(3)?,
+                    ),
+                    ChargeAmount::new(1000, CurrencyCode::new("USD")?)?,
+                    ChargeAmount::new(800, CurrencyCode::new("USD")?)?,
+                )?,
+            )
+        } else {
+            SubscriptionEnrollmentExpectedCharge::full_price(syrup_rail::SubscriptionOffer::new(
+                PlanKey::new("base_subscription")?,
+                ChargeAmount::new(1000, CurrencyCode::new("USD")?)?,
+            ))
+        };
+        let attempt_id = PaymentAttemptId::new(Uuid::now_v7());
+        let command = EnrollSubscription::new(
+            attempt_id,
+            BillingScopeId::new(account.billing_scope_id),
+            SubscriberId::new(subscriber_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("application-key")?,
+            PaymentToken::new("opaque-payment-token")?,
+            BillingContact::new(
+                Some("Ada".to_owned()),
+                Some("Lovelace".to_owned()),
+                Some("ada@example.test".to_owned()),
+            )?,
+            expected_charge,
+        );
+        let gateway = ResolvedGateway::new(
+            BillingScopeId::new(account.billing_scope_id),
+            GatewayAccountId::new(account.gateway_account_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            GatewayProviderKey::new("nmi")?,
+            GatewayLifecycleQueryPolicy::new(
+                GatewayLifecycleCursorKey::new("test_cursor")?,
+                ChronoDuration::minutes(1),
+                10,
+                2,
+                2,
+                20,
+            )?,
+            Arc::new(TestReferenceFactory),
+            Arc::new(NeverCalledGateway),
+        );
+        let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+        let mut transaction = database.pool.begin().await?;
+        assert!(matches!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &reservation,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Reserved(_)
+        ));
+        transaction.commit().await?;
+        let admission = match admit_subscription_enrollment_submission(
+            &database.pool,
+            &TestOfferStore,
+            &reservation,
+        )
+        .await?
+        {
+            SubscriptionEnrollmentAdmissionOutcome::Admitted(admission) => admission,
+            other => return Err(format!("unexpected final admission: {other:?}").into()),
+        };
+        let coordinator = TestCoordinator {
+            pool: database.pool.clone(),
+            events: Arc::new(Mutex::new(Vec::new())),
+            fail_event,
+        };
+        Ok(ApplicationFixture {
+            database,
+            reservation,
+            coordinator,
+            command,
+            gateway_account: account,
+            admission: Some(admission),
+        })
+    }
+
+    fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
+        approved_outcome_with_transaction(Some(transaction_id))
+    }
+
+    fn approved_outcome_with_transaction(transaction_id: Option<&str>) -> GatewayPaymentOutcome {
+        GatewayPaymentOutcome::new(
+            GatewayPaymentStatus::Approved,
+            ProcessorEvidence::new(
+                transaction_id.map(|value| GatewayTransactionId::new(value).unwrap()),
+                Some(GatewayPaymentMethodReference::new("vault_application").unwrap()),
+                Some(GatewayDiagnostic::new("1")),
+                Some(GatewayDiagnostic::new("100")),
+                Some(GatewayDiagnostic::new("Approved")),
+                Some(GatewayDiagnostic::new("complete")),
+                GatewayPaymentDescriptor::from_provider_parts(
+                    Some(GatewayDiagnostic::new("creditcard")),
+                    Some(GatewayDiagnostic::new("visa")),
+                    Some("4242"),
+                    Some(12),
+                    Some(2031),
+                ),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = application_fixture("enroll_apply", true, false).await?;
+        let outcome = approved_outcome("txn_application_approved");
+        let result = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &outcome,
+        )
+        .await?;
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
+        assert_eq!(
+            result
+                .subscription()
+                .expect("applied subscription")
+                .recurring_charge()
+                .cents(),
+            800
+        );
+        let events = fixture.coordinator.events.lock().await.clone();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].semantic_key(),
+            BillingEventKey::SubscriptionStarted(
+                result.subscription().expect("applied subscription").id()
+            )
+        );
+        assert!(matches!(
+            &events[0],
+            BillingEvent::SubscriptionStarted { charge, .. } if charge.cents() == 800
+        ));
+        let rows: (i64, i64, i64, String, i32) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT count(*) FROM billing_payment_methods),
+                (SELECT count(*) FROM billing_subscriptions),
+                (SELECT count(*) FROM billing_processor_charges),
+                (SELECT status FROM billing_subscription_discount_claims LIMIT 1),
+                (SELECT periods_applied FROM billing_subscription_discounts LIMIT 1)
+            "#,
+        )
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(rows, (1, 1, 1, "applied".to_owned(), 1));
+        let progression: String =
+            sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
+                .fetch_one(&fixture.database.pool)
+                .await?;
+        assert_eq!(progression, "applied");
+
+        let replay = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &outcome,
+        )
+        .await?;
+        assert_eq!(replay.attempt().status(), PaymentAttemptStatus::Approved);
+        assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn committed_admission_capability_submits_and_applies_exactly_one_sale()
+    -> Result<(), Box<dyn Error>> {
+        let mut fixture = application_fixture("submit_once", false, false).await?;
+        let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+            "txn_submitted_once",
+        ))));
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+        let result = submit_admitted_subscription_enrollment(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            *fixture.admission.take().expect("committed admission"),
+            &fixture.command,
+            &resolved,
+        )
+        .await?;
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
+        assert!(result.subscription().is_some());
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn provider_not_submitted_error_resolves_the_admitted_attempt_without_resubmission()
+    -> Result<(), Box<dyn Error>> {
+        let mut fixture = application_fixture("not_submitted", false, false).await?;
+        let gateway = Arc::new(ScriptedGateway::new(Err(
+            GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::Unavailable(
+                GatewayDiagnostic::new("temporary provider outage"),
+            )),
+        )));
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+        let result = submit_admitted_subscription_enrollment(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            *fixture.admission.take().expect("committed admission"),
+            &fixture.command,
+            &resolved,
+        )
+        .await?;
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Failed);
+        assert_eq!(
+            result.attempt().state().resolution_code(),
+            Some(PaymentResolutionCode::GatewayUnavailableBeforeSubmission)
+        );
+        assert!(result.subscription().is_none());
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn event_failure_rolls_back_application_and_durably_parks_approval()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = application_fixture("event_fail", false, true).await?;
+        let result = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &approved_outcome("txn_event_failure"),
+        )
+        .await?;
+        assert_eq!(
+            result.attempt().status(),
+            PaymentAttemptStatus::ReviewRequired
+        );
+        assert!(result.subscription().is_none());
+        let counts: (i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                (SELECT count(*) FROM billing_payment_methods),
+                (SELECT count(*) FROM billing_subscriptions),
+                (SELECT count(*) FROM billing_processor_charges)
+            "#,
+        )
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(counts, (0, 0, 0));
+        assert!(fixture.coordinator.events.lock().await.is_empty());
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = application_fixture("charge_fallback", false, false).await?;
+        sqlx::raw_sql(
+            r#"
+            CREATE FUNCTION host_reject_attempt_status_update()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.status IS DISTINCT FROM OLD.status THEN
+                    RAISE EXCEPTION 'injected attempt status write failure';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            CREATE TRIGGER host_reject_attempt_status_update
+            BEFORE UPDATE OF status ON billing_payment_attempts
+            FOR EACH ROW EXECUTE FUNCTION host_reject_attempt_status_update();
+            "#,
+        )
+        .execute(&fixture.database.pool)
+        .await?;
+        let result = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &approved_outcome("txn_charge_fallback"),
+        )
+        .await?;
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Pending);
+        assert!(result.subscription().is_none());
+        let durable: (i64, String, Option<String>) = sqlx::query_as(
+            r#"
+            SELECT count(*), min(progression_state), min(gateway_transaction_id)
+            FROM billing_processor_charges
+            "#,
+        )
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(
+            durable,
+            (
+                1,
+                "pending".to_owned(),
+                Some("txn_charge_fallback".to_owned())
+            )
+        );
+        let subscription_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM billing_subscriptions")
+                .fetch_one(&fixture.database.pool)
+                .await?;
+        assert_eq!(subscription_count, 0);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn later_exact_approval_identifies_a_transactionless_fallback_charge()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = application_fixture("identify_charge", false, false).await?;
+        sqlx::raw_sql(
+            r#"
+            CREATE FUNCTION host_reject_attempt_status_update()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.status IS DISTINCT FROM OLD.status THEN
+                    RAISE EXCEPTION 'injected attempt status write failure';
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+            CREATE TRIGGER host_reject_attempt_status_update
+            BEFORE UPDATE OF status ON billing_payment_attempts
+            FOR EACH ROW EXECUTE FUNCTION host_reject_attempt_status_update();
+            "#,
+        )
+        .execute(&fixture.database.pool)
+        .await?;
+        let parked = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &approved_outcome_with_transaction(None),
+        )
+        .await?;
+        assert_eq!(parked.attempt().status(), PaymentAttemptStatus::Pending);
+        let before: Option<String> =
+            sqlx::query_scalar("SELECT gateway_transaction_id FROM billing_processor_charges")
+                .fetch_one(&fixture.database.pool)
+                .await?;
+        assert!(before.is_none());
+
+        sqlx::query("DROP TRIGGER host_reject_attempt_status_update ON billing_payment_attempts")
+            .execute(&fixture.database.pool)
+            .await?;
+        let exact = approved_outcome("txn_identified_later");
+        let applied = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &exact,
+        )
+        .await?;
+        assert_eq!(applied.attempt().status(), PaymentAttemptStatus::Approved);
+        let identified: (String, String) = sqlx::query_as(
+            "SELECT gateway_transaction_id, progression_state FROM billing_processor_charges",
+        )
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(
+            identified,
+            ("txn_identified_later".to_owned(), "applied".to_owned())
+        );
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn approval_after_terminal_failure_is_parked_with_reversal_required_charge()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = application_fixture("terminal_race", false, false).await?;
+        sqlx::query(
+            r#"
+            UPDATE billing_payment_attempts
+            SET status = 'failed', resolved_at = clock_timestamp(),
+                gateway_response_text = 'local failure', updated_at = clock_timestamp()
+            WHERE id = $1
+            "#,
+        )
+        .bind(fixture.reservation.identity().attempt_id().as_uuid())
+        .execute(&fixture.database.pool)
+        .await?;
+        let result = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &approved_outcome("txn_terminal_race"),
+        )
+        .await?;
+        assert_eq!(
+            result.attempt().status(),
+            PaymentAttemptStatus::ReviewRequired
+        );
+        assert!(result.subscription().is_none());
+        let progression: String =
+            sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
+                .fetch_one(&fixture.database.pool)
+                .await?;
+        assert_eq!(progression, "external_reversal_required");
+        assert!(fixture.coordinator.events.lock().await.is_empty());
+        fixture.cleanup().await
+    }
+}
