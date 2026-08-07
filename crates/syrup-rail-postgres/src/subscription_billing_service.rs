@@ -466,7 +466,11 @@ impl SubscriptionBillingService {
             }
             Err(GatewayError::RateLimited(detail)) => {
                 return self
-                    .resolve_recovery_provider_readiness_rate_limit(&reservation, detail)
+                    .resolve_recovery_provider_readiness_rate_limit(
+                        &reservation,
+                        detail,
+                        OutcomeResolutionBoundary::Prepared,
+                    )
                     .await;
             }
             Err(_) => {
@@ -482,17 +486,16 @@ impl SubscriptionBillingService {
             }
         }
 
-        let admission = match admit_subscription_recovery_submission(&self.pool, &reservation)
-            .await?
-        {
-            SubscriptionRecoveryAdmissionOutcome::Admitted(admission) => *admission,
-            SubscriptionRecoveryAdmissionOutcome::AlreadyAdmitted(attempt) => {
-                return self.payment_result(attempt).await;
-            }
-            SubscriptionRecoveryAdmissionOutcome::Rejected { reason, .. } => {
-                return Err(SubscriptionEnrollmentServiceError::RecoverySubmissionRejected(reason));
-            }
-        };
+        let admission =
+            match admit_subscription_recovery_submission(&self.pool, &reservation).await? {
+                SubscriptionRecoveryAdmissionOutcome::Admitted(admission) => *admission,
+                SubscriptionRecoveryAdmissionOutcome::AlreadyAdmitted(attempt) => {
+                    return self.payment_result(attempt).await;
+                }
+                SubscriptionRecoveryAdmissionOutcome::Rejected { attempt, .. } => {
+                    return self.payment_result(attempt).await;
+                }
+            };
         if let Some(scope) = self.active_cooldown(&account).await? {
             return self
                 .resolve_recovery_cooldown(
@@ -501,6 +504,40 @@ impl SubscriptionBillingService {
                     OutcomeResolutionBoundary::AdmittedNotSubmitted,
                 )
                 .await;
+        }
+        match gateway.account_mode().await {
+            Ok(GatewayAccountMode::Live) => {}
+            Ok(GatewayAccountMode::Test) => {
+                return self
+                    .resolve_recovery_readiness_failure(
+                        &reservation,
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
+                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                        None,
+                        OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                    )
+                    .await;
+            }
+            Err(GatewayError::RateLimited(detail)) => {
+                return self
+                    .resolve_recovery_provider_readiness_rate_limit(
+                        &reservation,
+                        detail,
+                        OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                    )
+                    .await;
+            }
+            Err(_) => {
+                return self
+                    .resolve_recovery_readiness_failure(
+                        &reservation,
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
+                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                        None,
+                        OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                    )
+                    .await;
+            }
         }
         match submit_admitted_subscription_recovery(
             &self.pool,
@@ -806,6 +843,7 @@ impl SubscriptionBillingService {
         &self,
         reservation: &SubscriptionRecoveryReservation,
         detail: GatewayDiagnostic,
+        boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
         let code = PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission;
         let payment = self
@@ -814,7 +852,7 @@ impl SubscriptionBillingService {
                 detail,
                 code,
                 Some(RateLimitCooldown::Provider),
-                OutcomeResolutionBoundary::Prepared,
+                boundary,
             )
             .await?;
         if payment.attempt().state().resolution_code() == Some(code) {

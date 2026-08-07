@@ -1201,54 +1201,239 @@ async fn park_recovery_approved_outcome(
     evidence: &ProcessorEvidence,
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    for attempt_index in 0..APPROVED_EVIDENCE_WRITE_ATTEMPTS {
-        let application = async {
+    match try_park_recovery_approved_outcome(pool, reservation, evidence, message).await {
+        Ok(result) => Ok(result),
+        Err(_) => {
+            observe_recovery_approved_evidence_with_retry(pool, reservation, evidence).await?;
             let mut transaction = pool.begin().await?;
-            set_application_timeouts(&mut transaction).await?;
-            lock_subscription_aggregate(
+            let attempt = find_payment_attempt_by_id_on_connection(
                 &mut transaction,
-                reservation.identity().subscriber_id(),
-                reservation.plan_key(),
+                reservation.identity().billing_scope_id(),
+                reservation.identity().attempt_id(),
             )
-            .await?;
-            let attempt = lock_expected_recovery_attempt(&mut transaction, reservation).await?;
-            if attempt.status() == PaymentAttemptStatus::Approved {
-                let result = payment_result_for_attempt(&mut transaction, attempt).await?;
-                transaction.commit().await?;
-                return Ok::<_, SubscriptionEnrollmentApplicationError>(result);
-            }
-            let observation = observe_processor_charge(
-                &mut transaction,
-                &attempt,
-                evidence,
-                ChargeProgression::ReconciliationRequired,
-            )
-            .await?;
-            let parked =
-                park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?;
-            if let ObservedCharge::Owned(charge) = observation {
-                transition_charge(
-                    &mut transaction,
-                    charge.id,
-                    ChargeProgression::ReconciliationRequired,
-                    None,
-                )
-                .await?;
-            }
-            let result = payment_result_for_attempt(&mut transaction, parked).await?;
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+            let result = payment_result_for_attempt(&mut transaction, attempt).await?;
             transaction.commit().await?;
             Ok(result)
         }
+    }
+}
+
+async fn try_park_recovery_approved_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+    message: &'static str,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    lock_subscription_aggregate(
+        &mut transaction,
+        reservation.identity().subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    let attempt = lock_expected_recovery_attempt(&mut transaction, reservation).await?;
+    let attempt = if attempt.status() == PaymentAttemptStatus::Approved {
+        observe_processor_charge(
+            &mut transaction,
+            &attempt,
+            evidence,
+            ChargeProgression::Applied,
+        )
+        .await?;
+        attempt
+    } else if attempt.status().is_terminal() {
+        let progression =
+            if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
+                ChargeProgression::ExternalReversalRequired
+            } else {
+                ChargeProgression::ReconciliationRequired
+            };
+        observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
+        attempt
+    } else {
+        observe_processor_charge(
+            &mut transaction,
+            &attempt,
+            evidence,
+            ChargeProgression::Pending,
+        )
+        .await?;
+        park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
+    };
+    let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn observe_recovery_approved_evidence_with_retry(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    for attempt_index in 0..APPROVED_EVIDENCE_WRITE_ATTEMPTS {
+        let result = async {
+            let mut transaction = pool.begin().await?;
+            set_application_timeouts(&mut transaction).await?;
+            let attempt = lock_expected_recovery_attempt(&mut transaction, reservation).await?;
+            observe_processor_charge(
+                &mut transaction,
+                &attempt,
+                evidence,
+                ChargeProgression::Pending,
+            )
+            .await?;
+            transaction.commit().await?;
+            Ok::<(), SubscriptionEnrollmentApplicationError>(())
+        }
         .await;
-        match application {
-            Ok(result) => return Ok(result),
+        match result {
+            Ok(()) => return Ok(()),
             Err(error)
-                if attempt_index + 1 < APPROVED_EVIDENCE_WRITE_ATTEMPTS
-                    && is_retryable_evidence_error(&error) =>
+                if is_retryable_evidence_error(&error)
+                    && attempt_index + 1 < APPROVED_EVIDENCE_WRITE_ATTEMPTS =>
             {
                 tokio::time::sleep(APPROVED_EVIDENCE_RETRY_DELAY).await;
             }
+            Err(error) if is_retryable_evidence_error(&error) => break,
             Err(error) => return Err(error),
+        }
+    }
+    observe_recovery_approved_evidence_without_attempt_lock(pool, reservation, evidence).await
+}
+
+async fn observe_recovery_approved_evidence_without_attempt_lock(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let identity = reservation.identity();
+    let request = reservation.request();
+    let descriptor = evidence.descriptor();
+    let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    for _ in 0..2 {
+        let has_existing_charge: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
+        )
+        .bind(identity.attempt_id().as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let role = if has_existing_charge {
+            "additional"
+        } else {
+            "primary"
+        };
+        let inserted = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO billing_processor_charges (
+                id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
+                gateway_transaction_id, gateway_payment_method_reference,
+                gateway_response, gateway_response_code, gateway_response_text,
+                gateway_condition, payment_type, card_brand, card_last4,
+                card_exp_month, card_exp_year, charge_role, progression_state,
+                attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, 'pending', 'subscription_recovery', $18,
+                NULL, $19, $20
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(identity.attempt_id().as_uuid())
+        .bind(identity.billing_scope_id().as_uuid())
+        .bind(identity.gateway_account_id().as_uuid())
+        .bind(request.gateway_order_id().expose())
+        .bind(transaction_id)
+        .bind(
+            evidence
+                .payment_method_reference()
+                .map(|value| value.expose()),
+        )
+        .bind(evidence.response().map(GatewayDiagnostic::expose))
+        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+        .bind(evidence.condition().map(GatewayDiagnostic::expose))
+        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+        .bind(descriptor.card_last_four().map(|value| value.expose()))
+        .bind(descriptor.card_exp_month())
+        .bind(descriptor.card_exp_year())
+        .bind(role)
+        .bind(reservation.plan_key().as_str())
+        .bind(request.amount().cents())
+        .bind(request.amount().currency().as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if inserted.is_some() {
+            transaction.commit().await?;
+            return Ok(());
+        }
+    }
+    let evidence_matches = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
+            AND gateway_response IS NOT DISTINCT FROM $4
+            AND gateway_response_code IS NOT DISTINCT FROM $5
+            AND gateway_response_text IS NOT DISTINCT FROM $6
+            AND gateway_condition IS NOT DISTINCT FROM $7
+            AND payment_type IS NOT DISTINCT FROM $8
+            AND card_brand IS NOT DISTINCT FROM $9
+            AND card_last4 IS NOT DISTINCT FROM $10
+            AND card_exp_month IS NOT DISTINCT FROM $11
+            AND card_exp_year IS NOT DISTINCT FROM $12
+        FROM billing_processor_charges
+        WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
+        "#,
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .bind(transaction_id)
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if evidence_matches == Some(true) {
+        transaction.commit().await?;
+        return Ok(());
+    }
+    if let Some(transaction_id) = transaction_id {
+        let owned_elsewhere: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM billing_processor_charges
+                WHERE gateway_account_id = $1 AND gateway_transaction_id = $2
+                    AND attempt_id <> $3
+            )
+            "#,
+        )
+        .bind(identity.gateway_account_id().as_uuid())
+        .bind(transaction_id)
+        .bind(identity.attempt_id().as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if owned_elsewhere {
+            transaction.commit().await?;
+            return Ok(());
         }
     }
     Err(SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable)
@@ -3598,18 +3783,22 @@ mod tests {
             .subscription()
             .expect("approved enrollment has a subscription")
             .id();
-        let due_at: DateTime<Utc> = sqlx::query_scalar(
+        let due_at = Utc::now() - ChronoDuration::days(1);
+        let current_period_start_at = due_at - ChronoDuration::days(31);
+        let persisted_due_at: DateTime<Utc> = sqlx::query_scalar(
             r#"
             UPDATE billing_subscriptions
-            SET current_period_start_at = clock_timestamp() - interval '2 months',
-                current_period_end_at = clock_timestamp() - interval '1 month',
-                next_renewal_at = clock_timestamp() - interval '1 month',
+            SET current_period_start_at = $2,
+                current_period_end_at = $3,
+                next_renewal_at = $3,
                 updated_at = clock_timestamp()
             WHERE id = $1
             RETURNING next_renewal_at
             "#,
         )
         .bind(subscription_id.as_uuid())
+        .bind(current_period_start_at)
+        .bind(due_at)
         .fetch_one(&fixture.database.pool)
         .await?;
 
@@ -3656,7 +3845,7 @@ mod tests {
             .expect("recovery applies subscription");
         assert_eq!(recovered.id(), subscription_id);
         assert_eq!(recovered.status(), SubscriptionStatus::Active);
-        assert_eq!(*recovered.current_period().start_at(), due_at);
+        assert_eq!(*recovered.current_period().start_at(), persisted_due_at);
         assert_eq!(
             recovered.payment_method_id(),
             result
@@ -3684,11 +3873,30 @@ mod tests {
         .await?;
         assert_eq!(discount, (2, "active".to_owned(), 800));
 
-        let replay = service.recover(command).await?;
+        let replay = service.recover(command.clone()).await?;
         assert_eq!(replay, result);
         assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+        let next_due_at = Utc::now() - ChronoDuration::hours(12);
+        sqlx::query(
+            r#"
+            UPDATE billing_subscriptions
+            SET current_period_end_at = $2,
+                next_renewal_at = $2,
+                updated_at = clock_timestamp()
+            WHERE id = $1
+            "#,
+        )
+        .bind(subscription_id.as_uuid())
+        .bind(next_due_at)
+        .execute(&fixture.database.pool)
+        .await?;
+        assert!(matches!(
+            service.recover(command).await,
+            Err(SubscriptionEnrollmentServiceError::IdempotencyConflict)
+        ));
+        assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
         let events = fixture.coordinator.events.lock().await;
         assert_eq!(events.len(), 2);
         assert!(matches!(

@@ -605,11 +605,15 @@ pub async fn preflight_subscription_recovery_in_transaction(
     else {
         return Ok(SubscriptionRecoveryPreflightOutcome::Continue);
     };
-    Ok(if recovery_attempt_matches_command(&existing, command) {
-        SubscriptionRecoveryPreflightOutcome::Replay(Box::new(existing))
-    } else {
-        SubscriptionRecoveryPreflightOutcome::IdempotencyConflict
-    })
+    Ok(
+        if recovery_attempt_matches_command(&existing, command)
+            && recovery_attempt_matches_replay_context(transaction, &existing).await?
+        {
+            SubscriptionRecoveryPreflightOutcome::Replay(Box::new(existing))
+        } else {
+            SubscriptionRecoveryPreflightOutcome::IdempotencyConflict
+        },
+    )
 }
 
 /// Locks the canonical subscription, derives the exact due-period request, and
@@ -631,11 +635,15 @@ pub async fn reserve_subscription_recovery_in_transaction(
     )
     .await?
     {
-        return Ok(if recovery_attempt_matches_command(&existing, command) {
-            SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
-        } else {
-            SubscriptionRecoveryReservationOutcome::IdempotencyConflict
-        });
+        return Ok(
+            if recovery_attempt_matches_command(&existing, command)
+                && recovery_attempt_matches_replay_context(transaction, &existing).await?
+            {
+                SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
+            } else {
+                SubscriptionRecoveryReservationOutcome::IdempotencyConflict
+            },
+        );
     }
 
     let row = sqlx::query(
@@ -742,11 +750,15 @@ pub async fn reserve_subscription_recovery_in_transaction(
     )
     .await?
     {
-        return Ok(if recovery_attempt_matches_command(&existing, command) {
-            SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
-        } else {
-            SubscriptionRecoveryReservationOutcome::IdempotencyConflict
-        });
+        return Ok(
+            if recovery_attempt_matches_command(&existing, command)
+                && recovery_attempt_matches_replay_context(transaction, &existing).await?
+            {
+                SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
+            } else {
+                SubscriptionRecoveryReservationOutcome::IdempotencyConflict
+            },
+        );
     }
     Ok(SubscriptionRecoveryReservationOutcome::Rejected(
         SubscriptionRecoveryReservationRejection::AttemptInProgress,
@@ -1253,6 +1265,50 @@ fn recovery_attempt_matches_command(
                 *period.start_at(),
                 attempt.request().amount(),
             )
+}
+
+async fn recovery_attempt_matches_replay_context(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: &PaymentAttempt,
+) -> Result<bool, sqlx::Error> {
+    let PaymentAttemptTarget::SubscriptionRecovery {
+        plan_key,
+        period,
+        expected_state,
+        ..
+    } = attempt.request().target()
+    else {
+        return Ok(false);
+    };
+    let identity = attempt.identity();
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM billing_subscriptions
+            WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+                AND plan_key = $4
+                AND (
+                    (
+                        status IN ('active', 'past_due')
+                        AND next_renewal_at = $5
+                    )
+                    OR (
+                        $6 = 'approved'
+                        AND next_renewal_at > clock_timestamp()
+                        AND current_period_start_at = $5
+                    )
+                )
+        )
+        "#,
+    )
+    .bind(expected_state.subscription_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(plan_key.as_str())
+    .bind(period.start_at())
+    .bind(attempt.status().as_str())
+    .fetch_one(&mut **transaction)
+    .await
 }
 
 fn recovery_attempt_matches_reservation(
