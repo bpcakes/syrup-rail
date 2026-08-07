@@ -328,7 +328,7 @@ impl fmt::Debug for GatewayPaymentDescriptor {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default, Eq, PartialEq)]
 pub struct ProcessorEvidence {
     transaction_id: Option<GatewayTransactionId>,
     payment_method_reference: Option<GatewayPaymentMethodReference>,
@@ -387,6 +387,10 @@ impl ProcessorEvidence {
 
     pub const fn descriptor(&self) -> &GatewayPaymentDescriptor {
         &self.descriptor
+    }
+
+    pub const fn has_gateway_reference(&self) -> bool {
+        self.transaction_id.is_some() || self.payment_method_reference.is_some()
     }
 }
 
@@ -1018,6 +1022,18 @@ mod tests {
         let debug = format!("{identifier:?}");
         assert!(!debug.contains("txn_sentinel"));
         assert!(debug.contains("redacted"));
+        let evidence = ProcessorEvidence::new(
+            Some(identifier),
+            None,
+            None,
+            None,
+            None,
+            None,
+            GatewayPaymentDescriptor::default(),
+        );
+        assert!(evidence.has_gateway_reference());
+        assert_eq!(ProcessorEvidence::default(), ProcessorEvidence::default());
+        assert!(!format!("{evidence:?}").contains("txn_sentinel"));
         assert_eq!(
             GatewayTransactionId::from_correlation("bad selector"),
             Err(GatewayReferenceValueError::UnsupportedCorrelationCharacter)

@@ -13,6 +13,8 @@ and transaction orchestration.
   behavior fixtures behind `schema-contract-test-support`.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
   and exact configuration activation.
+- `src/attempts.rs` — typed canonical payment-attempt loading and exact-owner
+  idempotency row locking.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
   caller-transaction protected-write guard.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
@@ -32,6 +34,9 @@ and transaction orchestration.
   `src/schema_contract.rs` and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
+- Change canonical attempt row parsing or idempotency row locking in
+  `src/attempts.rs`; keep payment tokens and provider credentials outside the
+  durable model.
 - Change reusable subscription access projection or protected-write admission
   in `src/entitlement.rs`; keep host authentication and gateway availability
   outside the query/guard.

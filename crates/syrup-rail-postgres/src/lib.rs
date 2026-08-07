@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod attempts;
 mod cancellation;
 mod deletion;
 mod discounts;
@@ -16,6 +17,10 @@ pub mod schema_contract;
 #[cfg(test)]
 mod test_support;
 
+pub use attempts::{
+    PaymentAttemptStoreError, find_payment_attempt_by_id_in_transaction,
+    lock_payment_attempt_by_idempotency_in_transaction,
+};
 pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
 pub use deletion::{billing_deletion_blockers, scrub_subscriber_billing_data};
 pub use discounts::*;

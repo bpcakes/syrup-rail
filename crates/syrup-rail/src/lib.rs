@@ -6,8 +6,10 @@
 #![forbid(unsafe_code)]
 
 mod admission;
+mod attempt;
 mod card_data;
 mod discount;
+mod enrollment;
 mod event;
 mod gateway;
 mod gateway_value;
@@ -19,8 +21,10 @@ mod resolver;
 mod subscription;
 
 pub use admission::*;
+pub use attempt::*;
 pub use card_data::{raw_card_data_ranges, string_contains_raw_card_data};
 pub use discount::*;
+pub use enrollment::*;
 pub use event::*;
 pub use gateway::*;
 pub use gateway_value::*;
