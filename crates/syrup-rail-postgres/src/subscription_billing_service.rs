@@ -512,7 +512,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            None,
+            Some(GatewayDiagnostic::new("failed")),
             GatewayPaymentDescriptor::default(),
         );
         resolve_non_approved_outcome(

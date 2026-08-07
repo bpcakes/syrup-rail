@@ -972,13 +972,17 @@ async fn observe_approved_evidence_without_attempt_lock(
     set_application_timeouts(&mut transaction).await?;
 
     for _ in 0..2 {
-        let has_primary: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1 AND charge_role = 'primary')",
+        let has_existing_charge: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
         )
         .bind(identity.attempt_id().as_uuid())
         .fetch_one(&mut *transaction)
         .await?;
-        let role = if has_primary { "additional" } else { "primary" };
+        let role = if has_existing_charge {
+            "additional"
+        } else {
+            "primary"
+        };
         let inserted = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO billing_processor_charges (
@@ -1612,8 +1616,8 @@ async fn observe_processor_charge(
 ) -> Result<ObservedCharge, SubscriptionEnrollmentApplicationError> {
     let identity = attempt.identity();
     let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
-    let has_primary: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1 AND charge_role = 'primary')",
+    let has_existing_charge: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
     )
     .bind(identity.attempt_id().as_uuid())
     .fetch_one(&mut *connection)
@@ -1628,7 +1632,7 @@ async fn observe_processor_charge(
             return Ok(ObservedCharge::Owned(charge));
         }
     }
-    let role = if has_primary {
+    let role = if has_existing_charge {
         ChargeRole::Additional
     } else {
         ChargeRole::Primary
