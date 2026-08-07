@@ -32,8 +32,9 @@ pub use discounts::*;
 pub use enrollment_application::{
     AdmittedSubscriptionEnrollment, SubscriptionEnrollmentAdmissionOutcome,
     SubscriptionEnrollmentApplicationError, SubscriptionEnrollmentProviderResult,
-    admit_subscription_enrollment_submission, apply_subscription_enrollment_gateway_outcome,
-    submit_admitted_subscription_enrollment,
+    admit_subscription_enrollment_submission,
+    apply_reconciled_subscription_enrollment_gateway_outcome,
+    apply_subscription_enrollment_gateway_outcome, submit_admitted_subscription_enrollment,
 };
 pub use entitlement::{
     EntitlementGuardError, EntitlementQueryError, entitlement, require_entitlement_for_update,

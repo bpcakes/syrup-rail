@@ -3,9 +3,9 @@ use std::fmt;
 use crate::{
     BillingContact, BillingContactSnapshot, BillingScopeId, ChargeAmount, DiscountClaimId,
     DiscountCodeId, GatewayConfigurationId, GatewayOrderId, GatewayProviderKey, IdempotencyKey,
-    PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentToken,
-    PlanKey, ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountSnapshot,
-    SubscriptionOffer,
+    PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
+    PaymentAttemptTarget, PaymentToken, PlanKey, ResolvedGateway, SubscriberId, Subscription,
+    SubscriptionDiscountSnapshot, SubscriptionOffer,
 };
 use thiserror::Error;
 
@@ -252,6 +252,10 @@ impl fmt::Debug for EnrollSubscription {
 pub enum SubscriptionEnrollmentReservationBuildError {
     #[error("resolved gateway identity does not match the enrollment command")]
     GatewayIdentityMismatch,
+    #[error("only subscription-initial attempts can become enrollment reservations")]
+    AttemptKindMismatch,
+    #[error("subscription-initial attempt has an invalid charge amount")]
+    InvalidCharge,
 }
 
 /// Secret-free input for the durable enrollment reservation transaction.
@@ -310,6 +314,47 @@ impl SubscriptionEnrollmentReservation {
                 command.billing_contact(),
             ),
             expected_charge: command.expected_charge().clone(),
+        })
+    }
+
+    /// Reconstructs application authority for a durable initial attempt.
+    ///
+    /// Reconciliation supplies the canonical provider key joined through the
+    /// attempt's gateway account. No payment token, live offer, or gateway
+    /// resolver is needed because this path applies an already-observed
+    /// provider outcome and never submits another mutation.
+    pub fn from_attempt(
+        attempt: &PaymentAttempt,
+        provider_key: GatewayProviderKey,
+    ) -> Result<Self, SubscriptionEnrollmentReservationBuildError> {
+        let request = attempt.request();
+        let PaymentAttemptTarget::SubscriptionInitial {
+            plan_key, discount, ..
+        } = request.target()
+        else {
+            return Err(SubscriptionEnrollmentReservationBuildError::AttemptKindMismatch);
+        };
+        let expected_charge = match discount {
+            Some(discount) => SubscriptionEnrollmentExpectedCharge::discounted(
+                plan_key.clone(),
+                discount.snapshot().clone(),
+            ),
+            None => {
+                let charge = ChargeAmount::try_from(request.amount())
+                    .map_err(|_| SubscriptionEnrollmentReservationBuildError::InvalidCharge)?;
+                SubscriptionEnrollmentExpectedCharge::full_price(SubscriptionOffer::new(
+                    plan_key.clone(),
+                    charge,
+                ))
+            }
+        };
+        Ok(Self {
+            identity: attempt.identity(),
+            provider_key,
+            idempotency_key: request.idempotency_key().clone(),
+            gateway_order_id: request.gateway_order_id().clone(),
+            billing_contact: request.billing_contact().clone(),
+            expected_charge,
         })
     }
 

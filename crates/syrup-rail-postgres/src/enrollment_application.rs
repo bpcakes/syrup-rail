@@ -5,10 +5,11 @@ use sqlx::{PgConnection, PgPool, Row};
 use syrup_rail::{
     BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId, EnrollSubscription,
     GatewayDiagnostic, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome,
-    GatewayPaymentStatus, GatewaySaleIntent, GatewaySaleRequest, GatewayTransactionId,
-    PaymentAttempt, PaymentAttemptKind, PaymentAttemptStatus, PaymentMethodId,
-    PaymentResolutionCode, PlanKey, ProcessorEvidence, ResolvedGateway, SubscriberId, Subscription,
-    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
+    GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest,
+    GatewayTransactionId, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
+    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence,
+    ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountDuration,
+    SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
     SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionStatus,
     next_monthly_billing_period,
@@ -321,6 +322,59 @@ pub async fn apply_subscription_enrollment_gateway_outcome(
             resolve_unknown_outcome(pool, reservation, outcome.evidence(), None).await
         }
     }
+}
+
+/// Applies an already-observed provider outcome to an exact durable enrollment attempt.
+///
+/// This is the reconciliation counterpart to foreground enrollment. It rebuilds
+/// the secret-free reservation from immutable attempt state and the canonical
+/// gateway account, then enters the same atomic application path. It never
+/// resolves a live gateway or submits another provider mutation.
+pub async fn apply_reconciled_subscription_enrollment_gateway_outcome(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    billing_scope_id: BillingScopeId,
+    attempt_id: PaymentAttemptId,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    let attempt = crate::find_payment_attempt_by_id_in_transaction(
+        &mut transaction,
+        billing_scope_id,
+        attempt_id,
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        "subscription enrollment attempt was not found",
+    ))?;
+    let provider_key = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT provider_key
+        FROM billing_gateway_accounts
+        WHERE billing_scope_id = $1 AND id = $2
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(attempt.identity().gateway_account_id().as_uuid())
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        "subscription enrollment gateway account was not found",
+    ))?;
+    transaction.commit().await?;
+
+    let provider_key = GatewayProviderKey::new(provider_key).map_err(|_| {
+        SubscriptionEnrollmentApplicationError::InvalidState(
+            "subscription enrollment gateway provider key is invalid",
+        )
+    })?;
+    let reservation = SubscriptionEnrollmentReservation::from_attempt(&attempt, provider_key)
+        .map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(
+                "reconciled attempt is not a valid subscription enrollment",
+            )
+        })?;
+    apply_subscription_enrollment_gateway_outcome(pool, coordinator, &reservation, outcome).await
 }
 
 async fn apply_approved_outcome(
@@ -2724,6 +2778,48 @@ mod tests {
         )
         .await?;
         assert_eq!(replay.attempt().status(), PaymentAttemptStatus::Approved);
+        assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn reconciled_initial_approval_uses_durable_attempt_after_configuration_rotation()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = application_fixture("rec_initial", false, false).await?;
+        sqlx::query(
+            r#"
+            UPDATE billing_gateway_accounts
+            SET gateway_configuration_id = $2, updated_at = clock_timestamp()
+            WHERE id = $1
+            "#,
+        )
+        .bind(fixture.gateway_account.gateway_account_id)
+        .bind(Uuid::now_v7())
+        .execute(&fixture.database.pool)
+        .await?;
+        let outcome = approved_outcome("txn_reconciled_approved");
+
+        let result = apply_reconciled_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            fixture.command.billing_scope_id(),
+            fixture.command.attempt_id(),
+            &outcome,
+        )
+        .await?;
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
+        assert!(result.subscription().is_some());
+        assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
+
+        let replay = apply_reconciled_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            fixture.command.billing_scope_id(),
+            fixture.command.attempt_id(),
+            &outcome,
+        )
+        .await?;
+        assert_eq!(replay, result);
         assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
         fixture.cleanup().await
     }

@@ -17,8 +17,9 @@ and transaction orchestration.
   idempotency row locking, and token-free initial-enrollment reservation/final
   submission admission.
 - `src/enrollment_application.rs` — committed one-shot initial-sale authority,
-  atomic approved application, recurring-discount insertion, permanent charge
-  observation, terminal-race handling, and approved-failure compensation.
+  foreground and reconciliation entrypoints into one atomic application path,
+  recurring-discount insertion, permanent charge observation, terminal-race
+  handling, and approved-failure compensation.
 - `src/subscription_billing_service.rs` — complete foreground initial-enrollment
   orchestration from replay-before-admission through fresh cooldown and the
   one-shot provider sale.
@@ -48,8 +49,9 @@ and transaction orchestration.
   tokens and provider credentials outside the transaction and durable model.
 - Change initial provider submission, attempt/charge resolution, payment-method
   and subscription creation, discount application, or approved-failure parking
-  in `src/enrollment_application.rs`; keep the complete application write set
-  on the host-prepared transaction.
+  in `src/enrollment_application.rs`; reconciliation must rebuild authority
+  from the exact durable attempt and must not submit another provider mutation.
+  Keep the complete application write set on the host-prepared transaction.
 - Change foreground replay, host admission, gateway resolution, cooldown and
   readiness ordering, or reservation-to-sale composition in
   `src/subscription_billing_service.rs`; do not introduce another enrollment

@@ -490,5 +490,9 @@ const fn map_reservation_build_error(
         SubscriptionEnrollmentReservationBuildError::GatewayIdentityMismatch => {
             SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch
         }
+        SubscriptionEnrollmentReservationBuildError::AttemptKindMismatch
+        | SubscriptionEnrollmentReservationBuildError::InvalidCharge => {
+            SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
+        }
     }
 }
