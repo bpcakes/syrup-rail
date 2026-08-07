@@ -21,13 +21,16 @@ use crate::{
     admit_subscription_enrollment_submission,
     apply_reconciled_subscription_enrollment_gateway_outcome,
     enrollment_application::{
-        RateLimitCooldown, payment_result_for_attempt, resolve_non_approved_outcome,
+        OutcomeResolutionBoundary, RateLimitCooldown, payment_result_for_attempt,
+        resolve_non_approved_outcome,
     },
     preflight_subscription_enrollment_in_transaction,
     reserve_subscription_enrollment_in_transaction, submit_admitted_subscription_enrollment,
 };
 
 const INVALID_SERVICE_STATE: &str = "canonical subscription enrollment service state is invalid";
+const LIVE_READINESS_FAILED_TEXT: &str =
+    "Payment was not submitted because the payment processor was not ready for live transactions.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayMutationCooldownScope {
@@ -248,7 +251,9 @@ impl SubscriptionBillingService {
         }
 
         if let Some(scope) = self.active_cooldown(&account).await? {
-            return self.resolve_cooldown(&reservation, scope).await;
+            return self
+                .resolve_cooldown(&reservation, scope, OutcomeResolutionBoundary::Prepared)
+                .await;
         }
         match gateway.account_mode().await {
             Ok(GatewayAccountMode::Live) => {}
@@ -256,9 +261,10 @@ impl SubscriptionBillingService {
                 return self
                     .resolve_readiness_failure(
                         &reservation,
-                        GatewayDiagnostic::new("gateway account is in test mode"),
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
                         PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
                         None,
+                        OutcomeResolutionBoundary::Prepared,
                     )
                     .await;
             }
@@ -267,13 +273,14 @@ impl SubscriptionBillingService {
                     .resolve_provider_readiness_rate_limit(&reservation, detail)
                     .await;
             }
-            Err(error) => {
+            Err(_) => {
                 return self
                     .resolve_readiness_failure(
                         &reservation,
-                        error.detail().clone(),
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
                         PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
                         None,
+                        OutcomeResolutionBoundary::Prepared,
                     )
                     .await;
             }
@@ -298,7 +305,13 @@ impl SubscriptionBillingService {
         };
 
         if let Some(scope) = self.active_cooldown(&account).await? {
-            return self.resolve_cooldown(&reservation, scope).await;
+            return self
+                .resolve_cooldown(
+                    &reservation,
+                    scope,
+                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                )
+                .await;
         }
         match submit_admitted_subscription_enrollment(
             &self.pool,
@@ -431,6 +444,7 @@ impl SubscriptionBillingService {
         &self,
         reservation: &SubscriptionEnrollmentReservation,
         scope: GatewayMutationCooldownScope,
+        boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
         let (message, code) = match scope {
             GatewayMutationCooldownScope::Account => (
@@ -443,7 +457,13 @@ impl SubscriptionBillingService {
             ),
         };
         let payment = self
-            .resolve_readiness_failure(reservation, GatewayDiagnostic::new(message), code, None)
+            .resolve_readiness_failure(
+                reservation,
+                GatewayDiagnostic::new(message),
+                code,
+                None,
+                boundary,
+            )
             .await?;
         if payment.attempt().state().resolution_code() == Some(code) {
             Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope })
@@ -459,7 +479,13 @@ impl SubscriptionBillingService {
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
         let code = PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission;
         let payment = self
-            .resolve_readiness_failure(reservation, detail, code, Some(RateLimitCooldown::Provider))
+            .resolve_readiness_failure(
+                reservation,
+                detail,
+                code,
+                Some(RateLimitCooldown::Provider),
+                OutcomeResolutionBoundary::Prepared,
+            )
             .await?;
         if payment.attempt().state().resolution_code() == Some(code) {
             Err(
@@ -478,6 +504,7 @@ impl SubscriptionBillingService {
         detail: GatewayDiagnostic,
         code: PaymentResolutionCode,
         cooldown: Option<RateLimitCooldown>,
+        boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
         let evidence = ProcessorEvidence::new(
             None,
@@ -495,6 +522,7 @@ impl SubscriptionBillingService {
             PaymentAttemptStatus::Failed,
             Some(code),
             cooldown,
+            boundary,
         )
         .await
         .map_err(SubscriptionEnrollmentServiceError::from)

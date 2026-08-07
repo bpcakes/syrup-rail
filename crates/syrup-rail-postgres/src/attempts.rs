@@ -803,7 +803,10 @@ async fn current_subscription_exists(
         r#"
         SELECT id FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
-            AND status IN ('active', 'past_due')
+            AND (
+                status IN ('active', 'past_due')
+                OR (status = 'canceled' AND current_period_end_at > clock_timestamp())
+            )
         ORDER BY updated_at DESC, id DESC FOR NO KEY UPDATE
         "#,
     )
