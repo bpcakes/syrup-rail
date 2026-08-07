@@ -2,12 +2,12 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use sqlx::PgPool;
 use syrup_rail::{
-    EndUserMutationAdmission, EndUserMutationAdmissionResult, EndUserMutationCommand,
-    EndUserMutationOperation, EnrollSubscription, GatewayAccountId, GatewayAccountMode,
-    GatewayDiagnostic, GatewayError, GatewayNotSubmittedError, GatewayPaymentDescriptor,
-    GatewayProviderKey, GatewayResolutionError, GatewayResolver, PaymentAttempt,
-    PaymentAttemptStatus, PaymentResolutionCode, ProcessorEvidence,
-    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPreflightOutcome,
+    BillingScopeId, EndUserMutationAdmission, EndUserMutationAdmissionResult,
+    EndUserMutationCommand, EndUserMutationOperation, EnrollSubscription, GatewayAccountId,
+    GatewayAccountMode, GatewayDiagnostic, GatewayError, GatewayNotSubmittedError,
+    GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayProviderKey, GatewayResolutionError,
+    GatewayResolver, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentResolutionCode,
+    ProcessorEvidence, SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPreflightOutcome,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationBuildError,
     SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
     SubscriptionEnrollmentSubmissionRejection,
@@ -19,6 +19,7 @@ use crate::{
     SubscriptionEnrollmentAdmissionOutcome, SubscriptionEnrollmentApplicationError,
     SubscriptionEnrollmentProviderResult, SubscriptionOfferStore,
     admit_subscription_enrollment_submission,
+    apply_reconciled_subscription_enrollment_gateway_outcome,
     enrollment_application::{
         RateLimitCooldown, payment_result_for_attempt, resolve_non_approved_outcome,
     },
@@ -313,6 +314,28 @@ impl SubscriptionBillingService {
                 SubscriptionEnrollmentServiceError::GatewayNotSubmitted(error),
             ),
         }
+    }
+
+    /// Applies an already-observed provider outcome without another submission.
+    ///
+    /// Reconciliation enters the same application authority as foreground
+    /// enrollment but reconstructs its secret-free reservation from the exact
+    /// durable attempt and canonical gateway account.
+    pub async fn apply_reconciled_outcome(
+        &self,
+        billing_scope_id: BillingScopeId,
+        attempt_id: PaymentAttemptId,
+        outcome: &GatewayPaymentOutcome,
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+        apply_reconciled_subscription_enrollment_gateway_outcome(
+            &self.pool,
+            self.coordinator.as_ref(),
+            billing_scope_id,
+            attempt_id,
+            outcome,
+        )
+        .await
+        .map_err(Into::into)
     }
 
     async fn preflight(
