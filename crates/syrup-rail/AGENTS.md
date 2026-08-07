@@ -11,7 +11,8 @@ command/outcome types for application-independent subscription billing.
 - `src/{identity,money,subscription,discount,event,resolution}.rs` own validated
   billing values and closed lifecycle facts, including card-safe grant
   commands, lossless grant audit records, canonical discount commands,
-  immutable discount snapshots, and exact-plan cancellation outcomes.
+  immutable discount snapshots, exact-plan cancellation outcomes, and typed
+  subscriber billing-data scrub commands/results.
 - `src/{gateway,gateway_value}.rs` own the five-method provider port, typed
   evidence, sensitive values, and diagnostic boundary.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure

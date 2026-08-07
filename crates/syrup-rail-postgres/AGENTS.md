@@ -20,7 +20,8 @@ and transaction orchestration.
   quoting, saved-claim mutation, and the host offer-store port.
 - `src/cancellation.rs` — caller-transaction exact-plan cancellation,
   attempt fences, stale update cleanup, and canonical event production.
-- `src/deletion.rs` — transaction-local canonical account-deletion blockers.
+- `src/deletion.rs` — transaction-local canonical account-deletion blockers
+  and mutable billing-data scrubbing.
 
 ## Edit here for X
 
@@ -40,8 +41,9 @@ and transaction orchestration.
 - Change exact-plan cancellation in `src/cancellation.rs`; the host must lock
   the live event recipient first, append the returned event in the same
   transaction, and leave stored payment methods unchanged.
-- Change canonical deletion admission in `src/deletion.rs`; keep host order and
-  fulfillment blockers in the host transaction.
+- Change canonical deletion admission or billing attempt/payment-method scrub
+  policy in `src/deletion.rs`; keep host identity, order, fulfillment, and
+  retained-subject work in the host transaction.
 
 ## Invariants
 
@@ -56,6 +58,9 @@ and transaction orchestration.
   shared operations never persist or receive plaintext provider credentials.
 - Offer-dependent discount operations lock the exact host plan row through the
   caller's connection; implementations must not open a second connection.
+- Subscriber scrubbing enters every affected gateway-account payment-method
+  domain in deterministic order before mutating attempts or methods and never
+  changes immutable processor-charge observations.
 
 ## Common commands
 

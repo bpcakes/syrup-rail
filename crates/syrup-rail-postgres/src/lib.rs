@@ -17,7 +17,7 @@ pub mod schema_contract;
 mod test_support;
 
 pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
-pub use deletion::billing_deletion_blockers;
+pub use deletion::{billing_deletion_blockers, scrub_subscriber_billing_data};
 pub use discounts::*;
 pub use entitlement::{EntitlementQueryError, entitlement};
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};

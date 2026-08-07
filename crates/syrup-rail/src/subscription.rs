@@ -852,6 +852,56 @@ impl BillingDeletionBlockers {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrubSubscriberBillingData {
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+}
+
+impl ScrubSubscriberBillingData {
+    pub const fn new(billing_scope_id: BillingScopeId, subscriber_id: SubscriberId) -> Self {
+        Self {
+            billing_scope_id,
+            subscriber_id,
+        }
+    }
+
+    pub const fn billing_scope_id(self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    pub const fn subscriber_id(self) -> SubscriberId {
+        self.subscriber_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ScrubbedBillingRows {
+    payment_attempts: u64,
+    payment_methods: u64,
+}
+
+impl ScrubbedBillingRows {
+    pub const fn new(payment_attempts: u64, payment_methods: u64) -> Self {
+        Self {
+            payment_attempts,
+            payment_methods,
+        }
+    }
+
+    pub const fn payment_attempts(self) -> u64 {
+        self.payment_attempts
+    }
+
+    pub const fn payment_methods(self) -> u64 {
+        self.payment_methods
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.payment_attempts == 0 && self.payment_methods == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
