@@ -15,6 +15,7 @@ mod identity;
 mod money;
 mod policy;
 mod resolution;
+mod resolver;
 mod subscription;
 
 pub use admission::*;
@@ -27,6 +28,7 @@ pub use identity::*;
 pub use money::*;
 pub use policy::*;
 pub use resolution::*;
+pub use resolver::*;
 pub use subscription::*;
 
 /// Workspace package version exposed for consumer pinning diagnostics.

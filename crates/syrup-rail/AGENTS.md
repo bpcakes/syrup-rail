@@ -14,8 +14,9 @@ command/outcome types for application-independent subscription billing.
   immutable discount snapshots, exact-plan cancellation outcomes, typed
   entitlement guards, subscriber billing-data scrub commands/results, and the
   closed host admission boundary for end-user billing mutations.
-- `src/{gateway,gateway_value}.rs` own the five-method provider port, typed
-  evidence, sensitive values, and diagnostic boundary.
+- `src/{gateway,gateway_value,resolver}.rs` own the five-method provider port,
+  typed evidence, sensitive values, provider-I/O-free host resolver contract,
+  and diagnostic boundary.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure
   payment/calendar policy.
 
