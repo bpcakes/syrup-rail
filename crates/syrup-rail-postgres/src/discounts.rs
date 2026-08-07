@@ -389,7 +389,7 @@ pub async fn claim_subscription_discount_in_transaction(
     let code = code_from_row(&code_row)?;
     let quote = SubscriptionDiscountCodeQuote::new(code, &offer)
         .map_err(|_| SubscriptionDiscountOperationError::InvalidState(INVALID_DISCOUNT_STATE))?;
-    let existing = saved_claim_for_update(
+    let existing = saved_subscription_discount_claim_in_transaction(
         transaction,
         claim.billing_scope_id(),
         claim.subscriber_id(),
@@ -487,8 +487,13 @@ pub async fn clear_subscription_discount_in_transaction(
 ) -> Result<SubscriptionDiscountClearOutcome, SubscriptionDiscountOperationError> {
     set_lock_timeout(transaction).await?;
     lock_subscription_aggregate(transaction, subscriber_id, plan_key).await?;
-    let existing =
-        saved_claim_for_update(transaction, billing_scope_id, subscriber_id, plan_key).await?;
+    let existing = saved_subscription_discount_claim_in_transaction(
+        transaction,
+        billing_scope_id,
+        subscriber_id,
+        plan_key,
+    )
+    .await?;
     lock_initial_attempt_rows(transaction, billing_scope_id, subscriber_id, plan_key).await?;
     if blocking_initial_attempt(transaction, billing_scope_id, subscriber_id, plan_key).await? {
         return Ok(SubscriptionDiscountClearOutcome::BlockedByInitialAttempt);
@@ -547,6 +552,58 @@ pub async fn saved_subscription_discount_claim(
     .fetch_optional(pool)
     .await?;
     row.as_ref().map(claim_from_row).transpose()
+}
+
+pub async fn mark_subscription_discount_claim_applied_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    claim_id: DiscountClaimId,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+    subscription_id: SubscriptionId,
+    payment_attempt_id: PaymentAttemptId,
+) -> Result<SubscriptionDiscountClaimRecord, SubscriptionDiscountOperationError> {
+    set_lock_timeout(transaction).await?;
+    let row = sqlx::query(
+        r#"
+        UPDATE billing_subscription_discount_claims claims
+        SET status = 'applied', applied_at = now(),
+            applied_subscription_id = $5, applied_payment_attempt_id = $6
+        WHERE claims.id = $1
+            AND claims.billing_scope_id = $2
+            AND claims.subscriber_id = $3
+            AND claims.plan_key = $4
+            AND claims.status IN ('saved', 'expired')
+            AND EXISTS (
+                SELECT 1 FROM billing_payment_attempts attempts
+                WHERE attempts.id = $6
+                    AND attempts.billing_scope_id = claims.billing_scope_id
+                    AND attempts.subscriber_id = claims.subscriber_id
+                    AND attempts.plan_key = claims.plan_key
+                    AND attempts.subscription_initial_discount_claim_id = claims.id
+                    AND attempts.attempt_kind = 'subscription_initial'
+                    AND attempts.submitted_at IS NOT NULL
+            )
+        RETURNING claims.id, claims.billing_scope_id, claims.subscriber_id,
+            claims.plan_key, claims.discount_code_id, claims.code_snapshot,
+            claims.label_snapshot, claims.discount_kind, claims.amount_off_cents,
+            claims.percent_off_bps, claims.currency, claims.duration,
+            claims.duration_months, claims.base_amount_cents,
+            claims.discounted_amount_cents, claims.status, claims.claimed_at,
+            claims.applied_at, claims.applied_subscription_id,
+            claims.applied_payment_attempt_id, claims.superseded_at
+        "#,
+    )
+    .bind(claim_id.as_uuid())
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .bind(subscription_id.as_uuid())
+    .bind(payment_attempt_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?
+    .ok_or(sqlx::Error::RowNotFound)?;
+    claim_from_row(&row)
 }
 
 async fn lock_offer(
@@ -701,7 +758,7 @@ async fn expire_saved_claims_for_code(
     Ok(())
 }
 
-async fn saved_claim_for_update(
+pub async fn saved_subscription_discount_claim_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
