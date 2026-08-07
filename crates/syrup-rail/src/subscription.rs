@@ -4,8 +4,9 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::{
-    ActorId, BillingPeriod, BillingScopeId, ChargeAmount, DiscountClaimId, PaymentMethodId,
-    PlanKey, SubscriberId, SubscriptionGrantId, SubscriptionId, SubscriptionStatus,
+    ActorId, BillingPeriod, BillingScopeId, ChargeAmount, CurrencyCode, DiscountClaimId,
+    PaymentMethodId, PlanKey, SubscriberId, SubscriptionGrantId, SubscriptionId,
+    SubscriptionStatus,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -620,6 +621,10 @@ impl SubscriptionDiscountSnapshot {
 
     pub const fn discounted_charge(&self) -> ChargeAmount {
         self.discounted_charge
+    }
+
+    pub const fn currency(&self) -> &CurrencyCode {
+        self.base_charge.currency_code()
     }
 }
 

@@ -109,6 +109,10 @@ impl ChargeAmount {
     pub const fn currency(self) -> CurrencyCode {
         self.0.currency()
     }
+
+    pub const fn currency_code(&self) -> &CurrencyCode {
+        &self.0.currency
+    }
 }
 
 impl TryFrom<Money> for ChargeAmount {
