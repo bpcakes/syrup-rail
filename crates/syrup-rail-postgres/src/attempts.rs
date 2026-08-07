@@ -13,11 +13,11 @@ use syrup_rail::{
     PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentResolutionCode, PercentOffBasisPoints,
     PlanKey, PositiveDiscountCents, ProcessorEvidence, SubscriberId, SubscriptionDiscountCode,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
-    SubscriptionEnrollmentDiscountSnapshot, SubscriptionEnrollmentReservation,
-    SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
-    SubscriptionEnrollmentSubmissionOutcome, SubscriptionEnrollmentSubmissionRejection,
-    SubscriptionId, SubscriptionInitialApplication, SubscriptionPaymentStateSnapshot,
-    SubscriptionStatus,
+    SubscriptionEnrollmentDiscountSnapshot, SubscriptionEnrollmentPreflightOutcome,
+    SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationOutcome,
+    SubscriptionEnrollmentReservationRejection, SubscriptionEnrollmentSubmissionOutcome,
+    SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionInitialApplication,
+    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -333,6 +333,94 @@ pub async fn reserve_subscription_enrollment_in_transaction(
             SubscriptionEnrollmentReservationOutcome::IdempotencyConflict
         },
     )
+}
+
+/// Resolves subscriber-wide enrollment idempotency before host admission.
+///
+/// Matching stale prepared work is expired at the exact database-clock
+/// boundary and returned as a replay. This operation deliberately does not
+/// lock an offer or inspect current subscription state: replay semantics are
+/// determined by the historical request before any live policy or quota.
+pub async fn preflight_subscription_enrollment_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &syrup_rail::EnrollSubscription,
+) -> Result<SubscriptionEnrollmentPreflightOutcome, PaymentAttemptStoreError> {
+    set_enrollment_timeouts(transaction).await?;
+    let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        false,
+    )
+    .await?
+    else {
+        return Ok(SubscriptionEnrollmentPreflightOutcome::Continue);
+    };
+    if !replay_matches_command(&existing, command) {
+        return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
+    }
+    if attempt_is_already_replayable(&existing) {
+        return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
+            existing,
+        )));
+    }
+
+    lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
+    let existing = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        true,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    if !replay_matches_command(&existing, command) {
+        return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
+    }
+    if attempt_is_already_replayable(&existing) {
+        return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
+            existing,
+        )));
+    }
+    if !initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
+        return Ok(SubscriptionEnrollmentPreflightOutcome::Continue);
+    }
+
+    lock_initial_attempt_rows(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.plan_key(),
+    )
+    .await?;
+    lock_initial_charge_rows(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.plan_key(),
+    )
+    .await?;
+    expire_stale_initial_attempts(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.plan_key(),
+    )
+    .await?;
+    let expired = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        true,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
+        expired,
+    )))
 }
 
 /// Revalidates a prepared initial attempt and durably admits its one provider mutation.
@@ -894,6 +982,25 @@ fn replay_matches_reservation(
             .matches_subscription_initial_expected_charge(
                 reservation.plan_key(),
                 reservation.expected_charge(),
+            )
+}
+
+fn replay_matches_command(
+    attempt: &PaymentAttempt,
+    command: &syrup_rail::EnrollSubscription,
+) -> bool {
+    let identity = attempt.identity();
+    identity.billing_scope_id() == command.billing_scope_id()
+        && identity.subscriber_id() == command.subscriber_id()
+        && identity.gateway_configuration_id() == command.gateway_configuration_id()
+        && attempt.kind() == PaymentAttemptKind::SubscriptionInitial
+        && attempt.request().target().plan_key() == Some(command.plan_key())
+        && attempt
+            .request()
+            .fingerprint()
+            .matches_subscription_initial_expected_charge(
+                command.plan_key(),
+                command.expected_charge(),
             )
 }
 

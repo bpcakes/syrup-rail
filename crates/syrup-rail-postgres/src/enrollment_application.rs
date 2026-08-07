@@ -29,6 +29,7 @@ const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
 const BILLING_OPERATION_TIMEOUT: &str = "5s";
 const APPROVED_EVIDENCE_WRITE_ATTEMPTS: usize = 3;
 const APPROVED_EVIDENCE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS: i64 = 60;
 const INVALID_APPLICATION_STATE: &str = "canonical initial-enrollment application state is invalid";
 const CURRENT_SUBSCRIPTION_CONFLICT_TEXT: &str =
     "Approved subscription enrollment conflicts with a current subscription.";
@@ -115,6 +116,29 @@ pub enum SubscriptionEnrollmentAdmissionOutcome {
     },
 }
 
+#[derive(Debug)]
+pub enum SubscriptionEnrollmentProviderResult {
+    Payment(SubscriptionEnrollmentPaymentResult),
+    NotSubmitted {
+        payment: SubscriptionEnrollmentPaymentResult,
+        error: GatewayNotSubmittedError,
+    },
+}
+
+impl SubscriptionEnrollmentProviderResult {
+    pub const fn payment(&self) -> &SubscriptionEnrollmentPaymentResult {
+        match self {
+            Self::Payment(payment) | Self::NotSubmitted { payment, .. } => payment,
+        }
+    }
+
+    pub fn into_payment(self) -> SubscriptionEnrollmentPaymentResult {
+        match self {
+            Self::Payment(payment) | Self::NotSubmitted { payment, .. } => payment,
+        }
+    }
+}
+
 /// Owns and commits final enrollment admission before exposing a one-shot
 /// submission capability. A rolled-back transaction can never yield the
 /// capability consumed by [`submit_admitted_subscription_enrollment`].
@@ -159,11 +183,14 @@ pub async fn submit_admitted_subscription_enrollment(
     admission: AdmittedSubscriptionEnrollment,
     command: &EnrollSubscription,
     gateway: &ResolvedGateway,
-) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let reconstructed = SubscriptionEnrollmentReservation::from_command(command, gateway)
-        .map_err(|_| SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch)?;
+) -> Result<SubscriptionEnrollmentProviderResult, SubscriptionEnrollmentApplicationError> {
+    let reconstructed = SubscriptionEnrollmentReservation::from_command_for_attempt(
+        command,
+        gateway,
+        admission.attempt.identity().attempt_id(),
+    )
+    .map_err(|_| SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch)?;
     if reconstructed != admission.reservation
-        || admission.attempt.identity().attempt_id() != command.attempt_id()
         || admission.attempt.status() != PaymentAttemptStatus::Pending
         || admission
             .attempt
@@ -189,37 +216,45 @@ pub async fn submit_admitted_subscription_enrollment(
         Some(command.billing_contact().clone()),
     );
     match gateway.sale(request).await {
-        Ok(outcome) => {
-            apply_subscription_enrollment_gateway_outcome(
-                pool,
-                coordinator,
-                &admission.reservation,
-                &outcome,
-            )
-            .await
-        }
+        Ok(outcome) => apply_subscription_enrollment_gateway_outcome(
+            pool,
+            coordinator,
+            &admission.reservation,
+            &outcome,
+        )
+        .await
+        .map(SubscriptionEnrollmentProviderResult::Payment),
         Err(GatewayMutationError::NotSubmitted(error)) => {
             let evidence = mutation_error_evidence(error.detail());
-            resolve_non_approved_outcome(
+            let cooldown = matches!(error, GatewayNotSubmittedError::RateLimited(_))
+                .then_some(RateLimitCooldown::Account);
+            let payment = resolve_non_approved_outcome(
                 pool,
                 &admission.reservation,
                 &evidence,
                 PaymentAttemptStatus::Failed,
                 Some(not_submitted_resolution_code(&error)),
+                cooldown,
             )
-            .await
+            .await?;
+            Ok(SubscriptionEnrollmentProviderResult::NotSubmitted { payment, error })
         }
-        Err(
-            GatewayMutationError::RateLimitedIndeterminate(detail)
-            | GatewayMutationError::Indeterminate(detail),
-        ) => {
-            resolve_unknown_outcome(
-                pool,
-                &admission.reservation,
-                &mutation_error_evidence(&detail),
-            )
-            .await
-        }
+        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => resolve_unknown_outcome(
+            pool,
+            &admission.reservation,
+            &mutation_error_evidence(&detail),
+            Some(RateLimitCooldown::Provider),
+        )
+        .await
+        .map(SubscriptionEnrollmentProviderResult::Payment),
+        Err(GatewayMutationError::Indeterminate(detail)) => resolve_unknown_outcome(
+            pool,
+            &admission.reservation,
+            &mutation_error_evidence(&detail),
+            None,
+        )
+        .await
+        .map(SubscriptionEnrollmentProviderResult::Payment),
     }
 }
 
@@ -267,6 +302,7 @@ pub async fn apply_subscription_enrollment_gateway_outcome(
                 outcome.evidence(),
                 PaymentAttemptStatus::Declined,
                 None,
+                None,
             )
             .await
         }
@@ -277,11 +313,12 @@ pub async fn apply_subscription_enrollment_gateway_outcome(
                 outcome.evidence(),
                 PaymentAttemptStatus::Failed,
                 None,
+                None,
             )
             .await
         }
         GatewayPaymentStatus::Unknown => {
-            resolve_unknown_outcome(pool, reservation, outcome.evidence()).await
+            resolve_unknown_outcome(pool, reservation, outcome.evidence(), None).await
         }
     }
 }
@@ -524,12 +561,13 @@ async fn apply_approved_on_connection(
     ))
 }
 
-async fn resolve_non_approved_outcome(
+pub(crate) async fn resolve_non_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionEnrollmentReservation,
     evidence: &ProcessorEvidence,
     status: PaymentAttemptStatus,
     resolution_code: Option<PaymentResolutionCode>,
+    cooldown: Option<RateLimitCooldown>,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
@@ -552,6 +590,9 @@ async fn resolve_non_approved_outcome(
             false,
         )
         .await?;
+    }
+    if let Some(cooldown) = cooldown {
+        extend_rate_limit_cooldown(&mut transaction, reservation, cooldown).await?;
     }
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,
@@ -603,6 +644,7 @@ async fn resolve_unknown_outcome(
     pool: &PgPool,
     reservation: &SubscriptionEnrollmentReservation,
     evidence: &ProcessorEvidence,
+    cooldown: Option<RateLimitCooldown>,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
@@ -635,6 +677,9 @@ async fn resolve_unknown_outcome(
             .await?;
         }
     }
+    if let Some(cooldown) = cooldown {
+        extend_rate_limit_cooldown(&mut transaction, reservation, cooldown).await?;
+    }
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,
         reservation.identity().billing_scope_id(),
@@ -647,6 +692,64 @@ async fn resolve_unknown_outcome(
     let result = payment_result_for_attempt(&mut transaction, attempt).await?;
     transaction.commit().await?;
     Ok(result)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RateLimitCooldown {
+    Account,
+    Provider,
+}
+
+async fn extend_rate_limit_cooldown(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionEnrollmentReservation,
+    cooldown: RateLimitCooldown,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let result = match cooldown {
+        RateLimitCooldown::Account => {
+            sqlx::query(
+                r#"
+                UPDATE billing_gateway_accounts
+                SET mutation_rate_limited_until = GREATEST(
+                        COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
+                        clock_timestamp() + make_interval(secs => $4)
+                    ),
+                    updated_at = clock_timestamp()
+                WHERE id = $1
+                    AND billing_scope_id = $2
+                    AND gateway_configuration_id = $3
+                "#,
+            )
+            .bind(reservation.identity().gateway_account_id().as_uuid())
+            .bind(reservation.identity().billing_scope_id().as_uuid())
+            .bind(reservation.identity().gateway_configuration_id().as_uuid())
+            .bind(PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
+            .execute(&mut *connection)
+            .await?
+        }
+        RateLimitCooldown::Provider => {
+            sqlx::query(
+                r#"
+                UPDATE billing_gateway_provider_rate_limits
+                SET rate_limited_until = GREATEST(
+                    rate_limited_until,
+                    clock_timestamp() + make_interval(secs => $2)
+                )
+                WHERE provider_key = $1
+                "#,
+            )
+            .bind(reservation.provider_key().as_str())
+            .bind(PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
+            .execute(&mut *connection)
+            .await?
+        }
+    };
+    if result.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(())
 }
 
 async fn park_approved_outcome(
@@ -1538,7 +1641,7 @@ fn evidence_looks_approved(evidence: &ProcessorEvidence) -> bool {
                 .is_some_and(|value| syrup_rail::gateway_state_is_approved(value.expose())))
 }
 
-async fn payment_result_for_attempt(
+pub(crate) async fn payment_result_for_attempt(
     connection: &mut PgConnection,
     attempt: PaymentAttempt,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
@@ -1637,11 +1740,13 @@ mod tests {
     use chrono::Duration as ChronoDuration;
     use sqlx::{Postgres, Transaction};
     use syrup_rail::{
-        BillingContact, BillingEventKey, ChargeAmount, CurrencyCode, EnrollSubscription,
+        BillingContact, BillingEventKey, ChargeAmount, CurrencyCode, EndUserMutationAdmission,
+        EndUserMutationAdmissionResult, EndUserMutationCommand, EnrollSubscription,
         GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayError,
         GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy, GatewayMutationError,
         GatewayMutationReferenceFactory, GatewayOrderId, GatewayPaymentDescriptor,
-        GatewayPaymentMethodReference, GatewayProviderKey, GatewayQueryRequest, GatewaySaleRequest,
+        GatewayPaymentMethodReference, GatewayProviderKey, GatewayQueryRequest,
+        GatewayResolutionError, GatewayResolver, GatewaySaleRequest,
         GatewayStorePaymentMethodRequest, GatewayTransactionReport,
         GatewayTransactionReportRequest, IdempotencyKey, PaymentAttemptId, PaymentGateway,
         PaymentToken, PercentOffBasisPoints, ResolvedGateway, SubscriptionDiscountCode,
@@ -1652,7 +1757,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        BillingEventWriteError, BillingTransaction, SubscriptionOfferStore,
+        BillingEventWriteError, BillingTransaction, GatewayMutationCooldownScope,
+        SubscriptionBillingService, SubscriptionEnrollmentServiceError, SubscriptionOfferStore,
         reserve_subscription_enrollment_in_transaction,
         test_support::{TestDatabase, create_gateway_account},
     };
@@ -1719,6 +1825,134 @@ mod tests {
         sale_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
     }
 
+    struct RateLimitedReadinessGateway;
+
+    #[async_trait]
+    impl PaymentGateway for RateLimitedReadinessGateway {
+        async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
+            Err(GatewayError::RateLimited(GatewayDiagnostic::new(
+                "query throttle",
+            )))
+        }
+
+        async fn sale(
+            &self,
+            _request: GatewaySaleRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("readiness throttle must prevent provider mutation")
+        }
+
+        async fn store_payment_method(
+            &self,
+            _request: GatewayStorePaymentMethodRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("initial enrollment must not store without a sale")
+        }
+
+        async fn query_transaction(
+            &self,
+            _request: GatewayQueryRequest,
+        ) -> Result<Option<GatewayPaymentOutcome>, GatewayError> {
+            panic!("initial enrollment readiness must not query transactions")
+        }
+
+        async fn query_transaction_reports(
+            &self,
+            _request: GatewayTransactionReportRequest,
+        ) -> Result<Vec<GatewayTransactionReport>, GatewayError> {
+            panic!("initial enrollment readiness must not query reports")
+        }
+    }
+
+    struct CooldownDuringReadinessGateway {
+        pool: PgPool,
+        account_id: Uuid,
+    }
+
+    #[async_trait]
+    impl PaymentGateway for CooldownDuringReadinessGateway {
+        async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
+            sqlx::query(
+                r#"
+                UPDATE billing_gateway_accounts
+                SET mutation_rate_limited_until = clock_timestamp() + interval '1 minute'
+                WHERE id = $1
+                "#,
+            )
+            .bind(self.account_id)
+            .execute(&self.pool)
+            .await
+            .expect("test readiness cooldown write");
+            Ok(GatewayAccountMode::Live)
+        }
+
+        async fn sale(
+            &self,
+            _request: GatewaySaleRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("fresh cooldown must prevent provider mutation")
+        }
+
+        async fn store_payment_method(
+            &self,
+            _request: GatewayStorePaymentMethodRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("initial enrollment must not store without a sale")
+        }
+
+        async fn query_transaction(
+            &self,
+            _request: GatewayQueryRequest,
+        ) -> Result<Option<GatewayPaymentOutcome>, GatewayError> {
+            panic!("initial enrollment readiness must not query transactions")
+        }
+
+        async fn query_transaction_reports(
+            &self,
+            _request: GatewayTransactionReportRequest,
+        ) -> Result<Vec<GatewayTransactionReport>, GatewayError> {
+            panic!("initial enrollment readiness must not query reports")
+        }
+    }
+
+    struct PermitAdmission {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl EndUserMutationAdmission for PermitAdmission {
+        async fn admit(&self, _command: EndUserMutationCommand) -> EndUserMutationAdmissionResult {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            EndUserMutationAdmissionResult::Allowed
+        }
+    }
+
+    struct StaticResolver {
+        gateway: ResolvedGateway,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl GatewayResolver for StaticResolver {
+        async fn resolve(
+            &self,
+            billing_scope_id: BillingScopeId,
+            gateway_account_id: GatewayAccountId,
+            gateway_configuration_id: GatewayConfigurationId,
+            provider_key: GatewayProviderKey,
+        ) -> Result<ResolvedGateway, GatewayResolutionError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if billing_scope_id != self.gateway.billing_scope_id()
+                || gateway_account_id != self.gateway.gateway_account_id()
+                || gateway_configuration_id != self.gateway.gateway_configuration_id()
+                || provider_key != *self.gateway.provider_key()
+            {
+                return Err(GatewayResolutionError::ConfigurationChanged);
+            }
+            Ok(self.gateway.clone())
+        }
+    }
+
     impl ScriptedGateway {
         fn new(result: Result<GatewayPaymentOutcome, GatewayMutationError>) -> Self {
             Self {
@@ -1768,10 +2002,13 @@ mod tests {
         }
     }
 
-    fn scripted_resolved_gateway(
+    fn scripted_resolved_gateway<G>(
         account: crate::test_support::GatewayAccountFixture,
-        gateway: Arc<ScriptedGateway>,
-    ) -> ResolvedGateway {
+        gateway: Arc<G>,
+    ) -> ResolvedGateway
+    where
+        G: PaymentGateway + 'static,
+    {
         ResolvedGateway::new(
             BillingScopeId::new(account.billing_scope_id),
             GatewayAccountId::new(account.gateway_account_id),
@@ -1916,6 +2153,15 @@ mod tests {
         discounted: bool,
         fail_event: bool,
     ) -> Result<ApplicationFixture, Box<dyn Error>> {
+        enrollment_fixture(project, discounted, fail_event, true).await
+    }
+
+    async fn enrollment_fixture(
+        project: &str,
+        discounted: bool,
+        fail_event: bool,
+        prepare_submission: bool,
+    ) -> Result<ApplicationFixture, Box<dyn Error>> {
         let database = TestDatabase::start(project).await?;
         sqlx::query(
             r#"
@@ -2029,26 +2275,32 @@ mod tests {
             Arc::new(NeverCalledGateway),
         );
         let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
-        let mut transaction = database.pool.begin().await?;
-        assert!(matches!(
-            reserve_subscription_enrollment_in_transaction(
-                &mut transaction,
-                &TestOfferStore,
-                &reservation,
+        let admission = if prepare_submission {
+            let mut transaction = database.pool.begin().await?;
+            assert!(matches!(
+                reserve_subscription_enrollment_in_transaction(
+                    &mut transaction,
+                    &TestOfferStore,
+                    &reservation,
+                )
+                .await?,
+                SubscriptionEnrollmentReservationOutcome::Reserved(_)
+            ));
+            transaction.commit().await?;
+            Some(
+                match admit_subscription_enrollment_submission(
+                    &database.pool,
+                    &TestOfferStore,
+                    &reservation,
+                )
+                .await?
+                {
+                    SubscriptionEnrollmentAdmissionOutcome::Admitted(admission) => admission,
+                    other => return Err(format!("unexpected final admission: {other:?}").into()),
+                },
             )
-            .await?,
-            SubscriptionEnrollmentReservationOutcome::Reserved(_)
-        ));
-        transaction.commit().await?;
-        let admission = match admit_subscription_enrollment_submission(
-            &database.pool,
-            &TestOfferStore,
-            &reservation,
-        )
-        .await?
-        {
-            SubscriptionEnrollmentAdmissionOutcome::Admitted(admission) => admission,
-            other => return Err(format!("unexpected final admission: {other:?}").into()),
+        } else {
+            None
         };
         let coordinator = TestCoordinator {
             pool: database.pool.clone(),
@@ -2061,7 +2313,7 @@ mod tests {
             coordinator,
             command,
             gateway_account: account,
-            admission: Some(admission),
+            admission,
         })
     }
 
@@ -2088,6 +2340,328 @@ mod tests {
                 ),
             ),
         )
+    }
+
+    #[tokio::test]
+    async fn foreground_service_applies_once_and_replays_before_host_admission()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = enrollment_fixture("service_enroll", false, false, false).await?;
+        let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+            "txn_service_enroll",
+        ))));
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+        let resolver = Arc::new(StaticResolver {
+            gateway: resolved,
+            calls: AtomicUsize::new(0),
+        });
+        let admission = Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            resolver.clone(),
+            admission.clone(),
+            Arc::new(fixture.coordinator.clone()),
+        );
+
+        let result = service.enroll(fixture.command.clone()).await?;
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
+        assert!(result.subscription().is_some());
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+
+        let replay = service.enroll(fixture.command.clone()).await?;
+        assert_eq!(replay, result);
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn foreground_service_pre_reservation_cooldown_creates_no_attempt_or_provider_io()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = enrollment_fixture("service_cooldown", false, false, false).await?;
+        sqlx::query(
+            r#"
+            UPDATE billing_gateway_accounts
+            SET mutation_rate_limited_until = clock_timestamp() + interval '1 minute'
+            WHERE id = $1
+            "#,
+        )
+        .bind(fixture.gateway_account.gateway_account_id)
+        .execute(&fixture.database.pool)
+        .await?;
+        let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+            "txn_must_not_submit",
+        ))));
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+        let resolver = Arc::new(StaticResolver {
+            gateway: resolved,
+            calls: AtomicUsize::new(0),
+        });
+        let admission = Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            resolver.clone(),
+            admission.clone(),
+            Arc::new(fixture.coordinator.clone()),
+        );
+
+        let error = service
+            .enroll(fixture.command.clone())
+            .await
+            .expect_err("active local cooldown must reject before reservation");
+        assert!(matches!(
+            error,
+            SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+                scope: GatewayMutationCooldownScope::Account
+            }
+        ));
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_payment_attempts")
+            .fetch_one(&fixture.database.pool)
+            .await?;
+        assert_eq!(attempts, 0);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn foreground_service_resumes_the_durable_attempt_not_the_retry_candidate_id()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = enrollment_fixture("service_resume", false, false, false).await?;
+        let original_attempt_id = fixture.command.attempt_id();
+        let mut transaction = fixture.database.pool.begin().await?;
+        assert!(matches!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &fixture.reservation,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Reserved(_)
+        ));
+        transaction.commit().await?;
+
+        let retry = EnrollSubscription::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            fixture.command.idempotency_key().clone(),
+            fixture.command.payment_token().clone(),
+            fixture.command.billing_contact().clone(),
+            fixture.command.expected_charge().clone(),
+        );
+        let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+            "txn_service_resume",
+        ))));
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+        let resolver = Arc::new(StaticResolver {
+            gateway: resolved,
+            calls: AtomicUsize::new(0),
+        });
+        let admission = Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            resolver,
+            admission.clone(),
+            Arc::new(fixture.coordinator.clone()),
+        );
+
+        let result = service.enroll(retry).await?;
+        assert_eq!(
+            result.attempt().identity().attempt_id(),
+            original_attempt_id
+        );
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_atomically()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = enrollment_fixture("svc_ready_429", false, false, false).await?;
+        let resolved = scripted_resolved_gateway(
+            fixture.gateway_account,
+            Arc::new(RateLimitedReadinessGateway),
+        );
+        let resolver = Arc::new(StaticResolver {
+            gateway: resolved,
+            calls: AtomicUsize::new(0),
+        });
+        let admission = Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            resolver.clone(),
+            admission.clone(),
+            Arc::new(fixture.coordinator.clone()),
+        );
+
+        let error = service
+            .enroll(fixture.command.clone())
+            .await
+            .expect_err("provider readiness throttle must return a typed cooldown");
+        assert!(matches!(
+            error,
+            SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+                scope: GatewayMutationCooldownScope::Provider
+            }
+        ));
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+        let state: (String, Option<String>, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT attempt.status, attempt.resolution_code,
+                COALESCE(account.mutation_rate_limited_until > clock_timestamp(), false),
+                provider.rate_limited_until > clock_timestamp()
+            FROM billing_payment_attempts AS attempt
+            INNER JOIN billing_gateway_accounts AS account
+                ON account.id = attempt.gateway_account_id
+            INNER JOIN billing_gateway_provider_rate_limits AS provider
+                ON provider.provider_key = account.provider_key
+            WHERE attempt.id = $1
+            "#,
+        )
+        .bind(fixture.command.attempt_id().as_uuid())
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(state.0, "failed");
+        assert_eq!(
+            state.1.as_deref(),
+            Some("gateway_provider_rate_limited_before_submission")
+        );
+        assert!(!state.2);
+        assert!(state.3);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn foreground_fresh_cooldown_after_readiness_prevents_the_admitted_sale()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = enrollment_fixture("svc_fresh_stop", false, false, false).await?;
+        let gateway = Arc::new(CooldownDuringReadinessGateway {
+            pool: fixture.database.pool.clone(),
+            account_id: fixture.gateway_account.gateway_account_id,
+        });
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, gateway);
+        let resolver = Arc::new(StaticResolver {
+            gateway: resolved,
+            calls: AtomicUsize::new(0),
+        });
+        let admission = Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            resolver,
+            admission,
+            Arc::new(fixture.coordinator.clone()),
+        );
+
+        let error = service
+            .enroll(fixture.command.clone())
+            .await
+            .expect_err("fresh cooldown must close the one-shot sale boundary");
+        assert!(matches!(
+            error,
+            SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+                scope: GatewayMutationCooldownScope::Account
+            }
+        ));
+        let attempt: (String, Option<String>, bool) = sqlx::query_as(
+            r#"
+            SELECT status, resolution_code, submitted_at IS NOT NULL
+            FROM billing_payment_attempts
+            WHERE id = $1
+            "#,
+        )
+        .bind(fixture.command.attempt_id().as_uuid())
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(attempt.0, "failed");
+        assert_eq!(
+            attempt.1.as_deref(),
+            Some("gateway_account_mutation_cooldown_before_submission")
+        );
+        assert!(attempt.2);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn foreground_stale_prepared_replay_expires_before_admission_or_live_terms()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = enrollment_fixture("svc_stale_replay", false, false, false).await?;
+        let mut transaction = fixture.database.pool.begin().await?;
+        assert!(matches!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &fixture.reservation,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Reserved(_)
+        ));
+        transaction.commit().await?;
+        sqlx::query(
+            r#"
+            UPDATE billing_payment_attempts
+            SET created_at = clock_timestamp() - interval '30 minutes'
+            WHERE id = $1
+            "#,
+        )
+        .bind(fixture.command.attempt_id().as_uuid())
+        .execute(&fixture.database.pool)
+        .await?;
+        sqlx::query("DELETE FROM host_subscription_offers")
+            .execute(&fixture.database.pool)
+            .await?;
+
+        let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+            "txn_stale_must_not_submit",
+        ))));
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+        let resolver = Arc::new(StaticResolver {
+            gateway: resolved,
+            calls: AtomicUsize::new(0),
+        });
+        let admission = Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            resolver.clone(),
+            admission.clone(),
+            Arc::new(fixture.coordinator.clone()),
+        );
+
+        let result = service.enroll(fixture.command.clone()).await?;
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Failed);
+        assert_eq!(
+            result.attempt().state().resolution_code(),
+            Some(PaymentResolutionCode::SubscriptionInitialPreparedAttemptExpired)
+        );
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+        fixture.cleanup().await
     }
 
     #[tokio::test]
@@ -2171,8 +2745,11 @@ mod tests {
         )
         .await?;
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
-        assert!(result.subscription().is_some());
+        assert_eq!(
+            result.payment().attempt().status(),
+            PaymentAttemptStatus::Approved
+        );
+        assert!(result.payment().subscription().is_some());
         fixture.cleanup().await
     }
 
@@ -2195,12 +2772,58 @@ mod tests {
         )
         .await?;
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Failed);
         assert_eq!(
-            result.attempt().state().resolution_code(),
+            result.payment().attempt().status(),
+            PaymentAttemptStatus::Failed
+        );
+        assert_eq!(
+            result.payment().attempt().state().resolution_code(),
             Some(PaymentResolutionCode::GatewayUnavailableBeforeSubmission)
         );
-        assert!(result.subscription().is_none());
+        assert!(result.payment().subscription().is_none());
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn provider_not_submitted_throttle_atomically_extends_the_account_cooldown()
+    -> Result<(), Box<dyn Error>> {
+        let mut fixture = application_fixture("account_throttle", false, false).await?;
+        let gateway = Arc::new(ScriptedGateway::new(Err(
+            GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::RateLimited(
+                GatewayDiagnostic::new("merchant throttle"),
+            )),
+        )));
+        let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+        let result = submit_admitted_subscription_enrollment(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            *fixture.admission.take().expect("committed admission"),
+            &fixture.command,
+            &resolved,
+        )
+        .await?;
+        assert!(matches!(
+            result,
+            SubscriptionEnrollmentProviderResult::NotSubmitted {
+                error: GatewayNotSubmittedError::RateLimited(_),
+                ..
+            }
+        ));
+        let deadlines: (bool, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                mutation_rate_limited_until > clock_timestamp(),
+                provider.rate_limited_until > clock_timestamp()
+            FROM billing_gateway_accounts AS account
+            INNER JOIN billing_gateway_provider_rate_limits AS provider
+                ON provider.provider_key = account.provider_key
+            WHERE account.id = $1
+            "#,
+        )
+        .bind(fixture.gateway_account.gateway_account_id)
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(deadlines, (true, false));
         fixture.cleanup().await
     }
 

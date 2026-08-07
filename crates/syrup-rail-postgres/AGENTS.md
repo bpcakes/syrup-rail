@@ -19,6 +19,9 @@ and transaction orchestration.
 - `src/enrollment_application.rs` — committed one-shot initial-sale authority,
   atomic approved application, recurring-discount insertion, permanent charge
   observation, terminal-race handling, and approved-failure compensation.
+- `src/subscription_billing_service.rs` — complete foreground initial-enrollment
+  orchestration from replay-before-admission through fresh cooldown and the
+  one-shot provider sale.
 - `src/transactions.rs` — host-prepared billing transaction and typed event
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
@@ -47,6 +50,10 @@ and transaction orchestration.
   and subscription creation, discount application, or approved-failure parking
   in `src/enrollment_application.rs`; keep the complete application write set
   on the host-prepared transaction.
+- Change foreground replay, host admission, gateway resolution, cooldown and
+  readiness ordering, or reservation-to-sale composition in
+  `src/subscription_billing_service.rs`; do not introduce another enrollment
+  path in a host adapter.
 - Change the host transaction/event boundary in `src/transactions.rs`; do not
   add arbitrary SQL callbacks or a production no-op event implementation.
 - Change reusable subscription access projection or protected-write admission
@@ -83,6 +90,13 @@ and transaction orchestration.
 - Final admission must commit before it yields the non-cloneable one-shot sale
   capability. No transaction or lock spans provider I/O, and an already
   admitted attempt never yields another sale capability.
+- Matching submitted/terminal/stale replay and same-key conflict resolve before
+  host admission. A matching prepared retry rebinds to the durable attempt ID;
+  a newly generated candidate ID is never exposed to the provider.
+- Initial enrollment checks the durable account/provider cooldown before
+  reservation, after reservation before readiness, and after committed final
+  admission. A post-reservation stop resolves the exact attempt, and provider
+  throttle evidence extends its matching cooldown in that same transaction.
 - Initial approval begins with the host recipient lock, then the shared
   payment-method domain and exact plan aggregate. Method, subscription,
   discount/claim, attempt, processor charge, and `SubscriptionStarted` event

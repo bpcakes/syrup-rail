@@ -12,7 +12,7 @@ command/outcome types for application-independent subscription billing.
   billing values and closed lifecycle facts, including card-safe grant
   commands, lossless grant audit records, canonical discount commands,
   immutable discount and enrollment expectations, secret-free initial
-  reservation and submission outcomes, durable enrollment payment results,
+  reservation, preflight, and submission outcomes, durable enrollment payment results,
   durable attempt fingerprints and state snapshots, exact-plan cancellation outcomes, typed entitlement guards,
   subscriber billing-data scrub commands/results, and the closed host admission
   boundary for end-user billing mutations.

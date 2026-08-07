@@ -271,22 +271,34 @@ impl SubscriptionEnrollmentReservation {
         command: &EnrollSubscription,
         gateway: &ResolvedGateway,
     ) -> Result<Self, SubscriptionEnrollmentReservationBuildError> {
+        Self::from_command_for_attempt(command, gateway, command.attempt_id())
+    }
+
+    /// Builds the same request for an already-durable matching attempt.
+    ///
+    /// The candidate ID on a retried command is not part of idempotency. Once
+    /// reservation discovers a matching prepared attempt, orchestration binds
+    /// all later admission and submission work to that durable attempt ID.
+    pub fn from_command_for_attempt(
+        command: &EnrollSubscription,
+        gateway: &ResolvedGateway,
+        attempt_id: PaymentAttemptId,
+    ) -> Result<Self, SubscriptionEnrollmentReservationBuildError> {
         if gateway.billing_scope_id() != command.billing_scope_id()
             || gateway.gateway_configuration_id() != command.gateway_configuration_id()
         {
             return Err(SubscriptionEnrollmentReservationBuildError::GatewayIdentityMismatch);
         }
         let identity = PaymentAttemptIdentity::new(
-            command.attempt_id(),
+            attempt_id,
             command.billing_scope_id(),
             command.subscriber_id(),
             gateway.gateway_account_id(),
             gateway.gateway_configuration_id(),
         );
-        let gateway_order_id = gateway.mutation_reference_factory().for_attempt(
-            PaymentAttemptKind::SubscriptionInitial,
-            command.attempt_id(),
-        );
+        let gateway_order_id = gateway
+            .mutation_reference_factory()
+            .for_attempt(PaymentAttemptKind::SubscriptionInitial, attempt_id);
         Ok(Self {
             identity,
             provider_key: gateway.provider_key().clone(),
@@ -358,6 +370,19 @@ pub enum SubscriptionEnrollmentReservationOutcome {
     Replay(PaymentAttempt),
     IdempotencyConflict,
     Rejected(SubscriptionEnrollmentReservationRejection),
+}
+
+/// Replay decision made before consuming host mutation admission.
+///
+/// A matching still-prepared attempt continues through normal admission. A
+/// submitted or terminal attempt is returned immediately, and a stale
+/// prepared attempt is terminalized and returned without consulting live
+/// enrollment terms or resolving a gateway.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentPreflightOutcome {
+    Continue,
+    Replay(Box<PaymentAttempt>),
+    IdempotencyConflict,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
