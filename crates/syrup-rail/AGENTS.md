@@ -8,11 +8,12 @@ command/outcome types for application-independent subscription billing.
 ## Key entrypoints
 
 - `src/lib.rs` is the public facade.
-- `src/{identity,money,subscription,discount,event,resolution}.rs` own validated
+- `src/{identity,money,subscription,discount,event,resolution,admission}.rs` own validated
   billing values and closed lifecycle facts, including card-safe grant
   commands, lossless grant audit records, canonical discount commands,
   immutable discount snapshots, exact-plan cancellation outcomes, typed
-  entitlement guards, and subscriber billing-data scrub commands/results.
+  entitlement guards, subscriber billing-data scrub commands/results, and the
+  closed host admission boundary for end-user billing mutations.
 - `src/{gateway,gateway_value}.rs` own the five-method provider port, typed
   evidence, sensitive values, and diagnostic boundary.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure

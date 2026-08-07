@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod admission;
 mod card_data;
 mod discount;
 mod event;
@@ -16,6 +17,7 @@ mod policy;
 mod resolution;
 mod subscription;
 
+pub use admission::*;
 pub use card_data::{raw_card_data_ranges, string_contains_raw_card_data};
 pub use discount::*;
 pub use event::*;
