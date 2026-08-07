@@ -1,7 +1,8 @@
-use sqlx::{PgPool, Row, postgres::PgRow};
+use chrono::{DateTime, Utc};
+use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     ActorId, AppliedSubscriptionDiscount, BillingPeriod, ChargeAmount, CurrencyCode,
-    DiscountClaimId, Entitlement, EntitlementQuery, LimitedDiscountMonths,
+    DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, LimitedDiscountMonths,
     MissingSubscriptionAction, PastDueAction, PaymentMethodId, PercentOffBasisPoints,
     PositiveDiscountCents, SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
@@ -13,6 +14,19 @@ use uuid::Uuid;
 
 const INVALID_ENTITLEMENT_STATE: &str =
     "canonical subscription state cannot be represented as one entitlement";
+const ENTITLEMENT_GUARD_LOCK_TIMEOUT: &str = "250ms";
+
+type GuardGrantTimeState = (DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GuardAccess {
+    Missing,
+    Paid,
+    PaidThroughCancellation,
+    PastDue,
+    Granted,
+    Invalid,
+}
 
 #[derive(Debug, Error)]
 pub enum EntitlementQueryError {
@@ -20,6 +34,141 @@ pub enum EntitlementQueryError {
     Sql(#[from] sqlx::Error),
     #[error("{0}")]
     InvalidState(&'static str),
+}
+
+#[derive(Debug, Error)]
+pub enum EntitlementGuardError {
+    #[error("subscription entitlement guard failed")]
+    Sql(#[from] sqlx::Error),
+    #[error("subscription entitlement is required")]
+    Required,
+    #[error("subscription entitlement is past due")]
+    PastDue,
+    #[error("{0}")]
+    InvalidState(&'static str),
+}
+
+/// Locks and revalidates one exact entitlement inside the caller's transaction.
+///
+/// The accepted paid or grant rows and their aggregate advisory domain remain
+/// locked until the caller commits or rolls back its protected mutation.
+pub async fn require_entitlement_for_update(
+    transaction: &mut Transaction<'_, Postgres>,
+    guard: &EntitlementGuard,
+) -> Result<(), EntitlementGuardError> {
+    let previous_lock_timeout: String =
+        sqlx::query_scalar("SELECT current_setting('lock_timeout', true)")
+            .fetch_one(&mut **transaction)
+            .await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(ENTITLEMENT_GUARD_LOCK_TIMEOUT)
+        .execute(&mut **transaction)
+        .await?;
+
+    let access = lock_and_classify_entitlement(transaction, guard).await?;
+
+    // Restore the host's transaction-local setting before every completed
+    // semantic result. A SQL error aborts the transaction normally instead.
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(previous_lock_timeout)
+        .execute(&mut **transaction)
+        .await?;
+
+    match access {
+        GuardAccess::Paid | GuardAccess::PaidThroughCancellation | GuardAccess::Granted => Ok(()),
+        GuardAccess::PastDue => Err(EntitlementGuardError::PastDue),
+        GuardAccess::Missing => Err(EntitlementGuardError::Required),
+        GuardAccess::Invalid => Err(EntitlementGuardError::InvalidState(
+            INVALID_ENTITLEMENT_STATE,
+        )),
+    }
+}
+
+async fn lock_and_classify_entitlement(
+    transaction: &mut Transaction<'_, Postgres>,
+    guard: &EntitlementGuard,
+) -> Result<GuardAccess, sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(guard.subscriber_id().as_uuid())
+        .bind(guard.plan_key().as_str())
+        .execute(&mut **transaction)
+        .await?;
+
+    let subscriptions = sqlx::query_as::<_, (String, DateTime<Utc>)>(
+        r#"
+        SELECT status, current_period_end_at
+        FROM billing_subscriptions
+        WHERE billing_scope_id = $1
+            AND subscriber_id = $2
+            AND plan_key = $3
+        ORDER BY id
+        FOR SHARE
+        "#,
+    )
+    .bind(guard.billing_scope_id().as_uuid())
+    .bind(guard.subscriber_id().as_uuid())
+    .bind(guard.plan_key().as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let grants = sqlx::query_as::<_, GuardGrantTimeState>(
+        r#"
+        SELECT starts_at, ends_at, revoked_at
+        FROM billing_subscription_grants
+        WHERE billing_scope_id = $1
+            AND subscriber_id = $2
+            AND plan_key = $3
+        ORDER BY id
+        FOR SHARE
+        "#,
+    )
+    .bind(guard.billing_scope_id().as_uuid())
+    .bind(guard.subscriber_id().as_uuid())
+    .bind(guard.plan_key().as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    let access_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await?;
+
+    Ok(classify_guard_access(&subscriptions, &grants, access_at))
+}
+
+fn classify_guard_access(
+    subscriptions: &[(String, DateTime<Utc>)],
+    grants: &[GuardGrantTimeState],
+    access_at: DateTime<Utc>,
+) -> GuardAccess {
+    let current_paid = subscriptions
+        .iter()
+        .filter(|(status, current_period_end_at)| {
+            matches!(status.as_str(), "active" | "past_due")
+                || (status == "canceled" && *current_period_end_at > access_at)
+        })
+        .collect::<Vec<_>>();
+    let active_grant_count = grants
+        .iter()
+        .filter(|(starts_at, ends_at, revoked_at)| {
+            *starts_at <= access_at && *ends_at > access_at && revoked_at.is_none()
+        })
+        .count();
+    if current_paid.len() > 1
+        || active_grant_count > 1
+        || (!current_paid.is_empty() && active_grant_count > 0)
+    {
+        return GuardAccess::Invalid;
+    }
+    if active_grant_count == 1 {
+        return GuardAccess::Granted;
+    }
+    let Some((status, _)) = current_paid.first() else {
+        return GuardAccess::Missing;
+    };
+    match status.as_str() {
+        "active" => GuardAccess::Paid,
+        "canceled" => GuardAccess::PaidThroughCancellation,
+        "past_due" => GuardAccess::PastDue,
+        _ => GuardAccess::Invalid,
+    }
 }
 
 /// Loads one exact scope/subscriber/plan entitlement from a single database snapshot.
@@ -410,11 +559,216 @@ where
 mod tests {
     use std::{error::Error, io};
 
-    use syrup_rail::{BillingScopeId, Entitlement, EntitlementQuery, PlanKey, SubscriberId};
+    use chrono::{TimeZone, Utc};
+    use sqlx::PgPool;
+    use syrup_rail::{
+        BillingScopeId, Entitlement, EntitlementGuard, EntitlementQuery, PlanKey, SubscriberId,
+    };
     use uuid::Uuid;
 
-    use super::{EntitlementQueryError, entitlement};
-    use crate::test_support::TestDatabase;
+    use super::{
+        EntitlementGuardError, EntitlementQueryError, GuardAccess, classify_guard_access,
+        entitlement, require_entitlement_for_update,
+    };
+    use crate::test_support::{TestDatabase, create_gateway_account};
+
+    #[test]
+    fn protected_write_policy_covers_paid_grant_boundaries_and_invalid_overlap() {
+        let at = Utc.with_ymd_and_hms(2026, 8, 7, 18, 0, 0).unwrap();
+        let before = at - chrono::Duration::hours(1);
+        let after = at + chrono::Duration::hours(1);
+
+        assert_eq!(classify_guard_access(&[], &[], at), GuardAccess::Missing);
+        assert_eq!(
+            classify_guard_access(&[("active".to_owned(), after)], &[], at),
+            GuardAccess::Paid
+        );
+        assert_eq!(
+            classify_guard_access(&[("past_due".to_owned(), after)], &[], at),
+            GuardAccess::PastDue
+        );
+        assert_eq!(
+            classify_guard_access(&[("canceled".to_owned(), after)], &[], at),
+            GuardAccess::PaidThroughCancellation
+        );
+        assert_eq!(
+            classify_guard_access(&[("canceled".to_owned(), at)], &[], at),
+            GuardAccess::Missing
+        );
+        assert_eq!(
+            classify_guard_access(&[], &[(before, after, None)], at),
+            GuardAccess::Granted
+        );
+        assert_eq!(
+            classify_guard_access(&[], &[(before, at, None)], at),
+            GuardAccess::Missing
+        );
+        assert_eq!(
+            classify_guard_access(&[], &[(before, after, Some(at))], at),
+            GuardAccess::Missing
+        );
+        assert_eq!(
+            classify_guard_access(
+                &[("active".to_owned(), after)],
+                &[(before, after, None)],
+                at,
+            ),
+            GuardAccess::Invalid
+        );
+        assert_eq!(
+            classify_guard_access(
+                &[
+                    ("canceled".to_owned(), after),
+                    ("canceled".to_owned(), after),
+                ],
+                &[],
+                at,
+            ),
+            GuardAccess::Invalid
+        );
+        assert_eq!(
+            classify_guard_access(&[], &[(before, after, None), (before, after, None)], at,),
+            GuardAccess::Invalid
+        );
+    }
+
+    #[tokio::test]
+    async fn protected_write_guard_uses_database_state_and_restores_the_host_timeout()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("sr_guard_state").await?;
+        let result = async {
+            let scope = Uuid::now_v7();
+            let subscriber = Uuid::now_v7();
+            let entitlement_guard = guard(scope, subscriber)?;
+
+            let mut transaction = database.pool.begin().await?;
+            sqlx::query("SELECT set_config('lock_timeout', '3s', true)")
+                .execute(&mut *transaction)
+                .await?;
+            if !matches!(
+                require_entitlement_for_update(&mut transaction, &entitlement_guard).await,
+                Err(EntitlementGuardError::Required)
+            ) {
+                return Err(io::Error::other("missing entitlement was not rejected").into());
+            }
+            let restored: String = sqlx::query_scalar("SELECT current_setting('lock_timeout')")
+                .fetch_one(&mut *transaction)
+                .await?;
+            if restored != "3s" {
+                return Err(io::Error::other("guard did not restore the host lock timeout").into());
+            }
+            transaction.rollback().await?;
+
+            let first_grant = insert_grant(&database.pool, scope, subscriber).await?;
+            require_guard(&database.pool, &entitlement_guard).await?;
+            let second_grant = insert_grant(&database.pool, scope, subscriber).await?;
+            if !matches!(
+                guard_result(&database.pool, &entitlement_guard).await?,
+                Err(EntitlementGuardError::InvalidState(_))
+            ) {
+                return Err(io::Error::other("duplicate active grants did not fail closed").into());
+            }
+            sqlx::query("DELETE FROM billing_subscription_grants WHERE id IN ($1, $2)")
+                .bind(first_grant)
+                .bind(second_grant)
+                .execute(&database.pool)
+                .await?;
+
+            let (paid_scope, paid_subscriber, subscription) =
+                insert_paid_subscription(&database.pool, "active").await?;
+            let paid_guard = guard(paid_scope, paid_subscriber)?;
+            require_guard(&database.pool, &paid_guard).await?;
+            sqlx::query("UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1")
+                .bind(subscription)
+                .execute(&database.pool)
+                .await?;
+            if !matches!(
+                guard_result(&database.pool, &paid_guard).await?,
+                Err(EntitlementGuardError::PastDue)
+            ) {
+                return Err(io::Error::other("past-due entitlement lost its distinct result").into());
+            }
+            sqlx::query(
+                "UPDATE billing_subscriptions SET status = 'canceled', canceled_at = clock_timestamp() WHERE id = $1",
+            )
+            .bind(subscription)
+            .execute(&database.pool)
+            .await?;
+            require_guard(&database.pool, &paid_guard).await?;
+            sqlx::query(
+                r#"
+                UPDATE billing_subscriptions
+                SET current_period_end_at = boundary.at,
+                    next_renewal_at = boundary.at,
+                    updated_at = boundary.at
+                FROM (SELECT clock_timestamp() AS at) boundary
+                WHERE id = $1
+                "#,
+            )
+            .bind(subscription)
+            .execute(&database.pool)
+            .await?;
+            if !matches!(
+                guard_result(&database.pool, &paid_guard).await?,
+                Err(EntitlementGuardError::Required)
+            ) {
+                return Err(io::Error::other("paid-through boundary did not end access").into());
+            }
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup
+    }
+
+    #[tokio::test]
+    async fn protected_write_guard_holds_the_aggregate_and_entitlement_rows_until_caller_end()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("sr_guard_locks").await?;
+        let result = async {
+            let scope = Uuid::now_v7();
+            let subscriber = Uuid::now_v7();
+            let grant_id = insert_grant(&database.pool, scope, subscriber).await?;
+            let guard = guard(scope, subscriber)?;
+            let mut holder = database.pool.begin().await?;
+            require_entitlement_for_update(&mut holder, &guard).await?;
+
+            let mut aggregate_contender = database.pool.begin().await?;
+            sqlx::query("SET LOCAL lock_timeout = '100ms'")
+                .execute(&mut *aggregate_contender)
+                .await?;
+            let aggregate_error = sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+            )
+            .bind(subscriber)
+            .bind("base_subscription")
+            .execute(&mut *aggregate_contender)
+            .await
+            .expect_err("guard must hold the shared subscription aggregate domain");
+            assert_lock_timeout(&aggregate_error)?;
+            aggregate_contender.rollback().await?;
+
+            let mut row_contender = database.pool.begin().await?;
+            sqlx::query("SET LOCAL lock_timeout = '100ms'")
+                .execute(&mut *row_contender)
+                .await?;
+            let row_error =
+                sqlx::query("SELECT id FROM billing_subscription_grants WHERE id = $1 FOR UPDATE")
+                    .bind(grant_id)
+                    .execute(&mut *row_contender)
+                    .await
+                    .expect_err("guard must hold its accepted grant row through the host mutation");
+            assert_lock_timeout(&row_error)?;
+            row_contender.rollback().await?;
+            holder.rollback().await?;
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup
+    }
 
     #[tokio::test]
     async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners()
@@ -648,5 +1002,119 @@ mod tests {
         let cleanup = database.cleanup().await;
         result?;
         cleanup
+    }
+
+    fn guard(scope: Uuid, subscriber: Uuid) -> Result<EntitlementGuard, Box<dyn Error>> {
+        Ok(EntitlementGuard::new(
+            BillingScopeId::new(scope),
+            SubscriberId::new(subscriber),
+            PlanKey::new("base_subscription")?,
+        ))
+    }
+
+    async fn guard_result(
+        pool: &PgPool,
+        guard: &EntitlementGuard,
+    ) -> Result<Result<(), EntitlementGuardError>, sqlx::Error> {
+        let mut transaction = pool.begin().await?;
+        let result = require_entitlement_for_update(&mut transaction, guard).await;
+        transaction.rollback().await?;
+        Ok(result)
+    }
+
+    async fn require_guard(pool: &PgPool, guard: &EntitlementGuard) -> Result<(), Box<dyn Error>> {
+        guard_result(pool, guard).await??;
+        Ok(())
+    }
+
+    async fn insert_grant(
+        pool: &PgPool,
+        scope: Uuid,
+        subscriber: Uuid,
+    ) -> Result<Uuid, sqlx::Error> {
+        let grant_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_subscription_grants (
+                id, billing_scope_id, subscriber_id, plan_key, grant_kind,
+                reason, starts_at, ends_at, granted_by_actor_id
+            ) VALUES (
+                $1, $2, $3, 'base_subscription', 'testing', 'guard fixture',
+                clock_timestamp() - interval '1 minute',
+                clock_timestamp() + interval '1 day', $4
+            )
+            "#,
+        )
+        .bind(grant_id)
+        .bind(scope)
+        .bind(subscriber)
+        .bind(Uuid::now_v7())
+        .execute(pool)
+        .await?;
+        Ok(grant_id)
+    }
+
+    async fn insert_paid_subscription(
+        pool: &PgPool,
+        status: &str,
+    ) -> Result<(Uuid, Uuid, Uuid), sqlx::Error> {
+        let account = create_gateway_account(pool, "guard_gateway").await?;
+        let subscriber = Uuid::now_v7();
+        let method = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_payment_methods (
+                id, billing_scope_id, subscriber_id, gateway_account_id,
+                gateway_payment_method_reference, status
+            ) VALUES ($1, $2, $3, $4, $5, 'active')
+            "#,
+        )
+        .bind(method)
+        .bind(account.billing_scope_id)
+        .bind(subscriber)
+        .bind(account.gateway_account_id)
+        .bind(format!("vault_{}", method.simple()))
+        .execute(pool)
+        .await?;
+        let subscription = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_subscriptions (
+                id, billing_scope_id, subscriber_id, plan_key, status,
+                gateway_account_id, payment_method_id, amount_cents,
+                currency, current_period_start_at, current_period_end_at,
+                next_renewal_at, initial_transaction_id, canceled_at
+            ) SELECT
+                $1, $2, $3, 'base_subscription', $4, $5, $6, 100, 'USD',
+                observed_at - interval '1 day', observed_at + interval '1 day',
+                observed_at + interval '1 day', $7,
+                CASE WHEN $4 = 'canceled' THEN observed_at ELSE NULL END
+            FROM (SELECT clock_timestamp() AS observed_at) clock
+            "#,
+        )
+        .bind(subscription)
+        .bind(account.billing_scope_id)
+        .bind(subscriber)
+        .bind(status)
+        .bind(account.gateway_account_id)
+        .bind(method)
+        .bind(format!("txn_{}", subscription.simple()))
+        .execute(pool)
+        .await?;
+        Ok((account.billing_scope_id, subscriber, subscription))
+    }
+
+    fn assert_lock_timeout(error: &sqlx::Error) -> Result<(), io::Error> {
+        let code = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.into_owned());
+        if code.as_deref() == Some("55P03") {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "expected PostgreSQL lock timeout, got {error}"
+            )))
+        }
     }
 }

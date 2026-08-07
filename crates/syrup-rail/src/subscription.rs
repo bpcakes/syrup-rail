@@ -776,6 +776,39 @@ pub struct EntitlementQuery {
     plan_key: PlanKey,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntitlementGuard {
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: PlanKey,
+}
+
+impl EntitlementGuard {
+    pub const fn new(
+        billing_scope_id: BillingScopeId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+    ) -> Self {
+        Self {
+            billing_scope_id,
+            subscriber_id,
+            plan_key,
+        }
+    }
+
+    pub const fn billing_scope_id(&self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    pub const fn subscriber_id(&self) -> SubscriberId {
+        self.subscriber_id
+    }
+
+    pub const fn plan_key(&self) -> &PlanKey {
+        &self.plan_key
+    }
+}
+
 impl EntitlementQuery {
     pub const fn new(
         billing_scope_id: BillingScopeId,

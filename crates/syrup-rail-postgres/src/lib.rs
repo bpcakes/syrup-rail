@@ -19,7 +19,9 @@ mod test_support;
 pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
 pub use deletion::{billing_deletion_blockers, scrub_subscriber_billing_data};
 pub use discounts::*;
-pub use entitlement::{EntitlementQueryError, entitlement};
+pub use entitlement::{
+    EntitlementGuardError, EntitlementQueryError, entitlement, require_entitlement_for_update,
+};
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
 pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,

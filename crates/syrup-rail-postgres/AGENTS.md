@@ -13,7 +13,8 @@ and transaction orchestration.
   behavior fixtures behind `schema-contract-test-support`.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
   and exact configuration activation.
-- `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection.
+- `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
+  caller-transaction protected-write guard.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
   revocation.
 - `src/discounts.rs` — exact-plan discount administration, offer-locked
@@ -31,8 +32,9 @@ and transaction orchestration.
   `src/schema_contract.rs` and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
-- Change reusable subscription access projection in `src/entitlement.rs`;
-  keep host authentication and gateway availability outside the query.
+- Change reusable subscription access projection or protected-write admission
+  in `src/entitlement.rs`; keep host authentication and gateway availability
+  outside the query/guard.
 - Change grant mutation policy in `src/grants.rs`; keep host user existence,
   actor authorization, and actor presentation in the host transaction.
 - Change reusable discount policy in `src/discounts.rs`; keep host acquisition
@@ -61,6 +63,9 @@ and transaction orchestration.
 - Subscriber scrubbing enters every affected gateway-account payment-method
   domain in deterministic order before mutating attempts or methods and never
   changes immutable processor-charge observations.
+- Protected-write admission requires the caller's SQL transaction so accepted
+  paid/grant locks remain held through the host mutation; it restores the
+  caller's prior transaction-local `lock_timeout` after semantic results.
 
 ## Common commands
 
