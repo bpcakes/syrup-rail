@@ -1820,7 +1820,9 @@ fn mutation_error_evidence(detail: &GatewayDiagnostic) -> ProcessorEvidence {
     )
 }
 
-const fn not_submitted_resolution_code(error: &GatewayNotSubmittedError) -> PaymentResolutionCode {
+pub(crate) const fn not_submitted_resolution_code(
+    error: &GatewayNotSubmittedError,
+) -> PaymentResolutionCode {
     match error {
         GatewayNotSubmittedError::RequestRejected(_) => {
             PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission

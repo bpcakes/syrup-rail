@@ -347,9 +347,9 @@ impl SubscriptionBillingService {
         .await?
         {
             SubscriptionEnrollmentProviderResult::Payment(payment) => Ok(payment),
-            SubscriptionEnrollmentProviderResult::NotSubmitted { error, .. } => Err(
-                SubscriptionEnrollmentServiceError::GatewayNotSubmitted(error),
-            ),
+            SubscriptionEnrollmentProviderResult::NotSubmitted { payment, error } => {
+                preserve_concurrent_terminal_payment(payment, error)
+            }
         }
     }
 
@@ -539,6 +539,15 @@ impl SubscriptionBillingService {
                     .await;
             }
         }
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return self
+                .resolve_recovery_cooldown(
+                    &reservation,
+                    scope,
+                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                )
+                .await;
+        }
         match submit_admitted_subscription_recovery(
             &self.pool,
             self.coordinator.as_ref(),
@@ -549,9 +558,9 @@ impl SubscriptionBillingService {
         .await?
         {
             SubscriptionRecoveryProviderResult::Payment(payment) => Ok(payment),
-            SubscriptionRecoveryProviderResult::NotSubmitted { error, .. } => Err(
-                SubscriptionEnrollmentServiceError::GatewayNotSubmitted(error),
-            ),
+            SubscriptionRecoveryProviderResult::NotSubmitted { payment, error } => {
+                preserve_concurrent_terminal_payment(payment, error)
+            }
         }
     }
 
@@ -894,6 +903,21 @@ impl SubscriptionBillingService {
         )
         .await
         .map_err(SubscriptionEnrollmentServiceError::from)
+    }
+}
+
+fn preserve_concurrent_terminal_payment(
+    payment: SubscriptionEnrollmentPaymentResult,
+    error: GatewayNotSubmittedError,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    if payment.attempt().state().resolution_code()
+        == Some(crate::enrollment_application::not_submitted_resolution_code(&error))
+    {
+        Err(SubscriptionEnrollmentServiceError::GatewayNotSubmitted(
+            error,
+        ))
+    } else {
+        Ok(payment)
     }
 }
 
