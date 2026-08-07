@@ -1,0 +1,11 @@
+[package]
+name = "syrup-rail-sqlx-gate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+postgres-test-harness.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

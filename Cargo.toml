@@ -5,6 +5,7 @@ members = [
   "crates/syrup-rail-postgres",
   "crates/syrup-rail-nmi",
   "crates/syrup-rail-nmi-client",
+  "tools/sqlx-gate",
 ]
 
 [workspace.package]

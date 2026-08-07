@@ -5,5 +5,10 @@
 
 #![forbid(unsafe_code)]
 
+mod gateway_accounts;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 pub mod schema_contract;
+#[cfg(test)]
+mod test_support;
+
+pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};

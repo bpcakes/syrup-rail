@@ -20,7 +20,3 @@ uuid.workspace = true
 [dev-dependencies]
 postgres-test-harness.workspace = true
 tokio.workspace = true
-
-[[example]]
-name = "sqlx_prepare_check"
-required-features = ["schema-contract-test-support"]

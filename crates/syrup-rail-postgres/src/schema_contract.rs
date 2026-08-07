@@ -512,89 +512,11 @@ fn require_exact_set(
 mod tests {
     use std::{error::Error, io};
 
-    use postgres_test_harness::{DatabaseLease, HarnessConfig, PostgresHarness};
-    use sqlx::{PgPool, postgres::PgPoolOptions};
+    use sqlx::PgPool;
     use uuid::Uuid;
 
     use super::{V1_INSTALL_SQL, assert_v1_conforms};
-
-    struct TestDatabase {
-        harness: PostgresHarness,
-        lease: DatabaseLease,
-        pool: PgPool,
-    }
-
-    #[derive(Clone, Copy)]
-    struct GatewayAccountFixture {
-        billing_scope_id: Uuid,
-        gateway_account_id: Uuid,
-        gateway_configuration_id: Uuid,
-    }
-
-    impl TestDatabase {
-        async fn start(project: &str) -> Result<Self, Box<dyn Error>> {
-            let harness =
-                PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?)
-                    .await?;
-            let lease = harness.empty_database().await?;
-            let pool = PgPoolOptions::new()
-                .max_connections(4)
-                .connect(lease.database_url())
-                .await?;
-            sqlx::raw_sql(V1_INSTALL_SQL).execute(&pool).await?;
-            Ok(Self {
-                harness,
-                lease,
-                pool,
-            })
-        }
-
-        async fn cleanup(self) -> Result<(), Box<dyn Error>> {
-            self.pool.close().await;
-            self.lease.cleanup().await?;
-            self.harness.shutdown().await?;
-            Ok(())
-        }
-    }
-
-    async fn create_gateway_account(
-        pool: &PgPool,
-        provider_key: &str,
-    ) -> Result<GatewayAccountFixture, sqlx::Error> {
-        sqlx::query(
-            r#"
-            INSERT INTO billing_gateway_provider_rate_limits (provider_key)
-            VALUES ($1)
-            ON CONFLICT (provider_key) DO NOTHING
-            "#,
-        )
-        .bind(provider_key)
-        .execute(pool)
-        .await?;
-
-        let fixture = GatewayAccountFixture {
-            billing_scope_id: Uuid::now_v7(),
-            gateway_account_id: Uuid::now_v7(),
-            gateway_configuration_id: Uuid::now_v7(),
-        };
-        sqlx::query(
-            r#"
-            INSERT INTO billing_gateway_accounts (
-                id,
-                billing_scope_id,
-                provider_key,
-                gateway_configuration_id
-            ) VALUES ($1, $2, $3, $4)
-            "#,
-        )
-        .bind(fixture.gateway_account_id)
-        .bind(fixture.billing_scope_id)
-        .bind(provider_key)
-        .bind(fixture.gateway_configuration_id)
-        .execute(pool)
-        .await?;
-        Ok(fixture)
-    }
+    use crate::test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account};
 
     #[tokio::test]
     async fn schema_v1_contains_no_host_or_cutover_vocabulary() -> Result<(), Box<dyn Error>> {

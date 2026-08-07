@@ -2835,6 +2835,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "syrup-rail-sqlx-gate"
+version = "0.1.0"
+dependencies = [
+ "postgres-test-harness",
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "testcontainers"
 version = "0.27.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

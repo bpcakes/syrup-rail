@@ -15,8 +15,6 @@ fi
 
 cargo run \
   --locked \
-  --example sqlx_prepare_check \
-  --manifest-path crates/syrup-rail-postgres/Cargo.toml \
-  --features schema-contract-test-support \
+  --manifest-path tools/sqlx-gate/Cargo.toml \
   -- \
   "--$mode"

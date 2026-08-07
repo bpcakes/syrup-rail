@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH registered_provider AS (\n            INSERT INTO billing_gateway_provider_rate_limits (\n                provider_key,\n                rate_limited_until\n            )\n            VALUES ($1, '-infinity')\n            ON CONFLICT (provider_key) DO NOTHING\n        )\n        INSERT INTO billing_gateway_accounts (\n            id,\n            billing_scope_id,\n            provider_key,\n            gateway_configuration_id\n        )\n        VALUES ($2, $3, $1, $4)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd10bb136caa4cb041c3793414afd74d539315ad7c08a623189ec15c2816f82b"
+}

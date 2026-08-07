@@ -11,6 +11,8 @@ and transaction orchestration.
   fresh-install DDL once frozen.
 - `src/schema_contract.rs` — read-only catalog conformance plus fresh-install
   behavior fixtures behind `schema-contract-test-support`.
+- `src/gateway_accounts.rs` — transaction-local gateway account registration
+  and exact configuration activation.
 
 ## Edit here for X
 
@@ -18,6 +20,8 @@ and transaction orchestration.
   `schema/v1/install.sql` before any host materializes version 1.
 - Change host conformance or schema behavior tests in
   `src/schema_contract.rs` and update the catalog fingerprint intentionally.
+- Change reusable gateway account/configuration metadata transitions in
+  `src/gateway_accounts.rs`; keep host credentials outside this crate.
 
 ## Invariants
 
@@ -28,6 +32,8 @@ and transaction orchestration.
   package fixtures and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;
   `billing_*` constraint and index names are reserved for canonical objects.
+- Host code composes transaction-local operations on its existing connection;
+  shared operations never persist or receive plaintext provider credentials.
 
 ## Common commands
 

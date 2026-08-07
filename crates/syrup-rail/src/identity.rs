@@ -197,6 +197,100 @@ slug_id!(PlanKey);
 slug_id!(GatewayProviderKey);
 slug_id!(GatewayLifecycleCursorKey);
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayAccountRegistration {
+    billing_scope_id: BillingScopeId,
+    gateway_account_id: GatewayAccountId,
+    provider_key: GatewayProviderKey,
+    gateway_configuration_id: GatewayConfigurationId,
+}
+
+impl GatewayAccountRegistration {
+    pub fn new(
+        billing_scope_id: BillingScopeId,
+        gateway_account_id: GatewayAccountId,
+        provider_key: GatewayProviderKey,
+        gateway_configuration_id: GatewayConfigurationId,
+    ) -> Self {
+        Self {
+            billing_scope_id,
+            gateway_account_id,
+            provider_key,
+            gateway_configuration_id,
+        }
+    }
+
+    pub const fn billing_scope_id(&self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    pub const fn gateway_account_id(&self) -> GatewayAccountId {
+        self.gateway_account_id
+    }
+
+    pub fn provider_key(&self) -> &GatewayProviderKey {
+        &self.provider_key
+    }
+
+    pub const fn gateway_configuration_id(&self) -> GatewayConfigurationId {
+        self.gateway_configuration_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayConfigurationActivation {
+    billing_scope_id: BillingScopeId,
+    gateway_account_id: GatewayAccountId,
+    provider_key: GatewayProviderKey,
+    expected_configuration_id: GatewayConfigurationId,
+    new_configuration_id: GatewayConfigurationId,
+}
+
+impl GatewayConfigurationActivation {
+    pub fn new(
+        billing_scope_id: BillingScopeId,
+        gateway_account_id: GatewayAccountId,
+        provider_key: GatewayProviderKey,
+        expected_configuration_id: GatewayConfigurationId,
+        new_configuration_id: GatewayConfigurationId,
+    ) -> Self {
+        Self {
+            billing_scope_id,
+            gateway_account_id,
+            provider_key,
+            expected_configuration_id,
+            new_configuration_id,
+        }
+    }
+
+    pub const fn billing_scope_id(&self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    pub const fn gateway_account_id(&self) -> GatewayAccountId {
+        self.gateway_account_id
+    }
+
+    pub fn provider_key(&self) -> &GatewayProviderKey {
+        &self.provider_key
+    }
+
+    pub const fn expected_configuration_id(&self) -> GatewayConfigurationId {
+        self.expected_configuration_id
+    }
+
+    pub const fn new_configuration_id(&self) -> GatewayConfigurationId {
+        self.new_configuration_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GatewayConfigurationActivationOutcome {
+    Activated,
+    AccountNotFound,
+    IdentityChanged,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PaymentAttemptKind {
     HostCharge,

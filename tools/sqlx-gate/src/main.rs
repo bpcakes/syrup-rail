@@ -1,8 +1,7 @@
 //! Self-provisioning SQLx metadata gate for `syrup-rail-postgres`.
 //!
-//! Leases PostgreSQL 18 through `postgres-test-harness`, applies the version-1
-//! install artifact, and runs `cargo sqlx prepare` from this crate without
-//! `--workspace` so metadata stays package-local.
+//! This tool intentionally does not depend on the query-owning package: it
+//! must be able to provision PostgreSQL before new query macros have metadata.
 
 #![forbid(unsafe_code)]
 
@@ -14,12 +13,14 @@ use std::{
 
 use postgres_test_harness::{HarnessConfig, PostgresHarness};
 use sqlx::postgres::PgPoolOptions;
-use syrup_rail_postgres::schema_contract::V1_INSTALL_SQL;
+
+const V1_INSTALL_SQL: &str =
+    include_str!("../../../crates/syrup-rail-postgres/schema/v1/install.sql");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = parse_mode()?;
-    let crate_root = crate_root()?;
+    let crate_root = postgres_crate_root()?;
     let install_sql = load_install_sql(&crate_root)?;
 
     let harness =
@@ -60,16 +61,18 @@ enum PrepareMode {
 
 fn parse_mode() -> Result<PrepareMode, String> {
     match env::args().nth(1).as_deref() {
-        Some("--check") => Ok(PrepareMode::Check),
+        Some("--check") | None => Ok(PrepareMode::Check),
         Some("--prepare") => Ok(PrepareMode::Prepare),
         Some(other) => Err(format!("unsupported mode argument: {other}")),
-        None => Ok(PrepareMode::Check),
     }
 }
 
-fn crate_root() -> Result<PathBuf, String> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    Ok(manifest_dir)
+fn postgres_crate_root() -> Result<PathBuf, String> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .map(|workspace_root| workspace_root.join("crates/syrup-rail-postgres"))
+        .ok_or_else(|| "tools/sqlx-gate must live two levels below the workspace root".into())
 }
 
 fn load_install_sql(crate_root: &Path) -> Result<&'static str, String> {
@@ -77,14 +80,7 @@ fn load_install_sql(crate_root: &Path) -> Result<&'static str, String> {
     match std::fs::read_to_string(&install_path) {
         Ok(on_disk) if on_disk == V1_INSTALL_SQL => Ok(V1_INSTALL_SQL),
         Ok(_) => Err(format!(
-            "{} differs from schema_contract::V1_INSTALL_SQL",
-            install_path.display()
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound && V1_INSTALL_SQL.is_empty() => {
-            Ok(V1_INSTALL_SQL)
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(format!(
-            "{} is missing but schema_contract::V1_INSTALL_SQL is populated",
+            "{} differs from the SQLx gate's embedded schema-v1 artifact",
             install_path.display()
         )),
         Err(error) => Err(format!(
@@ -106,15 +102,11 @@ async fn run_gate(
         .await
         .map_err(|error| format!("failed to connect to disposable database: {error}"))?;
 
-    let install_result = if install_sql.trim().is_empty() {
-        Ok(())
-    } else {
-        sqlx::raw_sql(install_sql)
-            .execute(&pool)
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("failed to apply schema/v1/install.sql: {error}"))
-    };
+    let install_result = sqlx::raw_sql(install_sql)
+        .execute(&pool)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("failed to apply schema/v1/install.sql: {error}"));
     pool.close().await;
     install_result?;
 

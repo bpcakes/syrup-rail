@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH candidate AS MATERIALIZED (\n            SELECT id, provider_key, gateway_configuration_id\n            FROM billing_gateway_accounts\n            WHERE billing_scope_id = $1\n            FOR UPDATE\n        ),\n        activated AS (\n            UPDATE billing_gateway_accounts AS accounts\n            SET gateway_configuration_id = $5,\n                updated_at = clock_timestamp()\n            FROM candidate\n            WHERE accounts.billing_scope_id = $1\n                AND accounts.id = candidate.id\n                AND candidate.id = $2\n                AND candidate.provider_key = $3\n                AND candidate.gateway_configuration_id = $4\n            RETURNING accounts.id\n        )\n        SELECT\n            EXISTS (SELECT 1 FROM candidate) AS \"account_exists!\",\n            EXISTS (SELECT 1 FROM activated) AS \"activated!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_exists!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "activated!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "501bf7c550f6019245b9bc5823b8d45a9907dbb15b2b2612d2830fb1ac2ede23"
+}
