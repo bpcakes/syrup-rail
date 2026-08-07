@@ -27,6 +27,8 @@ pub enum SubscriptionDiscountOperationError {
     OfferUnavailable,
     #[error("current subscription offer does not match the requested plan")]
     OfferPlanMismatch,
+    #[error("subscription discount configuration is invalid for the current offer")]
+    InvalidConfiguration,
     #[error("{0}")]
     InvalidState(&'static str),
 }
@@ -53,6 +55,9 @@ impl fmt::Debug for SubscriptionDiscountOperationError {
             }
             Self::OfferPlanMismatch => {
                 formatter.write_str("SubscriptionDiscountOperationError::OfferPlanMismatch")
+            }
+            Self::InvalidConfiguration => {
+                formatter.write_str("SubscriptionDiscountOperationError::InvalidConfiguration")
             }
             Self::InvalidState(detail) => formatter
                 .debug_tuple("SubscriptionDiscountOperationError::InvalidState")
@@ -168,6 +173,8 @@ pub async fn create_subscription_discount_code_in_transaction(
         creation.plan_key(),
     )
     .await?;
+    syrup_rail::discounted_charge(offer.base_charge(), creation.currency(), creation.kind())
+        .map_err(|_| SubscriptionDiscountOperationError::InvalidConfiguration)?;
     let (amount_off_cents, percent_off_bps) = discount_value(creation.kind());
     let duration_months = duration_months(creation.duration());
     sqlx::query(
@@ -232,6 +239,8 @@ pub async fn update_subscription_discount_code_in_transaction(
         update.plan_key(),
     )
     .await?;
+    syrup_rail::discounted_charge(offer.base_charge(), update.currency(), update.kind())
+        .map_err(|_| SubscriptionDiscountOperationError::InvalidConfiguration)?;
     let (amount_off_cents, percent_off_bps) = discount_value(update.kind());
     let row = sqlx::query(
         r#"
@@ -1108,6 +1117,33 @@ mod tests {
             insert_offer(&database.pool, scope, &plan_a, 5_900).await?;
             insert_offer(&database.pool, scope, &plan_b, 9_900).await?;
             let usd = CurrencyCode::new("USD")?;
+
+            let invalid_id = DiscountCodeId::new(Uuid::now_v7());
+            let invalid = SubscriptionDiscountCodeCreation::new(
+                invalid_id,
+                scope,
+                plan_a.clone(),
+                SubscriptionDiscountCode::new("TOOLARGE")?,
+                None,
+                SubscriptionDiscountKind::AmountOffCents(PositiveDiscountCents::new(6_000)?),
+                usd,
+                SubscriptionDiscountDuration::Indefinite,
+            )?;
+            if !matches!(
+                create_subscription_discount_code(&database.pool, &TestOfferStore, &invalid).await,
+                Err(SubscriptionDiscountOperationError::InvalidConfiguration)
+            ) {
+                return Err(io::Error::other("invalid offer-relative terms were accepted").into());
+            }
+            let invalid_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM billing_subscription_discount_codes WHERE id = $1",
+            )
+            .bind(invalid_id.as_uuid())
+            .fetch_one(&database.pool)
+            .await?;
+            if invalid_count != 0 {
+                return Err(io::Error::other("invalid code escaped its caller transaction").into());
+            }
 
             let code_a_id = DiscountCodeId::new(Uuid::now_v7());
             let code = SubscriptionDiscountCode::new("SAVE25")?;
