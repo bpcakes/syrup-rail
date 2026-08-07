@@ -98,17 +98,20 @@ mod tests {
             let subscription = Uuid::now_v7();
             sqlx::query(
                 r#"
+                WITH clock AS MATERIALIZED (
+                    SELECT clock_timestamp() AS observed_at
+                )
                 INSERT INTO billing_subscriptions (
                     id, billing_scope_id, subscriber_id, plan_key, status,
                     gateway_account_id, payment_method_id, amount_cents,
                     currency, current_period_start_at, current_period_end_at,
                     next_renewal_at, initial_transaction_id
-                ) VALUES (
+                ) SELECT
                     $1, $2, $3, 'plan_a', 'active', $4, $5, 100, 'USD',
-                    clock_timestamp() - interval '1 day',
-                    clock_timestamp() + interval '1 day',
-                    clock_timestamp() + interval '1 day', $6
-                )
+                    observed_at - interval '1 day',
+                    observed_at + interval '1 day',
+                    observed_at + interval '1 day', $6
+                FROM clock
                 "#,
             )
             .bind(subscription)

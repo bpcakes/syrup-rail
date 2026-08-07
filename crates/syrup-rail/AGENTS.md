@@ -9,7 +9,8 @@ command/outcome types for application-independent subscription billing.
 
 - `src/lib.rs` is the public facade.
 - `src/{identity,money,subscription,event,resolution}.rs` own validated billing
-  values and closed lifecycle facts.
+  values and closed lifecycle facts, including card-safe grant commands and
+  lossless grant audit records.
 - `src/{gateway,gateway_value}.rs` own the five-method provider port, typed
   evidence, sensitive values, and diagnostic boundary.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure

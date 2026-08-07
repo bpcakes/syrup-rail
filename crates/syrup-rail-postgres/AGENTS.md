@@ -14,6 +14,8 @@ and transaction orchestration.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
   and exact configuration activation.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection.
+- `src/grants.rs` — caller-transaction grant admission, creation, and
+  revocation.
 - `src/deletion.rs` — transaction-local canonical account-deletion blockers.
 
 ## Edit here for X
@@ -26,6 +28,8 @@ and transaction orchestration.
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
 - Change reusable subscription access projection in `src/entitlement.rs`;
   keep host authentication and gateway availability outside the query.
+- Change grant mutation policy in `src/grants.rs`; keep host user existence,
+  actor authorization, and actor presentation in the host transaction.
 - Change canonical deletion admission in `src/deletion.rs`; keep host order and
   fulfillment blockers in the host transaction.
 

@@ -8,6 +8,7 @@
 mod deletion;
 mod entitlement;
 mod gateway_accounts;
+mod grants;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 pub mod schema_contract;
 #[cfg(test)]
@@ -16,3 +17,6 @@ mod test_support;
 pub use deletion::billing_deletion_blockers;
 pub use entitlement::{EntitlementQueryError, entitlement};
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
+pub use grants::{
+    SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
+};
