@@ -568,12 +568,12 @@ mod tests {
                     gateway_account_id, payment_method_id, amount_cents,
                     currency, current_period_start_at, current_period_end_at,
                     next_renewal_at, initial_transaction_id
-                ) VALUES (
+                ) SELECT
                     $1, $2, $3, 'base_subscription', 'active', $4, $5, 100,
-                    'USD', clock_timestamp() - interval '1 day',
-                    clock_timestamp() + interval '1 day',
-                    clock_timestamp() + interval '1 day', $6
-                )
+                    'USD', observed_at - interval '1 day',
+                    observed_at + interval '1 day',
+                    observed_at + interval '1 day', $6
+                FROM (SELECT clock_timestamp() AS observed_at) clock
                 "#,
             )
             .bind(subscription)

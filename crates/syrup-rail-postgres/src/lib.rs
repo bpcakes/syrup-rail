@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod deletion;
+mod discounts;
 mod entitlement;
 mod gateway_accounts;
 mod grants;
@@ -15,6 +16,7 @@ pub mod schema_contract;
 mod test_support;
 
 pub use deletion::billing_deletion_blockers;
+pub use discounts::*;
 pub use entitlement::{EntitlementQueryError, entitlement};
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
 pub use grants::{

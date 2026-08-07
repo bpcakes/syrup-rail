@@ -16,6 +16,8 @@ and transaction orchestration.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
   revocation.
+- `src/discounts.rs` — exact-plan discount administration, offer-locked
+  quoting, saved-claim mutation, and the host offer-store port.
 - `src/deletion.rs` — transaction-local canonical account-deletion blockers.
 
 ## Edit here for X
@@ -30,6 +32,9 @@ and transaction orchestration.
   keep host authentication and gateway availability outside the query.
 - Change grant mutation policy in `src/grants.rs`; keep host user existence,
   actor authorization, and actor presentation in the host transaction.
+- Change reusable discount policy in `src/discounts.rs`; keep host acquisition
+  metadata in the host transaction and host plan pricing behind
+  `SubscriptionOfferStore`.
 - Change canonical deletion admission in `src/deletion.rs`; keep host order and
   fulfillment blockers in the host transaction.
 
@@ -44,6 +49,8 @@ and transaction orchestration.
   `billing_*` constraint and index names are reserved for canonical objects.
 - Host code composes transaction-local operations on its existing connection;
   shared operations never persist or receive plaintext provider credentials.
+- Offer-dependent discount operations lock the exact host plan row through the
+  caller's connection; implementations must not open a second connection.
 
 ## Common commands
 

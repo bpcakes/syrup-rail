@@ -12,6 +12,7 @@ default = []
 schema-contract-test-support = []
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 syrup-rail.workspace = true
 sqlx.workspace = true

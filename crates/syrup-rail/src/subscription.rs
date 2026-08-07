@@ -443,6 +443,15 @@ pub enum SubscriptionDiscountKind {
     PercentOffBasisPoints(PercentOffBasisPoints),
 }
 
+impl SubscriptionDiscountKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AmountOffCents(_) => "amount_off",
+            Self::PercentOffBasisPoints(_) => "percent_off",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PositiveDiscountCents(i32);
 
@@ -481,6 +490,15 @@ pub enum SubscriptionDiscountDuration {
     LimitedMonths(LimitedDiscountMonths),
 }
 
+impl SubscriptionDiscountDuration {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Indefinite => "indefinite",
+            Self::LimitedMonths(_) => "limited_months",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LimitedDiscountMonths(u8);
 
@@ -509,6 +527,8 @@ pub enum SubscriptionDiscountError {
     InvalidDurationMonths,
     #[error("discounted charge must use the base currency and cannot exceed the base charge")]
     InvalidChargeSnapshot,
+    #[error("subscription discount persisted state is invalid")]
+    InvalidState,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]

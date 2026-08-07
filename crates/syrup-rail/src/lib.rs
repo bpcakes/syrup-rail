@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod card_data;
+mod discount;
 mod event;
 mod gateway;
 mod gateway_value;
@@ -16,6 +17,7 @@ mod resolution;
 mod subscription;
 
 pub use card_data::{raw_card_data_ranges, string_contains_raw_card_data};
+pub use discount::*;
 pub use event::*;
 pub use gateway::*;
 pub use gateway_value::*;
