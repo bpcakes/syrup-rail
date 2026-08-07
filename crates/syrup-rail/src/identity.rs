@@ -412,6 +412,35 @@ pub enum SubscriptionStatus {
     Canceled,
 }
 
+impl SubscriptionStatus {
+    pub const ALL: [Self; 3] = [Self::Active, Self::PastDue, Self::Canceled];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::PastDue => "past_due",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("unknown subscription status")]
+pub struct SubscriptionStatusParseError;
+
+impl FromStr for SubscriptionStatus {
+    type Err = SubscriptionStatusParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "active" => Ok(Self::Active),
+            "past_due" => Ok(Self::PastDue),
+            "canceled" => Ok(Self::Canceled),
+            _ => Err(SubscriptionStatusParseError),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

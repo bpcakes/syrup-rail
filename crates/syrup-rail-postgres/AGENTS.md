@@ -13,6 +13,8 @@ and transaction orchestration.
   behavior fixtures behind `schema-contract-test-support`.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
   and exact configuration activation.
+- `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection.
+- `src/deletion.rs` — transaction-local canonical account-deletion blockers.
 
 ## Edit here for X
 
@@ -22,6 +24,10 @@ and transaction orchestration.
   `src/schema_contract.rs` and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
+- Change reusable subscription access projection in `src/entitlement.rs`;
+  keep host authentication and gateway availability outside the query.
+- Change canonical deletion admission in `src/deletion.rs`; keep host order and
+  fulfillment blockers in the host transaction.
 
 ## Invariants
 

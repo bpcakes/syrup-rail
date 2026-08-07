@@ -1,11 +1,11 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::{
-    ActorId, BillingPeriod, ChargeAmount, DiscountClaimId, PaymentMethodId, PlanKey,
-    SubscriptionGrantId, SubscriptionId, SubscriptionStatus,
+    ActorId, BillingPeriod, BillingScopeId, ChargeAmount, DiscountClaimId, PaymentMethodId,
+    PlanKey, SubscriberId, SubscriptionGrantId, SubscriptionId, SubscriptionStatus,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,6 +80,22 @@ impl SubscriptionGrantKind {
         match self {
             Self::Testing => "testing",
             Self::Promotion => "promotion",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("unknown subscription grant kind")]
+pub struct SubscriptionGrantKindParseError;
+
+impl FromStr for SubscriptionGrantKind {
+    type Err = SubscriptionGrantKindParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "testing" => Ok(Self::Testing),
+            "promotion" => Ok(Self::Promotion),
+            _ => Err(SubscriptionGrantKindParseError),
         }
     }
 }
@@ -257,6 +273,7 @@ impl fmt::Display for SubscriptionDiscountCode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionDiscountSnapshot {
     code: SubscriptionDiscountCode,
+    label: Option<String>,
     kind: SubscriptionDiscountKind,
     duration: SubscriptionDiscountDuration,
     base_charge: ChargeAmount,
@@ -266,6 +283,7 @@ pub struct SubscriptionDiscountSnapshot {
 impl SubscriptionDiscountSnapshot {
     pub fn new(
         code: SubscriptionDiscountCode,
+        label: Option<String>,
         kind: SubscriptionDiscountKind,
         duration: SubscriptionDiscountDuration,
         base_charge: ChargeAmount,
@@ -278,6 +296,7 @@ impl SubscriptionDiscountSnapshot {
         }
         Ok(Self {
             code,
+            label,
             kind,
             duration,
             base_charge,
@@ -287,6 +306,10 @@ impl SubscriptionDiscountSnapshot {
 
     pub const fn code(&self) -> &SubscriptionDiscountCode {
         &self.code
+    }
+
+    pub fn label(&self) -> Option<&str> {
+        self.label.as_deref()
     }
 
     pub const fn kind(&self) -> SubscriptionDiscountKind {
@@ -401,6 +424,89 @@ pub enum Entitlement {
     },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EntitlementQuery {
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: PlanKey,
+}
+
+impl EntitlementQuery {
+    pub const fn new(
+        billing_scope_id: BillingScopeId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+    ) -> Self {
+        Self {
+            billing_scope_id,
+            subscriber_id,
+            plan_key,
+        }
+    }
+
+    pub const fn billing_scope_id(&self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    pub const fn subscriber_id(&self) -> SubscriberId {
+        self.subscriber_id
+    }
+
+    pub const fn plan_key(&self) -> &PlanKey {
+        &self.plan_key
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeletionBlockerQuery {
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+}
+
+impl DeletionBlockerQuery {
+    pub const fn new(billing_scope_id: BillingScopeId, subscriber_id: SubscriberId) -> Self {
+        Self {
+            billing_scope_id,
+            subscriber_id,
+        }
+    }
+
+    pub const fn billing_scope_id(self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    pub const fn subscriber_id(self) -> SubscriberId {
+        self.subscriber_id
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BillingDeletionBlockers {
+    active_subscription: bool,
+    unresolved_payment: bool,
+}
+
+impl BillingDeletionBlockers {
+    pub const fn new(active_subscription: bool, unresolved_payment: bool) -> Self {
+        Self {
+            active_subscription,
+            unresolved_payment,
+        }
+    }
+
+    pub const fn active_subscription(self) -> bool {
+        self.active_subscription
+    }
+
+    pub const fn unresolved_payment(self) -> bool {
+        self.unresolved_payment
+    }
+
+    pub const fn is_empty(self) -> bool {
+        !self.active_subscription && !self.unresolved_payment
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -431,6 +537,7 @@ mod tests {
         assert_eq!(
             SubscriptionDiscountSnapshot::new(
                 code.clone(),
+                None,
                 kind,
                 SubscriptionDiscountDuration::Indefinite,
                 ChargeAmount::new(1_000, usd).unwrap(),
@@ -441,6 +548,7 @@ mod tests {
         assert_eq!(
             SubscriptionDiscountSnapshot::new(
                 code,
+                None,
                 kind,
                 SubscriptionDiscountDuration::Indefinite,
                 ChargeAmount::new(1_000, usd).unwrap(),
