@@ -18,6 +18,8 @@ and transaction orchestration.
   revocation.
 - `src/discounts.rs` — exact-plan discount administration, offer-locked
   quoting, saved-claim mutation, and the host offer-store port.
+- `src/cancellation.rs` — caller-transaction exact-plan cancellation,
+  attempt fences, stale update cleanup, and canonical event production.
 - `src/deletion.rs` — transaction-local canonical account-deletion blockers.
 
 ## Edit here for X
@@ -35,6 +37,9 @@ and transaction orchestration.
 - Change reusable discount policy in `src/discounts.rs`; keep host acquisition
   metadata in the host transaction and host plan pricing behind
   `SubscriptionOfferStore`.
+- Change exact-plan cancellation in `src/cancellation.rs`; the host must lock
+  the live event recipient first, append the returned event in the same
+  transaction, and leave stored payment methods unchanged.
 - Change canonical deletion admission in `src/deletion.rs`; keep host order and
   fulfillment blockers in the host transaction.
 

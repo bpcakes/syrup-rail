@@ -5,6 +5,7 @@
 
 #![forbid(unsafe_code)]
 
+mod cancellation;
 mod deletion;
 mod discounts;
 mod entitlement;
@@ -15,6 +16,7 @@ pub mod schema_contract;
 #[cfg(test)]
 mod test_support;
 
+pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
 pub use deletion::billing_deletion_blockers;
 pub use discounts::*;
 pub use entitlement::{EntitlementQueryError, entitlement};
