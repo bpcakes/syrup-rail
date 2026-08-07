@@ -790,7 +790,7 @@ pub async fn admit_subscription_recovery_submission_in_transaction(
     )
     .await?
     .ok_or_else(invalid_state)?;
-    if !recovery_attempt_matches_reservation(&attempt, reservation) {
+    if !recovery_attempt_belongs_to_reservation(&attempt, reservation) {
         return Err(invalid_state());
     }
     if attempt.status() != PaymentAttemptStatus::Pending
@@ -801,7 +801,8 @@ pub async fn admit_subscription_recovery_submission_in_transaction(
         ));
     }
 
-    let state_matches = recovery_subscription_state_matches(transaction, reservation).await?
+    let state_matches = recovery_attempt_matches_reservation(&attempt, reservation)
+        && recovery_subscription_state_matches(transaction, reservation).await?
         && !blocking_subscription_charge_attempt_exists_except(
             transaction,
             reservation.subscription_id(),
@@ -1315,9 +1316,18 @@ fn recovery_attempt_matches_reservation(
     attempt: &PaymentAttempt,
     reservation: &SubscriptionRecoveryReservation,
 ) -> bool {
+    recovery_attempt_belongs_to_reservation(attempt, reservation)
+        && attempt.request() == reservation.request()
+}
+
+fn recovery_attempt_belongs_to_reservation(
+    attempt: &PaymentAttempt,
+    reservation: &SubscriptionRecoveryReservation,
+) -> bool {
     attempt.identity() == reservation.identity()
         && attempt.kind() == PaymentAttemptKind::SubscriptionRecovery
-        && attempt.request() == reservation.request()
+        && attempt.request().idempotency_key() == reservation.request().idempotency_key()
+        && attempt.request().gateway_order_id() == reservation.request().gateway_order_id()
 }
 
 async fn gateway_identity_matches_recovery(
