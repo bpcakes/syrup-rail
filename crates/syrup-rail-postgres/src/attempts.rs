@@ -13,13 +13,27 @@ use syrup_rail::{
     PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentResolutionCode, PercentOffBasisPoints,
     PlanKey, PositiveDiscountCents, ProcessorEvidence, SubscriberId, SubscriptionDiscountCode,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
-    SubscriptionEnrollmentDiscountSnapshot, SubscriptionId, SubscriptionInitialApplication,
-    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
+    SubscriptionEnrollmentDiscountSnapshot, SubscriptionEnrollmentReservation,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
+    SubscriptionEnrollmentSubmissionOutcome, SubscriptionEnrollmentSubmissionRejection,
+    SubscriptionId, SubscriptionInitialApplication, SubscriptionPaymentStateSnapshot,
+    SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
 const INVALID_ATTEMPT_STATE: &str = "canonical payment attempt state is invalid";
+const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
+const BILLING_OPERATION_TIMEOUT: &str = "5s";
+const INITIAL_PREPARED_STALE_AFTER_SECONDS: i64 = 30 * 60;
+const INITIAL_PREPARED_EXPIRED_TEXT: &str =
+    "Prepared checkout expired before processor submission.";
+const INITIAL_BILLING_STATE_CHANGED_TEXT: &str =
+    "Checkout was canceled before submission because billing state changed.";
+const INITIAL_TERMS_CHANGED_TEXT: &str =
+    "Checkout was canceled before submission because enrollment terms changed.";
+const INITIAL_CONFIGURATION_CHANGED_TEXT: &str =
+    "Checkout was canceled before submission because payment configuration changed.";
 
 const PAYMENT_ATTEMPT_SELECT: &str = r#"
     SELECT id, billing_scope_id, subscriber_id, plan_key,
@@ -76,6 +90,404 @@ impl fmt::Debug for PaymentAttemptStoreError {
     }
 }
 
+/// Reserves or resumes one exact-plan initial enrollment inside the caller's transaction.
+///
+/// The payment token is deliberately absent from [`SubscriptionEnrollmentReservation`].
+/// The transaction locks the plan aggregate, authoritative host offer, saved claim, attempt
+/// rows, unresolved charge evidence, and exact gateway identity before inserting a token-free
+/// pending attempt.
+pub async fn reserve_subscription_enrollment_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    offers: &dyn crate::SubscriptionOfferStore,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<SubscriptionEnrollmentReservationOutcome, PaymentAttemptStoreError> {
+    set_enrollment_timeouts(transaction).await?;
+    let identity = reservation.identity();
+    lock_subscription_aggregate(
+        transaction,
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+
+    if let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+        false,
+    )
+    .await?
+    {
+        if !replay_matches_reservation(&existing, reservation) {
+            return Ok(SubscriptionEnrollmentReservationOutcome::IdempotencyConflict);
+        }
+        if attempt_is_already_replayable(&existing) {
+            return Ok(SubscriptionEnrollmentReservationOutcome::Replay(existing));
+        }
+        if initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
+            lock_initial_attempt_rows(
+                transaction,
+                identity.billing_scope_id(),
+                identity.subscriber_id(),
+                reservation.plan_key(),
+            )
+            .await?;
+            lock_initial_charge_rows(
+                transaction,
+                identity.billing_scope_id(),
+                identity.subscriber_id(),
+                reservation.plan_key(),
+            )
+            .await?;
+            expire_stale_initial_attempts(
+                transaction,
+                identity.billing_scope_id(),
+                identity.subscriber_id(),
+                reservation.plan_key(),
+            )
+            .await?;
+            let expired = payment_attempt_by_idempotency(
+                transaction,
+                identity.billing_scope_id(),
+                identity.subscriber_id(),
+                reservation.idempotency_key(),
+                true,
+            )
+            .await?
+            .ok_or_else(invalid_state)?;
+            return Ok(SubscriptionEnrollmentReservationOutcome::Replay(expired));
+        }
+    }
+
+    let Some(offer) = offers
+        .lock_current_offer(
+            transaction,
+            identity.billing_scope_id(),
+            reservation.plan_key(),
+        )
+        .await?
+    else {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged,
+        ));
+    };
+    if offer.plan_key() != reservation.plan_key() {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged,
+        ));
+    }
+    let saved_claim = crate::saved_subscription_discount_claim_in_transaction(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await
+    .map_err(map_discount_error)?;
+
+    lock_initial_attempt_rows(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    lock_initial_charge_rows(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    expire_stale_initial_attempts(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+
+    if let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+        true,
+    )
+    .await?
+        && attempt_is_already_replayable(&existing)
+    {
+        return Ok(if replay_matches_reservation(&existing, reservation) {
+            SubscriptionEnrollmentReservationOutcome::Replay(existing)
+        } else {
+            SubscriptionEnrollmentReservationOutcome::IdempotencyConflict
+        });
+    }
+
+    if current_subscription_exists(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?
+    {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::CurrentSubscription,
+        ));
+    }
+    if active_grant_exists(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?
+    {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::ActiveGrant,
+        ));
+    }
+    if unresolved_initial_charge_exists(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?
+    {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::UnresolvedProcessorCharge,
+        ));
+    }
+    let Some(request) =
+        enrollment_request_from_locked_terms(reservation, &offer, saved_claim.as_ref())
+    else {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged,
+        ));
+    };
+    if !gateway_identity_matches(transaction, reservation).await? {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::GatewayConfigurationChanged,
+        ));
+    }
+
+    if let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+        true,
+    )
+    .await?
+    {
+        return Ok(
+            if pending_attempt_matches_request(&existing, identity, &request) {
+                SubscriptionEnrollmentReservationOutcome::Replay(existing)
+            } else {
+                SubscriptionEnrollmentReservationOutcome::IdempotencyConflict
+            },
+        );
+    }
+    if blocking_initial_attempt_exists(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?
+    {
+        return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::AttemptInProgress,
+        ));
+    }
+
+    let inserted = insert_initial_attempt(transaction, identity, &request).await?;
+    if inserted {
+        let attempt = payment_attempt_by_idempotency(
+            transaction,
+            identity.billing_scope_id(),
+            identity.subscriber_id(),
+            reservation.idempotency_key(),
+            true,
+        )
+        .await?
+        .ok_or_else(invalid_state)?;
+        return Ok(SubscriptionEnrollmentReservationOutcome::Reserved(attempt));
+    }
+    let existing = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+        true,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    Ok(
+        if pending_attempt_matches_request(&existing, identity, &request) {
+            SubscriptionEnrollmentReservationOutcome::Replay(existing)
+        } else {
+            SubscriptionEnrollmentReservationOutcome::IdempotencyConflict
+        },
+    )
+}
+
+/// Revalidates a prepared initial attempt and durably admits its one provider mutation.
+///
+/// No provider I/O may occur after this function returns `Admitted` and before the caller
+/// invokes the sale. Every semantic rejection terminally fails the still-unsubmitted attempt.
+pub async fn admit_subscription_enrollment_submission_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    offers: &dyn crate::SubscriptionOfferStore,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<SubscriptionEnrollmentSubmissionOutcome, PaymentAttemptStoreError> {
+    set_enrollment_timeouts(transaction).await?;
+    let identity = reservation.identity();
+    lock_subscription_aggregate(
+        transaction,
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+
+    let Some(offer) = offers
+        .lock_current_offer(
+            transaction,
+            identity.billing_scope_id(),
+            reservation.plan_key(),
+        )
+        .await?
+    else {
+        return reject_prepared_initial(
+            transaction,
+            reservation,
+            SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged,
+            INITIAL_TERMS_CHANGED_TEXT,
+        )
+        .await;
+    };
+    let saved_claim = crate::saved_subscription_discount_claim_in_transaction(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await
+    .map_err(map_discount_error)?;
+    let attempt = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+        true,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    if !attempt_identity_matches_requested_gateway(&attempt, identity)
+        || attempt.kind() != PaymentAttemptKind::SubscriptionInitial
+        || attempt.request().target().plan_key() != Some(reservation.plan_key())
+    {
+        return Err(invalid_state());
+    }
+    if attempt.state().timestamps().submitted_at().is_some()
+        || attempt.status() != PaymentAttemptStatus::Pending
+    {
+        return Ok(SubscriptionEnrollmentSubmissionOutcome::AlreadyAdmitted(
+            attempt,
+        ));
+    }
+
+    lock_initial_charge_rows(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    if current_subscription_exists(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?
+        || active_grant_exists(
+            transaction,
+            identity.billing_scope_id(),
+            identity.subscriber_id(),
+            reservation.plan_key(),
+        )
+        .await?
+        || unresolved_initial_charge_exists(
+            transaction,
+            identity.billing_scope_id(),
+            identity.subscriber_id(),
+            reservation.plan_key(),
+        )
+        .await?
+    {
+        return reject_locked_prepared_initial(
+            transaction,
+            attempt,
+            SubscriptionEnrollmentSubmissionRejection::BillingStateChanged,
+            INITIAL_BILLING_STATE_CHANGED_TEXT,
+        )
+        .await;
+    }
+    let Some(expected_request) =
+        enrollment_request_from_locked_terms(reservation, &offer, saved_claim.as_ref())
+    else {
+        return reject_locked_prepared_initial(
+            transaction,
+            attempt,
+            SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged,
+            INITIAL_TERMS_CHANGED_TEXT,
+        )
+        .await;
+    };
+    if !pending_attempt_matches_request(&attempt, identity, &expected_request) {
+        return reject_locked_prepared_initial(
+            transaction,
+            attempt,
+            SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged,
+            INITIAL_TERMS_CHANGED_TEXT,
+        )
+        .await;
+    }
+    if !gateway_identity_matches(transaction, reservation).await? {
+        return reject_locked_prepared_initial(
+            transaction,
+            attempt,
+            SubscriptionEnrollmentSubmissionRejection::GatewayConfigurationChanged,
+            INITIAL_CONFIGURATION_CHANGED_TEXT,
+        )
+        .await;
+    }
+
+    let attempt_id = attempt.identity().attempt_id();
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET submitted_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL
+        "#,
+    )
+    .bind(attempt_id.as_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    let admitted = find_payment_attempt_by_id_in_transaction(
+        transaction,
+        identity.billing_scope_id(),
+        attempt_id,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    Ok(SubscriptionEnrollmentSubmissionOutcome::Admitted(admitted))
+}
+
 /// Loads an attempt by its exact scope and durable identity without locking it.
 pub async fn find_payment_attempt_by_id_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
@@ -110,6 +522,541 @@ pub async fn lock_payment_attempt_by_idempotency_in_transaction(
         .fetch_optional(&mut **transaction)
         .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
+}
+
+async fn set_enrollment_timeouts(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    )
+    .bind(BILLING_ROW_LOCK_TIMEOUT)
+    .bind(BILLING_OPERATION_TIMEOUT)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn lock_subscription_aggregate(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(subscriber_id.as_uuid())
+        .bind(plan_key.as_str())
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
+}
+
+async fn payment_attempt_by_idempotency(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    idempotency_key: &IdempotencyKey,
+    for_update: bool,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    let lock = if for_update { "FOR UPDATE" } else { "" };
+    let query = format!(
+        "{PAYMENT_ATTEMPT_SELECT} \
+         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3 \
+         {lock}"
+    );
+    let row = sqlx::query(&query)
+        .bind(billing_scope_id.as_uuid())
+        .bind(subscriber_id.as_uuid())
+        .bind(idempotency_key.expose())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    row.as_ref().map(payment_attempt_from_row).transpose()
+}
+
+async fn lock_initial_attempt_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<(), sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM billing_payment_attempts
+        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+            AND attempt_kind = 'subscription_initial'
+        ORDER BY created_at, id FOR UPDATE
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn lock_initial_charge_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<(), sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT charges.id
+        FROM billing_processor_charges charges
+        INNER JOIN billing_payment_attempts attempts ON attempts.id = charges.attempt_id
+        WHERE attempts.billing_scope_id = $1
+            AND attempts.subscriber_id = $2
+            AND attempts.plan_key = $3
+            AND attempts.attempt_kind = 'subscription_initial'
+        ORDER BY charges.observed_at, charges.id
+        FOR UPDATE OF charges
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn expire_stale_initial_attempts(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'failed',
+            gateway_response_text = COALESCE(gateway_response_text, $4),
+            gateway_condition = COALESCE(gateway_condition, 'failed'),
+            resolution_code = COALESCE(
+                resolution_code,
+                'subscription_initial_prepared_attempt_expired'
+            ),
+            resolved_at = clock_timestamp(), updated_at = clock_timestamp()
+        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+            AND attempt_kind = 'subscription_initial' AND status = 'pending'
+            AND submitted_at IS NULL
+            AND created_at <= clock_timestamp()
+                - ($5::bigint * interval '1 second')
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .bind(INITIAL_PREPARED_EXPIRED_TEXT)
+    .bind(INITIAL_PREPARED_STALE_AFTER_SECONDS)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+async fn initial_attempt_is_stale(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt_id: PaymentAttemptId,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT attempt_kind = 'subscription_initial'
+            AND status = 'pending'
+            AND submitted_at IS NULL
+            AND created_at <= clock_timestamp()
+                - ($2::bigint * interval '1 second')
+        FROM billing_payment_attempts
+        WHERE id = $1
+        "#,
+    )
+    .bind(attempt_id.as_uuid())
+    .bind(INITIAL_PREPARED_STALE_AFTER_SECONDS)
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+async fn current_subscription_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<bool, sqlx::Error> {
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM billing_subscriptions
+        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+            AND status IN ('active', 'past_due')
+        ORDER BY updated_at DESC, id DESC FOR NO KEY UPDATE
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(!rows.is_empty())
+}
+
+async fn active_grant_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<bool, sqlx::Error> {
+    let rows = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM billing_subscription_grants
+        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+            AND revoked_at IS NULL
+            AND starts_at <= clock_timestamp() AND ends_at > clock_timestamp()
+        ORDER BY ends_at DESC, id DESC FOR UPDATE
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_all(&mut **transaction)
+    .await?;
+    Ok(!rows.is_empty())
+}
+
+async fn unresolved_initial_charge_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM billing_processor_charges charges
+            INNER JOIN billing_payment_attempts attempts ON attempts.id = charges.attempt_id
+            WHERE attempts.billing_scope_id = $1
+                AND attempts.subscriber_id = $2
+                AND attempts.plan_key = $3
+                AND attempts.attempt_kind = 'subscription_initial'
+                AND charges.progression_state IN (
+                    'pending', 'reconciliation_required', 'external_reversal_required'
+                )
+        )
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+async fn blocking_initial_attempt_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM billing_payment_attempts
+            WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+                AND attempt_kind = 'subscription_initial'
+                AND (
+                    status IN ('pending', 'unknown')
+                    OR (
+                        status = 'review_required'
+                        AND resolution_code IS DISTINCT FROM
+                            'subscription_initial_current_subscription_conflict'
+                    )
+                )
+        )
+        "#,
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+fn enrollment_request_from_locked_terms(
+    reservation: &SubscriptionEnrollmentReservation,
+    offer: &syrup_rail::SubscriptionOffer,
+    saved_claim: Option<&syrup_rail::SubscriptionDiscountClaimRecord>,
+) -> Option<PaymentAttemptRequest> {
+    let saved_snapshot = saved_claim.map(|claim| claim.snapshot());
+    if !reservation
+        .expected_charge()
+        .matches_locked_terms(offer, saved_snapshot)
+    {
+        return None;
+    }
+    let discount = saved_claim.map(|claim| {
+        SubscriptionEnrollmentDiscountSnapshot::new(
+            claim.id(),
+            claim.discount_code_id(),
+            claim.snapshot().clone(),
+        )
+    });
+    let amount = reservation.expected_charge().charge().money();
+    let fingerprint = PaymentAttemptFingerprint::for_subscription_initial(
+        reservation.plan_key(),
+        amount,
+        discount.as_ref(),
+    );
+    Some(PaymentAttemptRequest::new(
+        PaymentAttemptTarget::SubscriptionInitial {
+            plan_key: reservation.plan_key().clone(),
+            discount,
+            application: None,
+        },
+        reservation.idempotency_key().clone(),
+        fingerprint,
+        amount,
+        reservation.gateway_order_id().clone(),
+        reservation.billing_contact().clone(),
+    ))
+}
+
+async fn gateway_identity_matches(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<bool, sqlx::Error> {
+    let identity = reservation.identity();
+    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+        r#"
+        SELECT id, gateway_configuration_id, provider_key
+        FROM billing_gateway_accounts
+        WHERE billing_scope_id = $1 FOR SHARE
+        "#,
+    )
+    .bind(identity.billing_scope_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(
+        row.is_some_and(|(account_id, configuration_id, provider_key)| {
+            account_id == identity.gateway_account_id().into_uuid()
+                && configuration_id == identity.gateway_configuration_id().into_uuid()
+                && provider_key == reservation.provider_key().as_str()
+        }),
+    )
+}
+
+fn attempt_is_already_replayable(attempt: &PaymentAttempt) -> bool {
+    attempt.status() != PaymentAttemptStatus::Pending
+        || attempt.state().timestamps().submitted_at().is_some()
+}
+
+fn replay_matches_reservation(
+    attempt: &PaymentAttempt,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> bool {
+    let identity = attempt.identity();
+    identity.billing_scope_id() == reservation.identity().billing_scope_id()
+        && identity.subscriber_id() == reservation.identity().subscriber_id()
+        && identity.gateway_account_id() == reservation.identity().gateway_account_id()
+        && identity.gateway_configuration_id() == reservation.identity().gateway_configuration_id()
+        && attempt.kind() == PaymentAttemptKind::SubscriptionInitial
+        && attempt.request().target().plan_key() == Some(reservation.plan_key())
+        && attempt
+            .request()
+            .fingerprint()
+            .matches_subscription_initial_expected_charge(
+                reservation.plan_key(),
+                reservation.expected_charge(),
+            )
+}
+
+fn pending_attempt_matches_request(
+    attempt: &PaymentAttempt,
+    requested_identity: PaymentAttemptIdentity,
+    requested: &PaymentAttemptRequest,
+) -> bool {
+    let identity = attempt.identity();
+    identity.billing_scope_id() == requested_identity.billing_scope_id()
+        && identity.subscriber_id() == requested_identity.subscriber_id()
+        && identity.gateway_account_id() == requested_identity.gateway_account_id()
+        && identity.gateway_configuration_id() == requested_identity.gateway_configuration_id()
+        && attempt.status() == PaymentAttemptStatus::Pending
+        && attempt.state().timestamps().submitted_at().is_none()
+        && attempt.request().target() == requested.target()
+        && attempt.request().fingerprint() == requested.fingerprint()
+        && attempt.request().amount() == requested.amount()
+}
+
+fn attempt_identity_matches_requested_gateway(
+    attempt: &PaymentAttempt,
+    requested: PaymentAttemptIdentity,
+) -> bool {
+    let identity = attempt.identity();
+    identity.billing_scope_id() == requested.billing_scope_id()
+        && identity.subscriber_id() == requested.subscriber_id()
+        && identity.gateway_account_id() == requested.gateway_account_id()
+        && identity.gateway_configuration_id() == requested.gateway_configuration_id()
+}
+
+async fn insert_initial_attempt(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: PaymentAttemptIdentity,
+    request: &PaymentAttemptRequest,
+) -> Result<bool, PaymentAttemptStoreError> {
+    let plan_key = request.target().plan_key().ok_or_else(invalid_state)?;
+    let discount = request.target().enrollment_discount();
+    let snapshot = discount.map(SubscriptionEnrollmentDiscountSnapshot::snapshot);
+    let kind = snapshot.map(|snapshot| snapshot.kind());
+    let duration = snapshot.map(|snapshot| snapshot.duration());
+    let result = sqlx::query(
+        r#"
+        INSERT INTO billing_payment_attempts (
+            id, billing_scope_id, subscriber_id, plan_key, attempt_kind, status,
+            idempotency_key, request_fingerprint, amount_cents, currency,
+            gateway_account_id, gateway_configuration_id, gateway_order_id,
+            subscription_initial_discount_claim_id,
+            subscription_initial_discount_code_id,
+            subscription_initial_discount_code_snapshot,
+            subscription_initial_discount_label_snapshot,
+            subscription_initial_discount_kind,
+            subscription_initial_discount_amount_off_cents,
+            subscription_initial_discount_percent_off_bps,
+            subscription_initial_discount_currency,
+            subscription_initial_discount_duration,
+            subscription_initial_discount_duration_months,
+            subscription_initial_discount_base_amount_cents,
+            subscription_initial_discount_discounted_amount_cents,
+            billing_name, billing_email
+        ) VALUES (
+            $1, $2, $3, $4, 'subscription_initial', 'pending',
+            $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+            $17, $18, $19, $20, $21, $22, $23, $24, $25
+        )
+        ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
+        "#,
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(plan_key.as_str())
+    .bind(request.idempotency_key().expose())
+    .bind(request.fingerprint().expose())
+    .bind(request.amount().cents())
+    .bind(request.amount().currency().as_str())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(identity.gateway_configuration_id().as_uuid())
+    .bind(request.gateway_order_id().expose())
+    .bind(discount.map(|discount| discount.claim_id().into_uuid()))
+    .bind(discount.map(|discount| discount.code_id().into_uuid()))
+    .bind(snapshot.map(|snapshot| snapshot.code().as_str()))
+    .bind(snapshot.and_then(|snapshot| snapshot.label()))
+    .bind(kind.map(|kind| kind.as_str()))
+    .bind(kind.and_then(discount_amount_off))
+    .bind(kind.and_then(discount_percent_off))
+    .bind(snapshot.map(|snapshot| snapshot.currency().as_str()))
+    .bind(duration.map(|duration| duration.as_str()))
+    .bind(duration.and_then(discount_duration_months))
+    .bind(snapshot.map(|snapshot| snapshot.base_charge().cents()))
+    .bind(snapshot.map(|snapshot| snapshot.discounted_charge().cents()))
+    .bind(request.billing_contact().name())
+    .bind(request.billing_contact().email())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+fn discount_amount_off(kind: SubscriptionDiscountKind) -> Option<i32> {
+    match kind {
+        SubscriptionDiscountKind::AmountOffCents(value) => Some(value.get()),
+        SubscriptionDiscountKind::PercentOffBasisPoints(_) => None,
+    }
+}
+
+fn discount_percent_off(kind: SubscriptionDiscountKind) -> Option<i32> {
+    match kind {
+        SubscriptionDiscountKind::AmountOffCents(_) => None,
+        SubscriptionDiscountKind::PercentOffBasisPoints(value) => Some(i32::from(value.get())),
+    }
+}
+
+fn discount_duration_months(duration: SubscriptionDiscountDuration) -> Option<i32> {
+    match duration {
+        SubscriptionDiscountDuration::Indefinite => None,
+        SubscriptionDiscountDuration::LimitedMonths(value) => Some(i32::from(value.get())),
+    }
+}
+
+async fn reject_prepared_initial(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionEnrollmentReservation,
+    reason: SubscriptionEnrollmentSubmissionRejection,
+    message: &'static str,
+) -> Result<SubscriptionEnrollmentSubmissionOutcome, PaymentAttemptStoreError> {
+    let identity = reservation.identity();
+    let attempt = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+        true,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    if !attempt_identity_matches_requested_gateway(&attempt, identity)
+        || attempt.kind() != PaymentAttemptKind::SubscriptionInitial
+    {
+        return Err(invalid_state());
+    }
+    if attempt.status() != PaymentAttemptStatus::Pending
+        || attempt.state().timestamps().submitted_at().is_some()
+    {
+        return Ok(SubscriptionEnrollmentSubmissionOutcome::AlreadyAdmitted(
+            attempt,
+        ));
+    }
+    reject_locked_prepared_initial(transaction, attempt, reason, message).await
+}
+
+async fn reject_locked_prepared_initial(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: PaymentAttempt,
+    reason: SubscriptionEnrollmentSubmissionRejection,
+    message: &'static str,
+) -> Result<SubscriptionEnrollmentSubmissionOutcome, PaymentAttemptStoreError> {
+    let identity = attempt.identity();
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'failed', gateway_response_text = $2,
+            gateway_condition = 'failed', resolved_at = clock_timestamp(),
+            updated_at = clock_timestamp()
+        WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL
+        "#,
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .bind(message)
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(invalid_state());
+    }
+    let attempt = find_payment_attempt_by_id_in_transaction(
+        transaction,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    Ok(SubscriptionEnrollmentSubmissionOutcome::Rejected { attempt, reason })
+}
+
+fn map_discount_error(
+    error: crate::SubscriptionDiscountOperationError,
+) -> PaymentAttemptStoreError {
+    match error {
+        crate::SubscriptionDiscountOperationError::Sql(error) => {
+            PaymentAttemptStoreError::Sql(error)
+        }
+        _ => invalid_state(),
+    }
 }
 
 fn payment_attempt_from_row(row: &PgRow) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
@@ -501,12 +1448,798 @@ const fn invalid_state() -> PaymentAttemptStoreError {
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{error::Error, sync::Arc};
 
+    use async_trait::async_trait;
     use chrono::Duration;
 
     use super::*;
     use crate::test_support::{TestDatabase, create_gateway_account};
+
+    struct TestOfferStore;
+
+    #[async_trait]
+    impl crate::SubscriptionOfferStore for TestOfferStore {
+        async fn lock_current_offer(
+            &self,
+            connection: &mut sqlx::PgConnection,
+            billing_scope_id: BillingScopeId,
+            plan_key: &PlanKey,
+        ) -> Result<Option<syrup_rail::SubscriptionOffer>, sqlx::Error> {
+            let row = sqlx::query_as::<_, (i32, String)>(
+                r#"
+                SELECT amount_cents, currency FROM host_subscription_offers
+                WHERE billing_scope_id = $1 AND plan_key = $2 FOR SHARE
+                "#,
+            )
+            .bind(billing_scope_id.as_uuid())
+            .bind(plan_key.as_str())
+            .fetch_optional(connection)
+            .await?;
+            row.map(|(amount, currency)| {
+                let currency = CurrencyCode::new(&currency)
+                    .map_err(|_| sqlx::Error::Protocol("invalid host currency".to_owned()))?;
+                let charge = ChargeAmount::new(amount, currency)
+                    .map_err(|_| sqlx::Error::Protocol("invalid host charge".to_owned()))?;
+                Ok(syrup_rail::SubscriptionOffer::new(plan_key.clone(), charge))
+            })
+            .transpose()
+        }
+    }
+
+    struct TestReferenceFactory;
+
+    impl syrup_rail::GatewayMutationReferenceFactory for TestReferenceFactory {
+        fn for_attempt(
+            &self,
+            kind: PaymentAttemptKind,
+            attempt_id: PaymentAttemptId,
+        ) -> GatewayOrderId {
+            assert_eq!(kind, PaymentAttemptKind::SubscriptionInitial);
+            GatewayOrderId::from_generated_attempt(
+                format!("sr_initial_{}", attempt_id.as_uuid().simple()),
+                attempt_id,
+            )
+            .expect("test order ID should be canonical")
+        }
+    }
+
+    struct NeverCalledGateway;
+
+    #[async_trait]
+    impl syrup_rail::PaymentGateway for NeverCalledGateway {
+        async fn account_mode(
+            &self,
+        ) -> Result<syrup_rail::GatewayAccountMode, syrup_rail::GatewayError> {
+            panic!("reservation must not perform provider I/O")
+        }
+
+        async fn sale(
+            &self,
+            _request: syrup_rail::GatewaySaleRequest,
+        ) -> Result<syrup_rail::GatewayPaymentOutcome, syrup_rail::GatewayMutationError> {
+            panic!("reservation must not perform provider I/O")
+        }
+
+        async fn store_payment_method(
+            &self,
+            _request: syrup_rail::GatewayStorePaymentMethodRequest,
+        ) -> Result<syrup_rail::GatewayPaymentOutcome, syrup_rail::GatewayMutationError> {
+            panic!("reservation must not perform provider I/O")
+        }
+
+        async fn query_transaction(
+            &self,
+            _request: syrup_rail::GatewayQueryRequest,
+        ) -> Result<Option<syrup_rail::GatewayPaymentOutcome>, syrup_rail::GatewayError> {
+            panic!("reservation must not perform provider I/O")
+        }
+
+        async fn query_transaction_reports(
+            &self,
+            _request: syrup_rail::GatewayTransactionReportRequest,
+        ) -> Result<Vec<syrup_rail::GatewayTransactionReport>, syrup_rail::GatewayError> {
+            panic!("reservation must not perform provider I/O")
+        }
+    }
+
+    async fn install_host_offers(database: &TestDatabase) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            CREATE TABLE host_subscription_offers (
+                billing_scope_id uuid NOT NULL,
+                plan_key text NOT NULL,
+                amount_cents integer NOT NULL,
+                currency text NOT NULL,
+                PRIMARY KEY (billing_scope_id, plan_key)
+            )
+            "#,
+        )
+        .execute(&database.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn set_offer(
+        database: &TestDatabase,
+        scope_id: Uuid,
+        plan_key: &str,
+        amount_cents: i32,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO host_subscription_offers (
+                billing_scope_id, plan_key, amount_cents, currency
+            ) VALUES ($1, $2, $3, 'USD')
+            ON CONFLICT (billing_scope_id, plan_key)
+            DO UPDATE SET amount_cents = EXCLUDED.amount_cents
+            "#,
+        )
+        .bind(scope_id)
+        .bind(plan_key)
+        .bind(amount_cents)
+        .execute(&database.pool)
+        .await?;
+        Ok(())
+    }
+
+    fn resolved_gateway(
+        account: crate::test_support::GatewayAccountFixture,
+    ) -> syrup_rail::ResolvedGateway {
+        syrup_rail::ResolvedGateway::new(
+            BillingScopeId::new(account.billing_scope_id),
+            GatewayAccountId::new(account.gateway_account_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            syrup_rail::GatewayProviderKey::new("nmi").unwrap(),
+            syrup_rail::GatewayLifecycleQueryPolicy::new(
+                syrup_rail::GatewayLifecycleCursorKey::new("test_cursor").unwrap(),
+                Duration::minutes(1),
+                10,
+                2,
+                2,
+                20,
+            )
+            .unwrap(),
+            Arc::new(TestReferenceFactory),
+            Arc::new(NeverCalledGateway),
+        )
+    }
+
+    fn enrollment_command(
+        account: crate::test_support::GatewayAccountFixture,
+        subscriber_id: Uuid,
+        attempt_id: Uuid,
+        idempotency_key: &str,
+        expected_charge: syrup_rail::SubscriptionEnrollmentExpectedCharge,
+    ) -> syrup_rail::EnrollSubscription {
+        syrup_rail::EnrollSubscription::new(
+            PaymentAttemptId::new(attempt_id),
+            BillingScopeId::new(account.billing_scope_id),
+            SubscriberId::new(subscriber_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new(idempotency_key).unwrap(),
+            syrup_rail::PaymentToken::new("token-secret").unwrap(),
+            syrup_rail::BillingContact::new(
+                Some("Sensitive".to_owned()),
+                Some("Name".to_owned()),
+                Some("secret@example.test".to_owned()),
+            )
+            .unwrap(),
+            expected_charge,
+        )
+    }
+
+    fn full_price(
+        plan_key: &str,
+        amount_cents: i32,
+    ) -> syrup_rail::SubscriptionEnrollmentExpectedCharge {
+        syrup_rail::SubscriptionEnrollmentExpectedCharge::full_price(
+            syrup_rail::SubscriptionOffer::new(
+                PlanKey::new(plan_key).unwrap(),
+                ChargeAmount::new(amount_cents, CurrencyCode::new("USD").unwrap()).unwrap(),
+            ),
+        )
+    }
+
+    async fn create_discount_code(
+        database: &TestDatabase,
+        scope_id: Uuid,
+        plan_key: &str,
+    ) -> Result<Uuid, sqlx::Error> {
+        let code_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_subscription_discount_codes (
+                id, billing_scope_id, plan_key, code_normalized, display_code,
+                label, status, discount_kind, percent_off_bps, currency,
+                duration, duration_months
+            ) VALUES (
+                $1, $2, $3, 'SAVE20', 'SAVE20', 'Sensitive campaign',
+                'active', 'percent_off', 2000, 'USD', 'limited_months', 3
+            )
+            "#,
+        )
+        .bind(code_id)
+        .bind(scope_id)
+        .bind(plan_key)
+        .execute(&database.pool)
+        .await?;
+        Ok(code_id)
+    }
+
+    async fn create_saved_claim(
+        database: &TestDatabase,
+        scope_id: Uuid,
+        subscriber_id: Uuid,
+        plan_key: &str,
+        code_id: Uuid,
+    ) -> Result<Uuid, sqlx::Error> {
+        let claim_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_subscription_discount_claims (
+                id, billing_scope_id, subscriber_id, plan_key,
+                discount_code_id, code_snapshot, label_snapshot,
+                discount_kind, percent_off_bps, currency, duration,
+                duration_months, base_amount_cents, discounted_amount_cents,
+                status
+            ) VALUES (
+                $1, $2, $3, $4, $5, 'SAVE20', 'Sensitive campaign',
+                'percent_off', 2000, 'USD', 'limited_months', 3,
+                1000, 800, 'saved'
+            )
+            "#,
+        )
+        .bind(claim_id)
+        .bind(scope_id)
+        .bind(subscriber_id)
+        .bind(plan_key)
+        .bind(code_id)
+        .execute(&database.pool)
+        .await?;
+        Ok(claim_id)
+    }
+
+    fn discounted_expected(plan_key: &str) -> syrup_rail::SubscriptionEnrollmentExpectedCharge {
+        let currency = CurrencyCode::new("USD").unwrap();
+        syrup_rail::SubscriptionEnrollmentExpectedCharge::discounted(
+            PlanKey::new(plan_key).unwrap(),
+            syrup_rail::SubscriptionDiscountSnapshot::new(
+                syrup_rail::SubscriptionDiscountCode::new("SAVE20").unwrap(),
+                Some("Sensitive campaign".to_owned()),
+                SubscriptionDiscountKind::PercentOffBasisPoints(
+                    PercentOffBasisPoints::new(2_000).unwrap(),
+                ),
+                SubscriptionDiscountDuration::LimitedMonths(LimitedDiscountMonths::new(3).unwrap()),
+                ChargeAmount::new(1_000, currency).unwrap(),
+                ChargeAmount::new(800, currency).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("enroll_reserve").await?;
+        install_host_offers(&database).await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        set_offer(
+            &database,
+            account.billing_scope_id,
+            "base_subscription",
+            1_000,
+        )
+        .await?;
+        set_offer(&database, account.billing_scope_id, "premium", 1_000).await?;
+        let subscriber_id = Uuid::now_v7();
+        let gateway = resolved_gateway(account);
+        let mut mismatched_account = account;
+        mismatched_account.gateway_configuration_id = Uuid::now_v7();
+        let mismatched_command = enrollment_command(
+            mismatched_account,
+            subscriber_id,
+            Uuid::now_v7(),
+            "mismatched-gateway",
+            full_price("base_subscription", 1_000),
+        );
+        assert_eq!(
+            SubscriptionEnrollmentReservation::from_command(&mismatched_command, &gateway)
+                .expect_err("reservation must bind to the resolved configuration"),
+            syrup_rail::SubscriptionEnrollmentReservationBuildError::GatewayIdentityMismatch,
+        );
+        let command = enrollment_command(
+            account,
+            subscriber_id,
+            Uuid::now_v7(),
+            "same-key",
+            full_price("base_subscription", 1_000),
+        );
+        let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+        let mut transaction = database.pool.begin().await?;
+        let reserved = reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &reservation,
+        )
+        .await?;
+        let attempt = match reserved {
+            SubscriptionEnrollmentReservationOutcome::Reserved(attempt) => attempt,
+            other => return Err(format!("unexpected reservation outcome: {other:?}").into()),
+        };
+        assert_eq!(attempt.status(), PaymentAttemptStatus::Pending);
+        assert_eq!(
+            attempt.request().fingerprint().expose(),
+            "subscription_initial:base_subscription:1000:USD:discount:none:expected:full_price:1000:USD"
+        );
+        assert!(attempt.state().timestamps().submitted_at().is_none());
+        transaction.commit().await?;
+
+        let persisted: String = sqlx::query_scalar(
+            "SELECT to_jsonb(attempts)::text FROM billing_payment_attempts attempts WHERE id = $1",
+        )
+        .bind(attempt.identity().attempt_id().as_uuid())
+        .fetch_one(&database.pool)
+        .await?;
+        assert!(!persisted.contains("token-secret"));
+        assert!(!format!("{reservation:?}").contains("token-secret"));
+
+        let replay_command = enrollment_command(
+            account,
+            subscriber_id,
+            Uuid::now_v7(),
+            "same-key",
+            full_price("base_subscription", 1_000),
+        );
+        let replay_reservation =
+            SubscriptionEnrollmentReservation::from_command(&replay_command, &gateway)?;
+        let mut transaction = database.pool.begin().await?;
+        let replay = reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &replay_reservation,
+        )
+        .await?;
+        assert!(matches!(
+            replay,
+            SubscriptionEnrollmentReservationOutcome::Replay(ref replayed)
+                if replayed.identity().attempt_id() == attempt.identity().attempt_id()
+        ));
+        transaction.commit().await?;
+
+        let changed_plan_command = enrollment_command(
+            account,
+            subscriber_id,
+            Uuid::now_v7(),
+            "same-key",
+            full_price("premium", 1_000),
+        );
+        let changed_plan_reservation =
+            SubscriptionEnrollmentReservation::from_command(&changed_plan_command, &gateway)?;
+        let mut transaction = database.pool.begin().await?;
+        assert_eq!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &changed_plan_reservation,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::IdempotencyConflict,
+        );
+        transaction.rollback().await?;
+
+        let mut transaction = database.pool.begin().await?;
+        let admitted = admit_subscription_enrollment_submission_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &replay_reservation,
+        )
+        .await?;
+        assert!(matches!(
+            admitted,
+            SubscriptionEnrollmentSubmissionOutcome::Admitted(ref admitted)
+                if admitted.identity().attempt_id() == attempt.identity().attempt_id()
+                    && admitted.state().timestamps().submitted_at().is_some()
+        ));
+        transaction.commit().await?;
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offer()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("enroll_stale").await?;
+        install_host_offers(&database).await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let plan_key = "base_subscription";
+        set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+        let gateway = resolved_gateway(account);
+
+        let before_boundary_subscriber = Uuid::now_v7();
+        let before_boundary = SubscriptionEnrollmentReservation::from_command(
+            &enrollment_command(
+                account,
+                before_boundary_subscriber,
+                Uuid::now_v7(),
+                "before-boundary",
+                full_price(plan_key, 1_000),
+            ),
+            &gateway,
+        )?;
+        let mut transaction = database.pool.begin().await?;
+        let before_boundary_attempt = match reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &before_boundary,
+        )
+        .await?
+        {
+            SubscriptionEnrollmentReservationOutcome::Reserved(attempt) => attempt,
+            other => return Err(format!("unexpected reservation outcome: {other:?}").into()),
+        };
+        transaction.commit().await?;
+        sqlx::query(
+            "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '29 minutes 59 seconds' WHERE id = $1",
+        )
+        .bind(before_boundary_attempt.identity().attempt_id().as_uuid())
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
+        )
+        .bind(account.billing_scope_id)
+        .bind(plan_key)
+        .execute(&database.pool)
+        .await?;
+        let mut transaction = database.pool.begin().await?;
+        assert_eq!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &before_boundary,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Rejected(
+                SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged,
+            )
+        );
+        transaction.rollback().await?;
+        let before_boundary_status: String =
+            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+                .bind(before_boundary_attempt.identity().attempt_id().as_uuid())
+                .fetch_one(&database.pool)
+                .await?;
+        assert_eq!(before_boundary_status, "pending");
+
+        set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+        let boundary_subscriber = Uuid::now_v7();
+        let boundary = SubscriptionEnrollmentReservation::from_command(
+            &enrollment_command(
+                account,
+                boundary_subscriber,
+                Uuid::now_v7(),
+                "at-boundary",
+                full_price(plan_key, 1_000),
+            ),
+            &gateway,
+        )?;
+        let mut transaction = database.pool.begin().await?;
+        let boundary_attempt = match reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &boundary,
+        )
+        .await?
+        {
+            SubscriptionEnrollmentReservationOutcome::Reserved(attempt) => attempt,
+            other => return Err(format!("unexpected reservation outcome: {other:?}").into()),
+        };
+        transaction.commit().await?;
+        sqlx::query(
+            "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '30 minutes' WHERE id = $1",
+        )
+        .bind(boundary_attempt.identity().attempt_id().as_uuid())
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
+        )
+        .bind(account.billing_scope_id)
+        .bind(plan_key)
+        .execute(&database.pool)
+        .await?;
+        let boundary_replay = SubscriptionEnrollmentReservation::from_command(
+            &enrollment_command(
+                account,
+                boundary_subscriber,
+                Uuid::now_v7(),
+                "at-boundary",
+                full_price(plan_key, 1_000),
+            ),
+            &gateway,
+        )?;
+
+        let mut transaction = database.pool.begin().await?;
+        let replay = reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &boundary_replay,
+        )
+        .await?;
+        let expired = match replay {
+            SubscriptionEnrollmentReservationOutcome::Replay(attempt) => attempt,
+            other => return Err(format!("unexpected stale replay outcome: {other:?}").into()),
+        };
+        assert_eq!(
+            expired.identity().attempt_id(),
+            boundary_attempt.identity().attempt_id()
+        );
+        assert_eq!(expired.status(), PaymentAttemptStatus::Failed);
+        assert_eq!(
+            expired.state().resolution_code(),
+            Some(PaymentResolutionCode::SubscriptionInitialPreparedAttemptExpired)
+        );
+        assert!(expired.state().timestamps().submitted_at().is_none());
+        transaction.commit().await?;
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn saved_discount_survives_repricing_but_not_pre_submission_expiry()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("enroll_discount").await?;
+        install_host_offers(&database).await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let plan_key = "base_subscription";
+        set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+        let code_id = create_discount_code(&database, account.billing_scope_id, plan_key).await?;
+        let gateway = resolved_gateway(account);
+
+        let subscriber_a = Uuid::now_v7();
+        let claim_a = create_saved_claim(
+            &database,
+            account.billing_scope_id,
+            subscriber_a,
+            plan_key,
+            code_id,
+        )
+        .await?;
+        let command_a = enrollment_command(
+            account,
+            subscriber_a,
+            Uuid::now_v7(),
+            "discount-a",
+            discounted_expected(plan_key),
+        );
+        let reservation_a = SubscriptionEnrollmentReservation::from_command(&command_a, &gateway)?;
+        let mut transaction = database.pool.begin().await?;
+        let attempt_a = match reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &reservation_a,
+        )
+        .await?
+        {
+            SubscriptionEnrollmentReservationOutcome::Reserved(attempt) => attempt,
+            other => return Err(format!("unexpected discounted reservation: {other:?}").into()),
+        };
+        transaction.commit().await?;
+        let discount = attempt_a
+            .request()
+            .target()
+            .enrollment_discount()
+            .expect("saved discount should be snapshotted");
+        assert_eq!(discount.claim_id().as_uuid(), &claim_a);
+        assert_eq!(discount.code_id().as_uuid(), &code_id);
+        assert_eq!(attempt_a.request().amount().cents(), 800);
+        assert_eq!(
+            attempt_a.request().fingerprint().expose(),
+            format!(
+                "subscription_initial:base_subscription:800:USD:discount:{claim_a}:{code_id}:SAVE20:percent_off:none:2000:USD:1000:800:limited_months:3:expected:discounted:SAVE20:percent_off:none:2000:limited_months:3:USD:1000:800"
+            )
+        );
+        let debug = format!("{attempt_a:?}");
+        assert!(!debug.contains("SAVE20"));
+        assert!(!debug.contains("Sensitive campaign"));
+
+        set_offer(&database, account.billing_scope_id, plan_key, 1_400).await?;
+        let mut transaction = database.pool.begin().await?;
+        assert!(matches!(
+            admit_subscription_enrollment_submission_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &reservation_a,
+            )
+            .await?,
+            SubscriptionEnrollmentSubmissionOutcome::Admitted(_)
+        ));
+        transaction.commit().await?;
+
+        let subscriber_b = Uuid::now_v7();
+        let claim_b = create_saved_claim(
+            &database,
+            account.billing_scope_id,
+            subscriber_b,
+            plan_key,
+            code_id,
+        )
+        .await?;
+        let command_b = enrollment_command(
+            account,
+            subscriber_b,
+            Uuid::now_v7(),
+            "discount-b",
+            discounted_expected(plan_key),
+        );
+        let reservation_b = SubscriptionEnrollmentReservation::from_command(&command_b, &gateway)?;
+        let mut transaction = database.pool.begin().await?;
+        assert!(matches!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &reservation_b,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Reserved(_)
+        ));
+        transaction.commit().await?;
+        sqlx::query(
+            "UPDATE billing_subscription_discount_claims SET status = 'expired' WHERE id = $1",
+        )
+        .bind(claim_b)
+        .execute(&database.pool)
+        .await?;
+        let mut transaction = database.pool.begin().await?;
+        let rejected = admit_subscription_enrollment_submission_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &reservation_b,
+        )
+        .await?;
+        assert!(matches!(
+            rejected,
+            SubscriptionEnrollmentSubmissionOutcome::Rejected {
+                ref attempt,
+                reason: SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged,
+            } if attempt.status() == PaymentAttemptStatus::Failed
+                && attempt.state().timestamps().submitted_at().is_none()
+        ));
+        transaction.commit().await?;
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn active_grant_blocks_only_its_exact_plan() -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("enroll_grant").await?;
+        install_host_offers(&database).await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        set_offer(&database, account.billing_scope_id, "basic", 1_000).await?;
+        set_offer(&database, account.billing_scope_id, "premium", 2_000).await?;
+        let subscriber_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_subscription_grants (
+                id, billing_scope_id, subscriber_id, plan_key, grant_kind,
+                reason, starts_at, ends_at, granted_by_actor_id
+            ) VALUES (
+                $1, $2, $3, 'basic', 'promotion', 'launch',
+                clock_timestamp() - interval '1 minute',
+                clock_timestamp() + interval '1 day', $4
+            )
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(Uuid::now_v7())
+        .execute(&database.pool)
+        .await?;
+        let gateway = resolved_gateway(account);
+
+        let basic = SubscriptionEnrollmentReservation::from_command(
+            &enrollment_command(
+                account,
+                subscriber_id,
+                Uuid::now_v7(),
+                "basic-grant",
+                full_price("basic", 1_000),
+            ),
+            &gateway,
+        )?;
+        let mut transaction = database.pool.begin().await?;
+        assert_eq!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &basic,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Rejected(
+                SubscriptionEnrollmentReservationRejection::ActiveGrant,
+            )
+        );
+        transaction.rollback().await?;
+
+        let premium = SubscriptionEnrollmentReservation::from_command(
+            &enrollment_command(
+                account,
+                subscriber_id,
+                Uuid::now_v7(),
+                "premium-with-basic-grant",
+                full_price("premium", 2_000),
+            ),
+            &gateway,
+        )?;
+        let mut transaction = database.pool.begin().await?;
+        assert!(matches!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &premium,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Reserved(_)
+        ));
+        transaction.commit().await?;
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn gateway_configuration_rotation_rejects_prepared_submission()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("enroll_rotate").await?;
+        install_host_offers(&database).await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let plan_key = "base_subscription";
+        set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+        let gateway = resolved_gateway(account);
+        let reservation = SubscriptionEnrollmentReservation::from_command(
+            &enrollment_command(
+                account,
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                "rotated-configuration",
+                full_price(plan_key, 1_000),
+            ),
+            &gateway,
+        )?;
+        let mut transaction = database.pool.begin().await?;
+        assert!(matches!(
+            reserve_subscription_enrollment_in_transaction(
+                &mut transaction,
+                &TestOfferStore,
+                &reservation,
+            )
+            .await?,
+            SubscriptionEnrollmentReservationOutcome::Reserved(_)
+        ));
+        transaction.commit().await?;
+
+        sqlx::query(
+            "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2, updated_at = clock_timestamp() WHERE id = $1",
+        )
+        .bind(account.gateway_account_id)
+        .bind(Uuid::now_v7())
+        .execute(&database.pool)
+        .await?;
+        let mut transaction = database.pool.begin().await?;
+        let rejected = admit_subscription_enrollment_submission_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &reservation,
+        )
+        .await?;
+        assert!(matches!(
+            rejected,
+            SubscriptionEnrollmentSubmissionOutcome::Rejected {
+                ref attempt,
+                reason: SubscriptionEnrollmentSubmissionRejection::GatewayConfigurationChanged,
+            } if attempt.status() == PaymentAttemptStatus::Failed
+                && attempt.state().timestamps().submitted_at().is_none()
+        ));
+        transaction.commit().await?;
+        database.cleanup().await
+    }
 
     #[tokio::test]
     async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), Box<dyn Error>>

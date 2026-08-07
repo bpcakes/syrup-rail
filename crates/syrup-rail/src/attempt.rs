@@ -4,10 +4,11 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::{
-    BillingPeriod, BillingScopeId, GatewayAccountId, GatewayConfigurationId, GatewayDiagnostic,
-    GatewayLifecycleState, GatewayOrderId, GatewayTransactionId, HostChargeTargetId,
-    IdempotencyKey, Money, PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus,
-    PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence, SubscriberId,
+    BillingContact, BillingPeriod, BillingScopeId, GatewayAccountId, GatewayConfigurationId,
+    GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId, GatewayTransactionId,
+    HostChargeTargetId, IdempotencyKey, Money, PaymentAttemptId, PaymentAttemptKind,
+    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence,
+    SubscriberId, SubscriptionDiscountDuration, SubscriptionDiscountKind,
     SubscriptionEnrollmentDiscountSnapshot, SubscriptionId, SubscriptionStatus,
 };
 
@@ -37,6 +38,107 @@ impl PaymentAttemptFingerprint {
 
     pub fn expose(&self) -> &str {
         &self.0
+    }
+
+    /// Builds the historical plan-bearing initial-enrollment fingerprint.
+    ///
+    /// CreditKit's `base_subscription` plan therefore retains its exact
+    /// pre-extraction bytes, while another host receives the same canonical
+    /// grammar with its own plan key.
+    pub fn for_subscription_initial(
+        plan_key: &PlanKey,
+        amount: Money,
+        discount: Option<&SubscriptionEnrollmentDiscountSnapshot>,
+    ) -> Self {
+        let currency_code = amount.currency();
+        let currency = currency_code.as_str();
+        let authoritative = match discount {
+            Some(discount) => {
+                let snapshot = discount.snapshot();
+                format!(
+                    "subscription_initial:{plan_key}:{}:{currency}:discount:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                    amount.cents(),
+                    discount.claim_id(),
+                    discount.code_id(),
+                    snapshot.code().as_str(),
+                    snapshot.kind().as_str(),
+                    discount_amount_off(snapshot.kind()),
+                    discount_percent_off(snapshot.kind()),
+                    snapshot.currency().as_str(),
+                    snapshot.base_charge().cents(),
+                    snapshot.discounted_charge().cents(),
+                    snapshot.duration().as_str(),
+                    discount_duration_months(snapshot.duration()),
+                )
+            }
+            None => format!(
+                "subscription_initial:{plan_key}:{}:{currency}:discount:none",
+                amount.cents()
+            ),
+        };
+        let expected =
+            subscription_initial_expected_fingerprint(amount, discount.map(|d| d.snapshot()));
+        Self(format!("{authoritative}:expected:{expected}"))
+    }
+
+    pub fn matches_subscription_initial_expected_charge(
+        &self,
+        plan_key: &PlanKey,
+        expected: &crate::SubscriptionEnrollmentExpectedCharge,
+    ) -> bool {
+        if expected.plan_key() != plan_key {
+            return false;
+        }
+        let expected_fingerprint = subscription_initial_expected_fingerprint(
+            expected.charge().money(),
+            expected.discount_snapshot(),
+        );
+        self.0
+            .ends_with(&format!(":expected:{expected_fingerprint}"))
+    }
+}
+
+fn subscription_initial_expected_fingerprint(
+    amount: Money,
+    discount: Option<&crate::SubscriptionDiscountSnapshot>,
+) -> String {
+    let currency_code = amount.currency();
+    let currency = currency_code.as_str();
+    match discount {
+        Some(snapshot) => format!(
+            "discounted:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            snapshot.code().as_str(),
+            snapshot.kind().as_str(),
+            discount_amount_off(snapshot.kind()),
+            discount_percent_off(snapshot.kind()),
+            snapshot.duration().as_str(),
+            discount_duration_months(snapshot.duration()),
+            snapshot.currency().as_str(),
+            snapshot.base_charge().cents(),
+            snapshot.discounted_charge().cents(),
+        ),
+        None => format!("full_price:{}:{currency}", amount.cents()),
+    }
+}
+
+fn discount_amount_off(kind: SubscriptionDiscountKind) -> String {
+    match kind {
+        SubscriptionDiscountKind::AmountOffCents(value) => value.get().to_string(),
+        SubscriptionDiscountKind::PercentOffBasisPoints(_) => "none".to_owned(),
+    }
+}
+
+fn discount_percent_off(kind: SubscriptionDiscountKind) -> String {
+    match kind {
+        SubscriptionDiscountKind::AmountOffCents(_) => "none".to_owned(),
+        SubscriptionDiscountKind::PercentOffBasisPoints(value) => value.get().to_string(),
+    }
+}
+
+fn discount_duration_months(duration: SubscriptionDiscountDuration) -> String {
+    match duration {
+        SubscriptionDiscountDuration::Indefinite => "none".to_owned(),
+        SubscriptionDiscountDuration::LimitedMonths(value) => value.get().to_string(),
     }
 }
 
@@ -124,6 +226,18 @@ impl BillingContactSnapshot {
             name: normalize_optional(name),
             email: normalize_optional(email),
         }
+    }
+
+    pub fn from_billing_contact(contact: &BillingContact) -> Self {
+        let name = [contact.first_name(), contact.last_name()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self::new(
+            (!name.is_empty()).then_some(name),
+            contact.email().map(ToOwned::to_owned),
+        )
     }
 
     pub fn name(&self) -> Option<&str> {

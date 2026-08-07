@@ -13,8 +13,9 @@ and transaction orchestration.
   behavior fixtures behind `schema-contract-test-support`.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
   and exact configuration activation.
-- `src/attempts.rs` — typed canonical payment-attempt loading and exact-owner
-  idempotency row locking.
+- `src/attempts.rs` — typed canonical payment-attempt loading, exact-owner
+  idempotency row locking, and token-free initial-enrollment reservation/final
+  submission admission.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
   caller-transaction protected-write guard.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
@@ -34,9 +35,9 @@ and transaction orchestration.
   `src/schema_contract.rs` and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
-- Change canonical attempt row parsing or idempotency row locking in
-  `src/attempts.rs`; keep payment tokens and provider credentials outside the
-  durable model.
+- Change canonical attempt row parsing, idempotency locking, or initial
+  enrollment reservation/final admission in `src/attempts.rs`; keep payment
+  tokens and provider credentials outside the transaction and durable model.
 - Change reusable subscription access projection or protected-write admission
   in `src/entitlement.rs`; keep host authentication and gateway availability
   outside the query/guard.
@@ -65,6 +66,9 @@ and transaction orchestration.
   shared operations never persist or receive plaintext provider credentials.
 - Offer-dependent discount operations lock the exact host plan row through the
   caller's connection; implementations must not open a second connection.
+- Initial enrollment reserves a token-free attempt before provider I/O, then
+  revalidates plan, claim, billing blockers, attempt fingerprint, and exact
+  gateway configuration under locks immediately before submission admission.
 - Subscriber scrubbing enters every affected gateway-account payment-method
   domain in deterministic order before mutating attempts or methods and never
   changes immutable processor-charge observations.

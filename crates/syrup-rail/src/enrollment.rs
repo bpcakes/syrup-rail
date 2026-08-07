@@ -1,10 +1,12 @@
 use std::fmt;
 
 use crate::{
-    BillingContact, BillingScopeId, ChargeAmount, DiscountClaimId, DiscountCodeId,
-    GatewayConfigurationId, IdempotencyKey, PaymentAttemptId, PaymentToken, PlanKey, SubscriberId,
-    SubscriptionDiscountSnapshot, SubscriptionOffer,
+    BillingContact, BillingContactSnapshot, BillingScopeId, ChargeAmount, DiscountClaimId,
+    DiscountCodeId, GatewayConfigurationId, GatewayOrderId, GatewayProviderKey, IdempotencyKey,
+    PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentToken,
+    PlanKey, ResolvedGateway, SubscriberId, SubscriptionDiscountSnapshot, SubscriptionOffer,
 };
+use thiserror::Error;
 
 /// Immutable discount evidence copied onto an initial payment attempt.
 ///
@@ -67,13 +69,35 @@ impl SubscriptionEnrollmentDiscountSnapshot {
 /// the requested plan to have a current locked offer. This distinction prevents
 /// a saved claim from being silently removed or introduced between the request,
 /// durable reservation, and final gateway admission.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub enum SubscriptionEnrollmentExpectedCharge {
     FullPrice(SubscriptionOffer),
     Discounted {
         plan_key: PlanKey,
         snapshot: SubscriptionDiscountSnapshot,
     },
+}
+
+impl fmt::Debug for SubscriptionEnrollmentExpectedCharge {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FullPrice(offer) => formatter
+                .debug_struct("SubscriptionEnrollmentExpectedCharge::FullPrice")
+                .field("plan_key", offer.plan_key())
+                .field("charge", &offer.base_charge())
+                .finish(),
+            Self::Discounted { plan_key, snapshot } => formatter
+                .debug_struct("SubscriptionEnrollmentExpectedCharge::Discounted")
+                .field("plan_key", plan_key)
+                .field("has_code", &true)
+                .field("has_label", &snapshot.label().is_some())
+                .field("kind", &snapshot.kind())
+                .field("duration", &snapshot.duration())
+                .field("base_charge", &snapshot.base_charge())
+                .field("discounted_charge", &snapshot.discounted_charge())
+                .finish(),
+        }
+    }
 }
 
 impl SubscriptionEnrollmentExpectedCharge {
@@ -221,6 +245,137 @@ impl fmt::Debug for EnrollSubscription {
     }
 }
 
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentReservationBuildError {
+    #[error("resolved gateway identity does not match the enrollment command")]
+    GatewayIdentityMismatch,
+}
+
+/// Secret-free input for the durable enrollment reservation transaction.
+///
+/// Construction binds the command to the exact provider-free resolver result
+/// and derives the provider order reference before any database lock is held.
+#[derive(Clone)]
+pub struct SubscriptionEnrollmentReservation {
+    identity: PaymentAttemptIdentity,
+    provider_key: GatewayProviderKey,
+    idempotency_key: IdempotencyKey,
+    gateway_order_id: GatewayOrderId,
+    billing_contact: BillingContactSnapshot,
+    expected_charge: SubscriptionEnrollmentExpectedCharge,
+}
+
+impl SubscriptionEnrollmentReservation {
+    pub fn from_command(
+        command: &EnrollSubscription,
+        gateway: &ResolvedGateway,
+    ) -> Result<Self, SubscriptionEnrollmentReservationBuildError> {
+        if gateway.billing_scope_id() != command.billing_scope_id()
+            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
+        {
+            return Err(SubscriptionEnrollmentReservationBuildError::GatewayIdentityMismatch);
+        }
+        let identity = PaymentAttemptIdentity::new(
+            command.attempt_id(),
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            gateway.gateway_account_id(),
+            gateway.gateway_configuration_id(),
+        );
+        let gateway_order_id = gateway.mutation_reference_factory().for_attempt(
+            PaymentAttemptKind::SubscriptionInitial,
+            command.attempt_id(),
+        );
+        Ok(Self {
+            identity,
+            provider_key: gateway.provider_key().clone(),
+            idempotency_key: command.idempotency_key().clone(),
+            gateway_order_id,
+            billing_contact: BillingContactSnapshot::from_billing_contact(
+                command.billing_contact(),
+            ),
+            expected_charge: command.expected_charge().clone(),
+        })
+    }
+
+    pub const fn identity(&self) -> PaymentAttemptIdentity {
+        self.identity
+    }
+
+    pub const fn provider_key(&self) -> &GatewayProviderKey {
+        &self.provider_key
+    }
+
+    pub const fn idempotency_key(&self) -> &IdempotencyKey {
+        &self.idempotency_key
+    }
+
+    pub const fn gateway_order_id(&self) -> &GatewayOrderId {
+        &self.gateway_order_id
+    }
+
+    pub const fn billing_contact(&self) -> &BillingContactSnapshot {
+        &self.billing_contact
+    }
+
+    pub const fn expected_charge(&self) -> &SubscriptionEnrollmentExpectedCharge {
+        &self.expected_charge
+    }
+
+    pub const fn plan_key(&self) -> &PlanKey {
+        self.expected_charge.plan_key()
+    }
+}
+
+impl fmt::Debug for SubscriptionEnrollmentReservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubscriptionEnrollmentReservation")
+            .field("identity", &self.identity)
+            .field("provider_key", &self.provider_key)
+            .field("has_idempotency_key", &true)
+            .field("has_gateway_order_id", &true)
+            .field("billing_contact", &self.billing_contact)
+            .field("expected_charge", &self.expected_charge)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentReservationRejection {
+    CurrentSubscription,
+    ActiveGrant,
+    UnresolvedProcessorCharge,
+    EnrollmentTermsChanged,
+    GatewayConfigurationChanged,
+    AttemptInProgress,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentReservationOutcome {
+    Reserved(PaymentAttempt),
+    Replay(PaymentAttempt),
+    IdempotencyConflict,
+    Rejected(SubscriptionEnrollmentReservationRejection),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentSubmissionRejection {
+    BillingStateChanged,
+    EnrollmentTermsChanged,
+    GatewayConfigurationChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentSubmissionOutcome {
+    Admitted(PaymentAttempt),
+    AlreadyAdmitted(PaymentAttempt),
+    Rejected {
+        attempt: PaymentAttempt,
+        reason: SubscriptionEnrollmentSubmissionRejection,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
@@ -312,9 +467,8 @@ mod tests {
 
     #[test]
     fn durable_discount_debug_omits_code_and_label_values() {
-        let snapshot = SubscriptionEnrollmentDiscountSnapshot::new(
-            DiscountClaimId::new(Uuid::from_u128(10)),
-            DiscountCodeId::new(Uuid::from_u128(11)),
+        let expected = SubscriptionEnrollmentExpectedCharge::discounted(
+            plan("basic"),
             SubscriptionDiscountSnapshot::new(
                 SubscriptionDiscountCode::new("SECRET20").unwrap(),
                 Some("Sensitive campaign label".to_owned()),
@@ -326,6 +480,20 @@ mod tests {
                 ChargeAmount::new(800, CurrencyCode::new("USD").unwrap()).unwrap(),
             )
             .unwrap(),
+        );
+        let expected_debug = format!("{expected:?}");
+        assert!(!expected_debug.contains("SECRET20"));
+        assert!(!expected_debug.contains("Sensitive campaign label"));
+        assert!(expected_debug.contains("has_code"));
+        assert!(expected_debug.contains("has_label"));
+
+        let snapshot = SubscriptionEnrollmentDiscountSnapshot::new(
+            DiscountClaimId::new(Uuid::from_u128(10)),
+            DiscountCodeId::new(Uuid::from_u128(11)),
+            expected
+                .discount_snapshot()
+                .expect("discounted expectation should retain snapshot")
+                .clone(),
         );
         let debug = format!("{snapshot:?}");
         assert!(!debug.contains("SECRET20"));

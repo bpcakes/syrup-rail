@@ -18,8 +18,9 @@ pub mod schema_contract;
 mod test_support;
 
 pub use attempts::{
-    PaymentAttemptStoreError, find_payment_attempt_by_id_in_transaction,
-    lock_payment_attempt_by_idempotency_in_transaction,
+    PaymentAttemptStoreError, admit_subscription_enrollment_submission_in_transaction,
+    find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,
+    reserve_subscription_enrollment_in_transaction,
 };
 pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
 pub use deletion::{billing_deletion_blockers, scrub_subscriber_billing_data};
