@@ -17,7 +17,10 @@ use syrup_rail::{
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationOutcome,
     SubscriptionEnrollmentReservationRejection, SubscriptionEnrollmentSubmissionOutcome,
     SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionInitialApplication,
-    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
+    SubscriptionPaymentStateSnapshot, SubscriptionRecoveryPreflightOutcome,
+    SubscriptionRecoveryReservation, SubscriptionRecoveryReservationOutcome,
+    SubscriptionRecoveryReservationRejection, SubscriptionRecoverySubmissionOutcome,
+    SubscriptionRecoverySubmissionRejection, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -34,6 +37,11 @@ const INITIAL_TERMS_CHANGED_TEXT: &str =
     "Checkout was canceled before submission because enrollment terms changed.";
 const INITIAL_CONFIGURATION_CHANGED_TEXT: &str =
     "Checkout was canceled before submission because payment configuration changed.";
+const RECOVERY_STATE_CHANGED_TEXT: &str =
+    "Subscription recovery was canceled before submission because billing state changed.";
+const RECOVERY_CONFIGURATION_CHANGED_TEXT: &str =
+    "Subscription recovery was canceled before submission because payment configuration changed.";
+const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
 
 const PAYMENT_ATTEMPT_SELECT: &str = r#"
     SELECT id, billing_scope_id, subscriber_id, plan_key,
@@ -576,6 +584,255 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
     Ok(SubscriptionEnrollmentSubmissionOutcome::Admitted(admitted))
 }
 
+/// Resolves subscriber-wide recovery idempotency before host admission.
+///
+/// A recovery command deliberately contains no amount or period. Matching is
+/// therefore against the immutable canonical target already stored on the
+/// attempt, plus the command's owner, plan, and gateway configuration.
+pub async fn preflight_subscription_recovery_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &syrup_rail::RecoverSubscriptionPayment,
+) -> Result<SubscriptionRecoveryPreflightOutcome, PaymentAttemptStoreError> {
+    set_enrollment_timeouts(transaction).await?;
+    let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        false,
+    )
+    .await?
+    else {
+        return Ok(SubscriptionRecoveryPreflightOutcome::Continue);
+    };
+    Ok(if recovery_attempt_matches_command(&existing, command) {
+        SubscriptionRecoveryPreflightOutcome::Replay(Box::new(existing))
+    } else {
+        SubscriptionRecoveryPreflightOutcome::IdempotencyConflict
+    })
+}
+
+/// Locks the canonical subscription, derives the exact due-period request, and
+/// inserts a token-free recovery attempt in one transaction.
+pub async fn reserve_subscription_recovery_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &syrup_rail::RecoverSubscriptionPayment,
+    gateway: &syrup_rail::ResolvedGateway,
+) -> Result<SubscriptionRecoveryReservationOutcome, PaymentAttemptStoreError> {
+    set_enrollment_timeouts(transaction).await?;
+    lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
+
+    if let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        true,
+    )
+    .await?
+    {
+        return Ok(if recovery_attempt_matches_command(&existing, command) {
+            SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
+        } else {
+            SubscriptionRecoveryReservationOutcome::IdempotencyConflict
+        });
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT id, gateway_account_id, payment_method_id, amount_cents, currency,
+            next_renewal_at, initial_transaction_id, status,
+            next_renewal_at <= clock_timestamp() AS is_due
+        FROM billing_subscriptions
+        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
+            AND status IN ('active', 'past_due')
+        ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, updated_at DESC, id DESC
+        LIMIT 1
+        FOR UPDATE
+        "#,
+    )
+    .bind(command.billing_scope_id().as_uuid())
+    .bind(command.subscriber_id().as_uuid())
+    .bind(command.plan_key().as_str())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let Some(row) = row else {
+        return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::SubscriptionNotFound,
+        ));
+    };
+    if !row.try_get::<bool, _>("is_due")? {
+        return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::PaymentNotDue,
+        ));
+    }
+
+    let subscription_id = SubscriptionId::new(row.try_get("id")?);
+    fail_stale_unsubmitted_payment_method_updates(transaction, subscription_id).await?;
+    let gateway_account_id = GatewayAccountId::new(row.try_get("gateway_account_id")?);
+    if gateway_account_id != gateway.gateway_account_id()
+        || !gateway_identity_matches_recovery(transaction, command, gateway).await?
+    {
+        return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::GatewayConfigurationChanged,
+        ));
+    }
+    if blocking_subscription_charge_attempt_exists(transaction, subscription_id).await? {
+        return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::AttemptInProgress,
+        ));
+    }
+    if blocking_payment_method_update_exists(transaction, subscription_id).await? {
+        return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::PaymentMethodUpdateInProgress,
+        ));
+    }
+
+    let payment_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
+    let period_start_at: DateTime<Utc> = row.try_get("next_renewal_at")?;
+    let period =
+        syrup_rail::next_monthly_billing_period(period_start_at).map_err(|_| invalid_state())?;
+    let currency_value: String = row.try_get("currency")?;
+    let currency = CurrencyCode::new(&currency_value).map_err(|_| invalid_state())?;
+    let charge =
+        ChargeAmount::new(row.try_get("amount_cents")?, currency).map_err(|_| invalid_state())?;
+    let transaction_value: String = row.try_get("initial_transaction_id")?;
+    let initial_transaction_id =
+        GatewayTransactionId::new(transaction_value).map_err(|_| invalid_state())?;
+    let status = row
+        .try_get::<String, _>("status")?
+        .parse::<SubscriptionStatus>()
+        .map_err(|_| invalid_state())?;
+    let reservation = SubscriptionRecoveryReservation::from_locked_subscription(
+        command,
+        gateway,
+        command.attempt_id(),
+        subscription_id,
+        payment_method_id,
+        initial_transaction_id,
+        status,
+        period,
+        charge,
+    )
+    .map_err(|_| invalid_state())?;
+
+    let inserted = insert_recovery_attempt(transaction, &reservation).await?;
+    if inserted {
+        let attempt = payment_attempt_by_idempotency(
+            transaction,
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            command.idempotency_key(),
+            true,
+        )
+        .await?
+        .ok_or_else(invalid_state)?;
+        return Ok(SubscriptionRecoveryReservationOutcome::Reserved(
+            Box::new(reservation),
+            Box::new(attempt),
+        ));
+    }
+
+    if let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        true,
+    )
+    .await?
+    {
+        return Ok(if recovery_attempt_matches_command(&existing, command) {
+            SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
+        } else {
+            SubscriptionRecoveryReservationOutcome::IdempotencyConflict
+        });
+    }
+    Ok(SubscriptionRecoveryReservationOutcome::Rejected(
+        SubscriptionRecoveryReservationRejection::AttemptInProgress,
+    ))
+}
+
+/// Revalidates the exact locked snapshot and commits one-shot provider
+/// admission. Every semantic rejection terminalizes the prepared attempt.
+pub async fn admit_subscription_recovery_submission_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<SubscriptionRecoverySubmissionOutcome, PaymentAttemptStoreError> {
+    set_enrollment_timeouts(transaction).await?;
+    let identity = reservation.identity();
+    lock_subscription_aggregate(
+        transaction,
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
+        .await?;
+    let attempt = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.request().idempotency_key(),
+        true,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    if !recovery_attempt_matches_reservation(&attempt, reservation) {
+        return Err(invalid_state());
+    }
+    if attempt.status() != PaymentAttemptStatus::Pending
+        || attempt.state().timestamps().submitted_at().is_some()
+    {
+        return Ok(SubscriptionRecoverySubmissionOutcome::AlreadyAdmitted(
+            attempt,
+        ));
+    }
+
+    let state_matches = recovery_subscription_state_matches(transaction, reservation).await?
+        && !blocking_subscription_charge_attempt_exists_except(
+            transaction,
+            reservation.subscription_id(),
+            identity.attempt_id(),
+        )
+        .await?
+        && !blocking_payment_method_update_exists(transaction, reservation.subscription_id())
+            .await?;
+    if !state_matches {
+        return reject_locked_recovery(
+            transaction,
+            attempt,
+            SubscriptionRecoverySubmissionRejection::BillingStateChanged,
+            RECOVERY_STATE_CHANGED_TEXT,
+        )
+        .await;
+    }
+    if !gateway_identity_matches_reservation(transaction, reservation).await? {
+        return reject_locked_recovery(
+            transaction,
+            attempt,
+            SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged,
+            RECOVERY_CONFIGURATION_CHANGED_TEXT,
+        )
+        .await;
+    }
+
+    sqlx::query(
+        "UPDATE billing_payment_attempts SET submitted_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL",
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    let admitted = find_payment_attempt_by_id_in_transaction(
+        transaction,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    Ok(SubscriptionRecoverySubmissionOutcome::Admitted(admitted))
+}
+
 /// Loads an attempt by its exact scope and durable identity without locking it.
 pub async fn find_payment_attempt_by_id_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
@@ -966,6 +1223,309 @@ async fn gateway_identity_matches(
 fn attempt_is_already_replayable(attempt: &PaymentAttempt) -> bool {
     attempt.status() != PaymentAttemptStatus::Pending
         || attempt.state().timestamps().submitted_at().is_some()
+}
+
+fn recovery_attempt_matches_command(
+    attempt: &PaymentAttempt,
+    command: &syrup_rail::RecoverSubscriptionPayment,
+) -> bool {
+    let identity = attempt.identity();
+    let PaymentAttemptTarget::SubscriptionRecovery {
+        plan_key,
+        period,
+        expected_state,
+        ..
+    } = attempt.request().target()
+    else {
+        return false;
+    };
+    identity.billing_scope_id() == command.billing_scope_id()
+        && identity.subscriber_id() == command.subscriber_id()
+        && identity.gateway_configuration_id() == command.gateway_configuration_id()
+        && plan_key == command.plan_key()
+        && attempt
+            .request()
+            .fingerprint()
+            .matches_subscription_recovery(
+                plan_key,
+                expected_state.subscription_id(),
+                expected_state.payment_method_id(),
+                *period.start_at(),
+                attempt.request().amount(),
+            )
+}
+
+fn recovery_attempt_matches_reservation(
+    attempt: &PaymentAttempt,
+    reservation: &SubscriptionRecoveryReservation,
+) -> bool {
+    attempt.identity() == reservation.identity()
+        && attempt.kind() == PaymentAttemptKind::SubscriptionRecovery
+        && attempt.request() == reservation.request()
+}
+
+async fn gateway_identity_matches_recovery(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: &syrup_rail::RecoverSubscriptionPayment,
+    gateway: &syrup_rail::ResolvedGateway,
+) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+        r#"
+        SELECT id, gateway_configuration_id, provider_key
+        FROM billing_gateway_accounts
+        WHERE billing_scope_id = $1 AND id = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(command.billing_scope_id().as_uuid())
+    .bind(gateway.gateway_account_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(
+        row.is_some_and(|(account_id, configuration_id, provider_key)| {
+            account_id == gateway.gateway_account_id().into_uuid()
+                && configuration_id == command.gateway_configuration_id().into_uuid()
+                && provider_key == gateway.provider_key().as_str()
+        }),
+    )
+}
+
+async fn gateway_identity_matches_reservation(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<bool, sqlx::Error> {
+    let identity = reservation.identity();
+    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+        r#"
+        SELECT id, gateway_configuration_id, provider_key
+        FROM billing_gateway_accounts
+        WHERE billing_scope_id = $1 AND id = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.gateway_account_id().as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    Ok(
+        row.is_some_and(|(account_id, configuration_id, provider_key)| {
+            account_id == identity.gateway_account_id().into_uuid()
+                && configuration_id == identity.gateway_configuration_id().into_uuid()
+                && provider_key == reservation.provider_key().as_str()
+        }),
+    )
+}
+
+async fn fail_stale_unsubmitted_payment_method_updates(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscription_id: SubscriptionId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'failed',
+            gateway_response_text = COALESCE(
+                gateway_response_text,
+                'Prepared payment method update expired before processor submission.'
+            ),
+            resolved_at = COALESCE(resolved_at, clock_timestamp()),
+            updated_at = clock_timestamp()
+        WHERE attempt_kind = 'subscription_payment_method_update'
+            AND subscription_id = $1
+            AND status = 'pending' AND submitted_at IS NULL
+            AND created_at <= clock_timestamp()
+                - ($2::bigint * interval '1 second')
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn blocking_subscription_charge_attempt_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscription_id: SubscriptionId,
+) -> Result<bool, sqlx::Error> {
+    blocking_subscription_charge_attempt_exists_except(
+        transaction,
+        subscription_id,
+        PaymentAttemptId::new(Uuid::nil()),
+    )
+    .await
+}
+
+async fn blocking_subscription_charge_attempt_exists_except(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscription_id: SubscriptionId,
+    excluded_attempt_id: PaymentAttemptId,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM billing_payment_attempts AS attempts
+            INNER JOIN billing_subscriptions AS subscriptions
+                ON subscriptions.id = attempts.subscription_id
+            WHERE attempts.subscription_id = $1
+                AND attempts.id <> $2
+                AND attempts.attempt_kind IN ('subscription_renewal', 'subscription_recovery')
+                AND (
+                    attempts.status IN ('pending', 'unknown', 'review_required')
+                    OR (
+                        attempts.status = 'approved'
+                        AND attempts.billing_period_start_at = subscriptions.next_renewal_at
+                    )
+                )
+        )
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(excluded_attempt_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+async fn blocking_payment_method_update_exists(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscription_id: SubscriptionId,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM billing_payment_attempts
+            WHERE subscription_id = $1
+                AND attempt_kind = 'subscription_payment_method_update'
+                AND status IN ('pending', 'unknown', 'review_required')
+        )
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+async fn recovery_subscription_state_matches(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<bool, sqlx::Error> {
+    let identity = reservation.identity();
+    let expected = reservation.expected_state();
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1 FROM billing_subscriptions
+            WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+                AND gateway_account_id = $4 AND plan_key = $5
+                AND status = $6 AND status IN ('active', 'past_due')
+                AND payment_method_id = $7 AND initial_transaction_id = $8
+                AND next_renewal_at = $9
+        )
+        "#,
+    )
+    .bind(reservation.subscription_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(reservation.plan_key().as_str())
+    .bind(expected.status().as_str())
+    .bind(expected.payment_method_id().as_uuid())
+    .bind(expected.initial_transaction_id().expose())
+    .bind(reservation.period().start_at())
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+async fn insert_recovery_attempt(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<bool, sqlx::Error> {
+    let identity = reservation.identity();
+    let request = reservation.request();
+    let expected = reservation.expected_state();
+    let result = sqlx::query(
+        r#"
+        INSERT INTO billing_payment_attempts (
+            id, billing_scope_id, subscriber_id, plan_key, subscription_id,
+            payment_method_id, attempt_kind, status, idempotency_key,
+            request_fingerprint, amount_cents, currency,
+            billing_period_start_at, billing_period_end_at,
+            gateway_account_id, gateway_configuration_id, gateway_order_id,
+            billing_name, billing_email,
+            subscription_expected_payment_method_id,
+            subscription_expected_initial_transaction_id,
+            subscription_expected_status
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, 'subscription_recovery', 'pending',
+            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+            $18, $19, $20
+        )
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(reservation.plan_key().as_str())
+    .bind(reservation.subscription_id().as_uuid())
+    .bind(expected.payment_method_id().as_uuid())
+    .bind(request.idempotency_key().expose())
+    .bind(request.fingerprint().expose())
+    .bind(request.amount().cents())
+    .bind(request.amount().currency().as_str())
+    .bind(reservation.period().start_at())
+    .bind(reservation.period().end_at())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(identity.gateway_configuration_id().as_uuid())
+    .bind(request.gateway_order_id().expose())
+    .bind(request.billing_contact().name())
+    .bind(request.billing_contact().email())
+    .bind(expected.payment_method_id().as_uuid())
+    .bind(expected.initial_transaction_id().expose())
+    .bind(expected.status().as_str())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+async fn reject_locked_recovery(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: PaymentAttempt,
+    reason: SubscriptionRecoverySubmissionRejection,
+    message: &'static str,
+) -> Result<SubscriptionRecoverySubmissionOutcome, PaymentAttemptStoreError> {
+    let resolution_code = match reason {
+        SubscriptionRecoverySubmissionRejection::BillingStateChanged => {
+            PaymentResolutionCode::SubscriptionRenewalRetryStateChangedBeforeCharge
+        }
+        SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged => {
+            PaymentResolutionCode::GatewayConfigurationBeforeSubmission
+        }
+    };
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'failed', resolution_code = $2,
+            gateway_response_text = $3,
+            resolved_at = COALESCE(resolved_at, clock_timestamp()),
+            updated_at = clock_timestamp()
+        WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL
+        "#,
+    )
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(resolution_code.as_str())
+    .bind(message)
+    .execute(&mut **transaction)
+    .await?;
+    let attempt = find_payment_attempt_by_id_in_transaction(
+        transaction,
+        attempt.identity().billing_scope_id(),
+        attempt.identity().attempt_id(),
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    Ok(SubscriptionRecoverySubmissionOutcome::Rejected { attempt, reason })
 }
 
 fn replay_matches_reservation(

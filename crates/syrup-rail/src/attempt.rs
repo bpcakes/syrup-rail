@@ -96,6 +96,39 @@ impl PaymentAttemptFingerprint {
         self.0
             .ends_with(&format!(":expected:{expected_fingerprint}"))
     }
+
+    /// Builds the canonical fingerprint for a subscriber-initiated recovery
+    /// of one exact subscription period.
+    pub fn for_subscription_recovery(
+        plan_key: &PlanKey,
+        subscription_id: SubscriptionId,
+        payment_method_id: PaymentMethodId,
+        period_start_at: DateTime<Utc>,
+        amount: Money,
+    ) -> Self {
+        Self(format!(
+            "subscription_recovery:{plan_key}:{subscription_id}:{payment_method_id}:{period_start_at}:{}:{}",
+            amount.cents(),
+            amount.currency().as_str(),
+        ))
+    }
+
+    pub fn matches_subscription_recovery(
+        &self,
+        plan_key: &PlanKey,
+        subscription_id: SubscriptionId,
+        payment_method_id: PaymentMethodId,
+        period_start_at: DateTime<Utc>,
+        amount: Money,
+    ) -> bool {
+        self == &Self::for_subscription_recovery(
+            plan_key,
+            subscription_id,
+            payment_method_id,
+            period_start_at,
+            amount,
+        )
+    }
 }
 
 fn subscription_initial_expected_fingerprint(

@@ -14,15 +14,15 @@ and transaction orchestration.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
   and exact configuration activation.
 - `src/attempts.rs` — typed canonical payment-attempt loading, exact-owner
-  idempotency row locking, and token-free initial-enrollment reservation/final
-  submission admission.
-- `src/enrollment_application.rs` — committed one-shot initial-sale authority,
-  foreground and reconciliation entrypoints into one atomic application path,
-  recurring-discount insertion, permanent charge observation, terminal-race
-  handling, and approved-failure compensation.
-- `src/subscription_billing_service.rs` — complete foreground initial-enrollment
-  orchestration from replay-before-admission through fresh cooldown and the
-  one-shot provider sale.
+  idempotency row locking, and token-free enrollment/recovery reservation and
+  final submission admission.
+- `src/enrollment_application.rs` — committed one-shot initial and recovery
+  sale authority, foreground and reconciliation entrypoints into one atomic
+  application path, recurring-discount progression, permanent charge
+  observation, terminal-race handling, and approved-failure compensation.
+- `src/subscription_billing_service.rs` — complete foreground enrollment and
+  recovery orchestration from replay-before-admission through fresh cooldown
+  and the one-shot provider sale.
 - `src/transactions.rs` — host-prepared billing transaction and typed event
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
@@ -44,18 +44,19 @@ and transaction orchestration.
   `src/schema_contract.rs` and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
-- Change canonical attempt row parsing, idempotency locking, or initial
-  enrollment reservation/final admission in `src/attempts.rs`; keep payment
+- Change canonical attempt row parsing, idempotency locking, or enrollment and
+  recovery reservation/final admission in `src/attempts.rs`; keep payment
   tokens and provider credentials outside the transaction and durable model.
-- Change initial provider submission, attempt/charge resolution, payment-method
-  and subscription creation, discount application, or approved-failure parking
-  in `src/enrollment_application.rs`; reconciliation must rebuild authority
-  from the exact durable attempt and must not submit another provider mutation.
-  Keep the complete application write set on the host-prepared transaction.
+- Change initial/recovery provider submission, attempt/charge resolution,
+  payment-method and subscription mutation, discount progression, or
+  approved-failure parking in `src/enrollment_application.rs`; reconciliation
+  must rebuild authority from the exact durable attempt and must not submit
+  another provider mutation. Keep the complete application write set on the
+  host-prepared transaction.
 - Change foreground replay, host admission, gateway resolution, cooldown and
   readiness ordering, or reservation-to-sale composition in
-  `src/subscription_billing_service.rs`; do not introduce another enrollment
-  path in a host adapter.
+  `src/subscription_billing_service.rs`; do not introduce another subscription
+  payment path in a host adapter.
 - Change the host transaction/event boundary in `src/transactions.rs`; do not
   add arbitrary SQL callbacks or a production no-op event implementation.
 - Change reusable subscription access projection or protected-write admission
@@ -104,6 +105,10 @@ and transaction orchestration.
   discount/claim, attempt, processor charge, and `SubscriptionStarted` event
   commit together. Pending confirmation requires a durable review attempt or
   immutable processor-charge observation.
+- Recovery derives its due period, amount, subscription identity, and expected
+  payment state from the locked canonical subscription. Approval replaces the
+  method, advances the period and discount, applies the immutable charge, and
+  appends `SubscriptionRenewed` in the same host-prepared transaction.
 - Subscriber scrubbing enters every affected gateway-account payment-method
   domain in deterministic order before mutating attempts or methods and never
   changes immutable processor-charge observations.

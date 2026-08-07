@@ -6,11 +6,14 @@ use syrup_rail::{
     EndUserMutationCommand, EndUserMutationOperation, EnrollSubscription, GatewayAccountId,
     GatewayAccountMode, GatewayDiagnostic, GatewayError, GatewayNotSubmittedError,
     GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayProviderKey, GatewayResolutionError,
-    GatewayResolver, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentResolutionCode,
-    ProcessorEvidence, SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPreflightOutcome,
+    GatewayResolver, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus,
+    PaymentResolutionCode, ProcessorEvidence, RecoverSubscriptionPayment,
+    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPreflightOutcome,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationBuildError,
     SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
-    SubscriptionEnrollmentSubmissionRejection,
+    SubscriptionEnrollmentSubmissionRejection, SubscriptionRecoveryPreflightOutcome,
+    SubscriptionRecoveryReservation, SubscriptionRecoveryReservationOutcome,
+    SubscriptionRecoveryReservationRejection, SubscriptionRecoverySubmissionRejection,
 };
 use thiserror::Error;
 
@@ -18,14 +21,18 @@ use crate::{
     BillingTransactionCoordinator, PaymentAttemptStoreError,
     SubscriptionEnrollmentAdmissionOutcome, SubscriptionEnrollmentApplicationError,
     SubscriptionEnrollmentProviderResult, SubscriptionOfferStore,
-    admit_subscription_enrollment_submission,
+    SubscriptionRecoveryAdmissionOutcome, SubscriptionRecoveryProviderResult,
+    admit_subscription_enrollment_submission, admit_subscription_recovery_submission,
     apply_reconciled_subscription_enrollment_gateway_outcome,
+    apply_reconciled_subscription_recovery_gateway_outcome,
     enrollment_application::{
         OutcomeResolutionBoundary, RateLimitCooldown, payment_result_for_attempt,
-        resolve_non_approved_outcome,
+        resolve_non_approved_outcome, resolve_recovery_non_approved_outcome,
     },
     preflight_subscription_enrollment_in_transaction,
-    reserve_subscription_enrollment_in_transaction, submit_admitted_subscription_enrollment,
+    preflight_subscription_recovery_in_transaction, reserve_subscription_enrollment_in_transaction,
+    reserve_subscription_recovery_in_transaction, submit_admitted_subscription_enrollment,
+    submit_admitted_subscription_recovery,
 };
 
 const INVALID_SERVICE_STATE: &str = "canonical subscription enrollment service state is invalid";
@@ -66,6 +73,10 @@ pub enum SubscriptionEnrollmentServiceError {
     ReservationRejected(SubscriptionEnrollmentReservationRejection),
     #[error("subscription enrollment submission was rejected")]
     SubmissionRejected(SubscriptionEnrollmentSubmissionRejection),
+    #[error("subscription recovery reservation was rejected")]
+    RecoveryReservationRejected(SubscriptionRecoveryReservationRejection),
+    #[error("subscription recovery submission was rejected")]
+    RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection),
     #[error("gateway mutation was not submitted")]
     GatewayNotSubmitted(#[source] GatewayNotSubmittedError),
     #[error("{0}")]
@@ -111,6 +122,14 @@ impl fmt::Debug for SubscriptionEnrollmentServiceError {
                 .finish(),
             Self::SubmissionRejected(reason) => formatter
                 .debug_tuple("SubscriptionEnrollmentServiceError::SubmissionRejected")
+                .field(reason)
+                .finish(),
+            Self::RecoveryReservationRejected(reason) => formatter
+                .debug_tuple("SubscriptionEnrollmentServiceError::RecoveryReservationRejected")
+                .field(reason)
+                .finish(),
+            Self::RecoverySubmissionRejected(reason) => formatter
+                .debug_tuple("SubscriptionEnrollmentServiceError::RecoverySubmissionRejected")
                 .field(reason)
                 .finish(),
             Self::GatewayNotSubmitted(error) => formatter
@@ -193,7 +212,12 @@ impl SubscriptionBillingService {
             }
         }
 
-        let account = self.gateway_account(&command).await?;
+        let account = self
+            .gateway_account(
+                command.billing_scope_id(),
+                command.gateway_configuration_id(),
+            )
+            .await?;
         if let Some(scope) = self.active_cooldown(&account).await? {
             return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
         }
@@ -329,6 +353,171 @@ impl SubscriptionBillingService {
         }
     }
 
+    /// Runs one complete subscriber-initiated recovery payment boundary.
+    ///
+    /// The command carries only the owner, requested plan/configuration, and
+    /// memory-only token/contact. Reservation derives the exact due period,
+    /// amount, subscription, and payment-state snapshot under lock.
+    pub async fn recover(
+        &self,
+        command: RecoverSubscriptionPayment,
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+        match self.preflight_recovery(&command).await? {
+            SubscriptionRecoveryPreflightOutcome::Continue => {}
+            SubscriptionRecoveryPreflightOutcome::Replay(attempt) => {
+                return self.payment_result(*attempt).await;
+            }
+            SubscriptionRecoveryPreflightOutcome::IdempotencyConflict => {
+                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+            }
+        }
+
+        match self
+            .admission
+            .admit(EndUserMutationCommand::new(
+                command.billing_scope_id(),
+                command.subscriber_id(),
+                EndUserMutationOperation::SubscriptionRecovery,
+            ))
+            .await
+        {
+            EndUserMutationAdmissionResult::Allowed => {}
+            EndUserMutationAdmissionResult::Denied { retry_after } => {
+                return Err(SubscriptionEnrollmentServiceError::AdmissionDenied {
+                    retry_after: retry_after.get(),
+                });
+            }
+            EndUserMutationAdmissionResult::Timeout => {
+                return Err(SubscriptionEnrollmentServiceError::AdmissionTimeout);
+            }
+            EndUserMutationAdmissionResult::Unavailable => {
+                return Err(SubscriptionEnrollmentServiceError::AdmissionUnavailable);
+            }
+        }
+
+        let account = self
+            .gateway_account(
+                command.billing_scope_id(),
+                command.gateway_configuration_id(),
+            )
+            .await?;
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
+        }
+        let gateway = self
+            .resolver
+            .resolve(
+                command.billing_scope_id(),
+                account.account_id,
+                command.gateway_configuration_id(),
+                account.provider_key.clone(),
+            )
+            .await?;
+        if gateway.billing_scope_id() != command.billing_scope_id()
+            || gateway.gateway_account_id() != account.account_id
+            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
+            || gateway.provider_key() != &account.provider_key
+        {
+            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
+        }
+
+        let (reservation, attempt) = match self.reserve_recovery(&command, &gateway).await? {
+            SubscriptionRecoveryReservationOutcome::Reserved(reservation, attempt) => {
+                (*reservation, *attempt)
+            }
+            SubscriptionRecoveryReservationOutcome::Replay(attempt) => {
+                return self.payment_result(*attempt).await;
+            }
+            SubscriptionRecoveryReservationOutcome::IdempotencyConflict => {
+                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+            }
+            SubscriptionRecoveryReservationOutcome::Rejected(reason) => {
+                return Err(
+                    SubscriptionEnrollmentServiceError::RecoveryReservationRejected(reason),
+                );
+            }
+        };
+        if attempt.status() != PaymentAttemptStatus::Pending
+            || attempt.state().timestamps().submitted_at().is_some()
+            || attempt.identity() != reservation.identity()
+        {
+            return Err(SubscriptionEnrollmentServiceError::InvalidState(
+                INVALID_SERVICE_STATE,
+            ));
+        }
+
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return self
+                .resolve_recovery_cooldown(&reservation, scope, OutcomeResolutionBoundary::Prepared)
+                .await;
+        }
+        match gateway.account_mode().await {
+            Ok(GatewayAccountMode::Live) => {}
+            Ok(GatewayAccountMode::Test) => {
+                return self
+                    .resolve_recovery_readiness_failure(
+                        &reservation,
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
+                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                        None,
+                        OutcomeResolutionBoundary::Prepared,
+                    )
+                    .await;
+            }
+            Err(GatewayError::RateLimited(detail)) => {
+                return self
+                    .resolve_recovery_provider_readiness_rate_limit(&reservation, detail)
+                    .await;
+            }
+            Err(_) => {
+                return self
+                    .resolve_recovery_readiness_failure(
+                        &reservation,
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
+                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                        None,
+                        OutcomeResolutionBoundary::Prepared,
+                    )
+                    .await;
+            }
+        }
+
+        let admission = match admit_subscription_recovery_submission(&self.pool, &reservation)
+            .await?
+        {
+            SubscriptionRecoveryAdmissionOutcome::Admitted(admission) => *admission,
+            SubscriptionRecoveryAdmissionOutcome::AlreadyAdmitted(attempt) => {
+                return self.payment_result(attempt).await;
+            }
+            SubscriptionRecoveryAdmissionOutcome::Rejected { reason, .. } => {
+                return Err(SubscriptionEnrollmentServiceError::RecoverySubmissionRejected(reason));
+            }
+        };
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return self
+                .resolve_recovery_cooldown(
+                    &reservation,
+                    scope,
+                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                )
+                .await;
+        }
+        match submit_admitted_subscription_recovery(
+            &self.pool,
+            self.coordinator.as_ref(),
+            admission,
+            &command,
+            &gateway,
+        )
+        .await?
+        {
+            SubscriptionRecoveryProviderResult::Payment(payment) => Ok(payment),
+            SubscriptionRecoveryProviderResult::NotSubmitted { error, .. } => Err(
+                SubscriptionEnrollmentServiceError::GatewayNotSubmitted(error),
+            ),
+        }
+    }
+
     /// Applies an already-observed provider outcome without another submission.
     ///
     /// Reconciliation enters the same application authority as foreground
@@ -340,14 +529,42 @@ impl SubscriptionBillingService {
         attempt_id: PaymentAttemptId,
         outcome: &GatewayPaymentOutcome,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
-        apply_reconciled_subscription_enrollment_gateway_outcome(
-            &self.pool,
-            self.coordinator.as_ref(),
+        let mut transaction = self.pool.begin().await?;
+        let attempt = crate::find_payment_attempt_by_id_in_transaction(
+            &mut transaction,
             billing_scope_id,
             attempt_id,
-            outcome,
         )
-        .await
+        .await?
+        .ok_or(SubscriptionEnrollmentServiceError::InvalidState(
+            "reconciled subscription payment attempt was not found",
+        ))?;
+        transaction.commit().await?;
+        match attempt.kind() {
+            PaymentAttemptKind::SubscriptionInitial => {
+                apply_reconciled_subscription_enrollment_gateway_outcome(
+                    &self.pool,
+                    self.coordinator.as_ref(),
+                    billing_scope_id,
+                    attempt_id,
+                    outcome,
+                )
+                .await
+            }
+            PaymentAttemptKind::SubscriptionRecovery => {
+                apply_reconciled_subscription_recovery_gateway_outcome(
+                    &self.pool,
+                    self.coordinator.as_ref(),
+                    billing_scope_id,
+                    attempt_id,
+                    outcome,
+                )
+                .await
+            }
+            _ => Err(SubscriptionEnrollmentApplicationError::InvalidState(
+                "attempt kind is not owned by the subscription billing service",
+            )),
+        }
         .map_err(Into::into)
     }
 
@@ -358,6 +575,17 @@ impl SubscriptionBillingService {
         let mut transaction = self.pool.begin().await?;
         let outcome =
             preflight_subscription_enrollment_in_transaction(&mut transaction, command).await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn preflight_recovery(
+        &self,
+        command: &RecoverSubscriptionPayment,
+    ) -> Result<SubscriptionRecoveryPreflightOutcome, SubscriptionEnrollmentServiceError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome =
+            preflight_subscription_recovery_in_transaction(&mut transaction, command).await?;
         transaction.commit().await?;
         Ok(outcome)
     }
@@ -377,6 +605,19 @@ impl SubscriptionBillingService {
         Ok(outcome)
     }
 
+    async fn reserve_recovery(
+        &self,
+        command: &RecoverSubscriptionPayment,
+        gateway: &syrup_rail::ResolvedGateway,
+    ) -> Result<SubscriptionRecoveryReservationOutcome, SubscriptionEnrollmentServiceError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome =
+            reserve_subscription_recovery_in_transaction(&mut transaction, command, gateway)
+                .await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
     async fn payment_result(
         &self,
         attempt: PaymentAttempt,
@@ -389,7 +630,8 @@ impl SubscriptionBillingService {
 
     async fn gateway_account(
         &self,
-        command: &EnrollSubscription,
+        billing_scope_id: BillingScopeId,
+        gateway_configuration_id: syrup_rail::GatewayConfigurationId,
     ) -> Result<GatewayAccountSnapshot, SubscriptionEnrollmentServiceError> {
         let row = sqlx::query_as::<_, (uuid::Uuid, String)>(
             r#"
@@ -398,8 +640,8 @@ impl SubscriptionBillingService {
             WHERE billing_scope_id = $1 AND gateway_configuration_id = $2
             "#,
         )
-        .bind(command.billing_scope_id().as_uuid())
-        .bind(command.gateway_configuration_id().as_uuid())
+        .bind(billing_scope_id.as_uuid())
+        .bind(gateway_configuration_id.as_uuid())
         .fetch_optional(&self.pool)
         .await?
         .ok_or(SubscriptionEnrollmentServiceError::GatewayConfigurationChanged)?;
@@ -516,6 +758,94 @@ impl SubscriptionBillingService {
             GatewayPaymentDescriptor::default(),
         );
         resolve_non_approved_outcome(
+            &self.pool,
+            reservation,
+            &evidence,
+            PaymentAttemptStatus::Failed,
+            Some(code),
+            cooldown,
+            boundary,
+        )
+        .await
+        .map_err(SubscriptionEnrollmentServiceError::from)
+    }
+
+    async fn resolve_recovery_cooldown(
+        &self,
+        reservation: &SubscriptionRecoveryReservation,
+        scope: GatewayMutationCooldownScope,
+        boundary: OutcomeResolutionBoundary,
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+        let (message, code) = match scope {
+            GatewayMutationCooldownScope::Account => (
+                "gateway account mutation cooldown is active",
+                PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission,
+            ),
+            GatewayMutationCooldownScope::Provider => (
+                "gateway provider cooldown is active",
+                PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
+            ),
+        };
+        let payment = self
+            .resolve_recovery_readiness_failure(
+                reservation,
+                GatewayDiagnostic::new(message),
+                code,
+                None,
+                boundary,
+            )
+            .await?;
+        if payment.attempt().state().resolution_code() == Some(code) {
+            Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope })
+        } else {
+            Ok(payment)
+        }
+    }
+
+    async fn resolve_recovery_provider_readiness_rate_limit(
+        &self,
+        reservation: &SubscriptionRecoveryReservation,
+        detail: GatewayDiagnostic,
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+        let code = PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission;
+        let payment = self
+            .resolve_recovery_readiness_failure(
+                reservation,
+                detail,
+                code,
+                Some(RateLimitCooldown::Provider),
+                OutcomeResolutionBoundary::Prepared,
+            )
+            .await?;
+        if payment.attempt().state().resolution_code() == Some(code) {
+            Err(
+                SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+                    scope: GatewayMutationCooldownScope::Provider,
+                },
+            )
+        } else {
+            Ok(payment)
+        }
+    }
+
+    async fn resolve_recovery_readiness_failure(
+        &self,
+        reservation: &SubscriptionRecoveryReservation,
+        detail: GatewayDiagnostic,
+        code: PaymentResolutionCode,
+        cooldown: Option<RateLimitCooldown>,
+        boundary: OutcomeResolutionBoundary,
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+        let evidence = ProcessorEvidence::new(
+            None,
+            None,
+            None,
+            None,
+            Some(detail),
+            Some(GatewayDiagnostic::new("failed")),
+            GatewayPaymentDescriptor::default(),
+        );
+        resolve_recovery_non_approved_outcome(
             &self.pool,
             reservation,
             &evidence,

@@ -8,11 +8,12 @@ use syrup_rail::{
     GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest,
     GatewayTransactionId, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
     PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence,
-    ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountDuration,
-    SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
+    RecoverSubscriptionPayment, ResolvedGateway, SubscriberId, Subscription,
+    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
-    SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionStatus,
-    next_monthly_billing_period,
+    SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionRecoveryReservation,
+    SubscriptionRecoverySubmissionOutcome, SubscriptionRecoverySubmissionRejection,
+    SubscriptionStatus, next_monthly_billing_period,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -43,6 +44,13 @@ const APPROVED_STORAGE_FAILURE_TEXT: &str =
     "Approved subscription enrollment could not be applied; manual review is required.";
 const TERMINAL_APPROVAL_RACE_TEXT: &str =
     "Approved processor evidence arrived after the enrollment attempt became terminal.";
+const RECOVERY_INCOMPLETE_APPROVAL_TEXT: &str =
+    "Approved subscription recovery is missing required processor identity.";
+const RECOVERY_APPROVED_STORAGE_FAILURE_TEXT: &str =
+    "Approved subscription recovery could not be applied; manual review is required.";
+const RECOVERY_STALE_STATE_TEXT: &str = "Approved subscription recovery could not update billing state because the subscription changed.";
+const RECOVERY_TERMINAL_APPROVAL_RACE_TEXT: &str =
+    "Approved processor evidence arrived after the recovery attempt became terminal.";
 
 #[derive(Error)]
 pub enum SubscriptionEnrollmentApplicationError {
@@ -128,6 +136,62 @@ pub enum SubscriptionEnrollmentProviderResult {
 }
 
 impl SubscriptionEnrollmentProviderResult {
+    pub const fn payment(&self) -> &SubscriptionEnrollmentPaymentResult {
+        match self {
+            Self::Payment(payment) | Self::NotSubmitted { payment, .. } => payment,
+        }
+    }
+
+    pub fn into_payment(self) -> SubscriptionEnrollmentPaymentResult {
+        match self {
+            Self::Payment(payment) | Self::NotSubmitted { payment, .. } => payment,
+        }
+    }
+}
+
+/// One committed final-admission result authorizing exactly one immediate
+/// subscription-recovery submission.
+pub struct AdmittedSubscriptionRecovery {
+    reservation: SubscriptionRecoveryReservation,
+    attempt: PaymentAttempt,
+}
+
+impl AdmittedSubscriptionRecovery {
+    pub const fn attempt(&self) -> &PaymentAttempt {
+        &self.attempt
+    }
+}
+
+impl fmt::Debug for AdmittedSubscriptionRecovery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmittedSubscriptionRecovery")
+            .field("attempt", &self.attempt)
+            .field("has_submission_authority", &true)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum SubscriptionRecoveryAdmissionOutcome {
+    Admitted(Box<AdmittedSubscriptionRecovery>),
+    AlreadyAdmitted(PaymentAttempt),
+    Rejected {
+        attempt: PaymentAttempt,
+        reason: SubscriptionRecoverySubmissionRejection,
+    },
+}
+
+#[derive(Debug)]
+pub enum SubscriptionRecoveryProviderResult {
+    Payment(SubscriptionEnrollmentPaymentResult),
+    NotSubmitted {
+        payment: SubscriptionEnrollmentPaymentResult,
+        error: GatewayNotSubmittedError,
+    },
+}
+
+impl SubscriptionRecoveryProviderResult {
     pub const fn payment(&self) -> &SubscriptionEnrollmentPaymentResult {
         match self {
             Self::Payment(payment) | Self::NotSubmitted { payment, .. } => payment,
@@ -383,6 +447,864 @@ pub async fn apply_reconciled_subscription_enrollment_gateway_outcome(
             )
         })?;
     apply_subscription_enrollment_gateway_outcome(pool, coordinator, &reservation, outcome).await
+}
+
+/// Commits final recovery admission before exposing its one-shot capability.
+pub async fn admit_subscription_recovery_submission(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<SubscriptionRecoveryAdmissionOutcome, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    let outcome =
+        crate::admit_subscription_recovery_submission_in_transaction(&mut transaction, reservation)
+            .await?;
+    transaction.commit().await?;
+    Ok(match outcome {
+        SubscriptionRecoverySubmissionOutcome::Admitted(attempt) => {
+            SubscriptionRecoveryAdmissionOutcome::Admitted(Box::new(AdmittedSubscriptionRecovery {
+                reservation: reservation.clone(),
+                attempt,
+            }))
+        }
+        SubscriptionRecoverySubmissionOutcome::AlreadyAdmitted(attempt) => {
+            SubscriptionRecoveryAdmissionOutcome::AlreadyAdmitted(attempt)
+        }
+        SubscriptionRecoverySubmissionOutcome::Rejected { attempt, reason } => {
+            SubscriptionRecoveryAdmissionOutcome::Rejected { attempt, reason }
+        }
+    })
+}
+
+/// Performs the one provider sale authorized by committed recovery admission,
+/// then applies or durably parks its result without holding a database lock
+/// across provider I/O.
+pub async fn submit_admitted_subscription_recovery(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    admission: AdmittedSubscriptionRecovery,
+    command: &RecoverSubscriptionPayment,
+    gateway: &ResolvedGateway,
+) -> Result<SubscriptionRecoveryProviderResult, SubscriptionEnrollmentApplicationError> {
+    let identity = admission.reservation.identity();
+    if admission.attempt.identity() != identity
+        || admission.attempt.request() != admission.reservation.request()
+        || admission.attempt.status() != PaymentAttemptStatus::Pending
+        || admission
+            .attempt
+            .state()
+            .timestamps()
+            .submitted_at()
+            .is_none()
+        || command.billing_scope_id() != identity.billing_scope_id()
+        || command.subscriber_id() != identity.subscriber_id()
+        || command.plan_key() != admission.reservation.plan_key()
+        || command.gateway_configuration_id() != identity.gateway_configuration_id()
+        || gateway.billing_scope_id() != identity.billing_scope_id()
+        || gateway.gateway_account_id() != identity.gateway_account_id()
+        || gateway.gateway_configuration_id() != identity.gateway_configuration_id()
+        || gateway.provider_key() != admission.reservation.provider_key()
+    {
+        return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
+    }
+    let charge =
+        syrup_rail::ChargeAmount::try_from(admission.attempt.request().amount()).map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })?;
+    let request = GatewaySaleRequest::new(
+        charge,
+        admission.attempt.request().gateway_order_id().clone(),
+        GatewaySaleIntent::InitialStoredCredential {
+            payment_token: command.payment_token().clone(),
+        },
+        Some(command.billing_contact().clone()),
+    );
+    match gateway.sale(request).await {
+        Ok(outcome) => apply_subscription_recovery_gateway_outcome(
+            pool,
+            coordinator,
+            &admission.reservation,
+            &outcome,
+        )
+        .await
+        .map(SubscriptionRecoveryProviderResult::Payment),
+        Err(GatewayMutationError::NotSubmitted(error)) => {
+            let evidence = mutation_error_evidence(error.detail());
+            let cooldown = matches!(error, GatewayNotSubmittedError::RateLimited(_))
+                .then_some(RateLimitCooldown::Account);
+            let payment = resolve_recovery_non_approved_outcome(
+                pool,
+                &admission.reservation,
+                &evidence,
+                PaymentAttemptStatus::Failed,
+                Some(not_submitted_resolution_code(&error)),
+                cooldown,
+                OutcomeResolutionBoundary::AdmittedNotSubmitted,
+            )
+            .await?;
+            Ok(SubscriptionRecoveryProviderResult::NotSubmitted { payment, error })
+        }
+        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => {
+            resolve_recovery_unknown_outcome(
+                pool,
+                &admission.reservation,
+                &mutation_error_evidence(&detail),
+                Some(RateLimitCooldown::Provider),
+            )
+            .await
+            .map(SubscriptionRecoveryProviderResult::Payment)
+        }
+        Err(GatewayMutationError::Indeterminate(detail)) => resolve_recovery_unknown_outcome(
+            pool,
+            &admission.reservation,
+            &mutation_error_evidence(&detail),
+            None,
+        )
+        .await
+        .map(SubscriptionRecoveryProviderResult::Payment),
+    }
+}
+
+/// Applies one recovery outcome through the canonical charge ledger and host
+/// billing transaction.
+pub async fn apply_subscription_recovery_gateway_outcome(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionRecoveryReservation,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    match outcome.status() {
+        GatewayPaymentStatus::Approved => {
+            if outcome.transaction_id().is_none() || outcome.payment_method_reference().is_none() {
+                return park_recovery_approved_outcome(
+                    pool,
+                    reservation,
+                    outcome.evidence(),
+                    RECOVERY_INCOMPLETE_APPROVAL_TEXT,
+                )
+                .await;
+            }
+            for attempt_index in 0..APPROVED_APPLICATION_ATTEMPTS {
+                match apply_recovery_approved_outcome(coordinator, reservation, outcome.evidence())
+                    .await
+                {
+                    Ok(result) => return Ok(result),
+                    Err(_) if attempt_index + 1 < APPROVED_APPLICATION_ATTEMPTS => {
+                        tokio::time::sleep(APPROVED_EVIDENCE_RETRY_DELAY).await;
+                    }
+                    Err(_) => break,
+                }
+            }
+            park_recovery_approved_outcome(
+                pool,
+                reservation,
+                outcome.evidence(),
+                RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
+            )
+            .await
+        }
+        GatewayPaymentStatus::Declined => {
+            resolve_recovery_non_approved_outcome(
+                pool,
+                reservation,
+                outcome.evidence(),
+                PaymentAttemptStatus::Declined,
+                None,
+                None,
+                OutcomeResolutionBoundary::Submitted,
+            )
+            .await
+        }
+        GatewayPaymentStatus::Failed => {
+            resolve_recovery_non_approved_outcome(
+                pool,
+                reservation,
+                outcome.evidence(),
+                PaymentAttemptStatus::Failed,
+                None,
+                None,
+                OutcomeResolutionBoundary::Submitted,
+            )
+            .await
+        }
+        GatewayPaymentStatus::Unknown => {
+            resolve_recovery_unknown_outcome(pool, reservation, outcome.evidence(), None).await
+        }
+    }
+}
+
+/// Re-enters the same recovery application authority from durable evidence and
+/// never resolves a live gateway or submits another mutation.
+pub async fn apply_reconciled_subscription_recovery_gateway_outcome(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    billing_scope_id: BillingScopeId,
+    attempt_id: PaymentAttemptId,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    let attempt = crate::find_payment_attempt_by_id_in_transaction(
+        &mut transaction,
+        billing_scope_id,
+        attempt_id,
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        "subscription recovery attempt was not found",
+    ))?;
+    let provider_key = sqlx::query_scalar::<_, String>(
+        "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
+    )
+    .bind(billing_scope_id.as_uuid())
+    .bind(attempt.identity().gateway_account_id().as_uuid())
+    .fetch_optional(&mut *transaction)
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        "subscription recovery gateway account was not found",
+    ))?;
+    transaction.commit().await?;
+    let provider_key = GatewayProviderKey::new(provider_key).map_err(|_| {
+        SubscriptionEnrollmentApplicationError::InvalidState(
+            "subscription recovery gateway provider key is invalid",
+        )
+    })?;
+    let reservation = SubscriptionRecoveryReservation::from_attempt(&attempt, provider_key)
+        .map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(
+                "reconciled attempt is not a valid subscription recovery",
+            )
+        })?;
+    apply_subscription_recovery_gateway_outcome(pool, coordinator, &reservation, outcome).await
+}
+
+async fn apply_recovery_approved_outcome(
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let identity = reservation.identity();
+    let mut transaction = coordinator
+        .begin(
+            BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id()),
+            BILLING_LOCK_TIMEOUT,
+        )
+        .await?;
+    let subject_state = transaction.subject_state();
+    let application = apply_recovery_approved_on_connection(
+        transaction.connection(),
+        subject_state,
+        reservation,
+        evidence,
+    )
+    .await;
+    let (result, event) = match application {
+        Ok(application) => application,
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            return Err(error);
+        }
+    };
+    if let Some(event) = event.as_ref()
+        && let Err(error) = transaction.append_event(event).await
+    {
+        let _ = transaction.rollback().await;
+        return Err(error.into());
+    }
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn apply_recovery_approved_on_connection(
+    connection: &mut PgConnection,
+    subject_state: BillingTransactionSubjectState,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<
+    (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
+    SubscriptionEnrollmentApplicationError,
+> {
+    set_application_timeouts(connection).await?;
+    let identity = reservation.identity();
+    lock_payment_method_domain(
+        connection,
+        identity.subscriber_id(),
+        identity.gateway_account_id().as_uuid(),
+    )
+    .await?;
+    lock_subscription_aggregate(connection, identity.subscriber_id(), reservation.plan_key())
+        .await?;
+    let attempt = lock_expected_recovery_attempt(connection, reservation).await?;
+
+    if attempt.status() == PaymentAttemptStatus::Approved {
+        let subscription = load_applied_subscription(connection, &attempt)
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Applied)
+            .await?;
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+            None,
+        ));
+    }
+    if subject_state != BillingTransactionSubjectState::LiveRecipient {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            "a subscription recovery event requires a live recipient",
+        ));
+    }
+    if attempt.status().is_terminal() {
+        let observation = observe_processor_charge(
+            connection,
+            &attempt,
+            evidence,
+            ChargeProgression::ExternalReversalRequired,
+        )
+        .await?;
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            None,
+            RECOVERY_TERMINAL_APPROVAL_RACE_TEXT,
+        )
+        .await?;
+        if let ObservedCharge::Owned(charge) = observation {
+            transition_charge(
+                connection,
+                charge.id,
+                ChargeProgression::ExternalReversalRequired,
+                None,
+            )
+            .await?;
+        }
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    }
+
+    let observation =
+        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Pending)
+            .await?;
+    let ObservedCharge::Owned(charge) = observation else {
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            None,
+            "The approved gateway transaction is already owned by another payment attempt.",
+        )
+        .await?;
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    };
+    if charge.role == ChargeRole::Additional {
+        transition_charge(
+            connection,
+            charge.id,
+            ChargeProgression::ExternalReversalRequired,
+            None,
+        )
+        .await?;
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            None,
+            "An additional approved charge requires manual reversal review.",
+        )
+        .await?;
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    }
+    if !recovery_subscription_matches(connection, reservation).await? {
+        transition_charge(
+            connection,
+            charge.id,
+            ChargeProgression::ExternalReversalRequired,
+            Some(PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState),
+        )
+        .await?;
+        let parked = park_locked_attempt(
+            connection,
+            &attempt,
+            evidence,
+            Some(PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState),
+            RECOVERY_STALE_STATE_TEXT,
+        )
+        .await?;
+        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+    }
+
+    let transaction_id =
+        evidence
+            .transaction_id()
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+    let old_method_id = reservation.expected_state().payment_method_id();
+    let method_id = upsert_payment_method(connection, &attempt, evidence).await?;
+    let updated = sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET status = 'active', payment_method_id = $2,
+            current_period_start_at = $3, current_period_end_at = $4,
+            next_renewal_at = $4, initial_transaction_id = $5,
+            updated_at = clock_timestamp()
+        WHERE id = $1 AND billing_scope_id = $6 AND subscriber_id = $7
+            AND gateway_account_id = $8 AND plan_key = $9
+            AND status = $10 AND status IN ('active', 'past_due')
+            AND payment_method_id = $11 AND initial_transaction_id = $12
+            AND next_renewal_at = $3
+        "#,
+    )
+    .bind(reservation.subscription_id().as_uuid())
+    .bind(method_id.as_uuid())
+    .bind(reservation.period().start_at())
+    .bind(reservation.period().end_at())
+    .bind(transaction_id.expose())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(reservation.plan_key().as_str())
+    .bind(reservation.expected_state().status().as_str())
+    .bind(old_method_id.as_uuid())
+    .bind(
+        reservation
+            .expected_state()
+            .initial_transaction_id()
+            .expose(),
+    )
+    .execute(&mut *connection)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    advance_subscription_discount_after_successful_charge(
+        connection,
+        reservation.subscription_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    disable_payment_method_if_unreferenced(connection, old_method_id).await?;
+    mark_attempt_approved(
+        connection,
+        &attempt,
+        evidence,
+        reservation.subscription_id(),
+        method_id,
+    )
+    .await?;
+    transition_charge(connection, charge.id, ChargeProgression::Applied, None).await?;
+
+    let attempt = find_payment_attempt_by_id_on_connection(
+        connection,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let subscription = load_subscription(
+        connection,
+        identity.billing_scope_id(),
+        reservation.subscription_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let event = BillingEvent::SubscriptionRenewed {
+        attempt_id: identity.attempt_id(),
+        subscription_id: reservation.subscription_id(),
+        plan_key: reservation.plan_key().clone(),
+        charge: syrup_rail::ChargeAmount::try_from(attempt.request().amount()).map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })?,
+        period: reservation.period().clone(),
+    };
+    Ok((
+        SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+        Some(event),
+    ))
+}
+
+async fn lock_expected_recovery_attempt(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    let identity = reservation.identity();
+    let attempt = lock_payment_attempt_by_id_on_connection(
+        connection,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    if attempt.identity() != identity
+        || attempt.kind() != PaymentAttemptKind::SubscriptionRecovery
+        || attempt.request() != reservation.request()
+    {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(attempt)
+}
+
+async fn recovery_subscription_matches(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<bool, SubscriptionEnrollmentApplicationError> {
+    let identity = reservation.identity();
+    let expected = reservation.expected_state();
+    let row = sqlx::query(
+        r#"
+        SELECT status, payment_method_id, initial_transaction_id, next_renewal_at
+        FROM billing_subscriptions
+        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+            AND gateway_account_id = $4 AND plan_key = $5
+        FOR UPDATE
+        "#,
+    )
+    .bind(reservation.subscription_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(reservation.plan_key().as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let status = row.try_get::<String, _>("status")?;
+    let payment_method_id: Uuid = row.try_get("payment_method_id")?;
+    let initial_transaction_id: String = row.try_get("initial_transaction_id")?;
+    let next_renewal_at: DateTime<Utc> = row.try_get("next_renewal_at")?;
+    Ok(status == expected.status().as_str()
+        && matches!(status.as_str(), "active" | "past_due")
+        && payment_method_id == expected.payment_method_id().into_uuid()
+        && syrup_rail::canonical_gateway_transaction_ids_equal(
+            &initial_transaction_id,
+            expected.initial_transaction_id().expose(),
+        )
+        && next_renewal_at == *reservation.period().start_at())
+}
+
+async fn disable_payment_method_if_unreferenced(
+    connection: &mut PgConnection,
+    payment_method_id: PaymentMethodId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_methods AS methods
+        SET status = 'disabled', updated_at = clock_timestamp()
+        WHERE methods.id = $1 AND methods.status = 'active'
+            AND NOT EXISTS (
+                SELECT 1 FROM billing_subscriptions AS subscriptions
+                WHERE subscriptions.payment_method_id = methods.id
+                    AND subscriptions.status <> 'canceled'
+            )
+        "#,
+    )
+    .bind(payment_method_id.as_uuid())
+    .execute(connection)
+    .await?;
+    Ok(())
+}
+
+async fn advance_subscription_discount_after_successful_charge(
+    connection: &mut PgConnection,
+    subscription_id: SubscriptionId,
+    plan_key: &PlanKey,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let row = sqlx::query(
+        r#"
+        SELECT duration, status, periods_total, periods_applied, base_amount_cents
+        FROM billing_subscription_discounts
+        WHERE subscription_id = $1 AND plan_key = $2
+        FOR UPDATE
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    let Some(row) = row else {
+        return Ok(());
+    };
+    let duration: String = row.try_get("duration")?;
+    let status: String = row.try_get("status")?;
+    if duration != "limited_months" || status == "completed" {
+        return Ok(());
+    }
+    let periods_total: i32 = row.try_get("periods_total")?;
+    let periods_applied: i32 = row.try_get("periods_applied")?;
+    if periods_applied >= periods_total {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    let next_periods_applied = periods_applied + 1;
+    let completed = next_periods_applied == periods_total;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscription_discounts
+        SET periods_applied = $3,
+            status = CASE WHEN $4 THEN 'completed' ELSE 'active' END,
+            completed_at = CASE WHEN $4 THEN clock_timestamp() ELSE NULL END
+        WHERE subscription_id = $1 AND plan_key = $2
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(plan_key.as_str())
+    .bind(next_periods_applied)
+    .bind(completed)
+    .execute(&mut *connection)
+    .await?;
+    if completed {
+        let base_amount_cents: i32 = row.try_get("base_amount_cents")?;
+        sqlx::query(
+            "UPDATE billing_subscriptions SET amount_cents = $2, updated_at = clock_timestamp() WHERE id = $1",
+        )
+        .bind(subscription_id.as_uuid())
+        .bind(base_amount_cents)
+        .execute(&mut *connection)
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn resolve_recovery_non_approved_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+    status: PaymentAttemptStatus,
+    resolution_code: Option<PaymentResolutionCode>,
+    cooldown: Option<RateLimitCooldown>,
+    boundary: OutcomeResolutionBoundary,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    lock_subscription_aggregate(
+        &mut transaction,
+        reservation.identity().subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    let attempt = lock_expected_recovery_attempt(&mut transaction, reservation).await?;
+    let may_resolve = attempt.status().is_resolvable()
+        && match boundary {
+            OutcomeResolutionBoundary::Prepared => {
+                attempt.state().timestamps().submitted_at().is_none()
+            }
+            OutcomeResolutionBoundary::AdmittedNotSubmitted => {
+                attempt.state().timestamps().submitted_at().is_some()
+            }
+            OutcomeResolutionBoundary::Submitted => true,
+        };
+    if may_resolve {
+        update_attempt_resolution(
+            &mut transaction,
+            &attempt,
+            evidence,
+            status,
+            resolution_code,
+            None,
+            None,
+            false,
+        )
+        .await?;
+        if boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1",
+            )
+            .bind(attempt.identity().attempt_id().as_uuid())
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    if let Some(cooldown) = cooldown {
+        extend_recovery_rate_limit_cooldown(&mut transaction, reservation, cooldown).await?;
+    }
+    let attempt = find_payment_attempt_by_id_on_connection(
+        &mut transaction,
+        reservation.identity().billing_scope_id(),
+        reservation.identity().attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn resolve_recovery_unknown_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+    cooldown: Option<RateLimitCooldown>,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    lock_subscription_aggregate(
+        &mut transaction,
+        reservation.identity().subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
+    let attempt = lock_expected_recovery_attempt(&mut transaction, reservation).await?;
+    if attempt.status().is_resolvable() {
+        update_attempt_resolution(
+            &mut transaction,
+            &attempt,
+            evidence,
+            PaymentAttemptStatus::Unknown,
+            None,
+            None,
+            None,
+            false,
+        )
+        .await?;
+        if evidence_looks_approved(evidence) {
+            observe_processor_charge(
+                &mut transaction,
+                &attempt,
+                evidence,
+                ChargeProgression::Pending,
+            )
+            .await?;
+        }
+    }
+    if let Some(cooldown) = cooldown {
+        extend_recovery_rate_limit_cooldown(&mut transaction, reservation, cooldown).await?;
+    }
+    let attempt = find_payment_attempt_by_id_on_connection(
+        &mut transaction,
+        reservation.identity().billing_scope_id(),
+        reservation.identity().attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))?;
+    let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+    transaction.commit().await?;
+    Ok(result)
+}
+
+async fn park_recovery_approved_outcome(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+    evidence: &ProcessorEvidence,
+    message: &'static str,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    for attempt_index in 0..APPROVED_EVIDENCE_WRITE_ATTEMPTS {
+        let application = async {
+            let mut transaction = pool.begin().await?;
+            set_application_timeouts(&mut transaction).await?;
+            lock_subscription_aggregate(
+                &mut transaction,
+                reservation.identity().subscriber_id(),
+                reservation.plan_key(),
+            )
+            .await?;
+            let attempt = lock_expected_recovery_attempt(&mut transaction, reservation).await?;
+            if attempt.status() == PaymentAttemptStatus::Approved {
+                let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+                transaction.commit().await?;
+                return Ok::<_, SubscriptionEnrollmentApplicationError>(result);
+            }
+            let observation = observe_processor_charge(
+                &mut transaction,
+                &attempt,
+                evidence,
+                ChargeProgression::ReconciliationRequired,
+            )
+            .await?;
+            let parked =
+                park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?;
+            if let ObservedCharge::Owned(charge) = observation {
+                transition_charge(
+                    &mut transaction,
+                    charge.id,
+                    ChargeProgression::ReconciliationRequired,
+                    None,
+                )
+                .await?;
+            }
+            let result = payment_result_for_attempt(&mut transaction, parked).await?;
+            transaction.commit().await?;
+            Ok(result)
+        }
+        .await;
+        match application {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if attempt_index + 1 < APPROVED_EVIDENCE_WRITE_ATTEMPTS
+                    && is_retryable_evidence_error(&error) =>
+            {
+                tokio::time::sleep(APPROVED_EVIDENCE_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable)
+}
+
+async fn extend_recovery_rate_limit_cooldown(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionRecoveryReservation,
+    cooldown: RateLimitCooldown,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let identity = reservation.identity();
+    let result = match cooldown {
+        RateLimitCooldown::Account => {
+            sqlx::query(
+                r#"
+                UPDATE billing_gateway_accounts
+                SET mutation_rate_limited_until = GREATEST(
+                        COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
+                        clock_timestamp() + make_interval(secs => $4)
+                    ),
+                    updated_at = clock_timestamp()
+                WHERE id = $1 AND billing_scope_id = $2
+                    AND gateway_configuration_id = $3
+                "#,
+            )
+            .bind(identity.gateway_account_id().as_uuid())
+            .bind(identity.billing_scope_id().as_uuid())
+            .bind(identity.gateway_configuration_id().as_uuid())
+            .bind(PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
+            .execute(&mut *connection)
+            .await?
+        }
+        RateLimitCooldown::Provider => {
+            sqlx::query(
+                r#"
+                UPDATE billing_gateway_provider_rate_limits
+                SET rate_limited_until = GREATEST(
+                        rate_limited_until,
+                        clock_timestamp() + make_interval(secs => $2)
+                    ),
+                    updated_at = clock_timestamp()
+                WHERE provider_key = $1
+                "#,
+            )
+            .bind(reservation.provider_key().as_str())
+            .bind(PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
+            .execute(&mut *connection)
+            .await?
+        }
+    };
+    if result.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(())
 }
 
 async fn apply_approved_outcome(
@@ -1511,7 +2433,8 @@ async fn update_attempt_resolution(
     let result = sqlx::query(
         r#"
         UPDATE billing_payment_attempts
-        SET status = $2, subscription_id = $3, payment_method_id = $4,
+        SET status = $2, subscription_id = COALESCE($3, subscription_id),
+            payment_method_id = COALESCE($4, payment_method_id),
             gateway_transaction_id = $5,
             gateway_payment_method_reference = $6,
             gateway_response = $7, gateway_response_code = $8,
@@ -2578,15 +3501,22 @@ mod tests {
     }
 
     fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
-        approved_outcome_with_transaction(Some(transaction_id))
+        approved_outcome_with_reference(Some(transaction_id), "vault_application")
     }
 
     fn approved_outcome_with_transaction(transaction_id: Option<&str>) -> GatewayPaymentOutcome {
+        approved_outcome_with_reference(transaction_id, "vault_application")
+    }
+
+    fn approved_outcome_with_reference(
+        transaction_id: Option<&str>,
+        payment_method_reference: &str,
+    ) -> GatewayPaymentOutcome {
         GatewayPaymentOutcome::new(
             GatewayPaymentStatus::Approved,
             ProcessorEvidence::new(
                 transaction_id.map(|value| GatewayTransactionId::new(value).unwrap()),
-                Some(GatewayPaymentMethodReference::new("vault_application").unwrap()),
+                Some(GatewayPaymentMethodReference::new(payment_method_reference).unwrap()),
                 Some(GatewayDiagnostic::new("1")),
                 Some(GatewayDiagnostic::new("100")),
                 Some(GatewayDiagnostic::new("Approved")),
@@ -2637,6 +3567,135 @@ mod tests {
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+        fixture.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
+    -> Result<(), Box<dyn Error>> {
+        let fixture = enrollment_fixture("service_recovery", true, false, false).await?;
+        let initial_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+            "txn_recovery_initial",
+        ))));
+        let initial_resolver = Arc::new(StaticResolver {
+            gateway: scripted_resolved_gateway(
+                fixture.gateway_account,
+                Arc::clone(&initial_gateway),
+            ),
+            calls: AtomicUsize::new(0),
+        });
+        let initial_service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            initial_resolver,
+            Arc::new(PermitAdmission {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(fixture.coordinator.clone()),
+        );
+        let initial = initial_service.enroll(fixture.command.clone()).await?;
+        let subscription_id = initial
+            .subscription()
+            .expect("approved enrollment has a subscription")
+            .id();
+        let due_at: DateTime<Utc> = sqlx::query_scalar(
+            r#"
+            UPDATE billing_subscriptions
+            SET current_period_start_at = clock_timestamp() - interval '2 months',
+                current_period_end_at = clock_timestamp() - interval '1 month',
+                next_renewal_at = clock_timestamp() - interval '1 month',
+                updated_at = clock_timestamp()
+            WHERE id = $1
+            RETURNING next_renewal_at
+            "#,
+        )
+        .bind(subscription_id.as_uuid())
+        .fetch_one(&fixture.database.pool)
+        .await?;
+
+        let recovery_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome_with_reference(
+            Some("txn_recovery_approved"),
+            "vault_recovery",
+        ))));
+        let resolver = Arc::new(StaticResolver {
+            gateway: scripted_resolved_gateway(
+                fixture.gateway_account,
+                Arc::clone(&recovery_gateway),
+            ),
+            calls: AtomicUsize::new(0),
+        });
+        let admission = Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            fixture.database.pool.clone(),
+            Arc::new(TestOfferStore),
+            resolver.clone(),
+            admission.clone(),
+            Arc::new(fixture.coordinator.clone()),
+        );
+        let command = RecoverSubscriptionPayment::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.plan_key().clone(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("recovery-key")?,
+            PaymentToken::new("opaque-recovery-token")?,
+            fixture.command.billing_contact().clone(),
+        );
+
+        let result = service.recover(command.clone()).await?;
+        assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
+        assert_eq!(
+            result.attempt().kind(),
+            PaymentAttemptKind::SubscriptionRecovery
+        );
+        let recovered = result
+            .subscription()
+            .expect("recovery applies subscription");
+        assert_eq!(recovered.id(), subscription_id);
+        assert_eq!(recovered.status(), SubscriptionStatus::Active);
+        assert_eq!(*recovered.current_period().start_at(), due_at);
+        assert_eq!(
+            recovered.payment_method_id(),
+            result
+                .attempt()
+                .request()
+                .target()
+                .payment_method_id()
+                .unwrap()
+        );
+        assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+
+        let discount: (i32, String, i32) = sqlx::query_as(
+            r#"
+            SELECT discounts.periods_applied, discounts.status, subscriptions.amount_cents
+            FROM billing_subscription_discounts AS discounts
+            INNER JOIN billing_subscriptions AS subscriptions
+                ON subscriptions.id = discounts.subscription_id
+            WHERE discounts.subscription_id = $1
+            "#,
+        )
+        .bind(subscription_id.as_uuid())
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(discount, (2, "active".to_owned(), 800));
+
+        let replay = service.recover(command).await?;
+        assert_eq!(replay, result);
+        assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+        let events = fixture.coordinator.events.lock().await;
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[1],
+            BillingEvent::SubscriptionRenewed { .. }
+        ));
+        drop(events);
         fixture.cleanup().await
     }
 
