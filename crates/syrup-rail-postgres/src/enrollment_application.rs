@@ -49,8 +49,6 @@ const RECOVERY_INCOMPLETE_APPROVAL_TEXT: &str =
 const RECOVERY_APPROVED_STORAGE_FAILURE_TEXT: &str =
     "Approved subscription recovery could not be applied; manual review is required.";
 const RECOVERY_STALE_STATE_TEXT: &str = "Approved subscription recovery could not update billing state because the subscription changed.";
-const RECOVERY_TERMINAL_APPROVAL_RACE_TEXT: &str =
-    "Approved processor evidence arrived after the recovery attempt became terminal.";
 
 #[derive(Error)]
 pub enum SubscriptionEnrollmentApplicationError {
@@ -760,14 +758,6 @@ async fn apply_recovery_approved_on_connection(
             ChargeProgression::ExternalReversalRequired,
         )
         .await?;
-        let parked = park_locked_attempt(
-            connection,
-            &attempt,
-            evidence,
-            None,
-            RECOVERY_TERMINAL_APPROVAL_RACE_TEXT,
-        )
-        .await?;
         if let ObservedCharge::Owned(charge) = observation {
             transition_charge(
                 connection,
@@ -777,7 +767,14 @@ async fn apply_recovery_approved_on_connection(
             )
             .await?;
         }
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::confirmation_pending(
+                attempt,
+                None,
+                evidence.clone(),
+            ),
+            None,
+        ));
     }
 
     let observation =
@@ -1215,7 +1212,15 @@ async fn park_recovery_approved_outcome(
             .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
                 INVALID_APPLICATION_STATE,
             ))?;
-            let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+            let result = if attempt.status() == PaymentAttemptStatus::Approved {
+                payment_result_for_attempt(&mut transaction, attempt).await?
+            } else {
+                SubscriptionEnrollmentPaymentResult::confirmation_pending(
+                    attempt,
+                    None,
+                    evidence.clone(),
+                )
+            };
             transaction.commit().await?;
             Ok(result)
         }
@@ -1967,7 +1972,15 @@ async fn park_approved_outcome(
             .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
                 INVALID_APPLICATION_STATE,
             ))?;
-            let result = payment_result_for_attempt(&mut transaction, attempt).await?;
+            let result = if attempt.status() == PaymentAttemptStatus::Approved {
+                payment_result_for_attempt(&mut transaction, attempt).await?
+            } else {
+                SubscriptionEnrollmentPaymentResult::confirmation_pending(
+                    attempt,
+                    None,
+                    evidence.clone(),
+                )
+            };
             transaction.commit().await?;
             Ok(result)
         }
@@ -3013,10 +3026,14 @@ pub(crate) async fn payment_result_for_attempt(
     connection: &mut PgConnection,
     attempt: PaymentAttempt,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let subscription = if attempt.status() == PaymentAttemptStatus::Approved {
-        load_applied_subscription(connection, &attempt).await?
-    } else {
-        None
+    let subscription = match attempt.kind() {
+        PaymentAttemptKind::SubscriptionRecovery => {
+            load_applied_subscription(connection, &attempt).await?
+        }
+        _ if attempt.status() == PaymentAttemptStatus::Approved => {
+            load_applied_subscription(connection, &attempt).await?
+        }
+        _ => None,
     };
     Ok(SubscriptionEnrollmentPaymentResult::new(
         attempt,
@@ -4457,6 +4474,15 @@ mod tests {
         )
         .await?;
         assert_eq!(result.attempt().status(), PaymentAttemptStatus::Pending);
+        assert_eq!(result.status(), PaymentAttemptStatus::Unknown);
+        assert!(result.is_confirmation_pending());
+        assert_eq!(
+            result
+                .processor_evidence()
+                .transaction_id()
+                .map(GatewayTransactionId::expose),
+            Some("txn_charge_fallback")
+        );
         assert!(result.subscription().is_none());
         let durable: (i64, String, Option<String>) = sqlx::query_as(
             r#"

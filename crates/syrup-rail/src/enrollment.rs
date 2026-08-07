@@ -4,8 +4,8 @@ use crate::{
     BillingContact, BillingContactSnapshot, BillingScopeId, ChargeAmount, DiscountClaimId,
     DiscountCodeId, GatewayConfigurationId, GatewayOrderId, GatewayProviderKey, IdempotencyKey,
     PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptTarget, PaymentToken, PlanKey, ResolvedGateway, SubscriberId, Subscription,
-    SubscriptionDiscountSnapshot, SubscriptionOffer,
+    PaymentAttemptStatus, PaymentAttemptTarget, PaymentToken, PlanKey, ProcessorEvidence,
+    ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountSnapshot, SubscriptionOffer,
 };
 use thiserror::Error;
 
@@ -459,6 +459,7 @@ pub enum SubscriptionEnrollmentSubmissionOutcome {
 pub struct SubscriptionEnrollmentPaymentResult {
     attempt: PaymentAttempt,
     subscription: Option<Subscription>,
+    pending_confirmation_evidence: Option<ProcessorEvidence>,
 }
 
 impl SubscriptionEnrollmentPaymentResult {
@@ -466,6 +467,23 @@ impl SubscriptionEnrollmentPaymentResult {
         Self {
             attempt,
             subscription,
+            pending_confirmation_evidence: None,
+        }
+    }
+
+    /// Returns a result for approved evidence that is durable but could not be
+    /// attached to the locked attempt in this call. The durable attempt remains
+    /// authoritative; callers must present this observation as confirmation
+    /// pending rather than as the attempt's older status.
+    pub const fn confirmation_pending(
+        attempt: PaymentAttempt,
+        subscription: Option<Subscription>,
+        evidence: ProcessorEvidence,
+    ) -> Self {
+        Self {
+            attempt,
+            subscription,
+            pending_confirmation_evidence: Some(evidence),
         }
     }
 
@@ -477,8 +495,36 @@ impl SubscriptionEnrollmentPaymentResult {
         self.subscription.as_ref()
     }
 
-    pub fn into_parts(self) -> (PaymentAttempt, Option<Subscription>) {
-        (self.attempt, self.subscription)
+    pub const fn status(&self) -> PaymentAttemptStatus {
+        if self.pending_confirmation_evidence.is_some() {
+            PaymentAttemptStatus::Unknown
+        } else {
+            self.attempt.status()
+        }
+    }
+
+    pub fn processor_evidence(&self) -> &ProcessorEvidence {
+        self.pending_confirmation_evidence
+            .as_ref()
+            .unwrap_or_else(|| self.attempt.state().processor_evidence())
+    }
+
+    pub const fn is_confirmation_pending(&self) -> bool {
+        self.pending_confirmation_evidence.is_some()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        PaymentAttempt,
+        Option<Subscription>,
+        Option<ProcessorEvidence>,
+    ) {
+        (
+            self.attempt,
+            self.subscription,
+            self.pending_confirmation_evidence,
+        )
     }
 }
 
