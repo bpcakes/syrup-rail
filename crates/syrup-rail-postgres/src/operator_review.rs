@@ -9,7 +9,7 @@ use syrup_rail::{
     ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalReason,
     GatewayAccountId, GatewayConfigurationId, GatewayDiagnostic, GatewayOrderId,
     GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayTransactionId,
-    HostChargeTargetId, ManualAttemptFailureOutcome, ManualFailureHostCharge,
+    HostChargeTargetId, ManualAttemptFailureOutcome, ManualFailureHostCharge, Money,
     OperatorReviewPageLimit, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
     PaymentAttemptStatus, PaymentResolutionCode, PlanKey, ProcessorCharge, ProcessorChargeId,
     ProcessorChargeProgression, ProcessorChargeReviewCursor, ProcessorChargeReviewItem,
@@ -780,7 +780,7 @@ pub(crate) fn processor_charge_from_row(
     let attempt_id = PaymentAttemptId::new(row.try_get("attempt_id")?);
     let currency = CurrencyCode::new(&row.try_get::<String, _>("currency")?)
         .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
-    let amount = ChargeAmount::new(row.try_get("amount_cents")?, currency)
+    let amount = Money::new(row.try_get("amount_cents")?, currency)
         .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
     let order = row.try_get::<String, _>("gateway_order_id")?;
     let gateway_order_id = GatewayOrderId::from_generated_attempt(&order, attempt_id)
@@ -811,7 +811,7 @@ fn processor_charge_from_review_row(row: &PgRow) -> Result<ProcessorCharge, Oper
     let attempt_id = PaymentAttemptId::new(row.try_get("review_charge_attempt_id")?);
     let currency = CurrencyCode::new(&row.try_get::<String, _>("review_charge_currency")?)
         .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
-    let amount = ChargeAmount::new(row.try_get("review_charge_amount_cents")?, currency)
+    let amount = Money::new(row.try_get("review_charge_amount_cents")?, currency)
         .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
     let order = row.try_get::<String, _>("review_charge_gateway_order_id")?;
     let gateway_order_id = GatewayOrderId::from_generated_attempt(&order, attempt_id)
@@ -1033,7 +1033,7 @@ fn locator_matches(
         && charge.gateway_account_id() == identity.gateway_account_id()
         && charge.attempt_kind() == attempt.kind()
         && charge.gateway_order_id() == attempt.request().gateway_order_id()
-        && charge.amount().money() == attempt.request().amount()
+        && charge.amount() == attempt.request().amount()
 }
 
 fn processor_charge_can_attest_external_reversal(charge: &ProcessorCharge) -> bool {
@@ -1088,7 +1088,7 @@ pub(crate) fn attestation_matches_source(
         && attestation.gateway_account_id() == attempt.identity().gateway_account_id()
         && attestation.gateway_configuration_id() == attempt.identity().gateway_configuration_id()
         && attestation.gateway_order_id() == attempt.request().gateway_order_id()
-        && attestation.amount() == charge.amount()
+        && attestation.amount().money() == charge.amount()
         && attestation.gateway_transaction_id()
             == charge
                 .evidence()

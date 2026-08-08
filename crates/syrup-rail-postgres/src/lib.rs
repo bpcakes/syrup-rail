@@ -94,7 +94,7 @@ pub use operator_review::{
 pub use processor_charges::{
     CompensatingProcessorChargeOutcome, ProcessorChargeObservationOutcome,
     ProcessorChargeStoreError, observe_processor_charge_in_transaction,
-    store_compensating_processor_charge,
+    store_compensating_processor_charge, transition_processor_charge_in_transaction,
 };
 pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,

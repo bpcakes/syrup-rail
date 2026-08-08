@@ -6,9 +6,9 @@ use thiserror::Error;
 
 use crate::{
     ActorId, BillingScopeId, ChargeAmount, GatewayAccountId, GatewayConfigurationId,
-    GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, HostChargeTargetId, PaymentAttempt,
-    PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus, PaymentResolutionCode,
-    ProcessorChargeId, ProcessorEvidence, SubscriberId,
+    GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, HostChargeTargetId, Money,
+    PaymentAttempt, PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus,
+    PaymentResolutionCode, ProcessorChargeId, ProcessorEvidence, SubscriberId,
 };
 
 pub const OPERATOR_REVIEW_PAGE_LIMIT: i64 = 100;
@@ -224,7 +224,7 @@ pub struct ProcessorCharge {
     gateway_account_id: GatewayAccountId,
     gateway_order_id: GatewayOrderId,
     attempt_kind: PaymentAttemptKind,
-    amount: ChargeAmount,
+    amount: Money,
     role: ProcessorChargeRole,
     progression: ProcessorChargeProgression,
     state_code: Option<ProcessorChargeStateCode>,
@@ -241,7 +241,7 @@ impl ProcessorCharge {
         gateway_account_id: GatewayAccountId,
         gateway_order_id: GatewayOrderId,
         attempt_kind: PaymentAttemptKind,
-        amount: ChargeAmount,
+        amount: Money,
         role: ProcessorChargeRole,
         progression: ProcessorChargeProgression,
         state_code: Option<ProcessorChargeStateCode>,
@@ -282,7 +282,7 @@ impl ProcessorCharge {
     pub const fn attempt_kind(&self) -> PaymentAttemptKind {
         self.attempt_kind
     }
-    pub const fn amount(&self) -> ChargeAmount {
+    pub const fn amount(&self) -> Money {
         self.amount
     }
     pub const fn role(&self) -> ProcessorChargeRole {
