@@ -268,20 +268,34 @@ impl SubscriptionBillingService {
             .host_charge_targets
             .as_deref()
             .ok_or(SubscriptionEnrollmentServiceError::HostChargeUnavailable)?;
-        let snapshot = match self.preflight_host_charge(targets, &command).await? {
-            HostChargePreflightOutcome::Continue(snapshot) => snapshot,
-            HostChargePreflightOutcome::Replay(attempt) => {
-                return Ok(HostChargePaymentResult::new(*attempt));
-            }
-            HostChargePreflightOutcome::IdempotencyConflict => {
-                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
-            }
-            HostChargePreflightOutcome::Rejected { reason } => {
-                return Err(
-                    SubscriptionEnrollmentServiceError::HostChargeReservationRejected(reason),
-                );
-            }
-        };
+        let (snapshot, prepared_attempt_id) =
+            match self.preflight_host_charge(targets, &command).await? {
+                HostChargePreflightOutcome::Continue(snapshot) => (snapshot, None),
+                HostChargePreflightOutcome::Replay(attempt)
+                    if attempt.status() == PaymentAttemptStatus::Pending
+                        && attempt.state().timestamps().submitted_at().is_none() =>
+                {
+                    let reservation =
+                        HostChargeReservation::from_attempt(&attempt).map_err(|_| {
+                            SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
+                        })?;
+                    (
+                        reservation.snapshot(),
+                        Some(attempt.identity().attempt_id()),
+                    )
+                }
+                HostChargePreflightOutcome::Replay(attempt) => {
+                    return Ok(HostChargePaymentResult::new(*attempt));
+                }
+                HostChargePreflightOutcome::IdempotencyConflict => {
+                    return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+                }
+                HostChargePreflightOutcome::Rejected { reason } => {
+                    return Err(
+                        SubscriptionEnrollmentServiceError::HostChargeReservationRejected(reason),
+                    );
+                }
+            };
 
         let account = self
             .gateway_account(
@@ -289,7 +303,9 @@ impl SubscriptionBillingService {
                 command.gateway_configuration_id(),
             )
             .await?;
-        if let Some(scope) = self.active_cooldown(&account).await? {
+        if prepared_attempt_id.is_none()
+            && let Some(scope) = self.active_cooldown(&account).await?
+        {
             return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
         }
         let gateway = self
@@ -326,30 +342,33 @@ impl SubscriptionBillingService {
             Err(error) => return Err(SubscriptionEnrollmentServiceError::GatewayReadiness(error)),
         }
 
-        match self
-            .admission
-            .admit(EndUserMutationCommand::new(
-                command.billing_scope_id(),
-                command.subscriber_id(),
-                EndUserMutationOperation::HostCharge,
-            ))
-            .await
-        {
-            EndUserMutationAdmissionResult::Allowed => {}
-            EndUserMutationAdmissionResult::Denied { retry_after } => {
-                return Err(SubscriptionEnrollmentServiceError::AdmissionDenied {
-                    retry_after: retry_after.get(),
-                });
-            }
-            EndUserMutationAdmissionResult::Timeout => {
-                return Err(SubscriptionEnrollmentServiceError::AdmissionTimeout);
-            }
-            EndUserMutationAdmissionResult::Unavailable => {
-                return Err(SubscriptionEnrollmentServiceError::AdmissionUnavailable);
+        if prepared_attempt_id.is_none() {
+            match self
+                .admission
+                .admit(EndUserMutationCommand::new(
+                    command.billing_scope_id(),
+                    command.subscriber_id(),
+                    EndUserMutationOperation::HostCharge,
+                ))
+                .await
+            {
+                EndUserMutationAdmissionResult::Allowed => {}
+                EndUserMutationAdmissionResult::Denied { retry_after } => {
+                    return Err(SubscriptionEnrollmentServiceError::AdmissionDenied {
+                        retry_after: retry_after.get(),
+                    });
+                }
+                EndUserMutationAdmissionResult::Timeout => {
+                    return Err(SubscriptionEnrollmentServiceError::AdmissionTimeout);
+                }
+                EndUserMutationAdmissionResult::Unavailable => {
+                    return Err(SubscriptionEnrollmentServiceError::AdmissionUnavailable);
+                }
             }
         }
 
-        let candidate_id = PaymentAttemptId::new(uuid::Uuid::now_v7());
+        let candidate_id =
+            prepared_attempt_id.unwrap_or_else(|| PaymentAttemptId::new(uuid::Uuid::now_v7()));
         let mut reservation =
             HostChargeReservation::from_command(&command, snapshot, &gateway, candidate_id)
                 .map_err(|_| {

@@ -21,7 +21,7 @@ use crate::{
         lock_payment_attempt_by_id_on_connection,
     },
     enrollment_application::{
-        SubscriptionEnrollmentApplicationError, mutation_error_evidence,
+        OutcomeResolutionBoundary, SubscriptionEnrollmentApplicationError, mutation_error_evidence,
         not_submitted_resolution_code, park_locked_attempt, set_application_timeouts,
         update_attempt_resolution,
     },
@@ -179,7 +179,7 @@ pub async fn submit_admitted_host_charge(
                 &evidence,
                 PaymentAttemptStatus::Failed,
                 Some(not_submitted_resolution_code(&error)),
-                true,
+                OutcomeResolutionBoundary::AdmittedNotSubmitted,
                 true,
                 false,
             )
@@ -236,7 +236,7 @@ pub async fn apply_host_charge_gateway_outcome(
                 outcome.evidence(),
                 PaymentAttemptStatus::Declined,
                 None,
-                false,
+                OutcomeResolutionBoundary::Submitted,
                 true,
                 false,
             )
@@ -250,7 +250,7 @@ pub async fn apply_host_charge_gateway_outcome(
                 outcome.evidence(),
                 PaymentAttemptStatus::Failed,
                 None,
-                false,
+                OutcomeResolutionBoundary::Submitted,
                 true,
                 false,
             )
@@ -311,7 +311,11 @@ pub(crate) async fn resolve_host_charge_before_submission(
         &evidence,
         PaymentAttemptStatus::Failed,
         Some(resolution_code),
-        admitted_not_submitted,
+        if admitted_not_submitted {
+            OutcomeResolutionBoundary::AdmittedNotSubmitted
+        } else {
+            OutcomeResolutionBoundary::Prepared
+        },
         false,
         extend_provider_cooldown,
     )
@@ -467,7 +471,7 @@ async fn resolve_host_charge_non_approved(
     evidence: &ProcessorEvidence,
     status: PaymentAttemptStatus,
     resolution_code: Option<PaymentResolutionCode>,
-    clear_submission: bool,
+    boundary: OutcomeResolutionBoundary,
     release_target: bool,
     extend_provider_cooldown: bool,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
@@ -498,7 +502,32 @@ async fn resolve_host_charge_non_approved(
         }
     }
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
-    if !attempt.status().is_terminal() {
+    let may_resolve = attempt.status().is_resolvable()
+        && match boundary {
+            OutcomeResolutionBoundary::Prepared => {
+                attempt.state().timestamps().submitted_at().is_none()
+            }
+            OutcomeResolutionBoundary::AdmittedNotSubmitted => {
+                attempt.state().timestamps().submitted_at().is_some()
+            }
+            OutcomeResolutionBoundary::Submitted => true,
+        };
+    if !may_resolve && release_target {
+        transaction.rollback().await?;
+        let mut reload = pool.begin().await?;
+        let attempt = crate::find_payment_attempt_by_id_in_transaction(
+            &mut reload,
+            identity.billing_scope_id(),
+            identity.attempt_id(),
+        )
+        .await?
+        .ok_or(HostChargeApplicationError::InvalidState(
+            INVALID_HOST_CHARGE_STATE,
+        ))?;
+        reload.commit().await?;
+        return Ok(HostChargePaymentResult::new(attempt));
+    }
+    if may_resolve {
         update_attempt_resolution(
             &mut transaction,
             &attempt,
@@ -519,7 +548,7 @@ async fn resolve_host_charge_non_approved(
             )
             .await?;
         }
-        if clear_submission {
+        if boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
             sqlx::query(
                 "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2",
             )
@@ -733,7 +762,7 @@ mod tests {
         IdempotencyKey, PaymentAttemptId, PaymentAttemptKind, PaymentGateway, PaymentToken,
         ResolvedGateway,
     };
-    use tokio::sync::Mutex;
+    use tokio::sync::{Mutex, Notify, oneshot};
     use uuid::Uuid;
 
     use super::*;
@@ -816,6 +845,63 @@ mod tests {
     struct TerminalRaceGateway {
         pool: PgPool,
         sale_calls: AtomicUsize,
+    }
+
+    struct RacingPreparedRetryGateway {
+        readiness_calls: AtomicUsize,
+        sale_calls: AtomicUsize,
+        blocked_readiness_started: Mutex<Option<oneshot::Sender<()>>>,
+        sale_started: Mutex<Option<oneshot::Sender<()>>>,
+        release_readiness: Notify,
+        release_sale: Notify,
+    }
+
+    #[async_trait]
+    impl PaymentGateway for RacingPreparedRetryGateway {
+        async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
+            if self.readiness_calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                if let Some(started) = self.blocked_readiness_started.lock().await.take() {
+                    let _ = started.send(());
+                }
+                self.release_readiness.notified().await;
+                Ok(GatewayAccountMode::Test)
+            } else {
+                Ok(GatewayAccountMode::Live)
+            }
+        }
+
+        async fn sale(
+            &self,
+            _request: GatewaySaleRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            self.sale_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(started) = self.sale_started.lock().await.take() {
+                let _ = started.send(());
+            }
+            self.release_sale.notified().await;
+            Ok(approved_outcome("host_txn_prepared_retry"))
+        }
+
+        async fn store_payment_method(
+            &self,
+            _request: GatewayStorePaymentMethodRequest,
+        ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
+            panic!("host charge must not store a payment method")
+        }
+
+        async fn query_transaction(
+            &self,
+            _request: GatewayQueryRequest,
+        ) -> Result<Option<GatewayPaymentOutcome>, GatewayError> {
+            panic!("foreground host charge must not query")
+        }
+
+        async fn query_transaction_reports(
+            &self,
+            _request: GatewayTransactionReportRequest,
+        ) -> Result<Vec<GatewayTransactionReport>, GatewayError> {
+            panic!("foreground host charge must not query reports")
+        }
     }
 
     #[async_trait]
@@ -1543,6 +1629,108 @@ mod tests {
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(charge_state, "external_reversal_required");
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn matching_retry_resumes_prepared_attempt_without_readiness_loser_overwrite()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("rail_host_resume").await?;
+        let result = async {
+            sqlx::query(
+                r#"
+                CREATE TABLE host_charge_targets (
+                    id uuid PRIMARY KEY,
+                    billing_scope_id uuid NOT NULL,
+                    subscriber_id uuid NOT NULL,
+                    status text NOT NULL,
+                    amount_cents integer NOT NULL,
+                    currency text NOT NULL,
+                    paid_at timestamptz
+                )
+                "#,
+            )
+            .execute(&database.pool)
+            .await?;
+            let account = create_gateway_account(&database.pool, "nmi").await?;
+            let subscriber_id = Uuid::now_v7();
+            let target_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
+            )
+            .bind(target_id)
+            .bind(account.billing_scope_id)
+            .bind(subscriber_id)
+            .execute(&database.pool)
+            .await?;
+
+            let (readiness_started_tx, readiness_started_rx) = oneshot::channel();
+            let (sale_started_tx, sale_started_rx) = oneshot::channel();
+            let gateway = Arc::new(RacingPreparedRetryGateway {
+                readiness_calls: AtomicUsize::new(0),
+                sale_calls: AtomicUsize::new(0),
+                blocked_readiness_started: Mutex::new(Some(readiness_started_tx)),
+                sale_started: Mutex::new(Some(sale_started_tx)),
+                release_readiness: Notify::new(),
+                release_sale: Notify::new(),
+            });
+            let service = SubscriptionBillingService::new(
+                database.pool.clone(),
+                Arc::new(UnusedOffers),
+                Arc::new(StaticResolver {
+                    gateway: resolved_gateway(account, gateway.clone()),
+                    calls: AtomicUsize::new(0),
+                }),
+                Arc::new(PermitAdmission {
+                    calls: AtomicUsize::new(0),
+                }),
+                Arc::new(TestCoordinator {
+                    pool: database.pool.clone(),
+                    events: Arc::new(Mutex::new(Vec::new())),
+                }),
+            )
+            .with_host_charge_targets(Arc::new(TestTargets));
+            let command = ChargeHostTarget::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                HostChargeTargetId::new(target_id),
+                GatewayConfigurationId::new(account.gateway_configuration_id),
+                PaymentToken::new("tok_host_resume")?,
+                IdempotencyKey::new("host-resume")?,
+                None,
+            );
+
+            let first_service = service.clone();
+            let first_command = command.clone();
+            let first =
+                tokio::spawn(async move { first_service.charge_host_target(first_command).await });
+            readiness_started_rx.await?;
+            let second_service = service.clone();
+            let second =
+                tokio::spawn(async move { second_service.charge_host_target(command).await });
+            sale_started_rx.await?;
+            gateway.release_readiness.notify_one();
+            let first = first.await??;
+            assert_eq!(first.status(), PaymentAttemptStatus::Pending);
+            assert!(
+                first
+                    .attempt()
+                    .state()
+                    .timestamps()
+                    .submitted_at()
+                    .is_some()
+            );
+            gateway.release_sale.notify_one();
+            let second = second.await??;
+            assert_eq!(second.status(), PaymentAttemptStatus::Approved);
+            assert_eq!(first.attempt().identity(), second.attempt().identity());
+            assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             Ok::<_, Box<dyn Error>>(())
         }
         .await;
