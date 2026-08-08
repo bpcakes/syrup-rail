@@ -13,6 +13,7 @@ mod enrollment_application;
 mod entitlement;
 mod gateway_accounts;
 mod grants;
+mod reconciliation;
 mod renewal;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 pub mod schema_contract;
@@ -64,6 +65,7 @@ pub use gateway_accounts::{activate_gateway_configuration, register_gateway_acco
 pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
 };
+pub use reconciliation::reconciliation_gateway_accounts;
 pub use renewal::{RenewalStoreError, due_renewals, renewal_attempt_state};
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionEnrollmentServiceError,

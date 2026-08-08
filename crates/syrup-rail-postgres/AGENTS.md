@@ -35,6 +35,8 @@ and transaction orchestration.
   attempt fences, stale update cleanup, and canonical event production.
 - `src/deletion.rs` — transaction-local canonical account-deletion blockers
   and mutable billing-data scrubbing.
+- `src/reconciliation.rs` — complete deterministic registered-account
+  reconciliation candidate selection.
 
 ## Edit here for X
 
@@ -73,6 +75,9 @@ and transaction orchestration.
 - Change canonical deletion admission or billing attempt/payment-method scrub
   policy in `src/deletion.rs`; keep host identity, order, fulfillment, and
   retained-subject work in the host transaction.
+- Change registered-account reconciliation selection in
+  `src/reconciliation.rs`; keep host configuration filtering and queue
+  encoding outside the shared query.
 
 ## Invariants
 
