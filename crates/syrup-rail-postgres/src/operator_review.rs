@@ -965,6 +965,7 @@ mod tests {
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let attempt_id = Uuid::now_v7();
         let charge_id = Uuid::now_v7();
+        let additional_charge_id = Uuid::now_v7();
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
         let order_id = format!("ck_{}", attempt_id.simple());
@@ -1034,21 +1035,57 @@ mod tests {
         .bind(target_id)
         .execute(&database.pool)
         .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO billing_processor_charges (
+                id, attempt_id, billing_scope_id, gateway_account_id,
+                gateway_order_id, gateway_transaction_id, gateway_response,
+                gateway_response_code, gateway_response_text, gateway_condition,
+                charge_role, progression_state, observed_at, attempt_kind,
+                host_charge_target_id, amount_cents, currency,
+                external_reversal_required_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, 'txn-operator-additional', '1', '100',
+                'Approved additional charge', 'complete', 'additional',
+                'external_reversal_required', clock_timestamp(), 'host_charge',
+                $6, 500, 'USD', clock_timestamp()
+            )
+            "#,
+        )
+        .bind(additional_charge_id)
+        .bind(attempt_id)
+        .bind(account.billing_scope_id)
+        .bind(account.gateway_account_id)
+        .bind(&order_id)
+        .bind(target_id)
+        .execute(&database.pool)
+        .await?;
 
         let page_limit = OperatorReviewPageLimit::new(1)?;
         let attempt_page = attempt_review_page(&database.pool, page_limit, None).await?;
         assert!(attempt_page.into_items().is_empty());
-        let charge_page = processor_charge_review_page(&database.pool, page_limit, None).await?;
-        assert!(charge_page.next_cursor().is_none());
-        let charge_items = charge_page.into_items();
-        assert_eq!(charge_items.len(), 1);
-        assert_eq!(
-            charge_items[0].charge().id(),
-            ProcessorChargeId::new(charge_id)
-        );
-        assert_eq!(
-            charge_items[0].attempt().identity().attempt_id(),
-            PaymentAttemptId::new(attempt_id)
+        let first_charge_page =
+            processor_charge_review_page(&database.pool, page_limit, None).await?;
+        let next_cursor = first_charge_page.next_cursor().expect("second charge page");
+        let first_charge_items = first_charge_page.into_items();
+        assert_eq!(first_charge_items.len(), 1);
+        let second_charge_page =
+            processor_charge_review_page(&database.pool, page_limit, Some(next_cursor)).await?;
+        assert!(second_charge_page.next_cursor().is_none());
+        let second_charge_items = second_charge_page.into_items();
+        assert_eq!(second_charge_items.len(), 1);
+        let returned_charge_ids = [
+            first_charge_items[0].charge().id(),
+            second_charge_items[0].charge().id(),
+        ];
+        assert!(returned_charge_ids.contains(&ProcessorChargeId::new(charge_id)));
+        assert!(returned_charge_ids.contains(&ProcessorChargeId::new(additional_charge_id)));
+        assert!(
+            first_charge_items
+                .iter()
+                .chain(&second_charge_items)
+                .all(|item| item.attempt().identity().attempt_id()
+                    == PaymentAttemptId::new(attempt_id))
         );
 
         let mut preflight = database.pool.begin().await?;
