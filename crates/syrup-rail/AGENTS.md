@@ -8,11 +8,11 @@ command/outcome types for application-independent subscription billing.
 ## Key entrypoints
 
 - `src/lib.rs` is the public facade.
-- `src/{identity,money,subscription,discount,enrollment,attempt,event,resolution,admission}.rs` own validated
+- `src/{identity,money,subscription,discount,enrollment,host_charge,attempt,event,resolution,admission}.rs` own validated
   billing values and closed lifecycle facts, including card-safe grant
   commands, lossless grant audit records, canonical discount commands,
-  immutable discount and enrollment expectations, secret-free initial
-  reservation, preflight, and submission outcomes, durable enrollment payment results,
+  immutable discount and enrollment expectations, secret-free initial and
+  host-charge reservations, preflight and submission outcomes, durable payment results,
   durable attempt fingerprints and state snapshots, exact-plan cancellation outcomes, typed entitlement guards,
   subscriber billing-data scrub commands/results, and the closed host admission
   boundary for end-user billing mutations.

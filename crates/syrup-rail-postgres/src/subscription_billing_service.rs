@@ -2,12 +2,13 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use sqlx::PgPool;
 use syrup_rail::{
-    BillingScopeId, ChargeRenewal, EndUserMutationAdmission, EndUserMutationAdmissionResult,
-    EndUserMutationCommand, EndUserMutationOperation, EnrollSubscription, GatewayAccountId,
-    GatewayAccountMode, GatewayDiagnostic, GatewayError, GatewayNotSubmittedError,
-    GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayProviderKey, GatewayResolutionError,
-    GatewayResolver, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus,
-    PaymentResolutionCode, ProcessorEvidence, RecoverSubscriptionPayment,
+    BillingScopeId, ChargeHostTarget, ChargeRenewal, EndUserMutationAdmission,
+    EndUserMutationAdmissionResult, EndUserMutationCommand, EndUserMutationOperation,
+    EnrollSubscription, GatewayAccountId, GatewayAccountMode, GatewayDiagnostic, GatewayError,
+    GatewayNotSubmittedError, GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayProviderKey,
+    GatewayResolutionError, GatewayResolver, HostChargePaymentResult, HostChargeReservation,
+    HostChargeTargetRejection, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
+    PaymentAttemptStatus, PaymentResolutionCode, ProcessorEvidence, RecoverSubscriptionPayment,
     ReplaceSubscriptionPaymentMethod, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentPreflightOutcome, SubscriptionEnrollmentReservation,
     SubscriptionEnrollmentReservationBuildError, SubscriptionEnrollmentReservationOutcome,
@@ -23,16 +24,20 @@ use syrup_rail::{
 };
 use thiserror::Error;
 
+use crate::host_charge_application::resolve_host_charge_before_submission;
 use crate::{
-    BillingTransactionCoordinator, PaymentAttemptStoreError,
+    BillingTransactionCoordinator, HostChargeAdmissionOutcome, HostChargeApplicationError,
+    HostChargePreflightOutcome, HostChargeProviderResult, HostChargeReservationOutcome,
+    HostChargeStoreError, HostChargeTargetStore, PaymentAttemptStoreError,
     SubscriptionEnrollmentAdmissionOutcome, SubscriptionEnrollmentApplicationError,
     SubscriptionEnrollmentProviderResult, SubscriptionOfferStore,
     SubscriptionPaymentMethodReplacementAdmissionOutcome,
     SubscriptionPaymentMethodReplacementProviderResult, SubscriptionRecoveryAdmissionOutcome,
     SubscriptionRecoveryProviderResult, SubscriptionRenewalAdmissionOutcome,
-    SubscriptionRenewalProviderResult, admit_subscription_enrollment_submission,
-    admit_subscription_payment_method_replacement, admit_subscription_recovery_submission,
-    admit_subscription_renewal_submission,
+    SubscriptionRenewalProviderResult, admit_host_charge_submission,
+    admit_subscription_enrollment_submission, admit_subscription_payment_method_replacement,
+    admit_subscription_recovery_submission, admit_subscription_renewal_submission,
+    apply_reconciled_host_charge_gateway_outcome,
     apply_reconciled_subscription_enrollment_gateway_outcome,
     apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
     apply_reconciled_subscription_recovery_gateway_outcome,
@@ -42,12 +47,13 @@ use crate::{
         resolve_non_approved_outcome, resolve_payment_method_replacement_non_approved_outcome,
         resolve_recovery_non_approved_outcome, resolve_renewal_non_approved_outcome,
     },
-    preflight_subscription_enrollment_in_transaction,
+    preflight_host_charge_in_transaction, preflight_subscription_enrollment_in_transaction,
     preflight_subscription_payment_method_replacement_in_transaction,
-    preflight_subscription_recovery_in_transaction, reserve_subscription_enrollment_in_transaction,
+    preflight_subscription_recovery_in_transaction, reserve_host_charge_in_transaction,
+    reserve_subscription_enrollment_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
     reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
-    submit_admitted_subscription_enrollment,
+    submit_admitted_host_charge, submit_admitted_subscription_enrollment,
     submit_admitted_subscription_payment_method_replacement, submit_admitted_subscription_recovery,
     submit_admitted_subscription_renewal,
 };
@@ -70,6 +76,12 @@ pub enum SubscriptionEnrollmentServiceError {
     Attempt(#[from] PaymentAttemptStoreError),
     #[error("subscription enrollment application failed")]
     Application(#[from] SubscriptionEnrollmentApplicationError),
+    #[error("host charge application failed")]
+    HostChargeApplication(#[from] HostChargeApplicationError),
+    #[error("host charge storage failed")]
+    HostChargeStore(#[from] HostChargeStoreError),
+    #[error("host charge capability is not configured")]
+    HostChargeUnavailable,
     #[error("the idempotency key belongs to a different payment request")]
     IdempotencyConflict,
     #[error("end-user mutation admission was denied")]
@@ -90,6 +102,10 @@ pub enum SubscriptionEnrollmentServiceError {
     ReservationRejected(SubscriptionEnrollmentReservationRejection),
     #[error("subscription enrollment submission was rejected")]
     SubmissionRejected(SubscriptionEnrollmentSubmissionRejection),
+    #[error("host charge reservation was rejected")]
+    HostChargeReservationRejected(HostChargeTargetRejection),
+    #[error("host charge submission was rejected")]
+    HostChargeSubmissionRejected(HostChargeTargetRejection),
     #[error("subscription recovery reservation was rejected")]
     RecoveryReservationRejected(SubscriptionRecoveryReservationRejection),
     #[error("subscription recovery submission was rejected")]
@@ -118,6 +134,14 @@ impl fmt::Debug for SubscriptionEnrollmentServiceError {
             Self::Application(_) => {
                 formatter.write_str("SubscriptionEnrollmentServiceError::Application")
             }
+            Self::HostChargeApplication(_) => {
+                formatter.write_str("SubscriptionEnrollmentServiceError::HostChargeApplication")
+            }
+            Self::HostChargeStore(_) => {
+                formatter.write_str("SubscriptionEnrollmentServiceError::HostChargeStore")
+            }
+            Self::HostChargeUnavailable => formatter
+                .write_str("SubscriptionEnrollmentServiceError::HostChargeUnavailable"),
             Self::IdempotencyConflict => {
                 formatter.write_str("SubscriptionEnrollmentServiceError::IdempotencyConflict")
             }
@@ -149,6 +173,14 @@ impl fmt::Debug for SubscriptionEnrollmentServiceError {
                 .finish(),
             Self::SubmissionRejected(reason) => formatter
                 .debug_tuple("SubscriptionEnrollmentServiceError::SubmissionRejected")
+                .field(reason)
+                .finish(),
+            Self::HostChargeReservationRejected(reason) => formatter
+                .debug_tuple("SubscriptionEnrollmentServiceError::HostChargeReservationRejected")
+                .field(reason)
+                .finish(),
+            Self::HostChargeSubmissionRejected(reason) => formatter
+                .debug_tuple("SubscriptionEnrollmentServiceError::HostChargeSubmissionRejected")
                 .field(reason)
                 .finish(),
             Self::RecoveryReservationRejected(reason) => formatter
@@ -198,6 +230,7 @@ pub struct SubscriptionBillingService {
     resolver: Arc<dyn GatewayResolver>,
     admission: Arc<dyn EndUserMutationAdmission>,
     coordinator: Arc<dyn BillingTransactionCoordinator>,
+    host_charge_targets: Option<Arc<dyn HostChargeTargetStore>>,
 }
 
 impl SubscriptionBillingService {
@@ -214,6 +247,231 @@ impl SubscriptionBillingService {
             resolver,
             admission,
             coordinator,
+            host_charge_targets: None,
+        }
+    }
+
+    pub fn with_host_charge_targets(mut self, targets: Arc<dyn HostChargeTargetStore>) -> Self {
+        self.host_charge_targets = Some(targets);
+        self
+    }
+
+    /// Charges one host-owned target through the canonical attempt ledger.
+    ///
+    /// Target eligibility and economics are supplied by the configured host
+    /// extension. No transaction or target lock spans gateway I/O.
+    pub async fn charge_host_target(
+        &self,
+        command: ChargeHostTarget,
+    ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
+        let targets = self
+            .host_charge_targets
+            .as_deref()
+            .ok_or(SubscriptionEnrollmentServiceError::HostChargeUnavailable)?;
+        let snapshot = match self.preflight_host_charge(targets, &command).await? {
+            HostChargePreflightOutcome::Continue(snapshot) => snapshot,
+            HostChargePreflightOutcome::Replay(attempt) => {
+                return Ok(HostChargePaymentResult::new(*attempt));
+            }
+            HostChargePreflightOutcome::IdempotencyConflict => {
+                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+            }
+            HostChargePreflightOutcome::Rejected { reason } => {
+                return Err(
+                    SubscriptionEnrollmentServiceError::HostChargeReservationRejected(reason),
+                );
+            }
+        };
+
+        let account = self
+            .gateway_account(
+                command.billing_scope_id(),
+                command.gateway_configuration_id(),
+            )
+            .await?;
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
+        }
+        let gateway = self
+            .resolver
+            .resolve(
+                command.billing_scope_id(),
+                account.account_id,
+                command.gateway_configuration_id(),
+                account.provider_key.clone(),
+            )
+            .await?;
+        if gateway.billing_scope_id() != command.billing_scope_id()
+            || gateway.gateway_account_id() != account.account_id
+            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
+            || gateway.provider_key() != &account.provider_key
+        {
+            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
+        }
+        match gateway.account_mode().await {
+            Ok(GatewayAccountMode::Live) => {}
+            Ok(GatewayAccountMode::Test) => {
+                return Err(SubscriptionEnrollmentServiceError::GatewayReadiness(
+                    GatewayError::Configuration(GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT)),
+                ));
+            }
+            Err(GatewayError::RateLimited(_)) => {
+                self.extend_provider_cooldown(&account.provider_key).await?;
+                return Err(
+                    SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+                        scope: GatewayMutationCooldownScope::Provider,
+                    },
+                );
+            }
+            Err(error) => return Err(SubscriptionEnrollmentServiceError::GatewayReadiness(error)),
+        }
+
+        match self
+            .admission
+            .admit(EndUserMutationCommand::new(
+                command.billing_scope_id(),
+                command.subscriber_id(),
+                EndUserMutationOperation::HostCharge,
+            ))
+            .await
+        {
+            EndUserMutationAdmissionResult::Allowed => {}
+            EndUserMutationAdmissionResult::Denied { retry_after } => {
+                return Err(SubscriptionEnrollmentServiceError::AdmissionDenied {
+                    retry_after: retry_after.get(),
+                });
+            }
+            EndUserMutationAdmissionResult::Timeout => {
+                return Err(SubscriptionEnrollmentServiceError::AdmissionTimeout);
+            }
+            EndUserMutationAdmissionResult::Unavailable => {
+                return Err(SubscriptionEnrollmentServiceError::AdmissionUnavailable);
+            }
+        }
+
+        let candidate_id = PaymentAttemptId::new(uuid::Uuid::now_v7());
+        let mut reservation =
+            HostChargeReservation::from_command(&command, snapshot, &gateway, candidate_id)
+                .map_err(|_| {
+                    SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
+                })?;
+        let attempt = match self.reserve_host_charge(targets, &reservation).await? {
+            HostChargeReservationOutcome::Reserved(attempt)
+            | HostChargeReservationOutcome::Replay(attempt)
+                if attempt.status() == PaymentAttemptStatus::Pending
+                    && attempt.state().timestamps().submitted_at().is_none() =>
+            {
+                attempt
+            }
+            HostChargeReservationOutcome::Replay(attempt) => {
+                return Ok(HostChargePaymentResult::new(attempt));
+            }
+            HostChargeReservationOutcome::IdempotencyConflict => {
+                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+            }
+            HostChargeReservationOutcome::Rejected { reason } => {
+                return Err(
+                    SubscriptionEnrollmentServiceError::HostChargeReservationRejected(reason),
+                );
+            }
+            HostChargeReservationOutcome::Reserved(_) => {
+                return Err(SubscriptionEnrollmentServiceError::InvalidState(
+                    INVALID_SERVICE_STATE,
+                ));
+            }
+        };
+        if attempt.identity().attempt_id() != candidate_id {
+            reservation = HostChargeReservation::from_command(
+                &command,
+                snapshot,
+                &gateway,
+                attempt.identity().attempt_id(),
+            )
+            .map_err(|_| SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE))?;
+        }
+
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return self
+                .resolve_host_charge_cooldown(targets, &reservation, scope, false)
+                .await;
+        }
+        match gateway.account_mode().await {
+            Ok(GatewayAccountMode::Live) => {}
+            Ok(GatewayAccountMode::Test) => {
+                return self
+                    .resolve_host_charge_readiness(
+                        targets,
+                        &reservation,
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
+                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                        false,
+                        false,
+                    )
+                    .await;
+            }
+            Err(GatewayError::RateLimited(detail)) => {
+                return self
+                    .resolve_host_charge_cooldown_with_detail(
+                        targets,
+                        &reservation,
+                        GatewayMutationCooldownScope::Provider,
+                        detail,
+                        false,
+                        true,
+                    )
+                    .await;
+            }
+            Err(error) => {
+                return self
+                    .resolve_host_charge_readiness(
+                        targets,
+                        &reservation,
+                        error.detail().clone(),
+                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                        false,
+                        false,
+                    )
+                    .await;
+            }
+        }
+
+        let admission =
+            match admit_host_charge_submission(&self.pool, targets, &reservation).await? {
+                HostChargeAdmissionOutcome::Admitted(admission) => *admission,
+                HostChargeAdmissionOutcome::AlreadyAdmitted(attempt) => {
+                    return Ok(HostChargePaymentResult::new(attempt));
+                }
+                HostChargeAdmissionOutcome::Rejected { attempt, .. } => {
+                    return Ok(HostChargePaymentResult::new(attempt));
+                }
+            };
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return self
+                .resolve_host_charge_cooldown(targets, &reservation, scope, true)
+                .await;
+        }
+        match submit_admitted_host_charge(
+            &self.pool,
+            self.coordinator.as_ref(),
+            targets,
+            admission,
+            &command,
+            &gateway,
+        )
+        .await?
+        {
+            HostChargeProviderResult::Payment(payment) => Ok(payment),
+            HostChargeProviderResult::NotSubmitted { payment, error } => {
+                if payment.attempt().state().resolution_code()
+                    == Some(crate::enrollment_application::not_submitted_resolution_code(&error))
+                {
+                    Err(SubscriptionEnrollmentServiceError::GatewayNotSubmitted(
+                        error,
+                    ))
+                } else {
+                    Ok(payment)
+                }
+            }
         }
     }
 
@@ -1051,6 +1309,29 @@ impl SubscriptionBillingService {
         .map_err(Into::into)
     }
 
+    /// Applies an exact-query outcome to one host charge without resubmission.
+    pub async fn apply_reconciled_host_charge_outcome(
+        &self,
+        billing_scope_id: BillingScopeId,
+        attempt_id: PaymentAttemptId,
+        outcome: &GatewayPaymentOutcome,
+    ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
+        let targets = self
+            .host_charge_targets
+            .as_deref()
+            .ok_or(SubscriptionEnrollmentServiceError::HostChargeUnavailable)?;
+        apply_reconciled_host_charge_gateway_outcome(
+            &self.pool,
+            self.coordinator.as_ref(),
+            targets,
+            billing_scope_id,
+            attempt_id,
+            outcome,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
     async fn preflight(
         &self,
         command: &EnrollSubscription,
@@ -1060,6 +1341,112 @@ impl SubscriptionBillingService {
             preflight_subscription_enrollment_in_transaction(&mut transaction, command).await?;
         transaction.commit().await?;
         Ok(outcome)
+    }
+
+    async fn preflight_host_charge(
+        &self,
+        targets: &dyn HostChargeTargetStore,
+        command: &ChargeHostTarget,
+    ) -> Result<HostChargePreflightOutcome, SubscriptionEnrollmentServiceError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome =
+            preflight_host_charge_in_transaction(&mut transaction, targets, command).await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn reserve_host_charge(
+        &self,
+        targets: &dyn HostChargeTargetStore,
+        reservation: &HostChargeReservation,
+    ) -> Result<HostChargeReservationOutcome, SubscriptionEnrollmentServiceError> {
+        let mut transaction = self.pool.begin().await?;
+        let outcome =
+            reserve_host_charge_in_transaction(&mut transaction, targets, reservation).await?;
+        transaction.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn resolve_host_charge_readiness(
+        &self,
+        targets: &dyn HostChargeTargetStore,
+        reservation: &HostChargeReservation,
+        detail: GatewayDiagnostic,
+        code: PaymentResolutionCode,
+        admitted_not_submitted: bool,
+        extend_provider_cooldown: bool,
+    ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
+        resolve_host_charge_before_submission(
+            &self.pool,
+            targets,
+            reservation,
+            detail,
+            code,
+            admitted_not_submitted,
+            extend_provider_cooldown,
+        )
+        .await
+        .map_err(Into::into)
+    }
+
+    async fn resolve_host_charge_cooldown(
+        &self,
+        targets: &dyn HostChargeTargetStore,
+        reservation: &HostChargeReservation,
+        scope: GatewayMutationCooldownScope,
+        admitted_not_submitted: bool,
+    ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
+        let detail = match scope {
+            GatewayMutationCooldownScope::Account => {
+                GatewayDiagnostic::new("gateway account mutation cooldown is active")
+            }
+            GatewayMutationCooldownScope::Provider => {
+                GatewayDiagnostic::new("gateway provider cooldown is active")
+            }
+        };
+        self.resolve_host_charge_cooldown_with_detail(
+            targets,
+            reservation,
+            scope,
+            detail,
+            admitted_not_submitted,
+            false,
+        )
+        .await
+    }
+
+    async fn resolve_host_charge_cooldown_with_detail(
+        &self,
+        targets: &dyn HostChargeTargetStore,
+        reservation: &HostChargeReservation,
+        scope: GatewayMutationCooldownScope,
+        detail: GatewayDiagnostic,
+        admitted_not_submitted: bool,
+        extend_provider_cooldown: bool,
+    ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
+        let code = match scope {
+            GatewayMutationCooldownScope::Account => {
+                PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission
+            }
+            GatewayMutationCooldownScope::Provider => {
+                PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
+            }
+        };
+        let payment = self
+            .resolve_host_charge_readiness(
+                targets,
+                reservation,
+                detail,
+                code,
+                admitted_not_submitted,
+                extend_provider_cooldown,
+            )
+            .await?;
+        if payment.attempt().state().resolution_code() == Some(code) {
+            Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope })
+        } else {
+            Ok(payment)
+        }
     }
 
     async fn preflight_recovery(

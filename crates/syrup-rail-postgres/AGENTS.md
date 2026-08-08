@@ -20,9 +20,12 @@ and transaction orchestration.
   sale authority, foreground and reconciliation entrypoints into one atomic
   application path, recurring-discount progression, permanent charge
   observation, terminal-race handling, and approved-failure compensation.
-- `src/subscription_billing_service.rs` — complete foreground enrollment and
-  recovery orchestration from replay-before-admission through fresh cooldown
-  and the one-shot provider sale.
+- `src/subscription_billing_service.rs` — complete foreground enrollment,
+  recovery, and host-charge orchestration from replay-before-admission through
+  fresh cooldown and the one-shot provider sale.
+- `src/host_charge_application.rs` — host-charge final admission, one-shot
+  provider submission, atomic host target/attempt/charge/event application,
+  exact reconciliation, and approved-failure compensation.
 - `src/transactions.rs` — host-prepared billing transaction and typed event
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
@@ -45,7 +48,8 @@ and transaction orchestration.
 - `src/processor_charges.rs` — canonical charge observation, exact replay and
   transactionless identification, plus bounded compensating persistence after
   a primary transaction has failed.
-- `src/host_charges.rs` — typed caller-transaction admission over the canonical
+- `src/host_charges.rs` — host target extension port, canonical attempt
+  reservation/final admission, and typed caller-transaction access to the
   host-charge `Reserve`, `Submit`, and `Release` ledger modes.
 
 ## Edit here for X
@@ -104,6 +108,9 @@ and transaction orchestration.
 - Change host-charge shared-ledger safety in `src/host_charges.rs`; the host
   target must already be locked on the supplied connection, and ordinary
   unsafe or same-key contender outcomes remain typed rather than errors.
+- Change host-charge outcome application or exact reconciliation in
+  `src/host_charge_application.rs`; target transition, attempt resolution,
+  processor evidence, and event append must share the host transaction.
 
 ## Invariants
 
@@ -131,6 +138,10 @@ and transaction orchestration.
   reservation, after reservation before readiness, and after committed final
   admission. A post-reservation stop resolves the exact attempt, and provider
   throttle evidence extends its matching cooldown in that same transaction.
+- Host charges use the same replay, cooldown, readiness, committed-admission,
+  one-shot submission, and durable evidence rules. Host target policy stays
+  behind `HostChargeTargetStore`, whose operations use only the supplied
+  connection and lock the target before entering the canonical ledger.
 - Initial approval begins with the host recipient lock, then the shared
   payment-method domain and exact plan aggregate. Method, subscription,
   discount/claim, attempt, processor charge, and `SubscriptionStarted` event

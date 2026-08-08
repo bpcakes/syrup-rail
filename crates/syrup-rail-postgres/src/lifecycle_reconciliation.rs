@@ -1,13 +1,11 @@
-use std::{error::Error, fmt};
-
-use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use syrup_rail::{
     BillingScopeId, CumulativeRefundCents, GatewayLifecycleAccount, GatewayLifecycleCursorKey,
     GatewayLifecycleEvidence, GatewayLifecycleQuarantine, GatewayLifecycleQuarantineReason,
     GatewayLifecycleState, GatewayOrderId, GatewayTransactionId, GatewayTransactionReport,
-    HostChargeTargetId, PaymentAttemptKind, PaymentReversalKind, SubscriberId,
+    HostChargeTargetId, HostChargeTargetTransition, HostChargeTargetTransitionKind,
+    PaymentAttemptId, PaymentAttemptKind, SubscriberId,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -20,108 +18,7 @@ const PENDING_CLEANUP_BATCH_SIZE: i64 = 500;
 const STAGED_APPLICATION_BATCH_SIZE: i64 = 100;
 const INVALID_STORED_STATE: &str = "canonical gateway lifecycle state is invalid";
 
-type BoxError = Box<dyn Error + Send + Sync + 'static>;
-
-#[derive(Debug)]
-pub struct HostChargeTargetStoreError {
-    source: BoxError,
-}
-
-impl HostChargeTargetStoreError {
-    pub fn new(source: impl Error + Send + Sync + 'static) -> Self {
-        Self {
-            source: Box::new(source),
-        }
-    }
-
-    pub fn into_source(self) -> Box<dyn Error + Send + Sync + 'static> {
-        self.source
-    }
-}
-
-impl fmt::Display for HostChargeTargetStoreError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("host charge target transition failed")
-    }
-}
-
-impl Error for HostChargeTargetStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HostChargeReversal {
-    billing_scope_id: BillingScopeId,
-    subscriber_id: SubscriberId,
-    target_id: HostChargeTargetId,
-    kind: PaymentReversalKind,
-    paid_at: DateTime<Utc>,
-    reversed_at: DateTime<Utc>,
-}
-
-impl HostChargeReversal {
-    pub const fn new(
-        billing_scope_id: BillingScopeId,
-        subscriber_id: SubscriberId,
-        target_id: HostChargeTargetId,
-        kind: PaymentReversalKind,
-        paid_at: DateTime<Utc>,
-        reversed_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            billing_scope_id,
-            subscriber_id,
-            target_id,
-            kind,
-            paid_at,
-            reversed_at,
-        }
-    }
-
-    pub const fn billing_scope_id(self) -> BillingScopeId {
-        self.billing_scope_id
-    }
-
-    pub const fn subscriber_id(self) -> SubscriberId {
-        self.subscriber_id
-    }
-
-    pub const fn target_id(self) -> HostChargeTargetId {
-        self.target_id
-    }
-
-    pub const fn kind(self) -> PaymentReversalKind {
-        self.kind
-    }
-
-    pub const fn paid_at(self) -> DateTime<Utc> {
-        self.paid_at
-    }
-
-    pub const fn reversed_at(self) -> DateTime<Utc> {
-        self.reversed_at
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HostChargeTargetTransitionOutcome {
-    Changed,
-    Unchanged,
-}
-
-/// Host-owned exact-target transition composed into the shared lifecycle
-/// transaction. Implementations must use only the supplied connection and
-/// exact target identity; they must not search by gateway evidence.
-#[async_trait]
-pub trait HostChargeTargetStore: Send + Sync {
-    async fn reverse(
-        &self,
-        connection: &mut PgConnection,
-        reversal: HostChargeReversal,
-    ) -> Result<HostChargeTargetTransitionOutcome, HostChargeTargetStoreError>;
-}
+use crate::{HostChargeTargetError, HostChargeTargetStore};
 
 #[derive(Debug, Error)]
 pub enum GatewayLifecycleReconciliationError {
@@ -132,7 +29,7 @@ pub enum GatewayLifecycleReconciliationError {
     #[error("{0}")]
     InvalidState(&'static str),
     #[error(transparent)]
-    HostChargeTarget(#[from] HostChargeTargetStoreError),
+    HostChargeTarget(#[from] HostChargeTargetError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,7 +129,6 @@ struct AttemptCandidate {
     current_state: GatewayLifecycleState,
     current_lifecycle_at: Option<DateTime<Utc>>,
     current_refunded_amount_cents: i32,
-    paid_at: DateTime<Utc>,
     matched_transaction_id: bool,
     matched_order_id: bool,
 }
@@ -520,14 +416,14 @@ async fn apply_or_stage_evidence(
                     latest_time(candidate.current_lifecycle_at, evidence.effective_at)
                         .unwrap_or(reconciled_at);
                 host_charge_targets
-                    .reverse(
+                    .apply_transition(
                         &mut transaction,
-                        HostChargeReversal::new(
+                        HostChargeTargetTransition::new(
                             candidate.billing_scope_id,
                             candidate.subscriber_id,
+                            PaymentAttemptId::new(candidate.id),
                             target_id,
-                            kind,
-                            candidate.paid_at,
+                            HostChargeTargetTransitionKind::Reversed { kind },
                             reversed_at,
                         ),
                     )
@@ -592,7 +488,6 @@ async fn attempt_candidates(
             attempts.gateway_lifecycle_status,
             attempts.gateway_lifecycle_at,
             attempts.refunded_amount_cents,
-            COALESCE(attempts.resolved_at, attempts.updated_at, attempts.created_at) AS paid_at,
             COALESCE((
                 $1::text IS NOT NULL
                 AND public.billing_canonical_gateway_transaction_id(
@@ -667,7 +562,6 @@ async fn attempt_candidates(
                 current_state,
                 current_lifecycle_at: row.try_get("gateway_lifecycle_at")?,
                 current_refunded_amount_cents,
-                paid_at: row.try_get("paid_at")?,
                 matched_transaction_id: row.try_get("matched_transaction_id")?,
                 matched_order_id: row.try_get("matched_order_id")?,
             })
@@ -1261,8 +1155,11 @@ mod tests {
 
     use super::*;
     use crate::test_support::{TestDatabase, create_gateway_account};
+    use async_trait::async_trait;
+    use sqlx::PgConnection;
     use syrup_rail::{
         GatewayAccountId, GatewayDiagnostic, GatewayProviderKey, GatewayReferenceValueError,
+        HostChargeTargetNoChange, HostChargeTargetTransitionOutcome,
     };
 
     #[derive(Default)]
@@ -1272,43 +1169,70 @@ mod tests {
 
     #[async_trait]
     impl HostChargeTargetStore for ExactHostTargets {
-        async fn reverse(
+        async fn reserve_target(
+            &self,
+            _connection: &mut PgConnection,
+            _reservation: &crate::HostChargeTargetReservation,
+        ) -> Result<crate::HostChargeReservationDecision, crate::HostChargeTargetError> {
+            Ok(crate::HostChargeReservationDecision::Rejected {
+                reason: syrup_rail::HostChargeTargetRejection::TargetUnavailable,
+            })
+        }
+
+        async fn admit_submission(
+            &self,
+            _connection: &mut PgConnection,
+            _admission: &crate::HostChargeSubmissionAdmission,
+        ) -> Result<crate::HostChargeSubmissionDecision, crate::HostChargeTargetError> {
+            Ok(crate::HostChargeSubmissionDecision::Rejected {
+                reason: syrup_rail::HostChargeTargetRejection::TargetUnavailable,
+            })
+        }
+
+        async fn apply_transition(
             &self,
             connection: &mut PgConnection,
-            reversal: HostChargeReversal,
-        ) -> Result<HostChargeTargetTransitionOutcome, HostChargeTargetStoreError> {
+            transition: HostChargeTargetTransition,
+        ) -> Result<HostChargeTargetTransitionOutcome, crate::HostChargeTargetError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let kind = match reversal.kind() {
-                PaymentReversalKind::Refunded => "refunded",
-                PaymentReversalKind::Voided => "voided",
-                PaymentReversalKind::Chargeback => "chargeback",
+            let kind = match transition.kind() {
+                HostChargeTargetTransitionKind::Reversed { kind } => match kind {
+                    syrup_rail::PaymentReversalKind::Refunded => "refunded",
+                    syrup_rail::PaymentReversalKind::Voided => "voided",
+                    syrup_rail::PaymentReversalKind::Chargeback => "chargeback",
+                },
+                _ => {
+                    return Ok(HostChargeTargetTransitionOutcome::Unchanged {
+                        reason: HostChargeTargetNoChange::InapplicableState,
+                    });
+                }
             };
             let result = sqlx::query(
                 r#"
                 UPDATE host_charge_targets
                 SET status = 'reversed',
                     reversal_kind = $4,
-                    paid_at = COALESCE(paid_at, $5),
-                    reversed_at = $6
+                    reversed_at = $5
                 WHERE id = $1
                     AND billing_scope_id = $2
                     AND subscriber_id = $3
                     AND status = 'paid'
                 "#,
             )
-            .bind(reversal.target_id().as_uuid())
-            .bind(reversal.billing_scope_id().as_uuid())
-            .bind(reversal.subscriber_id().as_uuid())
+            .bind(transition.target_id().as_uuid())
+            .bind(transition.billing_scope_id().as_uuid())
+            .bind(transition.subscriber_id().as_uuid())
             .bind(kind)
-            .bind(reversal.paid_at())
-            .bind(reversal.reversed_at())
+            .bind(transition.effective_at())
             .execute(connection)
             .await
-            .map_err(HostChargeTargetStoreError::new)?;
+            .map_err(crate::HostChargeTargetError::new)?;
             Ok(if result.rows_affected() == 1 {
-                HostChargeTargetTransitionOutcome::Changed
+                HostChargeTargetTransitionOutcome::Applied
             } else {
-                HostChargeTargetTransitionOutcome::Unchanged
+                HostChargeTargetTransitionOutcome::Unchanged {
+                    reason: HostChargeTargetNoChange::InapplicableState,
+                }
             })
         }
     }

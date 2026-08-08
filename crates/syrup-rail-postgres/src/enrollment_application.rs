@@ -3932,7 +3932,7 @@ pub(crate) enum OutcomeResolutionBoundary {
     Submitted,
 }
 
-fn mutation_error_evidence(detail: &GatewayDiagnostic) -> ProcessorEvidence {
+pub(crate) fn mutation_error_evidence(detail: &GatewayDiagnostic) -> ProcessorEvidence {
     ProcessorEvidence::new(
         None,
         None,
@@ -4381,7 +4381,9 @@ async fn lock_expected_attempt(
     Ok(attempt)
 }
 
-async fn set_application_timeouts(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
+pub(crate) async fn set_application_timeouts(
+    connection: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
     )
@@ -4697,7 +4699,7 @@ async fn mark_attempt_approved(
     .await
 }
 
-async fn park_locked_attempt(
+pub(crate) async fn park_locked_attempt(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
@@ -4807,7 +4809,7 @@ async fn park_locked_renewal_attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_attempt_resolution(
+pub(crate) async fn update_attempt_resolution(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,

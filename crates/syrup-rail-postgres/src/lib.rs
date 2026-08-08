@@ -13,6 +13,7 @@ mod enrollment_application;
 mod entitlement;
 mod gateway_accounts;
 mod grants;
+mod host_charge_application;
 mod host_charges;
 mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
@@ -70,9 +71,19 @@ pub use gateway_accounts::{activate_gateway_configuration, register_gateway_acco
 pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
 };
+pub use host_charge_application::{
+    AdmittedHostCharge, HostChargeAdmissionOutcome, HostChargeApplicationError,
+    HostChargeProviderResult, admit_host_charge_submission, apply_host_charge_gateway_outcome,
+    apply_reconciled_host_charge_gateway_outcome, submit_admitted_host_charge,
+};
 pub use host_charges::{
     HostChargeLedgerAdmission, HostChargeLedgerAdmissionError, HostChargeLedgerAdmissionMode,
-    HostChargeLedgerAdmissionQuery, host_charge_ledger_admission,
+    HostChargeLedgerAdmissionQuery, HostChargePreflightOutcome, HostChargeReservationDecision,
+    HostChargeReservationOutcome, HostChargeStoreError, HostChargeSubmissionAdmission,
+    HostChargeSubmissionDecision, HostChargeSubmissionOutcome, HostChargeTargetError,
+    HostChargeTargetReservation, HostChargeTargetStore,
+    admit_host_charge_submission_in_transaction, host_charge_ledger_admission,
+    preflight_host_charge_in_transaction, reserve_host_charge_in_transaction,
 };
 pub use lifecycle_quarantine::{
     GatewayLifecycleQuarantineAlert, GatewayLifecycleQuarantineResolutionOutcome,
@@ -82,12 +93,10 @@ pub use lifecycle_quarantine::{
 };
 pub use lifecycle_reconciliation::{
     GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError,
-    GatewayLifecycleReconciliationSummary, HostChargeReversal, HostChargeTargetStore,
-    HostChargeTargetStoreError, HostChargeTargetTransitionOutcome,
-    apply_gateway_lifecycle_evidence, apply_staged_gateway_lifecycle_evidence,
-    gateway_lifecycle_reconciliation_start, reconcile_gateway_transaction_reports,
-    record_gateway_lifecycle_quarantines, save_gateway_lifecycle_reconciliation_cursor,
-    stage_gateway_lifecycle_evidence,
+    GatewayLifecycleReconciliationSummary, apply_gateway_lifecycle_evidence,
+    apply_staged_gateway_lifecycle_evidence, gateway_lifecycle_reconciliation_start,
+    reconcile_gateway_transaction_reports, record_gateway_lifecycle_quarantines,
+    save_gateway_lifecycle_reconciliation_cursor, stage_gateway_lifecycle_evidence,
 };
 pub use operator_review::{
     ExternalReversalAttestationOutcome, ExternalReversalHostStore, ExternalReversalHostStoreError,

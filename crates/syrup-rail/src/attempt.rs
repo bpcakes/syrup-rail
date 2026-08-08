@@ -40,6 +40,15 @@ impl PaymentAttemptFingerprint {
         &self.0
     }
 
+    /// Builds the canonical fingerprint for one opaque host target charge.
+    pub fn for_host_charge(target_id: HostChargeTargetId, amount: Money) -> Self {
+        Self(format!(
+            "host_charge:{target_id}:{}:{}",
+            amount.cents(),
+            amount.currency().as_str(),
+        ))
+    }
+
     /// Builds the historical plan-bearing initial-enrollment fingerprint.
     ///
     /// CreditKit's `base_subscription` plan therefore retains its exact
