@@ -92,6 +92,10 @@ pub enum ProcessorChargeProgression {
 pub enum ProcessorChargeStateCode {
     PaymentResolution(PaymentResolutionCode),
     ExternalReversalRequired,
+    AdditionalApprovedChargeIdentified,
+    TransactionIdentityRequired,
+    ApprovedChargeWaitingForApplication,
+    ZeroAmountAdditionalApprovedCharge,
 }
 
 impl ProcessorChargeStateCode {
@@ -99,6 +103,10 @@ impl ProcessorChargeStateCode {
         match self {
             Self::PaymentResolution(code) => code.as_str(),
             Self::ExternalReversalRequired => "processor_charge_external_reversal_required",
+            Self::AdditionalApprovedChargeIdentified => "additional_approved_charge_identified",
+            Self::TransactionIdentityRequired => "processor_charge_transaction_identity_required",
+            Self::ApprovedChargeWaitingForApplication => "approved_charge_waiting_for_application",
+            Self::ZeroAmountAdditionalApprovedCharge => "zero_amount_additional_approved_charge",
         }
     }
 }
@@ -349,6 +357,26 @@ mod tests {
         assert_eq!(
             ExternalReversalReason::new("card 4111111111111111"),
             Err(ExternalReversalReasonError::ContainsRawCardData)
+        );
+    }
+
+    #[test]
+    fn processor_charge_state_codes_cover_charge_specific_workflow_states() {
+        assert_eq!(
+            ProcessorChargeStateCode::AdditionalApprovedChargeIdentified.as_str(),
+            "additional_approved_charge_identified"
+        );
+        assert_eq!(
+            ProcessorChargeStateCode::TransactionIdentityRequired.as_str(),
+            "processor_charge_transaction_identity_required"
+        );
+        assert_eq!(
+            ProcessorChargeStateCode::ApprovedChargeWaitingForApplication.as_str(),
+            "approved_charge_waiting_for_application"
+        );
+        assert_eq!(
+            ProcessorChargeStateCode::ZeroAmountAdditionalApprovedCharge.as_str(),
+            "zero_amount_additional_approved_charge"
         );
     }
 }

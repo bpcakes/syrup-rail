@@ -675,8 +675,23 @@ fn parse_reversal_kind(value: &str) -> Result<ExternalReversalKind, OperatorRevi
 }
 
 fn parse_charge_state_code(value: &str) -> Result<ProcessorChargeStateCode, OperatorReviewError> {
-    if value == "processor_charge_external_reversal_required" {
-        return Ok(ProcessorChargeStateCode::ExternalReversalRequired);
+    match value {
+        "processor_charge_external_reversal_required" => {
+            return Ok(ProcessorChargeStateCode::ExternalReversalRequired);
+        }
+        "additional_approved_charge_identified" => {
+            return Ok(ProcessorChargeStateCode::AdditionalApprovedChargeIdentified);
+        }
+        "processor_charge_transaction_identity_required" => {
+            return Ok(ProcessorChargeStateCode::TransactionIdentityRequired);
+        }
+        "approved_charge_waiting_for_application" => {
+            return Ok(ProcessorChargeStateCode::ApprovedChargeWaitingForApplication);
+        }
+        "zero_amount_additional_approved_charge" => {
+            return Ok(ProcessorChargeStateCode::ZeroAmountAdditionalApprovedCharge);
+        }
+        _ => {}
     }
     PaymentResolutionCode::try_from(value)
         .map(ProcessorChargeStateCode::PaymentResolution)
