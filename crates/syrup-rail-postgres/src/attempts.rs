@@ -1419,7 +1419,7 @@ pub(crate) async fn find_payment_attempt_by_id_on_connection(
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
-async fn set_enrollment_timeouts(
+pub(crate) async fn set_enrollment_timeouts(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -1445,6 +1445,20 @@ async fn lock_subscription_aggregate(
     Ok(())
 }
 
+pub(crate) async fn try_lock_subscription_aggregate(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+    )
+    .bind(subscriber_id.as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_one(&mut **transaction)
+    .await
+}
+
 async fn payment_attempt_by_idempotency(
     transaction: &mut Transaction<'_, Postgres>,
     billing_scope_id: BillingScopeId,
@@ -1467,7 +1481,7 @@ async fn payment_attempt_by_idempotency(
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
-async fn lock_initial_attempt_rows(
+pub(crate) async fn lock_initial_attempt_rows(
     transaction: &mut Transaction<'_, Postgres>,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
@@ -1489,7 +1503,7 @@ async fn lock_initial_attempt_rows(
     Ok(())
 }
 
-async fn lock_initial_charge_rows(
+pub(crate) async fn lock_initial_charge_rows(
     transaction: &mut Transaction<'_, Postgres>,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
@@ -1516,7 +1530,7 @@ async fn lock_initial_charge_rows(
     Ok(())
 }
 
-async fn expire_stale_initial_attempts(
+pub(crate) async fn expire_stale_initial_attempts(
     transaction: &mut Transaction<'_, Postgres>,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,

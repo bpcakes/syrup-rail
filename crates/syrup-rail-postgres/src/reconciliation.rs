@@ -1,6 +1,13 @@
 use sqlx::PgPool;
-use syrup_rail::{BillingScopeId, GatewayAccountId, GatewayAccountReconciliationCandidate};
+use syrup_rail::{
+    BillingScopeId, GatewayAccountId, GatewayAccountReconciliationCandidate, PlanKey, SubscriberId,
+};
 use uuid::Uuid;
+
+use crate::attempts::{
+    expire_stale_initial_attempts, lock_initial_attempt_rows, lock_initial_charge_rows,
+    set_enrollment_timeouts, try_lock_subscription_aggregate,
+};
 
 const PAYMENT_METHOD_REPLACEMENT_STALE_AFTER_SECONDS: i64 = 3 * 60;
 const RECONCILIATION_PHASE_BATCH_SIZE: i64 = 100;
@@ -83,6 +90,59 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
     Ok(result.rows_affected())
 }
 
+/// Expires every stale prepared enrollment for one account.
+///
+/// Each candidate enters its persisted subscriber/plan aggregate without
+/// waiting for a busy aggregate. This preserves progress for unrelated plans
+/// while serializing with enrollment admission and charge observation.
+pub async fn fail_stale_unsubmitted_subscription_enrollments(
+    pool: &PgPool,
+    gateway_account_id: GatewayAccountId,
+) -> Result<u64, sqlx::Error> {
+    let candidates = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+        r#"
+        SELECT DISTINCT billing_scope_id, subscriber_id, plan_key
+        FROM billing_payment_attempts
+        WHERE gateway_account_id = $1
+            AND attempt_kind = 'subscription_initial'
+            AND status = 'pending'
+            AND submitted_at IS NULL
+            AND created_at <= clock_timestamp() - interval '30 minutes'
+        ORDER BY billing_scope_id, subscriber_id, plan_key
+        "#,
+    )
+    .bind(gateway_account_id.as_uuid())
+    .fetch_all(pool)
+    .await?;
+
+    let mut failed = 0;
+    for (billing_scope_id, subscriber_id, plan_key) in candidates {
+        let plan_key = PlanKey::new(plan_key)
+            .map_err(|_| sqlx::Error::Protocol("stored plan key is invalid".to_owned()))?;
+        let billing_scope_id = BillingScopeId::new(billing_scope_id);
+        let subscriber_id = SubscriberId::new(subscriber_id);
+        let mut transaction = pool.begin().await?;
+        set_enrollment_timeouts(&mut transaction).await?;
+        if !try_lock_subscription_aggregate(&mut transaction, subscriber_id, &plan_key).await? {
+            transaction.rollback().await?;
+            continue;
+        }
+        lock_initial_attempt_rows(&mut transaction, billing_scope_id, subscriber_id, &plan_key)
+            .await?;
+        lock_initial_charge_rows(&mut transaction, billing_scope_id, subscriber_id, &plan_key)
+            .await?;
+        failed += expire_stale_initial_attempts(
+            &mut transaction,
+            billing_scope_id,
+            subscriber_id,
+            &plan_key,
+        )
+        .await?;
+        transaction.commit().await?;
+    }
+    Ok(failed)
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;
@@ -95,7 +155,7 @@ mod tests {
 
     use super::{
         RECONCILIATION_PHASE_BATCH_SIZE, fail_stale_unsubmitted_payment_method_replacements,
-        reconciliation_gateway_accounts,
+        fail_stale_unsubmitted_subscription_enrollments, reconciliation_gateway_accounts,
     };
     use crate::{
         register_gateway_account,
@@ -287,5 +347,116 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_enrollment_cleanup_uses_the_persisted_plan_lock_and_account_scope()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("sr_recon_initial").await?;
+        let result = async {
+            let account = create_gateway_account(&database.pool, "test_gateway").await?;
+            let sibling = create_gateway_account(&database.pool, "test_gateway").await?;
+            let subscriber_id = Uuid::now_v7();
+            let plan_a = "plan_a";
+            let plan_b = "plan_b";
+            let plan_a_attempt =
+                insert_stale_enrollment(&database.pool, account, subscriber_id, plan_a).await?;
+            let plan_b_attempt =
+                insert_stale_enrollment(&database.pool, account, subscriber_id, plan_b).await?;
+            let sibling_attempt =
+                insert_stale_enrollment(&database.pool, sibling, Uuid::now_v7(), "plan_c").await?;
+
+            let mut lock_holder = database.pool.begin().await?;
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+            )
+            .bind(subscriber_id)
+            .bind(plan_a)
+            .execute(&mut *lock_holder)
+            .await?;
+
+            assert_eq!(
+                fail_stale_unsubmitted_subscription_enrollments(
+                    &database.pool,
+                    GatewayAccountId::new(account.gateway_account_id),
+                )
+                .await?,
+                1,
+            );
+            assert_eq!(
+                attempt_status(&database.pool, plan_a_attempt).await?,
+                "pending"
+            );
+            assert_eq!(
+                attempt_status(&database.pool, plan_b_attempt).await?,
+                "failed"
+            );
+            assert_eq!(
+                attempt_status(&database.pool, sibling_attempt).await?,
+                "pending"
+            );
+
+            lock_holder.rollback().await?;
+            assert_eq!(
+                fail_stale_unsubmitted_subscription_enrollments(
+                    &database.pool,
+                    GatewayAccountId::new(account.gateway_account_id),
+                )
+                .await?,
+                1,
+            );
+            assert_eq!(
+                attempt_status(&database.pool, plan_a_attempt).await?,
+                "failed"
+            );
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup
+    }
+
+    async fn insert_stale_enrollment(
+        pool: &sqlx::PgPool,
+        account: crate::test_support::GatewayAccountFixture,
+        subscriber_id: Uuid,
+        plan_key: &str,
+    ) -> Result<Uuid, sqlx::Error> {
+        let attempt_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_payment_attempts (
+                id, billing_scope_id, subscriber_id, plan_key, attempt_kind,
+                status, idempotency_key, request_fingerprint, amount_cents,
+                currency, gateway_account_id, gateway_configuration_id,
+                gateway_order_id, created_at, updated_at
+            ) VALUES (
+                $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
+                100, 'USD', $7, $8, $9,
+                clock_timestamp() - interval '31 minutes',
+                clock_timestamp() - interval '31 minutes'
+            )
+            "#,
+        )
+        .bind(attempt_id)
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(plan_key)
+        .bind(format!("idem-{attempt_id}"))
+        .bind(format!("fingerprint-{attempt_id}"))
+        .bind(account.gateway_account_id)
+        .bind(account.gateway_configuration_id)
+        .bind(format!("order-{attempt_id}"))
+        .execute(pool)
+        .await?;
+        Ok(attempt_id)
+    }
+
+    async fn attempt_status(pool: &sqlx::PgPool, attempt_id: Uuid) -> Result<String, sqlx::Error> {
+        sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+            .bind(attempt_id)
+            .fetch_one(pool)
+            .await
     }
 }

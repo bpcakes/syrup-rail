@@ -75,9 +75,10 @@ and transaction orchestration.
 - Change canonical deletion admission or billing attempt/payment-method scrub
   policy in `src/deletion.rs`; keep host identity, order, fulfillment, and
   retained-subject work in the host transaction.
-- Change registered-account reconciliation selection or bounded stale
-  payment-method-replacement cleanup in `src/reconciliation.rs`; keep host
-  configuration filtering and queue encoding outside the shared operations.
+- Change registered-account reconciliation selection or local stale-attempt
+  phases in `src/reconciliation.rs`; preserve persisted plan-key aggregate
+  locks for enrollment cleanup, and keep host configuration filtering and
+  queue encoding outside the shared operations.
 
 ## Invariants
 

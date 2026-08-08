@@ -66,7 +66,8 @@ pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
 };
 pub use reconciliation::{
-    fail_stale_unsubmitted_payment_method_replacements, reconciliation_gateway_accounts,
+    fail_stale_unsubmitted_payment_method_replacements,
+    fail_stale_unsubmitted_subscription_enrollments, reconciliation_gateway_accounts,
 };
 pub use renewal::{RenewalStoreError, due_renewals, renewal_attempt_state};
 pub use subscription_billing_service::{
