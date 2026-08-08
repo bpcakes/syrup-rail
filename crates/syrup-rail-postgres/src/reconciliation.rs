@@ -184,9 +184,11 @@ pub async fn claim_exact_reconciliation_attempts(
                 AND NOT (
                     attempts.attempt_kind = 'subscription_initial'
                     AND attempts.status = 'review_required'
-                    AND attempts.resolution_code IN (
-                        'subscription_initial_current_subscription_conflict',
-                        'subscription_initial_current_grant_conflict'
+                    AND (
+                        attempts.resolution_code IS NOT DISTINCT FROM
+                            'subscription_initial_current_subscription_conflict'
+                        OR attempts.resolution_code IS NOT DISTINCT FROM
+                            'subscription_initial_current_grant_conflict'
                     )
                 )
                 AND NOT (
@@ -1033,6 +1035,16 @@ mod tests {
                 insert_stale_enrollment(&database.pool, account, subscriber_id, "plan_a").await?;
             let second =
                 insert_stale_enrollment(&database.pool, account, subscriber_id, "plan_b").await?;
+            sqlx::query(
+                r#"
+                UPDATE billing_payment_attempts
+                SET status = 'review_required', review_required_at = created_at
+                WHERE id = $1
+                "#,
+            )
+            .bind(first)
+            .execute(&database.pool)
+            .await?;
             for position in 2..=RECONCILIATION_PHASE_BATCH_SIZE {
                 insert_stale_enrollment(
                     &database.pool,
@@ -1067,7 +1079,7 @@ mod tests {
                 *attempt.identity().gateway_account_id().as_uuid() == account.gateway_account_id
             }));
             assert!(
-                apply_exact_query_observation(
+                !apply_exact_query_observation(
                     &database.pool,
                     &claimed[0],
                     ExactQueryObservation::NoTransaction,
@@ -1082,13 +1094,21 @@ mod tests {
                 apply_exact_query_observation(
                     &database.pool,
                     &claimed[1],
-                    ExactQueryObservation::MalformedResponse,
+                    ExactQueryObservation::NoTransaction,
                 )
                 .await?
             );
             assert_eq!(
                 attempt_status(&database.pool, second).await?,
                 "review_required"
+            );
+            assert!(
+                apply_exact_query_observation(
+                    &database.pool,
+                    &claimed[2],
+                    ExactQueryObservation::MalformedResponse,
+                )
+                .await?
             );
 
             let remainder = claim_exact_reconciliation_attempts(
