@@ -51,9 +51,9 @@ impl PaymentAttemptFingerprint {
 
     /// Builds the historical plan-bearing initial-enrollment fingerprint.
     ///
-    /// CreditKit's `base_subscription` plan therefore retains its exact
-    /// pre-extraction bytes, while another host receives the same canonical
-    /// grammar with its own plan key.
+    /// Existing plan keys therefore retain their exact pre-extraction bytes,
+    /// while every host receives the same canonical grammar with its own plan
+    /// key.
     pub fn for_subscription_initial(
         plan_key: &PlanKey,
         amount: Money,

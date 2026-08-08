@@ -275,7 +275,7 @@ impl Client {
             && outcome.customer_vault_id.is_none()
             && let PaymentSource::CustomerVault(customer_vault_id) = &request.source
         {
-            // This is the validated vault identity CreditKit submitted, not an
+            // This is the validated vault identity the host submitted, not an
             // identity echoed by NMI. An approved response attests that NMI
             // processed this exact request, while retaining the effective
             // source lets callers keep their payment-method linkage when the

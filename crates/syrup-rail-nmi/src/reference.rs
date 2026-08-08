@@ -93,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn creditkit_references_remain_byte_identical_and_bounded() {
+    fn generated_references_remain_byte_stable_and_bounded() {
         let id =
             PaymentAttemptId::new(Uuid::parse_str("018f52c0-8a17-7b2f-9bc8-5fa621ce1173").unwrap());
         let factory = NmiMutationReferenceFactory::new(NmiMutationNamespace::new("ck").unwrap());

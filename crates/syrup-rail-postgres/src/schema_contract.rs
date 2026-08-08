@@ -1229,20 +1229,20 @@ mod tests {
         let result = async {
             sqlx::raw_sql(
                 r#"
-                CREATE TABLE creditkit_billing_scopes (
+                CREATE TABLE example_host_billing_scopes (
                     id uuid PRIMARY KEY
                 );
 
                 ALTER TABLE billing_gateway_accounts
-                    ADD CONSTRAINT creditkit_gateway_accounts_scope_fk
+                    ADD CONSTRAINT example_host_gateway_accounts_scope_fk
                     FOREIGN KEY (billing_scope_id)
-                    REFERENCES creditkit_billing_scopes(id)
+                    REFERENCES example_host_billing_scopes(id)
                     ON DELETE RESTRICT;
 
-                CREATE INDEX creditkit_gateway_accounts_scope_idx
+                CREATE INDEX example_host_gateway_accounts_scope_idx
                 ON billing_gateway_accounts (billing_scope_id, id);
 
-                CREATE FUNCTION creditkit_gateway_account_noop()
+                CREATE FUNCTION example_host_gateway_account_noop()
                 RETURNS trigger
                 LANGUAGE plpgsql
                 SET search_path = pg_catalog, public
@@ -1252,10 +1252,10 @@ mod tests {
                 END
                 $$;
 
-                CREATE TRIGGER creditkit_gateway_account_noop
+                CREATE TRIGGER example_host_gateway_account_noop
                 BEFORE UPDATE ON billing_gateway_accounts
                 FOR EACH ROW
-                EXECUTE FUNCTION creditkit_gateway_account_noop();
+                EXECUTE FUNCTION example_host_gateway_account_noop();
                 "#,
             )
             .execute(&database.pool)
