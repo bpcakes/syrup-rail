@@ -25,31 +25,37 @@ pub use attempts::{
     PaymentAttemptStoreError, admit_subscription_enrollment_submission_in_transaction,
     admit_subscription_payment_method_replacement_in_transaction,
     admit_subscription_recovery_submission_in_transaction,
+    admit_subscription_renewal_submission_in_transaction,
     find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,
     preflight_subscription_enrollment_in_transaction,
     preflight_subscription_payment_method_replacement_in_transaction,
     preflight_subscription_recovery_in_transaction, reserve_subscription_enrollment_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
-    reserve_subscription_recovery_in_transaction,
+    reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
 };
 pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
 pub use deletion::{billing_deletion_blockers, scrub_subscriber_billing_data};
 pub use discounts::*;
 pub use enrollment_application::{
     AdmittedSubscriptionEnrollment, AdmittedSubscriptionPaymentMethodReplacement,
-    AdmittedSubscriptionRecovery, SubscriptionEnrollmentAdmissionOutcome,
-    SubscriptionEnrollmentApplicationError, SubscriptionEnrollmentProviderResult,
-    SubscriptionPaymentMethodReplacementAdmissionOutcome,
+    AdmittedSubscriptionRecovery, AdmittedSubscriptionRenewal,
+    SubscriptionEnrollmentAdmissionOutcome, SubscriptionEnrollmentApplicationError,
+    SubscriptionEnrollmentProviderResult, SubscriptionPaymentMethodReplacementAdmissionOutcome,
     SubscriptionPaymentMethodReplacementProviderResult, SubscriptionRecoveryAdmissionOutcome,
-    SubscriptionRecoveryProviderResult, admit_subscription_enrollment_submission,
+    SubscriptionRecoveryProviderResult, SubscriptionRenewalAdmissionOutcome,
+    SubscriptionRenewalProviderResult, admit_subscription_enrollment_submission,
     admit_subscription_payment_method_replacement, admit_subscription_recovery_submission,
+    admit_subscription_renewal_submission,
     apply_reconciled_subscription_enrollment_gateway_outcome,
     apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
     apply_reconciled_subscription_recovery_gateway_outcome,
+    apply_reconciled_subscription_renewal_gateway_outcome,
     apply_subscription_enrollment_gateway_outcome,
     apply_subscription_payment_method_replacement_gateway_outcome,
-    apply_subscription_recovery_gateway_outcome, submit_admitted_subscription_enrollment,
+    apply_subscription_recovery_gateway_outcome, apply_subscription_renewal_gateway_outcome,
+    submit_admitted_subscription_enrollment,
     submit_admitted_subscription_payment_method_replacement, submit_admitted_subscription_recovery,
+    submit_admitted_subscription_renewal,
 };
 pub use entitlement::{
     EntitlementGuardError, EntitlementQueryError, entitlement, require_entitlement_for_update,

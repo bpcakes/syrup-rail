@@ -166,6 +166,44 @@ pub struct SubscriptionRenewalReservation {
     request: PaymentAttemptRequest,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionRenewalReservationRejection {
+    SubscriptionNotFound,
+    PaymentNotDue,
+    AttemptInProgress,
+    PaymentMethodUpdateInProgress,
+    RetryBlocked,
+    GatewayConfigurationChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionRenewalReservationOutcome {
+    Reserved(Box<SubscriptionRenewalReservation>, Box<PaymentAttempt>),
+    Rejected(SubscriptionRenewalReservationRejection),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionRenewalSubmissionRejection {
+    BillingStateChanged,
+    GatewayConfigurationChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionRenewalSubmissionOutcome {
+    Admitted(PaymentAttempt),
+    AlreadyAdmitted(PaymentAttempt),
+    Rejected {
+        attempt: PaymentAttempt,
+        reason: SubscriptionRenewalSubmissionRejection,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionRenewalOutcome {
+    Noop,
+    Payment(Box<crate::SubscriptionEnrollmentPaymentResult>),
+}
+
 impl SubscriptionRenewalReservation {
     #[allow(clippy::too_many_arguments)]
     pub fn from_locked_subscription(
