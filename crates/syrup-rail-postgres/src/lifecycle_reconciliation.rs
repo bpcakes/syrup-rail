@@ -33,6 +33,10 @@ impl HostChargeTargetStoreError {
             source: Box::new(source),
         }
     }
+
+    pub fn into_source(self) -> Box<dyn Error + Send + Sync + 'static> {
+        self.source
+    }
 }
 
 impl fmt::Display for HostChargeTargetStoreError {
