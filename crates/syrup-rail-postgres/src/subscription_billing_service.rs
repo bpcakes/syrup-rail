@@ -1285,7 +1285,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            None,
+            Some(GatewayDiagnostic::new("failed")),
             GatewayPaymentDescriptor::default(),
         );
         resolve_non_approved_outcome(
@@ -1374,7 +1374,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            None,
+            Some(GatewayDiagnostic::new("failed")),
             GatewayPaymentDescriptor::default(),
         );
         resolve_recovery_non_approved_outcome(
@@ -1463,7 +1463,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            None,
+            Some(GatewayDiagnostic::new("failed")),
             GatewayPaymentDescriptor::default(),
         );
         resolve_payment_method_replacement_non_approved_outcome(
@@ -1667,13 +1667,15 @@ impl SubscriptionBillingService {
         cooldown: Option<RateLimitCooldown>,
         boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+        let condition = (code != PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
+            .then(|| GatewayDiagnostic::new("failed"));
         let evidence = ProcessorEvidence::new(
             None,
             None,
             None,
             None,
             Some(detail),
-            None,
+            condition,
             GatewayPaymentDescriptor::default(),
         );
         resolve_renewal_non_approved_outcome(
