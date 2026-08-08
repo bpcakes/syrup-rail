@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
+repository.workspace = true
 description = "NMI gateway and lifecycle-evidence adapter for Syrup Rail"
-publish = false
+publish = true
 
 [dependencies]
 async-trait.workspace = true

@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
+repository.workspace = true
 description = "A bounded, retry-free client for NMI payment APIs"
-publish = false
+publish = true
 
 [dependencies]
 futures-util.workspace = true

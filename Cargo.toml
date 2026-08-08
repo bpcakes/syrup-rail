@@ -12,6 +12,7 @@ members = [
 edition = "2024"
 version = "0.1.0"
 license = "LicenseRef-SyrupRail-Proprietary"
+repository = "https://github.com/bpcakes/syrup-rail"
 
 [workspace.dependencies]
 async-trait = "0.1"

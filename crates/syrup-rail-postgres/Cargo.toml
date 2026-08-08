@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version = "1.88"
 license.workspace = true
+repository.workspace = true
 description = "Canonical provider-neutral PostgreSQL schema contract and SQLx orchestration for Syrup Rail"
-publish = false
+publish = true
 
 [features]
 default = []
