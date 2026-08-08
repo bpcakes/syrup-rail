@@ -157,18 +157,34 @@ async fn store_once(
             CompensatingProcessorChargeOutcome::OwnedByOtherAttempt
         }
         ObservedCharge::Owned(charge) => {
+            let mut persisted = charge_by_id(&mut transaction, charge.id).await?;
+            if !charge.exact_replay {
+                let state_code = initial_charge_state_code(
+                    persisted.role(),
+                    persisted.progression(),
+                    evidence.transaction_id().is_some(),
+                );
+                if persisted.state_code() != state_code {
+                    persisted = transition_processor_charge(
+                        &mut transaction,
+                        persisted.id(),
+                        &[persisted.progression()],
+                        persisted.progression(),
+                        state_code,
+                        false,
+                    )
+                    .await?;
+                }
+            }
             if let Some(attestation) = attestation_by_charge(&mut transaction, charge.id)
                 .await
                 .map_err(map_operator_error)?
+                && (!charge.exact_replay
+                    || !attestation_matches_source(&attestation, &attempt, &persisted))
             {
-                let persisted = charge_by_id(&mut transaction, charge.id).await?;
-                if !charge.exact_replay
-                    || !attestation_matches_source(&attestation, &attempt, &persisted)
-                {
-                    return Err(ProcessorChargeStoreError::InvalidState(
-                        "attested processor charge was reobserved with different evidence",
-                    ));
-                }
+                return Err(ProcessorChargeStoreError::InvalidState(
+                    "attested processor charge was reobserved with different evidence",
+                ));
             }
             if charge.exact_replay {
                 CompensatingProcessorChargeOutcome::ExactReplay
