@@ -1105,8 +1105,13 @@ async fn apply_payment_method_replacement_approved_on_connection(
     let attempt = lock_expected_payment_method_replacement_attempt(connection, reservation).await?;
     if attempt.status() == PaymentAttemptStatus::Approved {
         let subscription = load_applied_subscription(connection, &attempt).await?;
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Applied)
-            .await?;
+        let progression =
+            if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
+                ChargeProgression::Applied
+            } else {
+                ChargeProgression::ReconciliationRequired
+            };
+        observe_processor_charge(connection, &attempt, evidence, progression).await?;
         return Ok((
             SubscriptionEnrollmentPaymentResult::new(attempt, subscription),
             None,
@@ -5161,6 +5166,35 @@ mod tests {
         assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+
+        let additional_transaction_id = "txn_method_unexpected_additional";
+        let reconciled = service
+            .apply_reconciled_outcome(
+                result.attempt().identity().billing_scope_id(),
+                result.attempt().identity().attempt_id(),
+                &approved_outcome_with_reference(
+                    Some(additional_transaction_id),
+                    "vault_method_unexpected_additional",
+                ),
+            )
+            .await?;
+        assert_eq!(
+            reconciled.attempt().status(),
+            PaymentAttemptStatus::Approved
+        );
+        let additional_progression: String = sqlx::query_scalar(
+            r#"
+            SELECT progression_state
+            FROM billing_processor_charges
+            WHERE attempt_id = $1 AND gateway_transaction_id = $2
+            "#,
+        )
+        .bind(result.attempt().identity().attempt_id().as_uuid())
+        .bind(additional_transaction_id)
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        assert_eq!(additional_progression, "reconciliation_required");
+
         let events = fixture.coordinator.events.lock().await;
         assert_eq!(events.len(), 2);
         assert!(matches!(
