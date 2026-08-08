@@ -66,7 +66,8 @@ pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
 };
 pub use reconciliation::{
-    ProcessorChargeClassificationSummary, classify_pending_processor_charges,
+    ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,
+    claim_exact_reconciliation_attempts, classify_pending_processor_charges,
     fail_stale_unsubmitted_payment_method_replacements,
     fail_stale_unsubmitted_subscription_enrollments, reconciliation_gateway_accounts,
 };

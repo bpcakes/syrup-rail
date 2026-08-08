@@ -2845,7 +2845,9 @@ fn map_discount_error(
     }
 }
 
-fn payment_attempt_from_row(row: &PgRow) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
+pub(crate) fn payment_attempt_from_row(
+    row: &PgRow,
+) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
     let attempt_id = PaymentAttemptId::new(row.try_get("id")?);
     let identity = PaymentAttemptIdentity::new(
         attempt_id,

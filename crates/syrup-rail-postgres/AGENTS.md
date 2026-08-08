@@ -75,9 +75,10 @@ and transaction orchestration.
 - Change canonical deletion admission or billing attempt/payment-method scrub
   policy in `src/deletion.rs`; keep host identity, order, fulfillment, and
   retained-subject work in the host transaction.
-- Change registered-account reconciliation selection or local stale-attempt
-  phases in `src/reconciliation.rs`; preserve persisted plan-key aggregate
-  locks for enrollment cleanup and pending processor-charge classification,
+- Change registered-account reconciliation selection, local stale-attempt
+  phases, pending charge classification, or exact-query claiming/negative
+  observation transitions in `src/reconciliation.rs`; preserve persisted
+  plan-key identity and aggregate locks, keep the fixed per-account envelopes,
   and keep host configuration filtering and queue encoding outside the shared
   operations.
 
@@ -119,6 +120,10 @@ and transaction orchestration.
 - Subscriber scrubbing enters every affected gateway-account payment-method
   domain in deterministic order before mutating attempts or methods and never
   changes immutable processor-charge observations.
+- Exact-query claiming returns canonical `PaymentAttempt` values after one
+  deterministic, account-scoped durable requery claim. Negative observations
+  re-lock and revalidate the immutable shared request before changing status;
+  provider I/O never occurs inside that transaction.
 - Protected-write admission requires the caller's SQL transaction so accepted
   paid/grant locks remain held through the host mutation; it restores the
   caller's prior transaction-local `lock_timeout` after semantic results.
