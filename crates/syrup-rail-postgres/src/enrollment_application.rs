@@ -25,7 +25,8 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    BillingTransactionCoordinator, BillingTransactionError, BillingTransactionSubjectState,
+    BillingTransaction, BillingTransactionCoordinator, BillingTransactionError,
+    BillingTransactionSubjectState,
     attempts::{
         PaymentAttemptStoreError, find_payment_attempt_by_id_on_connection,
         lock_payment_attempt_by_id_on_connection,
@@ -1381,6 +1382,16 @@ async fn apply_payment_method_replacement_approved_outcome(
         evidence,
     )
     .await;
+    finalize_approved_application(transaction, application).await
+}
+
+async fn finalize_approved_application(
+    mut transaction: Box<dyn BillingTransaction>,
+    application: Result<
+        (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
+        SubscriptionEnrollmentApplicationError,
+    >,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let (result, event) = match application {
         Ok(application) => application,
         Err(error) => {
@@ -1677,21 +1688,7 @@ async fn apply_recovery_approved_outcome(
         evidence,
     )
     .await;
-    let (result, event) = match application {
-        Ok(application) => application,
-        Err(error) => {
-            let _ = transaction.rollback().await;
-            return Err(error);
-        }
-    };
-    if let Some(event) = event.as_ref()
-        && let Err(error) = transaction.append_event(event).await
-    {
-        let _ = transaction.rollback().await;
-        return Err(error.into());
-    }
-    transaction.commit().await?;
-    Ok(result)
+    finalize_approved_application(transaction, application).await
 }
 
 async fn apply_renewal_approved_outcome(
@@ -1714,21 +1711,7 @@ async fn apply_renewal_approved_outcome(
         evidence,
     )
     .await;
-    let (result, event) = match application {
-        Ok(application) => application,
-        Err(error) => {
-            let _ = transaction.rollback().await;
-            return Err(error);
-        }
-    };
-    if let Some(event) = event.as_ref()
-        && let Err(error) = transaction.append_event(event).await
-    {
-        let _ = transaction.rollback().await;
-        return Err(error.into());
-    }
-    transaction.commit().await?;
-    Ok(result)
+    finalize_approved_application(transaction, application).await
 }
 
 async fn apply_renewal_approved_on_connection(
@@ -3590,21 +3573,7 @@ async fn apply_approved_outcome(
         evidence,
     )
     .await;
-    let (result, event) = match application {
-        Ok(application) => application,
-        Err(error) => {
-            let _ = transaction.rollback().await;
-            return Err(error);
-        }
-    };
-    if let Some(event) = event.as_ref()
-        && let Err(error) = transaction.append_event(event).await
-    {
-        let _ = transaction.rollback().await;
-        return Err(error.into());
-    }
-    transaction.commit().await?;
-    Ok(result)
+    finalize_approved_application(transaction, application).await
 }
 
 async fn apply_approved_on_connection(
