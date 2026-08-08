@@ -17,6 +17,10 @@ impl BillingTransactionError {
             source: Box::new(source),
         }
     }
+
+    pub fn into_source(self) -> BoxError {
+        self.source
+    }
 }
 
 impl fmt::Display for BillingTransactionError {
@@ -41,6 +45,10 @@ impl BillingEventWriteError {
         Self {
             source: Box::new(source),
         }
+    }
+
+    pub fn into_source(self) -> BoxError {
+        self.source
     }
 }
 
