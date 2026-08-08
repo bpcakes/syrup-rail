@@ -946,7 +946,12 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
     }
     let subscription_id = SubscriptionId::new(row.try_get("id")?);
     fail_stale_unsubmitted_payment_method_updates(transaction, subscription_id).await?;
-    if blocking_subscription_charge_attempt_exists(transaction, subscription_id).await? {
+    if blocking_subscription_charge_attempt_exists_for_method_replacement(
+        transaction,
+        subscription_id,
+    )
+    .await?
+    {
         return Ok(
             SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
                 SubscriptionPaymentMethodReplacementRejection::ChargeAttemptInProgress,
@@ -1066,8 +1071,11 @@ pub async fn admit_subscription_payment_method_replacement_in_transaction(
     }
     let state_matches = attempt.request() == reservation.request()
         && payment_method_replacement_subscription_state_matches(transaction, reservation).await?
-        && !blocking_subscription_charge_attempt_exists(transaction, reservation.subscription_id())
-            .await?
+        && !blocking_subscription_charge_attempt_exists_for_method_replacement(
+            transaction,
+            reservation.subscription_id(),
+        )
+        .await?
         && !blocking_payment_method_update_exists_except(
             transaction,
             reservation.subscription_id(),
@@ -1579,10 +1587,10 @@ async fn payment_method_replacement_attempt_matches_replay_context(
             SELECT 1 FROM billing_subscriptions
             WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
                 AND gateway_account_id = $4 AND plan_key = $5
-                AND status IN ('active', 'past_due')
                 AND (
                     (
-                        payment_method_id = $6
+                        status IN ('active', 'past_due')
+                        AND payment_method_id = $6
                         AND initial_transaction_id = $7
                     )
                     OR (
@@ -1794,7 +1802,7 @@ async fn fail_stale_unsubmitted_payment_method_updates(
         SET status = 'failed',
             gateway_response_text = COALESCE(
                 gateway_response_text,
-                'Prepared payment method update expired before processor submission.'
+                'Payment method update was abandoned before gateway submission.'
             ),
             resolved_at = COALESCE(resolved_at, clock_timestamp()),
             updated_at = clock_timestamp()
@@ -1851,6 +1859,29 @@ async fn blocking_subscription_charge_attempt_exists_except(
     )
     .bind(subscription_id.as_uuid())
     .bind(excluded_attempt_id.as_uuid())
+    .fetch_one(&mut **transaction)
+    .await
+}
+
+async fn blocking_subscription_charge_attempt_exists_for_method_replacement(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscription_id: SubscriptionId,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM billing_payment_attempts AS attempts
+            INNER JOIN billing_subscriptions AS subscriptions
+                ON subscriptions.id = attempts.subscription_id
+            WHERE attempts.subscription_id = $1
+                AND attempts.attempt_kind IN ('subscription_renewal', 'subscription_recovery')
+                AND attempts.billing_period_start_at = subscriptions.next_renewal_at
+                AND attempts.status IN ('pending', 'unknown', 'approved')
+        )
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
     .fetch_one(&mut **transaction)
     .await
 }

@@ -4,11 +4,11 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool, Row};
 use syrup_rail::{
     BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId, EnrollSubscription,
-    GatewayDiagnostic, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome,
-    GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest,
-    GatewayStorePaymentMethodRequest, GatewayTransactionId, PaymentAttempt, PaymentAttemptId,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentCardDisplay, PaymentMethodId,
-    PaymentResolutionCode, PlanKey, ProcessorEvidence, RecoverSubscriptionPayment,
+    GatewayDiagnostic, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentDescriptor,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent,
+    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus, PaymentCardDisplay,
+    PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence, RecoverSubscriptionPayment,
     ReplaceSubscriptionPaymentMethod, ResolvedGateway, SubscriberId, Subscription,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
@@ -951,6 +951,7 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
         "payment method replacement attempt was not found",
     ))?;
+    let outcome = reconciled_outcome_with_persisted_evidence(&attempt, outcome);
     let provider_key = sqlx::query_scalar::<_, String>(
         "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
     )
@@ -977,9 +978,69 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
         pool,
         coordinator,
         &reservation,
-        outcome,
+        &outcome,
     )
     .await
+}
+
+fn reconciled_outcome_with_persisted_evidence(
+    attempt: &PaymentAttempt,
+    outcome: &GatewayPaymentOutcome,
+) -> GatewayPaymentOutcome {
+    let observed = outcome.evidence();
+    let persisted = attempt.state().processor_evidence();
+    let observed_descriptor = observed.descriptor();
+    let persisted_descriptor = persisted.descriptor();
+    let descriptor = GatewayPaymentDescriptor::from_provider_parts(
+        observed_descriptor
+            .payment_type()
+            .or_else(|| persisted_descriptor.payment_type())
+            .cloned(),
+        observed_descriptor
+            .card_brand()
+            .or_else(|| persisted_descriptor.card_brand())
+            .cloned(),
+        observed_descriptor
+            .card_last_four()
+            .or_else(|| persisted_descriptor.card_last_four())
+            .map(|value| value.expose()),
+        observed_descriptor
+            .card_exp_month()
+            .or_else(|| persisted_descriptor.card_exp_month()),
+        observed_descriptor
+            .card_exp_year()
+            .or_else(|| persisted_descriptor.card_exp_year()),
+    );
+    GatewayPaymentOutcome::new(
+        outcome.status(),
+        ProcessorEvidence::new(
+            observed
+                .transaction_id()
+                .or_else(|| persisted.transaction_id())
+                .cloned(),
+            observed
+                .payment_method_reference()
+                .or_else(|| persisted.payment_method_reference())
+                .cloned(),
+            observed
+                .response()
+                .or_else(|| persisted.response())
+                .cloned(),
+            observed
+                .response_code()
+                .or_else(|| persisted.response_code())
+                .cloned(),
+            observed
+                .response_text()
+                .or_else(|| persisted.response_text())
+                .cloned(),
+            observed
+                .condition()
+                .or_else(|| persisted.condition())
+                .cloned(),
+            descriptor,
+        ),
+    )
 }
 
 async fn apply_payment_method_replacement_approved_outcome(
@@ -1890,7 +1951,8 @@ async fn resolve_payment_method_replacement_unknown_outcome(
     .await?;
     let attempt =
         lock_expected_payment_method_replacement_attempt(&mut transaction, reservation).await?;
-    if attempt.status().is_resolvable() {
+    if attempt.status().is_resolvable() && attempt.status() != PaymentAttemptStatus::ReviewRequired
+    {
         update_attempt_resolution(
             &mut transaction,
             &attempt,
@@ -2019,12 +2081,6 @@ async fn try_park_payment_method_replacement_approved_outcome(
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
-    lock_subscription_aggregate(
-        &mut transaction,
-        reservation.identity().subscriber_id(),
-        reservation.plan_key(),
-    )
-    .await?;
     let attempt =
         lock_expected_payment_method_replacement_attempt(&mut transaction, reservation).await?;
     let attempt = if attempt.status() == PaymentAttemptStatus::Approved {
@@ -4088,7 +4144,8 @@ pub(crate) async fn payment_result_for_attempt(
     attempt: PaymentAttempt,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let subscription = match attempt.kind() {
-        PaymentAttemptKind::SubscriptionRecovery => {
+        PaymentAttemptKind::SubscriptionRecovery
+        | PaymentAttemptKind::SubscriptionPaymentMethodUpdate => {
             load_applied_subscription(connection, &attempt).await?
         }
         _ if attempt.status() == PaymentAttemptStatus::Approved => {
