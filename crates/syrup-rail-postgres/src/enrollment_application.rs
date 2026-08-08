@@ -2467,22 +2467,21 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
             } else if boundary == OutcomeResolutionBoundary::Submitted
                 && matches!(status, PaymentAttemptStatus::Declined | PaymentAttemptStatus::Failed)
             {
-                let changed = sqlx::query(
-                    "UPDATE billing_subscriptions SET status = 'past_due', updated_at = clock_timestamp() WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 AND plan_key = $4 AND status = 'active'",
+                let retry_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+                    "UPDATE billing_subscriptions SET status = 'past_due', updated_at = clock_timestamp() WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 AND plan_key = $4 AND status = 'active' RETURNING next_renewal_at",
                 )
                 .bind(reservation.subscription_id().as_uuid())
                 .bind(identity.billing_scope_id().as_uuid())
                 .bind(identity.subscriber_id().as_uuid())
                 .bind(reservation.plan_key().as_str())
-                .execute(&mut *connection)
+                .fetch_optional(&mut *connection)
                 .await?;
-                if changed.rows_affected() == 1 {
+                if let Some(retry_at) = retry_at {
                     event = Some(BillingEvent::SubscriptionPaymentFailed {
                         attempt_id: identity.attempt_id(),
                         subscription_id: reservation.subscription_id(),
                         plan_key: reservation.plan_key().clone(),
-                        retry_at: Utc::now()
-                            + chrono::Duration::seconds(syrup_rail::RENEWAL_RETRY_AFTER_SECONDS),
+                        retry_at,
                     });
                 }
             }
@@ -3184,7 +3183,7 @@ async fn try_park_renewal_approved_outcome(
             ChargeProgression::Pending,
         )
         .await?;
-        park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
+        park_locked_renewal_attempt(&mut transaction, &attempt, evidence, None, message).await?
     };
     let result = payment_result_for_attempt(&mut transaction, attempt).await?;
     transaction.commit().await?;
@@ -3410,8 +3409,7 @@ async fn extend_recovery_rate_limit_cooldown(
                 SET mutation_rate_limited_until = GREATEST(
                         COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
                         clock_timestamp() + make_interval(secs => $4)
-                    ),
-                    updated_at = clock_timestamp()
+                    )
                 WHERE id = $1 AND billing_scope_id = $2
                     AND gateway_configuration_id = $3
                 "#,
@@ -3462,8 +3460,7 @@ async fn extend_renewal_rate_limit_cooldown(
                 SET mutation_rate_limited_until = GREATEST(
                         COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
                         clock_timestamp() + make_interval(secs => $4)
-                    ),
-                    updated_at = clock_timestamp()
+                    )
                 WHERE id = $1 AND billing_scope_id = $2
                     AND gateway_configuration_id = $3
                 "#,
@@ -3514,7 +3511,7 @@ async fn extend_payment_method_replacement_rate_limit_cooldown(
                 SET mutation_rate_limited_until = GREATEST(
                         COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
                         clock_timestamp() + make_interval(secs => $4)
-                    ), updated_at = clock_timestamp()
+                    )
                 WHERE id = $1 AND billing_scope_id = $2
                     AND gateway_configuration_id = $3
                 "#,
@@ -3969,8 +3966,7 @@ async fn extend_rate_limit_cooldown(
                 SET mutation_rate_limited_until = GREATEST(
                         COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
                         clock_timestamp() + make_interval(secs => $4)
-                    ),
-                    updated_at = clock_timestamp()
+                    )
                 WHERE id = $1
                     AND billing_scope_id = $2
                     AND gateway_configuration_id = $3
@@ -4629,6 +4625,50 @@ async fn mark_attempt_approved(
 }
 
 async fn park_locked_attempt(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    resolution_code: Option<PaymentResolutionCode>,
+    message: &'static str,
+) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    update_attempt_resolution(
+        connection,
+        attempt,
+        evidence,
+        PaymentAttemptStatus::ReviewRequired,
+        resolution_code,
+        None,
+        None,
+        true,
+    )
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET gateway_response_text = CASE
+                WHEN gateway_response_text IS NULL THEN $2
+                ELSE left($2 || ' ' || gateway_response_text, 512)
+            END,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+        "#,
+    )
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(message)
+    .execute(&mut *connection)
+    .await?;
+    find_payment_attempt_by_id_on_connection(
+        connection,
+        attempt.identity().billing_scope_id(),
+        attempt.identity().attempt_id(),
+    )
+    .await?
+    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+        INVALID_APPLICATION_STATE,
+    ))
+}
+
+async fn park_locked_renewal_attempt(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
