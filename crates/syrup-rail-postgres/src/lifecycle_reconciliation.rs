@@ -1028,12 +1028,9 @@ async fn cleanup_pending(
             FROM billing_gateway_lifecycle_pending_updates pending
             WHERE pending.billing_scope_id = $1
                 AND pending.gateway_account_id = $2
-                AND (
-                    pending.expires_at <= now()
-                    OR pending.check_count >= $3
-                )
+                AND pending.expires_at <= now()
             ORDER BY pending.expires_at, pending.first_seen_at, pending.id
-            LIMIT $4
+            LIMIT $3
             FOR UPDATE SKIP LOCKED
         )
         DELETE FROM billing_gateway_lifecycle_pending_updates pending
@@ -1043,7 +1040,6 @@ async fn cleanup_pending(
     )
     .bind(account.billing_scope_id().as_uuid())
     .bind(account.gateway_account_id().as_uuid())
-    .bind(PENDING_MAX_CHECKS)
     .bind(PENDING_CLEANUP_BATCH_SIZE)
     .execute(&mut *transaction)
     .await?;
