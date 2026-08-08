@@ -1285,7 +1285,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            Some(GatewayDiagnostic::new("failed")),
+            None,
             GatewayPaymentDescriptor::default(),
         );
         resolve_non_approved_outcome(
@@ -1374,7 +1374,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            Some(GatewayDiagnostic::new("failed")),
+            None,
             GatewayPaymentDescriptor::default(),
         );
         resolve_recovery_non_approved_outcome(
@@ -1463,7 +1463,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            Some(GatewayDiagnostic::new("failed")),
+            None,
             GatewayPaymentDescriptor::default(),
         );
         resolve_payment_method_replacement_non_approved_outcome(
@@ -1573,8 +1573,7 @@ impl SubscriptionBillingService {
             SET rate_limited_until = GREATEST(
                     rate_limited_until,
                     clock_timestamp() + make_interval(secs => $2)
-                ),
-                updated_at = clock_timestamp()
+                )
             WHERE provider_key = $1
             "#,
         )
@@ -1674,7 +1673,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            Some(GatewayDiagnostic::new("failed")),
+            None,
             GatewayPaymentDescriptor::default(),
         );
         resolve_renewal_non_approved_outcome(

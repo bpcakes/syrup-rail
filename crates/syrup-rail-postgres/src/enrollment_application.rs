@@ -3430,8 +3430,7 @@ async fn extend_recovery_rate_limit_cooldown(
                 SET rate_limited_until = GREATEST(
                         rate_limited_until,
                         clock_timestamp() + make_interval(secs => $2)
-                    ),
-                    updated_at = clock_timestamp()
+                    )
                 WHERE provider_key = $1
                 "#,
             )
@@ -3483,8 +3482,7 @@ async fn extend_renewal_rate_limit_cooldown(
                 SET rate_limited_until = GREATEST(
                         rate_limited_until,
                         clock_timestamp() + make_interval(secs => $2)
-                    ),
-                    updated_at = clock_timestamp()
+                    )
                 WHERE provider_key = $1
                 "#,
             )
@@ -3535,7 +3533,7 @@ async fn extend_payment_method_replacement_rate_limit_cooldown(
                 SET rate_limited_until = GREATEST(
                         rate_limited_until,
                         clock_timestamp() + make_interval(secs => $2)
-                    ), updated_at = clock_timestamp()
+                    )
                 WHERE provider_key = $1
                 "#,
             )
@@ -4637,32 +4635,53 @@ async fn park_locked_attempt(
     resolution_code: Option<PaymentResolutionCode>,
     message: &'static str,
 ) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
-    update_attempt_resolution(
-        connection,
-        attempt,
-        evidence,
-        PaymentAttemptStatus::ReviewRequired,
-        resolution_code,
-        None,
-        None,
-        true,
-    )
-    .await?;
-    sqlx::query(
+    let descriptor = evidence.descriptor();
+    let result = sqlx::query(
         r#"
         UPDATE billing_payment_attempts
-        SET gateway_response_text = CASE
-                WHEN gateway_response_text IS NULL THEN $2
-                ELSE left($2 || ' ' || gateway_response_text, 512)
+        SET status = 'review_required',
+            gateway_transaction_id = $2,
+            gateway_payment_method_reference = $3,
+            gateway_response = $4, gateway_response_code = $5,
+            gateway_response_text = CASE
+                WHEN $6 IS NULL THEN $14
+                ELSE left($14 || ' ' || $6, 512)
             END,
+            gateway_condition = $7,
+            payment_type = $8, card_brand = $9, card_last4 = $10,
+            card_exp_month = $11, card_exp_year = $12,
+            resolution_code = $13,
+            review_required_at = COALESCE(review_required_at, clock_timestamp()),
             updated_at = clock_timestamp()
         WHERE id = $1
+            AND status IN ('pending', 'unknown', 'review_required', 'declined', 'failed')
         "#,
     )
     .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .bind(resolution_code.map(PaymentResolutionCode::as_str))
     .bind(message)
     .execute(&mut *connection)
     .await?;
+    if result.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
     find_payment_attempt_by_id_on_connection(
         connection,
         attempt.identity().billing_scope_id(),
