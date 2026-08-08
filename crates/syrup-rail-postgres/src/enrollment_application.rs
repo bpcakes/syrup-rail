@@ -1778,8 +1778,6 @@ pub(crate) async fn resolve_recovery_non_approved_outcome(
             evidence,
             status,
             resolution_code,
-            None,
-            None,
             false,
         )
         .await?;
@@ -1845,8 +1843,6 @@ pub(crate) async fn resolve_payment_method_replacement_non_approved_outcome(
             evidence,
             status,
             resolution_code,
-            None,
-            None,
             false,
         )
         .await?;
@@ -1903,8 +1899,6 @@ async fn resolve_recovery_unknown_outcome(
             evidence,
             PaymentAttemptStatus::Unknown,
             None,
-            None,
-            None,
             false,
         )
         .await?;
@@ -1958,8 +1952,6 @@ async fn resolve_payment_method_replacement_unknown_outcome(
             &attempt,
             evidence,
             PaymentAttemptStatus::Unknown,
-            None,
-            None,
             None,
             false,
         )
@@ -2885,8 +2877,6 @@ pub(crate) async fn resolve_non_approved_outcome(
             evidence,
             status,
             resolution_code,
-            None,
-            None,
             false,
         )
         .await?;
@@ -2978,8 +2968,6 @@ async fn resolve_unknown_outcome(
             &attempt,
             evidence,
             PaymentAttemptStatus::Unknown,
-            None,
-            None,
             None,
             false,
         )
@@ -3676,7 +3664,7 @@ async fn mark_attempt_approved(
     subscription_id: SubscriptionId,
     method_id: PaymentMethodId,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    update_attempt_resolution(
+    update_attempt_resolution_with_applied_relationships(
         connection,
         attempt,
         evidence,
@@ -3702,8 +3690,6 @@ async fn park_locked_attempt(
         evidence,
         PaymentAttemptStatus::ReviewRequired,
         resolution_code,
-        None,
-        None,
         true,
     )
     .await?;
@@ -3735,6 +3721,68 @@ async fn park_locked_attempt(
 
 #[allow(clippy::too_many_arguments)]
 async fn update_attempt_resolution(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    status: PaymentAttemptStatus,
+    resolution_code: Option<PaymentResolutionCode>,
+    allow_terminal_approval_race: bool,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    let descriptor = evidence.descriptor();
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = $2,
+            gateway_transaction_id = $3,
+            gateway_payment_method_reference = $4,
+            gateway_response = $5, gateway_response_code = $6,
+            gateway_response_text = $7, gateway_condition = $8,
+            payment_type = $9, card_brand = $10, card_last4 = $11,
+            card_exp_month = $12, card_exp_year = $13,
+            resolution_code = $14,
+            resolved_at = CASE WHEN $2 IN ('approved', 'declined', 'failed')
+                THEN clock_timestamp() ELSE resolved_at END,
+            review_required_at = CASE WHEN $2 = 'review_required'
+                THEN COALESCE(review_required_at, clock_timestamp()) ELSE review_required_at END,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+            AND (
+                status IN ('pending', 'unknown', 'review_required')
+                OR ($15 AND status IN ('declined', 'failed'))
+            )
+        "#,
+    )
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(status.as_str())
+    .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .bind(resolution_code.map(PaymentResolutionCode::as_str))
+    .bind(allow_terminal_approval_race)
+    .execute(connection)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_attempt_resolution_with_applied_relationships(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
