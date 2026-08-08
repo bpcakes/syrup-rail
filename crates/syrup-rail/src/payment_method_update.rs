@@ -1,0 +1,272 @@
+use std::fmt;
+
+use crate::{
+    BillingContact, BillingContactSnapshot, BillingScopeId, CurrencyCode, GatewayConfigurationId,
+    GatewayProviderKey, GatewayTransactionId, IdempotencyKey, Money, PaymentAttempt,
+    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
+    PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PaymentMethodUpdateSnapshot,
+    PaymentToken, PlanKey, ResolvedGateway, SubscriberId, SubscriptionId,
+};
+use thiserror::Error;
+
+/// Provider-neutral request to replace the stored credential for one plan.
+///
+/// The browser token remains memory-only. The canonical subscription and its
+/// current method/initial-transaction baseline are derived under lock.
+#[derive(Clone)]
+pub struct ReplaceSubscriptionPaymentMethod {
+    attempt_id: PaymentAttemptId,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: PlanKey,
+    gateway_configuration_id: GatewayConfigurationId,
+    idempotency_key: IdempotencyKey,
+    payment_token: PaymentToken,
+    billing_contact: BillingContact,
+}
+
+impl ReplaceSubscriptionPaymentMethod {
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        attempt_id: PaymentAttemptId,
+        billing_scope_id: BillingScopeId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+        gateway_configuration_id: GatewayConfigurationId,
+        idempotency_key: IdempotencyKey,
+        payment_token: PaymentToken,
+        billing_contact: BillingContact,
+    ) -> Self {
+        Self {
+            attempt_id,
+            billing_scope_id,
+            subscriber_id,
+            plan_key,
+            gateway_configuration_id,
+            idempotency_key,
+            payment_token,
+            billing_contact,
+        }
+    }
+
+    pub const fn attempt_id(&self) -> PaymentAttemptId {
+        self.attempt_id
+    }
+    pub const fn billing_scope_id(&self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+    pub const fn subscriber_id(&self) -> SubscriberId {
+        self.subscriber_id
+    }
+    pub const fn plan_key(&self) -> &PlanKey {
+        &self.plan_key
+    }
+    pub const fn gateway_configuration_id(&self) -> GatewayConfigurationId {
+        self.gateway_configuration_id
+    }
+    pub const fn idempotency_key(&self) -> &IdempotencyKey {
+        &self.idempotency_key
+    }
+    pub const fn payment_token(&self) -> &PaymentToken {
+        &self.payment_token
+    }
+    pub const fn billing_contact(&self) -> &BillingContact {
+        &self.billing_contact
+    }
+}
+
+impl fmt::Debug for ReplaceSubscriptionPaymentMethod {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ReplaceSubscriptionPaymentMethod")
+            .field("attempt_id", &self.attempt_id)
+            .field("billing_scope_id", &self.billing_scope_id)
+            .field("subscriber_id", &self.subscriber_id)
+            .field("plan_key", &self.plan_key)
+            .field("gateway_configuration_id", &self.gateway_configuration_id)
+            .field("has_idempotency_key", &true)
+            .field("has_payment_token", &true)
+            .field("has_billing_contact", &true)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum SubscriptionPaymentMethodReplacementBuildError {
+    #[error("resolved gateway identity does not match the payment-method replacement command")]
+    GatewayIdentityMismatch,
+    #[error("attempt is not a valid subscription payment-method replacement")]
+    AttemptKindMismatch,
+}
+
+/// Secret-free authority for one exact stored-method replacement.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SubscriptionPaymentMethodReplacement {
+    identity: PaymentAttemptIdentity,
+    provider_key: GatewayProviderKey,
+    request: PaymentAttemptRequest,
+}
+
+impl SubscriptionPaymentMethodReplacement {
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_locked_subscription(
+        command: &ReplaceSubscriptionPaymentMethod,
+        gateway: &ResolvedGateway,
+        subscription_id: SubscriptionId,
+        payment_method_id: PaymentMethodId,
+        initial_transaction_id: GatewayTransactionId,
+        currency: CurrencyCode,
+    ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
+        if gateway.billing_scope_id() != command.billing_scope_id()
+            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
+        {
+            return Err(SubscriptionPaymentMethodReplacementBuildError::GatewayIdentityMismatch);
+        }
+        let identity = PaymentAttemptIdentity::new(
+            command.attempt_id(),
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            gateway.gateway_account_id(),
+            gateway.gateway_configuration_id(),
+        );
+        let expected_state = PaymentMethodUpdateSnapshot::new(
+            subscription_id,
+            payment_method_id,
+            initial_transaction_id,
+        );
+        let request = PaymentAttemptRequest::new(
+            PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
+                plan_key: command.plan_key().clone(),
+                payment_method_id,
+                expected_state: expected_state.clone(),
+            },
+            command.idempotency_key().clone(),
+            PaymentAttemptFingerprint::for_subscription_payment_method_update(
+                command.plan_key(),
+                subscription_id,
+                payment_method_id,
+                expected_state.expected_initial_transaction_id(),
+            ),
+            Money::new(0, currency).expect("zero payment-method replacement amount is valid"),
+            gateway.mutation_reference_factory().for_attempt(
+                PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                command.attempt_id(),
+            ),
+            BillingContactSnapshot::from_billing_contact(command.billing_contact()),
+        );
+        Ok(Self {
+            identity,
+            provider_key: gateway.provider_key().clone(),
+            request,
+        })
+    }
+
+    pub fn from_attempt(
+        attempt: &PaymentAttempt,
+        provider_key: GatewayProviderKey,
+    ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
+        let PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
+            plan_key,
+            expected_state,
+            ..
+        } = attempt.request().target()
+        else {
+            return Err(SubscriptionPaymentMethodReplacementBuildError::AttemptKindMismatch);
+        };
+        if attempt.request().amount().cents() != 0
+            || !attempt
+                .request()
+                .fingerprint()
+                .matches_subscription_payment_method_update(plan_key, expected_state)
+        {
+            return Err(SubscriptionPaymentMethodReplacementBuildError::AttemptKindMismatch);
+        }
+        Ok(Self {
+            identity: attempt.identity(),
+            provider_key,
+            request: attempt.request().clone(),
+        })
+    }
+
+    pub const fn identity(&self) -> PaymentAttemptIdentity {
+        self.identity
+    }
+    pub const fn provider_key(&self) -> &GatewayProviderKey {
+        &self.provider_key
+    }
+    pub const fn request(&self) -> &PaymentAttemptRequest {
+        &self.request
+    }
+    pub const fn plan_key(&self) -> &PlanKey {
+        match self.request.target().plan_key() {
+            Some(value) => value,
+            None => unreachable!(),
+        }
+    }
+    pub const fn subscription_id(&self) -> SubscriptionId {
+        match self.request.target().subscription_id() {
+            Some(value) => value,
+            None => unreachable!(),
+        }
+    }
+    pub const fn expected_state(&self) -> &PaymentMethodUpdateSnapshot {
+        match self.request.target().payment_method_update_snapshot() {
+            Some(value) => value,
+            None => unreachable!(),
+        }
+    }
+}
+
+impl fmt::Debug for SubscriptionPaymentMethodReplacement {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SubscriptionPaymentMethodReplacement")
+            .field("identity", &self.identity)
+            .field("provider_key", &self.provider_key)
+            .field("request", &self.request)
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionPaymentMethodReplacementRejection {
+    SubscriptionNotFound,
+    SubscriptionIneligible,
+    ChargeAttemptInProgress,
+    PaymentMethodUpdateInProgress,
+    GatewayConfigurationChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionPaymentMethodReplacementReservationOutcome {
+    Reserved(
+        Box<SubscriptionPaymentMethodReplacement>,
+        Box<PaymentAttempt>,
+    ),
+    Replay(Box<PaymentAttempt>),
+    IdempotencyConflict,
+    Rejected(SubscriptionPaymentMethodReplacementRejection),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionPaymentMethodReplacementPreflightOutcome {
+    Continue,
+    Replay(Box<PaymentAttempt>),
+    IdempotencyConflict,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionPaymentMethodReplacementSubmissionRejection {
+    BillingStateChanged,
+    GatewayConfigurationChanged,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionPaymentMethodReplacementSubmissionOutcome {
+    Admitted(PaymentAttempt),
+    AlreadyAdmitted(PaymentAttempt),
+    Rejected {
+        attempt: PaymentAttempt,
+        reason: SubscriptionPaymentMethodReplacementSubmissionRejection,
+    },
+}

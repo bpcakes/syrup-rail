@@ -129,6 +129,33 @@ impl PaymentAttemptFingerprint {
             amount,
         )
     }
+
+    /// Builds the canonical fingerprint for replacing one subscription's
+    /// stored payment method against its exact current payment baseline.
+    pub fn for_subscription_payment_method_update(
+        plan_key: &PlanKey,
+        subscription_id: SubscriptionId,
+        payment_method_id: PaymentMethodId,
+        expected_initial_transaction_id: &GatewayTransactionId,
+    ) -> Self {
+        Self(format!(
+            "subscription_payment_method_update:{plan_key}:{subscription_id}:{payment_method_id}:{}",
+            expected_initial_transaction_id.expose(),
+        ))
+    }
+
+    pub fn matches_subscription_payment_method_update(
+        &self,
+        plan_key: &PlanKey,
+        expected: &PaymentMethodUpdateSnapshot,
+    ) -> bool {
+        self == &Self::for_subscription_payment_method_update(
+            plan_key,
+            expected.subscription_id(),
+            expected.payment_method_id(),
+            expected.expected_initial_transaction_id(),
+        )
+    }
 }
 
 fn subscription_initial_expected_fingerprint(
