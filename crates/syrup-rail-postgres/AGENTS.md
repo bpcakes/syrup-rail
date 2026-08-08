@@ -45,6 +45,8 @@ and transaction orchestration.
 - `src/processor_charges.rs` — canonical charge observation, exact replay and
   transactionless identification, plus bounded compensating persistence after
   a primary transaction has failed.
+- `src/host_charges.rs` — typed caller-transaction admission over the canonical
+  host-charge `Reserve`, `Submit`, and `Release` ledger modes.
 
 ## Edit here for X
 
@@ -99,6 +101,9 @@ and transaction orchestration.
   `src/processor_charges.rs`; keep one canonical writer, preserve immutable
   evidence and transaction ownership, and retry only explicitly transient
   database failures outside a caller-owned transaction.
+- Change host-charge shared-ledger safety in `src/host_charges.rs`; the host
+  target must already be locked on the supplied connection, and ordinary
+  unsafe or same-key contender outcomes remain typed rather than errors.
 
 ## Invariants
 

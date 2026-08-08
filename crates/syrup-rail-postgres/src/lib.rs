@@ -13,6 +13,7 @@ mod enrollment_application;
 mod entitlement;
 mod gateway_accounts;
 mod grants;
+mod host_charges;
 mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
 mod operator_review;
@@ -68,6 +69,10 @@ pub use entitlement::{
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
 pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
+};
+pub use host_charges::{
+    HostChargeLedgerAdmission, HostChargeLedgerAdmissionError, HostChargeLedgerAdmissionMode,
+    HostChargeLedgerAdmissionQuery, host_charge_ledger_admission,
 };
 pub use lifecycle_quarantine::{
     GatewayLifecycleQuarantineAlert, GatewayLifecycleQuarantineResolutionOutcome,
