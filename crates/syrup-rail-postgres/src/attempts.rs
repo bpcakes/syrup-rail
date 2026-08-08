@@ -6,25 +6,28 @@ use syrup_rail::{
     BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, CumulativeRefundCents,
     CurrencyCode, DiscountClaimId, DiscountCodeId, GatewayAccountId, GatewayConfigurationId,
     GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId, GatewayPaymentDescriptor,
-    GatewayPaymentMethodReference, GatewayTransactionId, HostChargeTargetId, IdempotencyKey,
-    LimitedDiscountMonths, Money, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
-    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptLifecycle, PaymentAttemptRequest,
-    PaymentAttemptState, PaymentAttemptStatus, PaymentAttemptTarget, PaymentAttemptTimestamps,
-    PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentResolutionCode, PercentOffBasisPoints,
-    PlanKey, PositiveDiscountCents, ProcessorEvidence, SubscriberId, SubscriptionDiscountCode,
-    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
-    SubscriptionEnrollmentDiscountSnapshot, SubscriptionEnrollmentPreflightOutcome,
-    SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationOutcome,
-    SubscriptionEnrollmentReservationRejection, SubscriptionEnrollmentSubmissionOutcome,
-    SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionInitialApplication,
-    SubscriptionPaymentMethodReplacement, SubscriptionPaymentMethodReplacementPreflightOutcome,
+    GatewayPaymentMethodReference, GatewayProviderKey, GatewayTransactionId, HostChargeTargetId,
+    IdempotencyKey, LimitedDiscountMonths, Money, PaymentAttempt, PaymentAttemptFingerprint,
+    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptLifecycle,
+    PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptStatus, PaymentAttemptTarget,
+    PaymentAttemptTimestamps, PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentResolutionCode,
+    PercentOffBasisPoints, PlanKey, PositiveDiscountCents, ProcessorEvidence, SubscriberId,
+    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
+    SubscriptionDiscountSnapshot, SubscriptionEnrollmentDiscountSnapshot,
+    SubscriptionEnrollmentPreflightOutcome, SubscriptionEnrollmentReservation,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
+    SubscriptionEnrollmentSubmissionOutcome, SubscriptionEnrollmentSubmissionRejection,
+    SubscriptionId, SubscriptionInitialApplication, SubscriptionPaymentMethodReplacement,
+    SubscriptionPaymentMethodReplacementLockedTerms,
+    SubscriptionPaymentMethodReplacementPreflightOutcome,
     SubscriptionPaymentMethodReplacementRejection,
     SubscriptionPaymentMethodReplacementReservationOutcome,
     SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection, SubscriptionPaymentStateSnapshot,
-    SubscriptionRecoveryPreflightOutcome, SubscriptionRecoveryReservation,
-    SubscriptionRecoveryReservationOutcome, SubscriptionRecoveryReservationRejection,
-    SubscriptionRecoverySubmissionOutcome, SubscriptionRecoverySubmissionRejection,
+    SubscriptionRecoveryLockedTerms, SubscriptionRecoveryPreflightOutcome,
+    SubscriptionRecoveryReservation, SubscriptionRecoveryReservationOutcome,
+    SubscriptionRecoveryReservationRejection, SubscriptionRecoverySubmissionOutcome,
+    SubscriptionRecoverySubmissionRejection, SubscriptionRenewalLockedTerms,
     SubscriptionRenewalReservation, SubscriptionRenewalReservationOutcome,
     SubscriptionRenewalReservationRejection, SubscriptionRenewalSubmissionOutcome,
     SubscriptionRenewalSubmissionRejection, SubscriptionStatus,
@@ -109,6 +112,61 @@ impl fmt::Debug for PaymentAttemptStoreError {
                 .field(detail)
                 .finish(),
         }
+    }
+}
+
+/// The exact gateway identity a locked database row must still expose before
+/// an operation can reserve or submit a provider mutation.
+///
+/// Database provider keys remain raw values at this boundary: an unexpected
+/// persisted value fails closed as a mismatch rather than becoming a new parse
+/// error contract.
+#[derive(Clone, Copy)]
+struct ExpectedGatewayIdentity<'a> {
+    billing_scope_id: BillingScopeId,
+    gateway_account_id: GatewayAccountId,
+    gateway_configuration_id: GatewayConfigurationId,
+    provider_key: &'a GatewayProviderKey,
+}
+
+impl<'a> ExpectedGatewayIdentity<'a> {
+    fn for_gateway(
+        billing_scope_id: BillingScopeId,
+        expected_gateway_configuration_id: GatewayConfigurationId,
+        gateway: &'a syrup_rail::ResolvedGateway,
+    ) -> Self {
+        Self {
+            billing_scope_id,
+            gateway_account_id: gateway.gateway_account_id(),
+            gateway_configuration_id: expected_gateway_configuration_id,
+            provider_key: gateway.provider_key(),
+        }
+    }
+
+    fn from_reservation(
+        identity: PaymentAttemptIdentity,
+        provider_key: &'a GatewayProviderKey,
+    ) -> Self {
+        Self {
+            billing_scope_id: identity.billing_scope_id(),
+            gateway_account_id: identity.gateway_account_id(),
+            gateway_configuration_id: identity.gateway_configuration_id(),
+            provider_key,
+        }
+    }
+
+    const fn billing_scope_id(&self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    const fn gateway_account_id(&self) -> GatewayAccountId {
+        self.gateway_account_id
+    }
+
+    fn matches_row(&self, account_id: Uuid, configuration_id: Uuid, provider_key: &str) -> bool {
+        account_id == self.gateway_account_id.into_uuid()
+            && configuration_id == self.gateway_configuration_id.into_uuid()
+            && provider_key == self.provider_key.as_str()
     }
 }
 
@@ -290,7 +348,9 @@ pub async fn reserve_subscription_enrollment_in_transaction(
             SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged,
         ));
     };
-    if !gateway_identity_matches(transaction, reservation).await? {
+    let expected_gateway =
+        ExpectedGatewayIdentity::from_reservation(identity, reservation.provider_key());
+    if !gateway_identity_matches_scope(transaction, &expected_gateway).await? {
         return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
             SubscriptionEnrollmentReservationRejection::GatewayConfigurationChanged,
         ));
@@ -567,7 +627,9 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
         )
         .await;
     }
-    if !gateway_identity_matches(transaction, reservation).await? {
+    let expected_gateway =
+        ExpectedGatewayIdentity::from_reservation(identity, reservation.provider_key());
+    if !gateway_identity_matches_scope(transaction, &expected_gateway).await? {
         return reject_locked_prepared_initial(
             transaction,
             attempt,
@@ -662,8 +724,18 @@ pub async fn reserve_subscription_renewal_in_transaction(
 
     fail_stale_unsubmitted_payment_method_updates(transaction, command.subscription_id()).await?;
     let gateway_account_id = GatewayAccountId::new(row.try_get("gateway_account_id")?);
-    if gateway_account_id != gateway.gateway_account_id()
-        || !gateway_identity_matches_renewal(transaction, command, gateway).await?
+    let expected_gateway = ExpectedGatewayIdentity::for_gateway(
+        command.billing_scope_id(),
+        gateway.gateway_configuration_id(),
+        gateway,
+    );
+    if gateway_account_id != expected_gateway.gateway_account_id()
+        || !gateway_identity_matches_subscription(
+            transaction,
+            command.subscription_id(),
+            &expected_gateway,
+        )
+        .await?
     {
         return Ok(SubscriptionRenewalReservationOutcome::Rejected(
             SubscriptionRenewalReservationRejection::GatewayConfigurationChanged,
@@ -696,30 +768,21 @@ pub async fn reserve_subscription_renewal_in_transaction(
         ));
     }
 
-    let currency_value: String = row.try_get("currency")?;
-    let currency = CurrencyCode::new(&currency_value).map_err(|_| invalid_state())?;
-    let charge =
-        ChargeAmount::new(row.try_get("amount_cents")?, currency).map_err(|_| invalid_state())?;
-    let transaction_value: String = row.try_get("initial_transaction_id")?;
-    let initial_transaction_id =
-        GatewayTransactionId::new(transaction_value).map_err(|_| invalid_state())?;
-    let status = status_value
-        .parse::<SubscriptionStatus>()
-        .map_err(|_| invalid_state())?;
-    let period =
-        syrup_rail::next_monthly_billing_period(period_start_at).map_err(|_| invalid_state())?;
-    let reservation = SubscriptionRenewalReservation::from_locked_subscription(
+    let terms = locked_renewal_terms_from_row(
+        &row,
+        command.subscription_id(),
+        gateway_account_id,
+        period_start_at,
+        &status_value,
+        attempt_state.attempt_sequence_count,
+    )?;
+    let reservation = SubscriptionRenewalReservation::from_locked_subscription_terms(
         command,
         gateway,
         PaymentAttemptId::new(Uuid::now_v7()),
         subscriber_id,
         plan_key,
-        PaymentMethodId::new(row.try_get("payment_method_id")?),
-        initial_transaction_id,
-        status,
-        period,
-        charge,
-        attempt_state.attempt_sequence_count,
+        terms,
     )
     .map_err(|_| invalid_state())?;
     if !insert_renewal_attempt(transaction, &reservation).await? {
@@ -803,7 +866,9 @@ pub async fn admit_subscription_renewal_submission_in_transaction(
         )
         .await;
     }
-    if !gateway_identity_matches_renewal_reservation(transaction, reservation).await? {
+    let expected_gateway =
+        ExpectedGatewayIdentity::from_reservation(identity, reservation.provider_key());
+    if !gateway_identity_matches_account(transaction, &expected_gateway).await? {
         return reject_locked_renewal(
             transaction,
             attempt,
@@ -922,8 +987,13 @@ pub async fn reserve_subscription_recovery_in_transaction(
     let subscription_id = SubscriptionId::new(row.try_get("id")?);
     fail_stale_unsubmitted_payment_method_updates(transaction, subscription_id).await?;
     let gateway_account_id = GatewayAccountId::new(row.try_get("gateway_account_id")?);
-    if gateway_account_id != gateway.gateway_account_id()
-        || !gateway_identity_matches_recovery(transaction, command, gateway).await?
+    let expected_gateway = ExpectedGatewayIdentity::for_gateway(
+        command.billing_scope_id(),
+        command.gateway_configuration_id(),
+        gateway,
+    );
+    if gateway_account_id != expected_gateway.gateway_account_id()
+        || !gateway_identity_matches_account(transaction, &expected_gateway).await?
     {
         return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
             SubscriptionRecoveryReservationRejection::GatewayConfigurationChanged,
@@ -940,31 +1010,12 @@ pub async fn reserve_subscription_recovery_in_transaction(
         ));
     }
 
-    let payment_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
-    let period_start_at: DateTime<Utc> = row.try_get("next_renewal_at")?;
-    let period =
-        syrup_rail::next_monthly_billing_period(period_start_at).map_err(|_| invalid_state())?;
-    let currency_value: String = row.try_get("currency")?;
-    let currency = CurrencyCode::new(&currency_value).map_err(|_| invalid_state())?;
-    let charge =
-        ChargeAmount::new(row.try_get("amount_cents")?, currency).map_err(|_| invalid_state())?;
-    let transaction_value: String = row.try_get("initial_transaction_id")?;
-    let initial_transaction_id =
-        GatewayTransactionId::new(transaction_value).map_err(|_| invalid_state())?;
-    let status = row
-        .try_get::<String, _>("status")?
-        .parse::<SubscriptionStatus>()
-        .map_err(|_| invalid_state())?;
-    let reservation = SubscriptionRecoveryReservation::from_locked_subscription(
+    let terms = locked_recovery_terms_from_row(&row, subscription_id, gateway_account_id)?;
+    let reservation = SubscriptionRecoveryReservation::from_locked_subscription_terms(
         command,
         gateway,
         command.attempt_id(),
-        subscription_id,
-        payment_method_id,
-        initial_transaction_id,
-        status,
-        period,
-        charge,
+        terms,
     )
     .map_err(|_| invalid_state())?;
 
@@ -1064,7 +1115,9 @@ pub async fn admit_subscription_recovery_submission_in_transaction(
         )
         .await;
     }
-    if !gateway_identity_matches_reservation(transaction, reservation).await? {
+    let expected_gateway =
+        ExpectedGatewayIdentity::from_reservation(identity, reservation.provider_key());
+    if !gateway_identity_matches_account(transaction, &expected_gateway).await? {
         return reject_locked_recovery(
             transaction,
             attempt,
@@ -1202,9 +1255,13 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
         );
     }
     let gateway_account_id = GatewayAccountId::new(row.try_get("gateway_account_id")?);
-    if gateway_account_id != gateway.gateway_account_id()
-        || !gateway_identity_matches_payment_method_replacement(transaction, command, gateway)
-            .await?
+    let expected_gateway = ExpectedGatewayIdentity::for_gateway(
+        command.billing_scope_id(),
+        command.gateway_configuration_id(),
+        gateway,
+    );
+    if gateway_account_id != expected_gateway.gateway_account_id()
+        || !gateway_identity_matches_account(transaction, &expected_gateway).await?
     {
         return Ok(
             SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
@@ -1212,19 +1269,13 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
             ),
         );
     }
-    let payment_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
-    let initial_transaction_id =
-        GatewayTransactionId::new(row.try_get::<String, _>("initial_transaction_id")?)
-            .map_err(|_| invalid_state())?;
-    let currency =
-        CurrencyCode::new(&row.try_get::<String, _>("currency")?).map_err(|_| invalid_state())?;
-    let reservation = SubscriptionPaymentMethodReplacement::from_locked_subscription(
-        command,
-        gateway,
+    let terms = locked_payment_method_replacement_terms_from_row(
+        &row,
         subscription_id,
-        payment_method_id,
-        initial_transaction_id,
-        currency,
+        gateway_account_id,
+    )?;
+    let reservation = SubscriptionPaymentMethodReplacement::from_locked_subscription_terms(
+        command, gateway, terms,
     )
     .map_err(|_| invalid_state())?;
     let inserted = insert_payment_method_replacement_attempt(transaction, &reservation).await?;
@@ -1327,9 +1378,9 @@ pub async fn admit_subscription_payment_method_replacement_in_transaction(
         )
         .await;
     }
-    if !gateway_identity_matches_payment_method_replacement_reservation(transaction, reservation)
-        .await?
-    {
+    let expected_gateway =
+        ExpectedGatewayIdentity::from_reservation(identity, reservation.provider_key());
+    if !gateway_identity_matches_account(transaction, &expected_gateway).await? {
         return reject_locked_payment_method_replacement(
             transaction,
             attempt,
@@ -1731,11 +1782,10 @@ fn enrollment_request_from_locked_terms(
     ))
 }
 
-async fn gateway_identity_matches(
+async fn gateway_identity_matches_scope(
     transaction: &mut Transaction<'_, Postgres>,
-    reservation: &SubscriptionEnrollmentReservation,
+    expected: &ExpectedGatewayIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let identity = reservation.identity();
     let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
         SELECT id, gateway_configuration_id, provider_key
@@ -1743,14 +1793,12 @@ async fn gateway_identity_matches(
         WHERE billing_scope_id = $1 FOR SHARE
         "#,
     )
-    .bind(identity.billing_scope_id().as_uuid())
+    .bind(expected.billing_scope_id().as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
     Ok(
         row.is_some_and(|(account_id, configuration_id, provider_key)| {
-            account_id == identity.gateway_account_id().into_uuid()
-                && configuration_id == identity.gateway_configuration_id().into_uuid()
-                && provider_key == reservation.provider_key().as_str()
+            expected.matches_row(account_id, configuration_id, &provider_key)
         }),
     )
 }
@@ -1948,10 +1996,10 @@ fn renewal_attempt_belongs_to_reservation(
         && attempt.request().gateway_order_id() == reservation.request().gateway_order_id()
 }
 
-async fn gateway_identity_matches_renewal(
+async fn gateway_identity_matches_subscription(
     transaction: &mut Transaction<'_, Postgres>,
-    command: syrup_rail::ChargeRenewal,
-    gateway: &syrup_rail::ResolvedGateway,
+    subscription_id: SubscriptionId,
+    expected: &ExpectedGatewayIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
@@ -1964,49 +2012,20 @@ async fn gateway_identity_matches_renewal(
         FOR SHARE OF accounts
         "#,
     )
-    .bind(command.billing_scope_id().as_uuid())
-    .bind(command.subscription_id().as_uuid())
+    .bind(expected.billing_scope_id().as_uuid())
+    .bind(subscription_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
     Ok(
         row.is_some_and(|(account_id, configuration_id, provider_key)| {
-            account_id == gateway.gateway_account_id().into_uuid()
-                && configuration_id == gateway.gateway_configuration_id().into_uuid()
-                && provider_key == gateway.provider_key().as_str()
+            expected.matches_row(account_id, configuration_id, &provider_key)
         }),
     )
 }
 
-async fn gateway_identity_matches_renewal_reservation(
+async fn gateway_identity_matches_account(
     transaction: &mut Transaction<'_, Postgres>,
-    reservation: &SubscriptionRenewalReservation,
-) -> Result<bool, sqlx::Error> {
-    let identity = reservation.identity();
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-        r#"
-        SELECT id, gateway_configuration_id, provider_key
-        FROM billing_gateway_accounts
-        WHERE billing_scope_id = $1 AND id = $2
-        FOR SHARE
-        "#,
-    )
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?;
-    Ok(
-        row.is_some_and(|(account_id, configuration_id, provider_key)| {
-            account_id == identity.gateway_account_id().into_uuid()
-                && configuration_id == identity.gateway_configuration_id().into_uuid()
-                && provider_key == reservation.provider_key().as_str()
-        }),
-    )
-}
-
-async fn gateway_identity_matches_recovery(
-    transaction: &mut Transaction<'_, Postgres>,
-    command: &syrup_rail::RecoverSubscriptionPayment,
-    gateway: &syrup_rail::ResolvedGateway,
+    expected: &ExpectedGatewayIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
@@ -2016,95 +2035,123 @@ async fn gateway_identity_matches_recovery(
         FOR SHARE
         "#,
     )
-    .bind(command.billing_scope_id().as_uuid())
-    .bind(gateway.gateway_account_id().as_uuid())
+    .bind(expected.billing_scope_id().as_uuid())
+    .bind(expected.gateway_account_id().as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
     Ok(
         row.is_some_and(|(account_id, configuration_id, provider_key)| {
-            account_id == gateway.gateway_account_id().into_uuid()
-                && configuration_id == command.gateway_configuration_id().into_uuid()
-                && provider_key == gateway.provider_key().as_str()
+            expected.matches_row(account_id, configuration_id, &provider_key)
         }),
     )
 }
 
-async fn gateway_identity_matches_payment_method_replacement(
-    transaction: &mut Transaction<'_, Postgres>,
-    command: &syrup_rail::ReplaceSubscriptionPaymentMethod,
-    gateway: &syrup_rail::ResolvedGateway,
-) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-        r#"
-        SELECT id, gateway_configuration_id, provider_key
-        FROM billing_gateway_accounts
-        WHERE billing_scope_id = $1 AND id = $2
-        FOR SHARE
-        "#,
+fn locked_subscription_payment_state(
+    subscription_id: SubscriptionId,
+    payment_method_id: PaymentMethodId,
+    initial_transaction_id: GatewayTransactionId,
+    status: SubscriptionStatus,
+) -> Result<SubscriptionPaymentStateSnapshot, PaymentAttemptStoreError> {
+    SubscriptionPaymentStateSnapshot::new(
+        subscription_id,
+        payment_method_id,
+        initial_transaction_id,
+        status,
     )
-    .bind(command.billing_scope_id().as_uuid())
-    .bind(gateway.gateway_account_id().as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?;
-    Ok(
-        row.is_some_and(|(account_id, configuration_id, provider_key)| {
-            account_id == gateway.gateway_account_id().into_uuid()
-                && configuration_id == command.gateway_configuration_id().into_uuid()
-                && provider_key == gateway.provider_key().as_str()
-        }),
-    )
+    .map_err(|_| invalid_state())
 }
 
-async fn gateway_identity_matches_payment_method_replacement_reservation(
-    transaction: &mut Transaction<'_, Postgres>,
-    reservation: &SubscriptionPaymentMethodReplacement,
-) -> Result<bool, sqlx::Error> {
-    let identity = reservation.identity();
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-        r#"
-        SELECT id, gateway_configuration_id, provider_key
-        FROM billing_gateway_accounts
-        WHERE billing_scope_id = $1 AND id = $2
-        FOR SHARE
-        "#,
-    )
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?;
-    Ok(
-        row.is_some_and(|(account_id, configuration_id, provider_key)| {
-            account_id == identity.gateway_account_id().into_uuid()
-                && configuration_id == identity.gateway_configuration_id().into_uuid()
-                && provider_key == reservation.provider_key().as_str()
-        }),
-    )
+fn locked_renewal_terms_from_row(
+    row: &PgRow,
+    subscription_id: SubscriptionId,
+    gateway_account_id: GatewayAccountId,
+    period_start_at: DateTime<Utc>,
+    status_value: &str,
+    attempt_sequence_count: i64,
+) -> Result<SubscriptionRenewalLockedTerms, PaymentAttemptStoreError> {
+    let currency =
+        CurrencyCode::new(&row.try_get::<String, _>("currency")?).map_err(|_| invalid_state())?;
+    let charge =
+        ChargeAmount::new(row.try_get("amount_cents")?, currency).map_err(|_| invalid_state())?;
+    let initial_transaction_id =
+        GatewayTransactionId::new(row.try_get::<String, _>("initial_transaction_id")?)
+            .map_err(|_| invalid_state())?;
+    let status = status_value
+        .parse::<SubscriptionStatus>()
+        .map_err(|_| invalid_state())?;
+    let period =
+        syrup_rail::next_monthly_billing_period(period_start_at).map_err(|_| invalid_state())?;
+    let payment_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
+    let expected_state = locked_subscription_payment_state(
+        subscription_id,
+        payment_method_id,
+        initial_transaction_id,
+        status,
+    )?;
+    Ok(SubscriptionRenewalLockedTerms::new(
+        gateway_account_id,
+        expected_state,
+        period,
+        charge,
+        attempt_sequence_count,
+    ))
 }
 
-async fn gateway_identity_matches_reservation(
-    transaction: &mut Transaction<'_, Postgres>,
-    reservation: &SubscriptionRecoveryReservation,
-) -> Result<bool, sqlx::Error> {
-    let identity = reservation.identity();
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-        r#"
-        SELECT id, gateway_configuration_id, provider_key
-        FROM billing_gateway_accounts
-        WHERE billing_scope_id = $1 AND id = $2
-        FOR SHARE
-        "#,
-    )
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .fetch_optional(&mut **transaction)
-    .await?;
-    Ok(
-        row.is_some_and(|(account_id, configuration_id, provider_key)| {
-            account_id == identity.gateway_account_id().into_uuid()
-                && configuration_id == identity.gateway_configuration_id().into_uuid()
-                && provider_key == reservation.provider_key().as_str()
-        }),
-    )
+fn locked_recovery_terms_from_row(
+    row: &PgRow,
+    subscription_id: SubscriptionId,
+    gateway_account_id: GatewayAccountId,
+) -> Result<SubscriptionRecoveryLockedTerms, PaymentAttemptStoreError> {
+    let payment_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
+    let period_start_at: DateTime<Utc> = row.try_get("next_renewal_at")?;
+    let period =
+        syrup_rail::next_monthly_billing_period(period_start_at).map_err(|_| invalid_state())?;
+    let currency =
+        CurrencyCode::new(&row.try_get::<String, _>("currency")?).map_err(|_| invalid_state())?;
+    let charge =
+        ChargeAmount::new(row.try_get("amount_cents")?, currency).map_err(|_| invalid_state())?;
+    let initial_transaction_id =
+        GatewayTransactionId::new(row.try_get::<String, _>("initial_transaction_id")?)
+            .map_err(|_| invalid_state())?;
+    let status = row
+        .try_get::<String, _>("status")?
+        .parse::<SubscriptionStatus>()
+        .map_err(|_| invalid_state())?;
+    let expected_state = locked_subscription_payment_state(
+        subscription_id,
+        payment_method_id,
+        initial_transaction_id,
+        status,
+    )?;
+    Ok(SubscriptionRecoveryLockedTerms::new(
+        gateway_account_id,
+        expected_state,
+        period,
+        charge,
+    ))
+}
+
+fn locked_payment_method_replacement_terms_from_row(
+    row: &PgRow,
+    subscription_id: SubscriptionId,
+    gateway_account_id: GatewayAccountId,
+) -> Result<SubscriptionPaymentMethodReplacementLockedTerms, PaymentAttemptStoreError> {
+    let payment_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
+    let initial_transaction_id =
+        GatewayTransactionId::new(row.try_get::<String, _>("initial_transaction_id")?)
+            .map_err(|_| invalid_state())?;
+    let currency =
+        CurrencyCode::new(&row.try_get::<String, _>("currency")?).map_err(|_| invalid_state())?;
+    let expected_state = PaymentMethodUpdateSnapshot::new(
+        subscription_id,
+        payment_method_id,
+        initial_transaction_id,
+    );
+    Ok(SubscriptionPaymentMethodReplacementLockedTerms::new(
+        gateway_account_id,
+        expected_state,
+        currency,
+    ))
 }
 
 async fn fail_stale_unsubmitted_payment_method_updates(
@@ -3506,6 +3553,24 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn expected_gateway_identity_requires_every_persisted_component() {
+        let account_id = Uuid::from_u128(1);
+        let configuration_id = Uuid::from_u128(2);
+        let provider_key = GatewayProviderKey::new("nmi").expect("valid provider key");
+        let expected = ExpectedGatewayIdentity {
+            billing_scope_id: BillingScopeId::new(Uuid::from_u128(3)),
+            gateway_account_id: GatewayAccountId::new(account_id),
+            gateway_configuration_id: GatewayConfigurationId::new(configuration_id),
+            provider_key: &provider_key,
+        };
+
+        assert!(expected.matches_row(account_id, configuration_id, "nmi"));
+        assert!(!expected.matches_row(Uuid::from_u128(4), configuration_id, "nmi"));
+        assert!(!expected.matches_row(account_id, Uuid::from_u128(5), "nmi"));
+        assert!(!expected.matches_row(account_id, configuration_id, "other_gateway"));
     }
 
     #[tokio::test]

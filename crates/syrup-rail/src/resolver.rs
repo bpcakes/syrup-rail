@@ -144,7 +144,12 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::{GatewayLifecycleCursorKey, GatewayOrderId, PaymentAttemptId, PaymentAttemptKind};
+    use crate::{
+        BillingContact, BillingPeriod, ChargeAmount, CurrencyCode, GatewayLifecycleCursorKey,
+        GatewayOrderId, GatewayTransactionId, IdempotencyKey, PaymentAttemptId, PaymentAttemptKind,
+        PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentToken, PlanKey, SubscriberId,
+        SubscriptionId, SubscriptionPaymentStateSnapshot, SubscriptionStatus,
+    };
 
     struct NeverCalledGateway;
 
@@ -195,13 +200,24 @@ mod tests {
         }
     }
 
-    #[test]
-    fn resolved_gateway_preserves_exact_identity_without_provider_io() {
-        let scope = BillingScopeId::new(Uuid::from_u128(1));
-        let account = GatewayAccountId::new(Uuid::from_u128(2));
-        let configuration = GatewayConfigurationId::new(Uuid::from_u128(3));
-        let provider = GatewayProviderKey::new("test_gateway").expect("valid provider key");
-        let policy = GatewayLifecycleQueryPolicy::new(
+    struct TestReferenceFactory;
+
+    impl GatewayMutationReferenceFactory for TestReferenceFactory {
+        fn for_attempt(
+            &self,
+            kind: PaymentAttemptKind,
+            attempt_id: PaymentAttemptId,
+        ) -> GatewayOrderId {
+            GatewayOrderId::from_generated_attempt(
+                format!("test_{}_{}", kind.as_str(), attempt_id.as_uuid().simple()),
+                attempt_id,
+            )
+            .expect("test order ID should be valid")
+        }
+    }
+
+    fn test_policy() -> GatewayLifecycleQueryPolicy {
+        GatewayLifecycleQueryPolicy::new(
             GatewayLifecycleCursorKey::new("test_cursor").expect("valid cursor key"),
             Duration::minutes(1),
             10,
@@ -209,17 +225,31 @@ mod tests {
             2,
             20,
         )
-        .expect("valid lifecycle policy");
+        .expect("valid lifecycle policy")
+    }
 
-        let resolved = ResolvedGateway::new(
-            scope,
-            account,
-            configuration,
-            provider.clone(),
-            policy.clone(),
-            Arc::new(NeverCalledReferenceFactory),
+    fn test_gateway(
+        mutation_reference_factory: Arc<dyn GatewayMutationReferenceFactory>,
+    ) -> ResolvedGateway {
+        ResolvedGateway::new(
+            BillingScopeId::new(Uuid::from_u128(1)),
+            GatewayAccountId::new(Uuid::from_u128(2)),
+            GatewayConfigurationId::new(Uuid::from_u128(3)),
+            GatewayProviderKey::new("test_gateway").expect("valid provider key"),
+            test_policy(),
+            mutation_reference_factory,
             Arc::new(NeverCalledGateway),
-        );
+        )
+    }
+
+    #[test]
+    fn resolved_gateway_preserves_exact_identity_without_provider_io() {
+        let scope = BillingScopeId::new(Uuid::from_u128(1));
+        let account = GatewayAccountId::new(Uuid::from_u128(2));
+        let configuration = GatewayConfigurationId::new(Uuid::from_u128(3));
+        let provider = GatewayProviderKey::new("test_gateway").expect("valid provider key");
+        let policy = test_policy();
+        let resolved = test_gateway(Arc::new(NeverCalledReferenceFactory));
 
         assert_eq!(resolved.billing_scope_id(), scope);
         assert_eq!(resolved.gateway_account_id(), account);
@@ -229,5 +259,136 @@ mod tests {
         let debug = format!("{resolved:?}");
         assert!(debug.contains("has_mutation_reference_factory: true"));
         assert!(debug.contains("has_gateway: true"));
+    }
+
+    #[test]
+    fn locked_terms_build_the_same_reservations_as_legacy_arguments() {
+        let gateway = test_gateway(Arc::new(TestReferenceFactory));
+        let subscription_id = SubscriptionId::new(Uuid::from_u128(4));
+        let payment_method_id = PaymentMethodId::new(Uuid::from_u128(5));
+        let initial_transaction_id =
+            GatewayTransactionId::new("initial-transaction").expect("valid transaction ID");
+        let status = SubscriptionStatus::PastDue;
+        let start_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let period = BillingPeriod::new(start_at, start_at + Duration::days(30)).unwrap();
+        let charge = ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap();
+        let expected_state = SubscriptionPaymentStateSnapshot::new(
+            subscription_id,
+            payment_method_id,
+            initial_transaction_id.clone(),
+            status,
+        )
+        .unwrap();
+        let subscriber_id = SubscriberId::new(Uuid::from_u128(7));
+        let plan_key = PlanKey::new("premium").unwrap();
+
+        let renewal =
+            crate::ChargeRenewal::new(gateway.billing_scope_id(), subscription_id, start_at);
+        let renewal_attempt_id = PaymentAttemptId::new(Uuid::from_u128(8));
+        assert_eq!(
+            crate::SubscriptionRenewalReservation::from_locked_subscription(
+                renewal,
+                &gateway,
+                renewal_attempt_id,
+                subscriber_id,
+                plan_key.clone(),
+                payment_method_id,
+                initial_transaction_id.clone(),
+                status,
+                period.clone(),
+                charge,
+                3,
+            )
+            .unwrap(),
+            crate::SubscriptionRenewalReservation::from_locked_subscription_terms(
+                renewal,
+                &gateway,
+                renewal_attempt_id,
+                subscriber_id,
+                plan_key.clone(),
+                crate::SubscriptionRenewalLockedTerms::new(
+                    gateway.gateway_account_id(),
+                    expected_state.clone(),
+                    period.clone(),
+                    charge,
+                    3,
+                ),
+            )
+            .unwrap(),
+        );
+
+        let recovery = crate::RecoverSubscriptionPayment::new(
+            PaymentAttemptId::new(Uuid::from_u128(9)),
+            gateway.billing_scope_id(),
+            subscriber_id,
+            plan_key.clone(),
+            gateway.gateway_configuration_id(),
+            IdempotencyKey::new("recovery-key").unwrap(),
+            PaymentToken::new("recovery-token").unwrap(),
+            BillingContact::new(None, Some("Test".to_owned()), None).unwrap(),
+        );
+        assert_eq!(
+            crate::SubscriptionRecoveryReservation::from_locked_subscription(
+                &recovery,
+                &gateway,
+                recovery.attempt_id(),
+                subscription_id,
+                payment_method_id,
+                initial_transaction_id.clone(),
+                status,
+                period.clone(),
+                charge,
+            )
+            .unwrap(),
+            crate::SubscriptionRecoveryReservation::from_locked_subscription_terms(
+                &recovery,
+                &gateway,
+                recovery.attempt_id(),
+                crate::SubscriptionRecoveryLockedTerms::new(
+                    gateway.gateway_account_id(),
+                    expected_state.clone(),
+                    period.clone(),
+                    charge,
+                ),
+            )
+            .unwrap(),
+        );
+
+        let replacement = crate::ReplaceSubscriptionPaymentMethod::new(
+            PaymentAttemptId::new(Uuid::from_u128(10)),
+            gateway.billing_scope_id(),
+            subscriber_id,
+            plan_key,
+            gateway.gateway_configuration_id(),
+            IdempotencyKey::new("replacement-key").unwrap(),
+            PaymentToken::new("replacement-token").unwrap(),
+            BillingContact::new(None, Some("Test".to_owned()), None).unwrap(),
+        );
+        let currency = CurrencyCode::new("USD").unwrap();
+        assert_eq!(
+            crate::SubscriptionPaymentMethodReplacement::from_locked_subscription(
+                &replacement,
+                &gateway,
+                subscription_id,
+                payment_method_id,
+                initial_transaction_id.clone(),
+                currency,
+            )
+            .unwrap(),
+            crate::SubscriptionPaymentMethodReplacement::from_locked_subscription_terms(
+                &replacement,
+                &gateway,
+                crate::SubscriptionPaymentMethodReplacementLockedTerms::new(
+                    gateway.gateway_account_id(),
+                    PaymentMethodUpdateSnapshot::new(
+                        subscription_id,
+                        payment_method_id,
+                        initial_transaction_id,
+                    ),
+                    currency,
+                ),
+            )
+            .unwrap(),
+        );
     }
 }

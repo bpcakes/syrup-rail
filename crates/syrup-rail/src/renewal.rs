@@ -2,10 +2,10 @@ use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use crate::{
-    BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, GatewayProviderKey,
-    IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
-    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget,
-    PaymentMethodId, PlanKey, ResolvedGateway, SubscriberId, SubscriptionId,
+    BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, GatewayAccountId,
+    GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
+    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
+    PaymentAttemptTarget, PaymentMethodId, PlanKey, ResolvedGateway, SubscriberId, SubscriptionId,
     SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 
@@ -158,6 +158,39 @@ pub enum SubscriptionRenewalReservationBuildError {
     InvalidIdempotencyKey,
 }
 
+/// Validated subscription terms read while preparing one renewal attempt.
+///
+/// The PostgreSQL owner constructs this from a locked subscription row before
+/// creating the secret-free reservation. Keeping the exact optimistic payment
+/// state together with the charge period prevents individual row fields from
+/// being reconstructed by each caller.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionRenewalLockedTerms {
+    gateway_account_id: GatewayAccountId,
+    expected_state: SubscriptionPaymentStateSnapshot,
+    period: BillingPeriod,
+    charge: ChargeAmount,
+    attempt_sequence_count: i64,
+}
+
+impl SubscriptionRenewalLockedTerms {
+    pub const fn new(
+        gateway_account_id: GatewayAccountId,
+        expected_state: SubscriptionPaymentStateSnapshot,
+        period: BillingPeriod,
+        charge: ChargeAmount,
+        attempt_sequence_count: i64,
+    ) -> Self {
+        Self {
+            gateway_account_id,
+            expected_state,
+            period,
+            charge,
+            attempt_sequence_count,
+        }
+    }
+}
+
 /// Secret-free authority for one exact automatic recurring charge.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionRenewalReservation {
@@ -226,13 +259,6 @@ impl SubscriptionRenewalReservation {
         if gateway.billing_scope_id() != command.billing_scope_id() {
             return Err(SubscriptionRenewalReservationBuildError::GatewayIdentityMismatch);
         }
-        let identity = PaymentAttemptIdentity::new(
-            attempt_id,
-            command.billing_scope_id(),
-            subscriber_id,
-            gateway.gateway_account_id(),
-            gateway.gateway_configuration_id(),
-        );
         let expected_state = SubscriptionPaymentStateSnapshot::new(
             command.subscription_id(),
             payment_method_id,
@@ -240,6 +266,54 @@ impl SubscriptionRenewalReservation {
             status,
         )
         .map_err(|_| SubscriptionRenewalReservationBuildError::InvalidPaymentState)?;
+        Self::from_locked_subscription_terms(
+            command,
+            gateway,
+            attempt_id,
+            subscriber_id,
+            plan_key,
+            SubscriptionRenewalLockedTerms::new(
+                gateway.gateway_account_id(),
+                expected_state,
+                period,
+                charge,
+                attempt_sequence_count,
+            ),
+        )
+    }
+
+    /// Builds a renewal reservation from validated terms read under the
+    /// subscription lock.
+    pub fn from_locked_subscription_terms(
+        command: ChargeRenewal,
+        gateway: &ResolvedGateway,
+        attempt_id: PaymentAttemptId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+        terms: SubscriptionRenewalLockedTerms,
+    ) -> Result<Self, SubscriptionRenewalReservationBuildError> {
+        let SubscriptionRenewalLockedTerms {
+            gateway_account_id,
+            expected_state,
+            period,
+            charge,
+            attempt_sequence_count,
+        } = terms;
+        if gateway.billing_scope_id() != command.billing_scope_id()
+            || gateway_account_id != gateway.gateway_account_id()
+        {
+            return Err(SubscriptionRenewalReservationBuildError::GatewayIdentityMismatch);
+        }
+        if expected_state.subscription_id() != command.subscription_id() {
+            return Err(SubscriptionRenewalReservationBuildError::InvalidPaymentState);
+        }
+        let identity = PaymentAttemptIdentity::new(
+            attempt_id,
+            command.billing_scope_id(),
+            subscriber_id,
+            gateway_account_id,
+            gateway.gateway_configuration_id(),
+        );
         let idempotency_key = renewal_attempt_idempotency_key(
             command.subscription_id(),
             *command.period_start_at(),
@@ -249,13 +323,13 @@ impl SubscriptionRenewalReservation {
         let fingerprint = PaymentAttemptFingerprint::for_subscription_renewal(
             &plan_key,
             command.subscription_id(),
-            payment_method_id,
+            expected_state.payment_method_id(),
             *period.start_at(),
             charge.money(),
         );
         let target = PaymentAttemptTarget::SubscriptionRenewal {
             plan_key,
-            payment_method_id,
+            payment_method_id: expected_state.payment_method_id(),
             period,
             expected_state,
         };

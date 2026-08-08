@@ -2,11 +2,11 @@ use std::fmt;
 
 use crate::{
     BillingContact, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
-    GatewayConfigurationId, GatewayProviderKey, GatewayTransactionId, IdempotencyKey,
-    PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PaymentToken,
-    PlanKey, ResolvedGateway, SubscriberId, SubscriptionId, SubscriptionPaymentStateSnapshot,
-    SubscriptionStatus,
+    GatewayAccountId, GatewayConfigurationId, GatewayProviderKey, GatewayTransactionId,
+    IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget,
+    PaymentMethodId, PaymentToken, PlanKey, ResolvedGateway, SubscriberId, SubscriptionId,
+    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 use thiserror::Error;
 
@@ -112,6 +112,34 @@ pub enum SubscriptionRecoveryReservationBuildError {
     InvalidCharge,
 }
 
+/// Validated subscription terms read while preparing one recovery attempt.
+///
+/// The durable reservation uses the same optimistic payment-state snapshot it
+/// later revalidates before provider submission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionRecoveryLockedTerms {
+    gateway_account_id: GatewayAccountId,
+    expected_state: SubscriptionPaymentStateSnapshot,
+    period: BillingPeriod,
+    charge: ChargeAmount,
+}
+
+impl SubscriptionRecoveryLockedTerms {
+    pub const fn new(
+        gateway_account_id: GatewayAccountId,
+        expected_state: SubscriptionPaymentStateSnapshot,
+        period: BillingPeriod,
+        charge: ChargeAmount,
+    ) -> Self {
+        Self {
+            gateway_account_id,
+            expected_state,
+            period,
+            charge,
+        }
+    }
+}
+
 /// Secret-free authority for one exact recovery request.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionRecoveryReservation {
@@ -138,13 +166,6 @@ impl SubscriptionRecoveryReservation {
         {
             return Err(SubscriptionRecoveryReservationBuildError::GatewayIdentityMismatch);
         }
-        let identity = PaymentAttemptIdentity::new(
-            attempt_id,
-            command.billing_scope_id(),
-            command.subscriber_id(),
-            gateway.gateway_account_id(),
-            gateway.gateway_configuration_id(),
-        );
         let expected_state = SubscriptionPaymentStateSnapshot::new(
             subscription_id,
             payment_method_id,
@@ -152,16 +173,56 @@ impl SubscriptionRecoveryReservation {
             status,
         )
         .map_err(|_| SubscriptionRecoveryReservationBuildError::InvalidPaymentState)?;
+        Self::from_locked_subscription_terms(
+            command,
+            gateway,
+            attempt_id,
+            SubscriptionRecoveryLockedTerms::new(
+                gateway.gateway_account_id(),
+                expected_state,
+                period,
+                charge,
+            ),
+        )
+    }
+
+    /// Builds a recovery reservation from validated terms read under the
+    /// subscription lock.
+    pub fn from_locked_subscription_terms(
+        command: &RecoverSubscriptionPayment,
+        gateway: &ResolvedGateway,
+        attempt_id: PaymentAttemptId,
+        terms: SubscriptionRecoveryLockedTerms,
+    ) -> Result<Self, SubscriptionRecoveryReservationBuildError> {
+        let SubscriptionRecoveryLockedTerms {
+            gateway_account_id,
+            expected_state,
+            period,
+            charge,
+        } = terms;
+        if gateway.billing_scope_id() != command.billing_scope_id()
+            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
+            || gateway_account_id != gateway.gateway_account_id()
+        {
+            return Err(SubscriptionRecoveryReservationBuildError::GatewayIdentityMismatch);
+        }
+        let identity = PaymentAttemptIdentity::new(
+            attempt_id,
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            gateway_account_id,
+            gateway.gateway_configuration_id(),
+        );
         let fingerprint = PaymentAttemptFingerprint::for_subscription_recovery(
             command.plan_key(),
-            subscription_id,
-            payment_method_id,
+            expected_state.subscription_id(),
+            expected_state.payment_method_id(),
             *period.start_at(),
             charge.money(),
         );
         let target = PaymentAttemptTarget::SubscriptionRecovery {
             plan_key: command.plan_key().clone(),
-            payment_method_id,
+            payment_method_id: expected_state.payment_method_id(),
             period,
             expected_state,
         };

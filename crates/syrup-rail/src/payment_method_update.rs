@@ -1,11 +1,12 @@
 use std::fmt;
 
 use crate::{
-    BillingContact, BillingContactSnapshot, BillingScopeId, CurrencyCode, GatewayConfigurationId,
-    GatewayProviderKey, GatewayTransactionId, IdempotencyKey, Money, PaymentAttempt,
-    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PaymentMethodUpdateSnapshot,
-    PaymentToken, PlanKey, ResolvedGateway, SubscriberId, SubscriptionId,
+    BillingContact, BillingContactSnapshot, BillingScopeId, CurrencyCode, GatewayAccountId,
+    GatewayConfigurationId, GatewayProviderKey, GatewayTransactionId, IdempotencyKey, Money,
+    PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId,
+    PaymentMethodUpdateSnapshot, PaymentToken, PlanKey, ResolvedGateway, SubscriberId,
+    SubscriptionId,
 };
 use thiserror::Error;
 
@@ -99,6 +100,29 @@ pub enum SubscriptionPaymentMethodReplacementBuildError {
     AttemptKindMismatch,
 }
 
+/// Validated subscription terms read while preparing a payment-method
+/// replacement attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionPaymentMethodReplacementLockedTerms {
+    gateway_account_id: GatewayAccountId,
+    expected_state: PaymentMethodUpdateSnapshot,
+    currency: CurrencyCode,
+}
+
+impl SubscriptionPaymentMethodReplacementLockedTerms {
+    pub const fn new(
+        gateway_account_id: GatewayAccountId,
+        expected_state: PaymentMethodUpdateSnapshot,
+        currency: CurrencyCode,
+    ) -> Self {
+        Self {
+            gateway_account_id,
+            expected_state,
+            currency,
+        }
+    }
+}
+
 /// Secret-free authority for one exact stored-method replacement.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionPaymentMethodReplacement {
@@ -122,31 +146,61 @@ impl SubscriptionPaymentMethodReplacement {
         {
             return Err(SubscriptionPaymentMethodReplacementBuildError::GatewayIdentityMismatch);
         }
-        let identity = PaymentAttemptIdentity::new(
-            command.attempt_id(),
-            command.billing_scope_id(),
-            command.subscriber_id(),
-            gateway.gateway_account_id(),
-            gateway.gateway_configuration_id(),
-        );
         let expected_state = PaymentMethodUpdateSnapshot::new(
             subscription_id,
             payment_method_id,
             initial_transaction_id,
         );
+        Self::from_locked_subscription_terms(
+            command,
+            gateway,
+            SubscriptionPaymentMethodReplacementLockedTerms::new(
+                gateway.gateway_account_id(),
+                expected_state,
+                currency,
+            ),
+        )
+    }
+
+    /// Builds a payment-method replacement reservation from validated terms
+    /// read under the subscription lock.
+    pub fn from_locked_subscription_terms(
+        command: &ReplaceSubscriptionPaymentMethod,
+        gateway: &ResolvedGateway,
+        terms: SubscriptionPaymentMethodReplacementLockedTerms,
+    ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
+        let SubscriptionPaymentMethodReplacementLockedTerms {
+            gateway_account_id,
+            expected_state,
+            currency,
+        } = terms;
+        if gateway.billing_scope_id() != command.billing_scope_id()
+            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
+            || gateway_account_id != gateway.gateway_account_id()
+        {
+            return Err(SubscriptionPaymentMethodReplacementBuildError::GatewayIdentityMismatch);
+        }
+        let identity = PaymentAttemptIdentity::new(
+            command.attempt_id(),
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            gateway_account_id,
+            gateway.gateway_configuration_id(),
+        );
+        let fingerprint = PaymentAttemptFingerprint::for_subscription_payment_method_update(
+            command.plan_key(),
+            expected_state.subscription_id(),
+            expected_state.payment_method_id(),
+            expected_state.expected_initial_transaction_id(),
+        );
         let request = PaymentAttemptRequest::new(
             PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
                 plan_key: command.plan_key().clone(),
-                payment_method_id,
-                expected_state: expected_state.clone(),
+                payment_method_id: expected_state.payment_method_id(),
+                expected_state,
             },
             command.idempotency_key().clone(),
-            PaymentAttemptFingerprint::for_subscription_payment_method_update(
-                command.plan_key(),
-                subscription_id,
-                payment_method_id,
-                expected_state.expected_initial_transaction_id(),
-            ),
+            fingerprint,
             Money::new(0, currency).expect("zero payment-method replacement amount is valid"),
             gateway.mutation_reference_factory().for_attempt(
                 PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
