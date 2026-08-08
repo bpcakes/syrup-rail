@@ -2,10 +2,12 @@ use std::time::Duration;
 
 use sqlx::{PgConnection, PgPool, Row};
 use syrup_rail::{
-    GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, PaymentAttempt, PaymentAttemptId,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentResolutionCode, PlanKey, ProcessorCharge,
-    ProcessorChargeId, ProcessorChargeProgression, ProcessorChargeRole, ProcessorChargeStateCode,
-    ProcessorEvidence,
+    CurrencyCode, GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptStatus,
+    PaymentResolutionCode, PlanKey, ProcessorCharge, ProcessorChargeId, ProcessorChargeProgression,
+    ProcessorChargeRole, ProcessorChargeStateCode, ProcessorEvidence,
+    SubscriptionEnrollmentReservation, SubscriptionPaymentMethodReplacement,
+    SubscriptionRecoveryReservation,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -59,6 +61,238 @@ pub(crate) struct ChargeRecord {
 pub(crate) enum ObservedCharge {
     Owned(ChargeRecord),
     OwnedByOtherAttempt,
+}
+
+/// Frozen subscription charge dimensions used to retain approved processor
+/// evidence when the owning payment-attempt row cannot be locked in time.
+///
+/// The operation-specific constructors keep the kind and amount shape tied to
+/// the validated reservation rather than deriving them from an unlocked row.
+#[derive(Clone, Copy)]
+pub(crate) struct LockFreeApprovedEvidenceTerms<'a> {
+    identity: PaymentAttemptIdentity,
+    attempt_kind: PaymentAttemptKind,
+    plan_key: &'a PlanKey,
+    gateway_order_id: &'a GatewayOrderId,
+    amount_cents: i32,
+    currency: CurrencyCode,
+    host_charge_target_id: Option<Uuid>,
+}
+
+impl<'a> LockFreeApprovedEvidenceTerms<'a> {
+    pub(crate) fn initial(reservation: &'a SubscriptionEnrollmentReservation) -> Self {
+        let charge = reservation.expected_charge().charge();
+        Self::subscription(
+            reservation.identity(),
+            PaymentAttemptKind::SubscriptionInitial,
+            reservation.plan_key(),
+            reservation.gateway_order_id(),
+            charge.cents(),
+            charge.currency(),
+        )
+    }
+
+    pub(crate) fn recovery(reservation: &'a SubscriptionRecoveryReservation) -> Self {
+        let request = reservation.request();
+        let amount = request.amount();
+        Self::subscription(
+            reservation.identity(),
+            PaymentAttemptKind::SubscriptionRecovery,
+            reservation.plan_key(),
+            request.gateway_order_id(),
+            amount.cents(),
+            amount.currency(),
+        )
+    }
+
+    pub(crate) fn payment_method_replacement(
+        reservation: &'a SubscriptionPaymentMethodReplacement,
+    ) -> Self {
+        let request = reservation.request();
+        debug_assert_eq!(request.amount().cents(), 0);
+        Self::subscription(
+            reservation.identity(),
+            PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+            reservation.plan_key(),
+            request.gateway_order_id(),
+            0,
+            request.amount().currency(),
+        )
+    }
+
+    fn subscription(
+        identity: PaymentAttemptIdentity,
+        attempt_kind: PaymentAttemptKind,
+        plan_key: &'a PlanKey,
+        gateway_order_id: &'a GatewayOrderId,
+        amount_cents: i32,
+        currency: CurrencyCode,
+    ) -> Self {
+        debug_assert!(matches!(
+            attempt_kind,
+            PaymentAttemptKind::SubscriptionInitial
+                | PaymentAttemptKind::SubscriptionRecovery
+                | PaymentAttemptKind::SubscriptionPaymentMethodUpdate
+        ));
+        Self {
+            identity,
+            attempt_kind,
+            plan_key,
+            gateway_order_id,
+            amount_cents,
+            currency,
+            host_charge_target_id: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LockFreeApprovedEvidenceOutcome {
+    Persisted,
+    ExactReplay,
+    OwnedByOtherAttempt,
+    NotDurable,
+}
+
+/// Last-resort immutable evidence write used when another transaction keeps
+/// the attempt row locked beyond the bounded application window.
+///
+/// Database foreign keys and uniqueness constraints remain the authority, so
+/// this path can retain processor evidence without mutating or locking the
+/// attempt itself.
+pub(crate) async fn persist_approved_evidence_without_attempt_lock(
+    pool: &PgPool,
+    terms: LockFreeApprovedEvidenceTerms<'_>,
+    evidence: &ProcessorEvidence,
+) -> Result<LockFreeApprovedEvidenceOutcome, sqlx::Error> {
+    let identity = terms.identity;
+    let descriptor = evidence.descriptor();
+    let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
+    let mut transaction = pool.begin().await?;
+    set_enrollment_timeouts(&mut transaction).await?;
+
+    for _ in 0..2 {
+        let has_existing_charge: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
+        )
+        .bind(identity.attempt_id().as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        let role = if has_existing_charge {
+            "additional"
+        } else {
+            "primary"
+        };
+        let inserted = sqlx::query_scalar::<_, Uuid>(
+            r#"
+            INSERT INTO billing_processor_charges (
+                id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
+                gateway_transaction_id, gateway_payment_method_reference,
+                gateway_response, gateway_response_code, gateway_response_text,
+                gateway_condition, payment_type, card_brand, card_last4,
+                card_exp_month, card_exp_year, charge_role, progression_state,
+                attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, $15, $16, $17, 'pending', $18, $19, $20, $21, $22
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING id
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(identity.attempt_id().as_uuid())
+        .bind(identity.billing_scope_id().as_uuid())
+        .bind(identity.gateway_account_id().as_uuid())
+        .bind(terms.gateway_order_id.expose())
+        .bind(transaction_id)
+        .bind(
+            evidence
+                .payment_method_reference()
+                .map(|value| value.expose()),
+        )
+        .bind(evidence.response().map(GatewayDiagnostic::expose))
+        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+        .bind(evidence.condition().map(GatewayDiagnostic::expose))
+        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+        .bind(descriptor.card_last_four().map(|value| value.expose()))
+        .bind(descriptor.card_exp_month())
+        .bind(descriptor.card_exp_year())
+        .bind(role)
+        .bind(terms.attempt_kind.as_str())
+        .bind(terms.plan_key.as_str())
+        .bind(terms.host_charge_target_id)
+        .bind(terms.amount_cents)
+        .bind(terms.currency.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if inserted.is_some() {
+            transaction.commit().await?;
+            return Ok(LockFreeApprovedEvidenceOutcome::Persisted);
+        }
+    }
+
+    let evidence_matches = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
+            AND gateway_response IS NOT DISTINCT FROM $4
+            AND gateway_response_code IS NOT DISTINCT FROM $5
+            AND gateway_response_text IS NOT DISTINCT FROM $6
+            AND gateway_condition IS NOT DISTINCT FROM $7
+            AND payment_type IS NOT DISTINCT FROM $8
+            AND card_brand IS NOT DISTINCT FROM $9
+            AND card_last4 IS NOT DISTINCT FROM $10
+            AND card_exp_month IS NOT DISTINCT FROM $11
+            AND card_exp_year IS NOT DISTINCT FROM $12
+        FROM billing_processor_charges
+        WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
+        "#,
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .bind(transaction_id)
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(|value| value.expose()),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_last_four().map(|value| value.expose()))
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if evidence_matches == Some(true) {
+        transaction.commit().await?;
+        return Ok(LockFreeApprovedEvidenceOutcome::ExactReplay);
+    }
+    if let Some(transaction_id) = transaction_id {
+        let owned_elsewhere: bool = sqlx::query_scalar(
+            r#"
+            SELECT EXISTS (
+                SELECT 1 FROM billing_processor_charges
+                WHERE gateway_account_id = $1 AND gateway_transaction_id = $2
+                    AND attempt_id <> $3
+            )
+            "#,
+        )
+        .bind(identity.gateway_account_id().as_uuid())
+        .bind(transaction_id)
+        .bind(identity.attempt_id().as_uuid())
+        .fetch_one(&mut *transaction)
+        .await?;
+        if owned_elsewhere {
+            transaction.commit().await?;
+            return Ok(LockFreeApprovedEvidenceOutcome::OwnedByOtherAttempt);
+        }
+    }
+    Ok(LockFreeApprovedEvidenceOutcome::NotDurable)
 }
 
 pub async fn store_compensating_processor_charge(
@@ -818,7 +1052,8 @@ mod tests {
     use std::error::Error;
 
     use syrup_rail::{
-        GatewayDiagnostic, GatewayPaymentDescriptor, GatewayTransactionId, PaymentAttemptId,
+        BillingScopeId, CurrencyCode, GatewayAccountId, GatewayConfigurationId, GatewayDiagnostic,
+        GatewayPaymentDescriptor, GatewayTransactionId, PlanKey, SubscriberId,
     };
 
     use super::*;
@@ -868,6 +1103,245 @@ mod tests {
             Some(GatewayDiagnostic::new("complete")),
             GatewayPaymentDescriptor::default(),
         )
+    }
+
+    struct SubscriptionAttemptFixture {
+        identity: PaymentAttemptIdentity,
+        plan_key: PlanKey,
+        gateway_order_id: GatewayOrderId,
+    }
+
+    async fn insert_subscription_attempt(
+        pool: &PgPool,
+        gateway: GatewayAccountFixture,
+        attempt_kind: PaymentAttemptKind,
+        gateway_order: &str,
+    ) -> Result<SubscriptionAttemptFixture, Box<dyn Error>> {
+        assert!(matches!(
+            attempt_kind,
+            PaymentAttemptKind::SubscriptionRecovery
+                | PaymentAttemptKind::SubscriptionPaymentMethodUpdate
+        ));
+        let attempt_id = PaymentAttemptId::new(Uuid::now_v7());
+        let subscriber_id = SubscriberId::new(Uuid::now_v7());
+        let payment_method_id = Uuid::now_v7();
+        let subscription_id = Uuid::now_v7();
+        let plan_key = PlanKey::new("fallback-plan")?;
+        let gateway_order_id = GatewayOrderId::from_correlation(gateway_order)?;
+        sqlx::query(
+            r#"
+            WITH input AS (
+                SELECT
+                    $1::uuid AS attempt_id,
+                    $2::uuid AS billing_scope_id,
+                    $3::uuid AS subscriber_id,
+                    $4::uuid AS gateway_account_id,
+                    $5::uuid AS gateway_configuration_id,
+                    $6::text AS plan_key,
+                    $7::text AS gateway_order_id,
+                    $8::text AS attempt_kind,
+                    $9::uuid AS payment_method_id,
+                    $10::uuid AS subscription_id,
+                    clock_timestamp() AS period_start_at
+            ), payment_method AS (
+                INSERT INTO billing_payment_methods (
+                    id, billing_scope_id, subscriber_id, gateway_account_id,
+                    gateway_payment_method_reference, status
+                )
+                SELECT payment_method_id, billing_scope_id, subscriber_id,
+                    gateway_account_id, 'method-' || payment_method_id::text, 'active'
+                FROM input
+                RETURNING id
+            ), subscription AS (
+                INSERT INTO billing_subscriptions (
+                    id, billing_scope_id, subscriber_id, plan_key, status,
+                    gateway_account_id, payment_method_id, amount_cents, currency,
+                    current_period_start_at, current_period_end_at, next_renewal_at,
+                    initial_transaction_id
+                )
+                SELECT subscription_id, billing_scope_id, subscriber_id, plan_key, 'active',
+                    gateway_account_id, payment_method_id, 100, 'USD', period_start_at,
+                    period_start_at + interval '30 days',
+                    period_start_at + interval '30 days',
+                    'initial-' || subscription_id::text
+                FROM input CROSS JOIN payment_method
+                RETURNING id
+            )
+            INSERT INTO billing_payment_attempts (
+                id, billing_scope_id, subscriber_id, plan_key, subscription_id,
+                payment_method_id, attempt_kind, status, idempotency_key,
+                request_fingerprint, amount_cents, currency, billing_period_start_at,
+                billing_period_end_at, gateway_account_id, gateway_configuration_id,
+                gateway_order_id, payment_method_update_expected_payment_method_id,
+                payment_method_update_expected_initial_transaction_id,
+                subscription_expected_payment_method_id,
+                subscription_expected_initial_transaction_id, subscription_expected_status
+            )
+            SELECT attempt_id, billing_scope_id, subscriber_id, plan_key, subscription_id,
+                payment_method_id, attempt_kind, 'pending', 'fallback-' || attempt_id::text,
+                attempt_kind || ':' || subscription_id::text,
+                CASE WHEN attempt_kind = 'subscription_payment_method_update' THEN 0 ELSE 100 END,
+                'USD',
+                CASE WHEN attempt_kind = 'subscription_recovery' THEN period_start_at END,
+                CASE WHEN attempt_kind = 'subscription_recovery'
+                    THEN period_start_at + interval '30 days' END,
+                gateway_account_id, gateway_configuration_id, gateway_order_id,
+                CASE WHEN attempt_kind = 'subscription_payment_method_update'
+                    THEN payment_method_id END,
+                CASE WHEN attempt_kind = 'subscription_payment_method_update'
+                    THEN 'initial-' || subscription_id::text END,
+                CASE WHEN attempt_kind = 'subscription_recovery' THEN payment_method_id END,
+                CASE WHEN attempt_kind = 'subscription_recovery'
+                    THEN 'initial-' || subscription_id::text END,
+                CASE WHEN attempt_kind = 'subscription_recovery' THEN 'active' END
+            FROM input CROSS JOIN subscription
+            "#,
+        )
+        .bind(attempt_id.as_uuid())
+        .bind(gateway.billing_scope_id)
+        .bind(subscriber_id.as_uuid())
+        .bind(gateway.gateway_account_id)
+        .bind(gateway.gateway_configuration_id)
+        .bind(plan_key.as_str())
+        .bind(gateway_order_id.expose())
+        .bind(attempt_kind.as_str())
+        .bind(payment_method_id)
+        .bind(subscription_id)
+        .execute(pool)
+        .await?;
+
+        Ok(SubscriptionAttemptFixture {
+            identity: PaymentAttemptIdentity::new(
+                attempt_id,
+                BillingScopeId::new(gateway.billing_scope_id),
+                subscriber_id,
+                GatewayAccountId::new(gateway.gateway_account_id),
+                GatewayConfigurationId::new(gateway.gateway_configuration_id),
+            ),
+            plan_key,
+            gateway_order_id,
+        })
+    }
+
+    fn lock_free_terms(
+        fixture: &SubscriptionAttemptFixture,
+        attempt_kind: PaymentAttemptKind,
+    ) -> LockFreeApprovedEvidenceTerms<'_> {
+        let amount_cents = if attempt_kind == PaymentAttemptKind::SubscriptionPaymentMethodUpdate {
+            0
+        } else {
+            100
+        };
+        LockFreeApprovedEvidenceTerms::subscription(
+            fixture.identity,
+            attempt_kind,
+            &fixture.plan_key,
+            &fixture.gateway_order_id,
+            amount_cents,
+            CurrencyCode::new("USD").expect("test currency"),
+        )
+    }
+
+    #[tokio::test]
+    async fn lock_free_subscription_evidence_preserves_replay_and_ownership()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("rail_lock_fb").await?;
+        let result = async {
+            let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
+            let recovery = insert_subscription_attempt(
+                &database.pool,
+                gateway,
+                PaymentAttemptKind::SubscriptionRecovery,
+                "recovery-fallback-order",
+            )
+            .await?;
+            let evidence = approved_evidence("txn_recovery_fallback");
+            assert_eq!(
+                persist_approved_evidence_without_attempt_lock(
+                    &database.pool,
+                    lock_free_terms(&recovery, PaymentAttemptKind::SubscriptionRecovery),
+                    &evidence,
+                )
+                .await?,
+                LockFreeApprovedEvidenceOutcome::Persisted
+            );
+            assert_eq!(
+                persist_approved_evidence_without_attempt_lock(
+                    &database.pool,
+                    lock_free_terms(&recovery, PaymentAttemptKind::SubscriptionRecovery),
+                    &evidence,
+                )
+                .await?,
+                LockFreeApprovedEvidenceOutcome::ExactReplay
+            );
+            let owner = insert_subscription_attempt(
+                &database.pool,
+                gateway,
+                PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                "replacement-owner-order",
+            )
+            .await?;
+            let contender = insert_subscription_attempt(
+                &database.pool,
+                gateway,
+                PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                "replacement-contender-order",
+            )
+            .await?;
+            let evidence = approved_evidence("txn_replacement_owner");
+            assert_eq!(
+                persist_approved_evidence_without_attempt_lock(
+                    &database.pool,
+                    lock_free_terms(
+                        &owner,
+                        PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                    ),
+                    &evidence,
+                )
+                .await?,
+                LockFreeApprovedEvidenceOutcome::Persisted
+            );
+            assert_eq!(
+                persist_approved_evidence_without_attempt_lock(
+                    &database.pool,
+                    lock_free_terms(
+                        &contender,
+                        PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                    ),
+                    &evidence,
+                )
+                .await?,
+                LockFreeApprovedEvidenceOutcome::OwnedByOtherAttempt
+            );
+            let dimensions: (String, Option<Uuid>, i32, String, String) = sqlx::query_as(
+                "SELECT attempt_kind, host_charge_target_id, amount_cents, currency, progression_state FROM billing_processor_charges WHERE attempt_id = $1",
+            )
+            .bind(owner.identity.attempt_id().as_uuid())
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(
+                dimensions,
+                (
+                    "subscription_payment_method_update".to_owned(),
+                    None,
+                    0,
+                    "USD".to_owned(),
+                    "pending".to_owned(),
+                )
+            );
+            let contender_charges: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1",
+            )
+            .bind(contender.identity.attempt_id().as_uuid())
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(contender_charges, 0);
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup
     }
 
     #[tokio::test]

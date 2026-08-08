@@ -31,7 +31,10 @@ use crate::{
         PaymentAttemptStoreError, find_payment_attempt_by_id_on_connection,
         lock_payment_attempt_by_id_on_connection,
     },
-    processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
+    processor_charges::{
+        LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, ObservedCharge,
+        observe_processor_charge, transition_charge,
+    },
 };
 
 const BILLING_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
@@ -3044,144 +3047,12 @@ async fn observe_payment_method_replacement_approved_evidence_with_retry(
             Err(error) => return Err(error),
         }
     }
-    observe_payment_method_replacement_approved_evidence_without_attempt_lock(
+    persist_approved_evidence_without_attempt_lock(
         pool,
-        reservation,
+        LockFreeApprovedEvidenceTerms::payment_method_replacement(reservation),
         evidence,
     )
     .await
-}
-
-async fn observe_payment_method_replacement_approved_evidence_without_attempt_lock(
-    pool: &PgPool,
-    reservation: &SubscriptionPaymentMethodReplacement,
-    evidence: &ProcessorEvidence,
-) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let identity = reservation.identity();
-    let request = reservation.request();
-    let descriptor = evidence.descriptor();
-    let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
-    let mut transaction = pool.begin().await?;
-    set_application_timeouts(&mut transaction).await?;
-    for _ in 0..2 {
-        let has_existing_charge: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
-        )
-        .bind(identity.attempt_id().as_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let role = if has_existing_charge {
-            "additional"
-        } else {
-            "primary"
-        };
-        let inserted = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO billing_processor_charges (
-                id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
-                gateway_transaction_id, gateway_payment_method_reference,
-                gateway_response, gateway_response_code, gateway_response_text,
-                gateway_condition, payment_type, card_brand, card_last4,
-                card_exp_month, card_exp_year, charge_role, progression_state,
-                attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, 'pending',
-                'subscription_payment_method_update', $18, NULL, 0, $19
-            )
-            ON CONFLICT DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(identity.attempt_id().as_uuid())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(request.gateway_order_id().expose())
-        .bind(transaction_id)
-        .bind(
-            evidence
-                .payment_method_reference()
-                .map(|value| value.expose()),
-        )
-        .bind(evidence.response().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-        .bind(evidence.condition().map(GatewayDiagnostic::expose))
-        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_last_four().map(|value| value.expose()))
-        .bind(descriptor.card_exp_month())
-        .bind(descriptor.card_exp_year())
-        .bind(role)
-        .bind(reservation.plan_key().as_str())
-        .bind(request.amount().currency().as_str())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if inserted.is_some() {
-            transaction.commit().await?;
-            return Ok(());
-        }
-    }
-    let evidence_matches = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
-            AND gateway_response IS NOT DISTINCT FROM $4
-            AND gateway_response_code IS NOT DISTINCT FROM $5
-            AND gateway_response_text IS NOT DISTINCT FROM $6
-            AND gateway_condition IS NOT DISTINCT FROM $7
-            AND payment_type IS NOT DISTINCT FROM $8
-            AND card_brand IS NOT DISTINCT FROM $9
-            AND card_last4 IS NOT DISTINCT FROM $10
-            AND card_exp_month IS NOT DISTINCT FROM $11
-            AND card_exp_year IS NOT DISTINCT FROM $12
-        FROM billing_processor_charges
-        WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
-        "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(transaction_id)
-    .bind(
-        evidence
-            .payment_method_reference()
-            .map(|value| value.expose()),
-    )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .fetch_optional(&mut *transaction)
-    .await?;
-    if evidence_matches == Some(true) {
-        transaction.commit().await?;
-        return Ok(());
-    }
-    if let Some(transaction_id) = transaction_id {
-        let owned_elsewhere: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1 FROM billing_processor_charges
-                WHERE gateway_account_id = $1 AND gateway_transaction_id = $2
-                    AND attempt_id <> $3
-            )
-            "#,
-        )
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(transaction_id)
-        .bind(identity.attempt_id().as_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if owned_elsewhere {
-            transaction.commit().await?;
-            return Ok(());
-        }
-    }
-    Err(SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable)
 }
 
 async fn try_park_recovery_approved_outcome(
@@ -3365,140 +3236,12 @@ async fn observe_recovery_approved_evidence_with_retry(
             Err(error) => return Err(error),
         }
     }
-    observe_recovery_approved_evidence_without_attempt_lock(pool, reservation, evidence).await
-}
-
-async fn observe_recovery_approved_evidence_without_attempt_lock(
-    pool: &PgPool,
-    reservation: &SubscriptionRecoveryReservation,
-    evidence: &ProcessorEvidence,
-) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let identity = reservation.identity();
-    let request = reservation.request();
-    let descriptor = evidence.descriptor();
-    let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
-    let mut transaction = pool.begin().await?;
-    set_application_timeouts(&mut transaction).await?;
-    for _ in 0..2 {
-        let has_existing_charge: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
-        )
-        .bind(identity.attempt_id().as_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let role = if has_existing_charge {
-            "additional"
-        } else {
-            "primary"
-        };
-        let inserted = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO billing_processor_charges (
-                id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
-                gateway_transaction_id, gateway_payment_method_reference,
-                gateway_response, gateway_response_code, gateway_response_text,
-                gateway_condition, payment_type, card_brand, card_last4,
-                card_exp_month, card_exp_year, charge_role, progression_state,
-                attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, 'pending', 'subscription_recovery', $18,
-                NULL, $19, $20
-            )
-            ON CONFLICT DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(identity.attempt_id().as_uuid())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(request.gateway_order_id().expose())
-        .bind(transaction_id)
-        .bind(
-            evidence
-                .payment_method_reference()
-                .map(|value| value.expose()),
-        )
-        .bind(evidence.response().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-        .bind(evidence.condition().map(GatewayDiagnostic::expose))
-        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_last_four().map(|value| value.expose()))
-        .bind(descriptor.card_exp_month())
-        .bind(descriptor.card_exp_year())
-        .bind(role)
-        .bind(reservation.plan_key().as_str())
-        .bind(request.amount().cents())
-        .bind(request.amount().currency().as_str())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if inserted.is_some() {
-            transaction.commit().await?;
-            return Ok(());
-        }
-    }
-    let evidence_matches = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
-            AND gateway_response IS NOT DISTINCT FROM $4
-            AND gateway_response_code IS NOT DISTINCT FROM $5
-            AND gateway_response_text IS NOT DISTINCT FROM $6
-            AND gateway_condition IS NOT DISTINCT FROM $7
-            AND payment_type IS NOT DISTINCT FROM $8
-            AND card_brand IS NOT DISTINCT FROM $9
-            AND card_last4 IS NOT DISTINCT FROM $10
-            AND card_exp_month IS NOT DISTINCT FROM $11
-            AND card_exp_year IS NOT DISTINCT FROM $12
-        FROM billing_processor_charges
-        WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
-        "#,
+    persist_approved_evidence_without_attempt_lock(
+        pool,
+        LockFreeApprovedEvidenceTerms::recovery(reservation),
+        evidence,
     )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(transaction_id)
-    .bind(
-        evidence
-            .payment_method_reference()
-            .map(|value| value.expose()),
-    )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .fetch_optional(&mut *transaction)
-    .await?;
-    if evidence_matches == Some(true) {
-        transaction.commit().await?;
-        return Ok(());
-    }
-    if let Some(transaction_id) = transaction_id {
-        let owned_elsewhere: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1 FROM billing_processor_charges
-                WHERE gateway_account_id = $1 AND gateway_transaction_id = $2
-                    AND attempt_id <> $3
-            )
-            "#,
-        )
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(transaction_id)
-        .bind(identity.attempt_id().as_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if owned_elsewhere {
-            transaction.commit().await?;
-            return Ok(());
-        }
-    }
-    Err(SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable)
+    .await
 }
 
 async fn extend_rate_limit_cooldown(
@@ -3987,148 +3730,31 @@ async fn observe_approved_evidence_with_retry(
         }
     }
     let _ = last_error;
-    observe_approved_evidence_without_attempt_lock(pool, reservation, evidence).await
+    persist_approved_evidence_without_attempt_lock(
+        pool,
+        LockFreeApprovedEvidenceTerms::initial(reservation),
+        evidence,
+    )
+    .await
 }
 
-/// Last-resort immutable evidence write used when another transaction keeps
-/// the attempt row locked beyond the bounded application window.
-///
-/// The reservation already carries every frozen charge dimension. Database
-/// foreign keys and uniqueness constraints remain the authority, so this path
-/// can retain processor evidence without mutating or locking the attempt.
-async fn observe_approved_evidence_without_attempt_lock(
+async fn persist_approved_evidence_without_attempt_lock(
     pool: &PgPool,
-    reservation: &SubscriptionEnrollmentReservation,
+    terms: LockFreeApprovedEvidenceTerms<'_>,
     evidence: &ProcessorEvidence,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let identity = reservation.identity();
-    let descriptor = evidence.descriptor();
-    let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
-    let mut transaction = pool.begin().await?;
-    set_application_timeouts(&mut transaction).await?;
-
-    for _ in 0..2 {
-        let has_existing_charge: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
-        )
-        .bind(identity.attempt_id().as_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        let role = if has_existing_charge {
-            "additional"
-        } else {
-            "primary"
-        };
-        let inserted = sqlx::query_scalar::<_, Uuid>(
-            r#"
-            INSERT INTO billing_processor_charges (
-                id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
-                gateway_transaction_id, gateway_payment_method_reference,
-                gateway_response, gateway_response_code, gateway_response_text,
-                gateway_condition, payment_type, card_brand, card_last4,
-                card_exp_month, card_exp_year, charge_role, progression_state,
-                attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, 'pending', 'subscription_initial', $18,
-                NULL, $19, $20
-            )
-            ON CONFLICT DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(identity.attempt_id().as_uuid())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(reservation.gateway_order_id().expose())
-        .bind(transaction_id)
-        .bind(
-            evidence
-                .payment_method_reference()
-                .map(|value| value.expose()),
-        )
-        .bind(evidence.response().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-        .bind(evidence.condition().map(GatewayDiagnostic::expose))
-        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_last_four().map(|value| value.expose()))
-        .bind(descriptor.card_exp_month())
-        .bind(descriptor.card_exp_year())
-        .bind(role)
-        .bind(reservation.plan_key().as_str())
-        .bind(reservation.expected_charge().charge().cents())
-        .bind(reservation.expected_charge().charge().currency().as_str())
-        .fetch_optional(&mut *transaction)
-        .await?;
-        if inserted.is_some() {
-            transaction.commit().await?;
-            return Ok(());
+    match crate::processor_charges::persist_approved_evidence_without_attempt_lock(
+        pool, terms, evidence,
+    )
+    .await?
+    {
+        LockFreeApprovedEvidenceOutcome::Persisted
+        | LockFreeApprovedEvidenceOutcome::ExactReplay
+        | LockFreeApprovedEvidenceOutcome::OwnedByOtherAttempt => Ok(()),
+        LockFreeApprovedEvidenceOutcome::NotDurable => {
+            Err(SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable)
         }
     }
-
-    let evidence_matches = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
-            AND gateway_response IS NOT DISTINCT FROM $4
-            AND gateway_response_code IS NOT DISTINCT FROM $5
-            AND gateway_response_text IS NOT DISTINCT FROM $6
-            AND gateway_condition IS NOT DISTINCT FROM $7
-            AND payment_type IS NOT DISTINCT FROM $8
-            AND card_brand IS NOT DISTINCT FROM $9
-            AND card_last4 IS NOT DISTINCT FROM $10
-            AND card_exp_month IS NOT DISTINCT FROM $11
-            AND card_exp_year IS NOT DISTINCT FROM $12
-        FROM billing_processor_charges
-        WHERE attempt_id = $1
-            AND gateway_transaction_id IS NOT DISTINCT FROM $2
-        "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(transaction_id)
-    .bind(
-        evidence
-            .payment_method_reference()
-            .map(|value| value.expose()),
-    )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .fetch_optional(&mut *transaction)
-    .await?;
-    if evidence_matches == Some(true) {
-        transaction.commit().await?;
-        return Ok(());
-    }
-    if let Some(transaction_id) = transaction_id {
-        let owned_elsewhere: bool = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS (
-                SELECT 1 FROM billing_processor_charges
-                WHERE gateway_account_id = $1 AND gateway_transaction_id = $2
-                    AND attempt_id <> $3
-            )
-            "#,
-        )
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(transaction_id)
-        .bind(identity.attempt_id().as_uuid())
-        .fetch_one(&mut *transaction)
-        .await?;
-        if owned_elsewhere {
-            transaction.commit().await?;
-            return Ok(());
-        }
-    }
-    Err(SubscriptionEnrollmentApplicationError::ApprovedEvidenceNotDurable)
 }
 
 fn is_retryable_evidence_error(error: &SubscriptionEnrollmentApplicationError) -> bool {
