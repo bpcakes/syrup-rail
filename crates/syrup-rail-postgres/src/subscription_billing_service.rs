@@ -421,12 +421,12 @@ impl SubscriptionBillingService {
                     )
                     .await;
             }
-            Err(error) => {
+            Err(_) => {
                 return self
                     .resolve_host_charge_readiness(
                         targets,
                         &reservation,
-                        error.detail().clone(),
+                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
                         PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
                         false,
                         false,
