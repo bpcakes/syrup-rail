@@ -85,8 +85,10 @@ pub use lifecycle_reconciliation::{
 };
 pub use operator_review::{
     ExternalReversalAttestationOutcome, ExternalReversalHostStore, ExternalReversalHostStoreError,
-    ExternalReversalHostTransitionOutcome, OperatorReviewError, attempt_review_page,
-    attest_external_reversal, processor_charge_review_page,
+    ExternalReversalHostTransitionOutcome, ManualAttemptFailureHostStore,
+    ManualAttemptFailureHostStoreError, ManualAttemptFailureHostTransitionOutcome,
+    OperatorReviewError, attempt_review_page, attest_external_reversal,
+    fail_review_required_attempt, processor_charge_review_page,
 };
 pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,

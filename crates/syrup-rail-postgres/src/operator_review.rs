@@ -4,15 +4,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
-    ActorId, AttemptReviewCursor, AttemptReviewPage, BillingScopeId, ChargeAmount, CurrencyCode,
-    ExternalReversalAttestation, ExternalReversalHostChargeRelease, ExternalReversalKind,
-    ExternalReversalReason, GatewayAccountId, GatewayConfigurationId, GatewayDiagnostic,
-    GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayTransactionId,
-    HostChargeTargetId, OperatorReviewPageLimit, PaymentAttempt, PaymentAttemptId,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentResolutionCode, PlanKey, ProcessorCharge,
-    ProcessorChargeId, ProcessorChargeProgression, ProcessorChargeReviewCursor,
-    ProcessorChargeReviewItem, ProcessorChargeReviewPage, ProcessorChargeRole,
-    ProcessorChargeStateCode, ProcessorEvidence, SubscriberId,
+    ActorId, AttemptReviewCursor, AttemptReviewPage, BillingEvent, BillingEventSubject,
+    BillingScopeId, ChargeAmount, CurrencyCode, ExternalReversalAttestation,
+    ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalReason,
+    GatewayAccountId, GatewayConfigurationId, GatewayDiagnostic, GatewayOrderId,
+    GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayTransactionId,
+    HostChargeTargetId, ManualAttemptFailureOutcome, ManualFailureHostCharge,
+    OperatorReviewPageLimit, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
+    PaymentAttemptStatus, PaymentResolutionCode, PlanKey, ProcessorCharge, ProcessorChargeId,
+    ProcessorChargeProgression, ProcessorChargeReviewCursor, ProcessorChargeReviewItem,
+    ProcessorChargeReviewPage, ProcessorChargeRole, ProcessorChargeStateCode, ProcessorEvidence,
+    SubscriberId, review_required_attempt_can_be_manually_failed,
+    review_required_manual_failure_evidence,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -20,6 +23,9 @@ use uuid::Uuid;
 use crate::attempts::{
     lock_payment_attempt_by_id_on_connection, lock_subscription_aggregate,
     payment_attempt_from_row, processor_evidence_from_row, set_enrollment_timeouts,
+};
+use crate::transactions::{
+    BillingEventWriteError, BillingTransactionCoordinator, BillingTransactionError,
 };
 
 const INVALID_OPERATOR_STATE: &str = "canonical operator review state is invalid";
@@ -169,6 +175,56 @@ pub async fn processor_charge_review_page(
 }
 
 #[derive(Debug)]
+pub struct ManualAttemptFailureHostStoreError {
+    source: BoxError,
+}
+
+impl ManualAttemptFailureHostStoreError {
+    pub fn new(source: impl Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+
+    pub fn into_source(self) -> BoxError {
+        self.source
+    }
+}
+
+impl fmt::Display for ManualAttemptFailureHostStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("manual attempt failure host target transition failed")
+    }
+}
+
+impl Error for ManualAttemptFailureHostStoreError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ManualAttemptFailureHostTransitionOutcome {
+    Changed,
+    Unchanged,
+}
+
+#[async_trait]
+pub trait ManualAttemptFailureHostStore: Send + Sync {
+    async fn lock_payment_failure_target(
+        &self,
+        connection: &mut PgConnection,
+        charge: ManualFailureHostCharge,
+    ) -> Result<(), ManualAttemptFailureHostStoreError>;
+
+    async fn mark_payment_failed(
+        &self,
+        connection: &mut PgConnection,
+        charge: ManualFailureHostCharge,
+    ) -> Result<ManualAttemptFailureHostTransitionOutcome, ManualAttemptFailureHostStoreError>;
+}
+
+#[derive(Debug)]
 pub struct ExternalReversalHostStoreError {
     source: BoxError,
 }
@@ -219,6 +275,12 @@ pub enum OperatorReviewError {
     InvalidState(&'static str),
     #[error(transparent)]
     Host(#[from] ExternalReversalHostStoreError),
+    #[error(transparent)]
+    ManualFailureHost(#[from] ManualAttemptFailureHostStoreError),
+    #[error(transparent)]
+    BillingTransaction(#[from] BillingTransactionError),
+    #[error(transparent)]
+    BillingEvent(#[from] BillingEventWriteError),
 }
 
 impl From<crate::PaymentAttemptStoreError> for OperatorReviewError {
@@ -256,6 +318,241 @@ struct ChargeLocator {
     kind: PaymentAttemptKind,
     plan_key: Option<PlanKey>,
     host_target_id: Option<HostChargeTargetId>,
+}
+
+pub async fn fail_review_required_attempt(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    host: &dyn ManualAttemptFailureHostStore,
+    attempt_id: PaymentAttemptId,
+) -> Result<ManualAttemptFailureOutcome, OperatorReviewError> {
+    let Some(preloaded) = payment_attempt_by_id(pool, attempt_id).await? else {
+        return Ok(ManualAttemptFailureOutcome::NotFound);
+    };
+    if !review_required_attempt_can_be_manually_failed(&preloaded) {
+        return Ok(ManualAttemptFailureOutcome::KeptOpen(preloaded));
+    }
+
+    let identity = preloaded.identity();
+    let subject = BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id());
+    let mut transaction = coordinator
+        .begin(subject, std::time::Duration::from_millis(250))
+        .await?;
+    let result = async {
+        let connection = transaction.connection();
+        set_enrollment_timeouts(connection).await?;
+        let target = preloaded.request().target();
+        if let Some(plan_key) = target.plan_key() {
+            lock_subscription_aggregate(connection, identity.subscriber_id(), plan_key).await?;
+        } else if let Some(target_id) = target.host_charge_target_id() {
+            host.lock_payment_failure_target(
+                connection,
+                ManualFailureHostCharge::new(
+                    identity.billing_scope_id(),
+                    identity.subscriber_id(),
+                    target_id,
+                ),
+            )
+            .await?;
+        }
+
+        let Some(current) = lock_payment_attempt_by_id_on_connection(
+            connection,
+            identity.billing_scope_id(),
+            attempt_id,
+        )
+        .await?
+        else {
+            return Ok((ManualAttemptFailureOutcome::NotFound, None));
+        };
+        if current.identity() != preloaded.identity() || current.request() != preloaded.request() {
+            return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
+        }
+        if !review_required_attempt_can_be_manually_failed(&current)
+            || (current.kind() != PaymentAttemptKind::SubscriptionPaymentMethodUpdate
+                && unresolved_processor_charge_exists(connection, attempt_id).await?)
+        {
+            return Ok((ManualAttemptFailureOutcome::KeptOpen(current), None));
+        }
+
+        let evidence = review_required_manual_failure_evidence(&current);
+        let updated = update_attempt_for_manual_failure(connection, &current, &evidence).await?;
+        if updated != 1 {
+            return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
+        }
+
+        let event = if matches!(
+            current.kind(),
+            PaymentAttemptKind::SubscriptionRenewal | PaymentAttemptKind::SubscriptionRecovery
+        ) {
+            mark_subscription_past_due_for_manual_failure(connection, &current).await?
+        } else {
+            None
+        };
+        if let Some(target_id) = current.request().target().host_charge_target_id() {
+            host.mark_payment_failed(
+                connection,
+                ManualFailureHostCharge::new(
+                    identity.billing_scope_id(),
+                    identity.subscriber_id(),
+                    target_id,
+                ),
+            )
+            .await?;
+        }
+        let attempt = lock_payment_attempt_by_id_on_connection(
+            connection,
+            identity.billing_scope_id(),
+            attempt_id,
+        )
+        .await?
+        .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+        Ok((ManualAttemptFailureOutcome::Failed(attempt), event))
+    }
+    .await;
+
+    let (outcome, event) = match result {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            return Err(error);
+        }
+    };
+    if let Some(event) = event.as_ref()
+        && let Err(error) = transaction.append_event(event).await
+    {
+        let _ = transaction.rollback().await;
+        return Err(error.into());
+    }
+    transaction.commit().await?;
+    Ok(outcome)
+}
+
+async fn payment_attempt_by_id(
+    pool: &PgPool,
+    attempt_id: PaymentAttemptId,
+) -> Result<Option<PaymentAttempt>, OperatorReviewError> {
+    let query = format!("{} WHERE id = $1", crate::attempts::PAYMENT_ATTEMPT_SELECT);
+    let row = sqlx::query(&query)
+        .bind(attempt_id.as_uuid())
+        .fetch_optional(pool)
+        .await?;
+    row.as_ref()
+        .map(payment_attempt_from_row)
+        .transpose()
+        .map_err(Into::into)
+}
+
+async fn unresolved_processor_charge_exists(
+    connection: &mut PgConnection,
+    attempt_id: PaymentAttemptId,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM billing_processor_charges
+            WHERE attempt_id = $1
+                AND progression_state IN (
+                    'pending', 'reconciliation_required', 'external_reversal_required'
+                )
+        )
+        "#,
+    )
+    .bind(attempt_id.as_uuid())
+    .fetch_one(&mut *connection)
+    .await
+}
+
+async fn update_attempt_for_manual_failure(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+) -> Result<u64, sqlx::Error> {
+    let descriptor = evidence.descriptor();
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'failed',
+            gateway_transaction_id = $2,
+            gateway_payment_method_reference = $3,
+            gateway_response = $4,
+            gateway_response_code = $5,
+            gateway_response_text = $6,
+            gateway_condition = $7,
+            payment_type = $8,
+            card_brand = $9,
+            card_last4 = $10,
+            card_exp_month = $11,
+            card_exp_year = $12,
+            resolved_at = clock_timestamp(),
+            updated_at = clock_timestamp()
+        WHERE id = $1 AND status = 'review_required'
+        "#,
+    )
+    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
+    .bind(
+        evidence
+            .payment_method_reference()
+            .map(GatewayPaymentMethodReference::expose),
+    )
+    .bind(evidence.response().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+    .bind(evidence.condition().map(GatewayDiagnostic::expose))
+    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+    .bind(
+        descriptor
+            .card_last_four()
+            .map(syrup_rail::CardLastFour::expose),
+    )
+    .bind(descriptor.card_exp_month())
+    .bind(descriptor.card_exp_year())
+    .execute(&mut *connection)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+async fn mark_subscription_past_due_for_manual_failure(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+) -> Result<Option<BillingEvent>, OperatorReviewError> {
+    let identity = attempt.identity();
+    let target = attempt.request().target();
+    let subscription_id = target
+        .subscription_id()
+        .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    let plan_key = target
+        .plan_key()
+        .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    let retry_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        r#"
+        UPDATE billing_subscriptions
+        SET status = 'past_due', updated_at = clock_timestamp()
+        WHERE id = $1
+            AND billing_scope_id = $2
+            AND subscriber_id = $3
+            AND plan_key = $4
+            AND status = 'active'
+        RETURNING next_renewal_at
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(plan_key.as_str())
+    .fetch_optional(&mut *connection)
+    .await?;
+    Ok(
+        retry_at.map(|retry_at| BillingEvent::SubscriptionPaymentFailed {
+            attempt_id: identity.attempt_id(),
+            subscription_id,
+            plan_key: plan_key.clone(),
+            retry_at,
+        }),
+    )
 }
 
 pub async fn attest_external_reversal(
@@ -916,11 +1213,427 @@ fn parse_charge_state_code(value: &str) -> Result<ProcessorChargeStateCode, Oper
 mod tests {
     use std::{
         error::Error,
-        sync::atomic::{AtomicU64, Ordering},
+        fmt,
+        sync::{
+            Arc,
+            atomic::{AtomicU64, Ordering},
+        },
+        time::Duration,
     };
 
     use super::*;
     use crate::test_support::{TestDatabase, create_gateway_account};
+    use crate::transactions::{BillingTransaction, BillingTransactionSubjectState};
+    use tokio::sync::Mutex;
+
+    #[derive(Debug)]
+    struct InjectedTestError;
+
+    impl fmt::Display for InjectedTestError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("injected test error")
+        }
+    }
+
+    impl Error for InjectedTestError {}
+
+    #[derive(Clone)]
+    struct TestCoordinator {
+        pool: PgPool,
+        events: Arc<Mutex<Vec<BillingEvent>>>,
+        fail_event: bool,
+    }
+
+    #[async_trait]
+    impl BillingTransactionCoordinator for TestCoordinator {
+        async fn begin(
+            &self,
+            _subject: BillingEventSubject,
+            _lock_timeout: Duration,
+        ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError> {
+            Ok(Box::new(TestTransaction {
+                transaction: Some(
+                    self.pool
+                        .begin()
+                        .await
+                        .map_err(BillingTransactionError::new)?,
+                ),
+                events: Arc::clone(&self.events),
+                fail_event: self.fail_event,
+            }))
+        }
+    }
+
+    struct TestTransaction {
+        transaction: Option<Transaction<'static, Postgres>>,
+        events: Arc<Mutex<Vec<BillingEvent>>>,
+        fail_event: bool,
+    }
+
+    #[async_trait]
+    impl BillingTransaction for TestTransaction {
+        fn connection(&mut self) -> &mut PgConnection {
+            &mut *self.transaction.as_mut().expect("active test transaction")
+        }
+
+        fn subject_state(&self) -> BillingTransactionSubjectState {
+            BillingTransactionSubjectState::LiveRecipient
+        }
+
+        async fn append_event(
+            &mut self,
+            event: &BillingEvent,
+        ) -> Result<(), BillingEventWriteError> {
+            if self.fail_event {
+                return Err(BillingEventWriteError::new(InjectedTestError));
+            }
+            self.events.lock().await.push(event.clone());
+            Ok(())
+        }
+
+        async fn commit(mut self: Box<Self>) -> Result<(), BillingTransactionError> {
+            self.transaction
+                .take()
+                .expect("active test transaction")
+                .commit()
+                .await
+                .map_err(BillingTransactionError::new)
+        }
+
+        async fn rollback(mut self: Box<Self>) -> Result<(), BillingTransactionError> {
+            self.transaction
+                .take()
+                .expect("active test transaction")
+                .rollback()
+                .await
+                .map_err(BillingTransactionError::new)
+        }
+    }
+
+    struct ExactManualFailureHost;
+
+    #[async_trait]
+    impl ManualAttemptFailureHostStore for ExactManualFailureHost {
+        async fn lock_payment_failure_target(
+            &self,
+            connection: &mut PgConnection,
+            charge: ManualFailureHostCharge,
+        ) -> Result<(), ManualAttemptFailureHostStoreError> {
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM manual_failure_host_targets WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 FOR UPDATE",
+            )
+            .bind(charge.target_id().as_uuid())
+            .bind(charge.billing_scope_id().as_uuid())
+            .bind(charge.subscriber_id().as_uuid())
+            .fetch_optional(connection)
+            .await
+            .map_err(ManualAttemptFailureHostStoreError::new)?;
+            Ok(())
+        }
+
+        async fn mark_payment_failed(
+            &self,
+            connection: &mut PgConnection,
+            charge: ManualFailureHostCharge,
+        ) -> Result<ManualAttemptFailureHostTransitionOutcome, ManualAttemptFailureHostStoreError>
+        {
+            let result = sqlx::query(
+                "UPDATE manual_failure_host_targets SET status = 'payment_failed' WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 AND status = 'pending'",
+            )
+            .bind(charge.target_id().as_uuid())
+            .bind(charge.billing_scope_id().as_uuid())
+            .bind(charge.subscriber_id().as_uuid())
+            .execute(connection)
+            .await
+            .map_err(ManualAttemptFailureHostStoreError::new)?;
+            Ok(if result.rows_affected() == 1 {
+                ManualAttemptFailureHostTransitionOutcome::Changed
+            } else {
+                ManualAttemptFailureHostTransitionOutcome::Unchanged
+            })
+        }
+    }
+
+    async fn insert_review_renewal(
+        database: &TestDatabase,
+        account: &crate::test_support::GatewayAccountFixture,
+        subscriber_id: Uuid,
+        suffix: &str,
+    ) -> Result<(Uuid, Uuid), Box<dyn Error>> {
+        let payment_method_id = Uuid::now_v7();
+        let subscription_id = Uuid::now_v7();
+        let attempt_id = Uuid::now_v7();
+        let initial_transaction_id = format!("txn-initial-{suffix}");
+        sqlx::query(
+            r#"
+            INSERT INTO billing_payment_methods (
+                id, billing_scope_id, subscriber_id, gateway_account_id,
+                gateway_payment_method_reference, status
+            ) VALUES ($1, $2, $3, $4, $5, 'active')
+            "#,
+        )
+        .bind(payment_method_id)
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(account.gateway_account_id)
+        .bind(format!("method-{suffix}"))
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+            INSERT INTO billing_subscriptions (
+                id, billing_scope_id, subscriber_id, plan_key, status,
+                gateway_account_id, payment_method_id, amount_cents, currency,
+                current_period_start_at, current_period_end_at, next_renewal_at,
+                initial_transaction_id
+            ) SELECT
+                $1, $2, $3, 'test_plan', 'active', $4, $5, 500, 'USD',
+                observed_at - interval '1 month', observed_at, observed_at,
+                $6
+            FROM clock
+            "#,
+        )
+        .bind(subscription_id)
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(account.gateway_account_id)
+        .bind(payment_method_id)
+        .bind(&initial_transaction_id)
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
+            INSERT INTO billing_payment_attempts (
+                id, billing_scope_id, subscriber_id, plan_key,
+                subscription_id, payment_method_id, attempt_kind, status,
+                idempotency_key, request_fingerprint, amount_cents, currency,
+                billing_period_start_at, billing_period_end_at,
+                gateway_account_id, gateway_configuration_id, gateway_order_id,
+                submitted_at, review_required_at,
+                subscription_expected_payment_method_id,
+                subscription_expected_initial_transaction_id,
+                subscription_expected_status
+            ) SELECT
+                $1, $2, $3, 'test_plan', $4, $5, 'subscription_renewal',
+                'review_required', $6, $7, 500, 'USD', observed_at,
+                observed_at + interval '1 month', $8, $9, $10,
+                observed_at, observed_at, $5, $11, 'active'
+            FROM clock
+            "#,
+        )
+        .bind(attempt_id)
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(subscription_id)
+        .bind(payment_method_id)
+        .bind(format!("idem-{suffix}"))
+        .bind(format!("fingerprint-{suffix}"))
+        .bind(account.gateway_account_id)
+        .bind(account.gateway_configuration_id)
+        .bind(format!("order-{suffix}"))
+        .bind(initial_transaction_id)
+        .execute(&database.pool)
+        .await?;
+        Ok((subscription_id, attempt_id))
+    }
+
+    #[tokio::test]
+    async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("rail_manual").await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        sqlx::query(
+            r#"
+            CREATE TABLE manual_failure_host_targets (
+                id uuid PRIMARY KEY,
+                billing_scope_id uuid NOT NULL,
+                subscriber_id uuid NOT NULL,
+                status text NOT NULL
+            )
+            "#,
+        )
+        .execute(&database.pool)
+        .await?;
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let coordinator = TestCoordinator {
+            pool: database.pool.clone(),
+            events: Arc::clone(&events),
+            fail_event: false,
+        };
+        let host = ExactManualFailureHost;
+
+        let subscriber_id = Uuid::now_v7();
+        let (subscription_id, renewal_attempt_id) =
+            insert_review_renewal(&database, &account, subscriber_id, "success").await?;
+        let outcome = fail_review_required_attempt(
+            &database.pool,
+            &coordinator,
+            &host,
+            PaymentAttemptId::new(renewal_attempt_id),
+        )
+        .await?;
+        assert!(matches!(outcome, ManualAttemptFailureOutcome::Failed(_)));
+        let (attempt_status, response_text, condition): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT status, gateway_response_text, gateway_condition FROM billing_payment_attempts WHERE id = $1",
+            )
+            .bind(renewal_attempt_id)
+            .fetch_one(&database.pool)
+            .await?;
+        assert_eq!(attempt_status, "failed");
+        assert_eq!(
+            response_text.as_deref(),
+            Some(syrup_rail::MANUAL_ATTEMPT_FAILURE_NOTE)
+        );
+        assert_eq!(condition.as_deref(), Some("failed"));
+        let subscription_status: String =
+            sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
+                .bind(subscription_id)
+                .fetch_one(&database.pool)
+                .await?;
+        assert_eq!(subscription_status, "past_due");
+        let recorded_events = events.lock().await;
+        assert_eq!(recorded_events.len(), 1);
+        assert!(matches!(
+            &recorded_events[0],
+            BillingEvent::SubscriptionPaymentFailed { attempt_id, .. }
+                if *attempt_id == PaymentAttemptId::new(renewal_attempt_id)
+        ));
+        drop(recorded_events);
+        assert!(matches!(
+            fail_review_required_attempt(
+                &database.pool,
+                &coordinator,
+                &host,
+                PaymentAttemptId::new(renewal_attempt_id),
+            )
+            .await?,
+            ManualAttemptFailureOutcome::KeptOpen(_)
+        ));
+        assert_eq!(events.lock().await.len(), 1);
+
+        let blocked_subscriber_id = Uuid::now_v7();
+        let (blocked_subscription_id, blocked_attempt_id) =
+            insert_review_renewal(&database, &account, blocked_subscriber_id, "blocked").await?;
+        let failing_coordinator = TestCoordinator {
+            pool: database.pool.clone(),
+            events: Arc::new(Mutex::new(Vec::new())),
+            fail_event: true,
+        };
+        assert!(
+            fail_review_required_attempt(
+                &database.pool,
+                &failing_coordinator,
+                &host,
+                PaymentAttemptId::new(blocked_attempt_id),
+            )
+            .await
+            .is_err()
+        );
+        let rolled_back: (String, String) = sqlx::query_as(
+            "SELECT attempts.status, subscriptions.status FROM billing_payment_attempts attempts INNER JOIN billing_subscriptions subscriptions ON subscriptions.id = attempts.subscription_id WHERE attempts.id = $1",
+        )
+        .bind(blocked_attempt_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(
+            rolled_back,
+            ("review_required".to_owned(), "active".to_owned())
+        );
+        sqlx::query(
+            r#"
+            INSERT INTO billing_processor_charges (
+                id, attempt_id, billing_scope_id, gateway_account_id,
+                gateway_order_id, gateway_transaction_id, charge_role,
+                progression_state, observed_at, attempt_kind, plan_key,
+                amount_cents, currency
+            ) SELECT
+                $2, id, billing_scope_id, gateway_account_id, gateway_order_id,
+                'txn-blocked', 'primary', 'pending', clock_timestamp(),
+                attempt_kind, plan_key, amount_cents, currency
+            FROM billing_payment_attempts WHERE id = $1
+            "#,
+        )
+        .bind(blocked_attempt_id)
+        .bind(Uuid::now_v7())
+        .execute(&database.pool)
+        .await?;
+        assert!(matches!(
+            fail_review_required_attempt(
+                &database.pool,
+                &coordinator,
+                &host,
+                PaymentAttemptId::new(blocked_attempt_id),
+            )
+            .await?,
+            ManualAttemptFailureOutcome::KeptOpen(_)
+        ));
+        let blocked_subscription_status: String =
+            sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
+                .bind(blocked_subscription_id)
+                .fetch_one(&database.pool)
+                .await?;
+        assert_eq!(blocked_subscription_status, "active");
+
+        let host_subscriber_id = Uuid::now_v7();
+        let host_target_id = Uuid::now_v7();
+        let host_attempt_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO manual_failure_host_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'pending')",
+        )
+        .bind(host_target_id)
+        .bind(account.billing_scope_id)
+        .bind(host_subscriber_id)
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO billing_payment_attempts (
+                id, billing_scope_id, subscriber_id, host_charge_target_id,
+                attempt_kind, status, idempotency_key, request_fingerprint,
+                amount_cents, currency, gateway_account_id,
+                gateway_configuration_id, gateway_order_id, review_required_at
+            ) VALUES (
+                $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
+                500, 'USD', $7, $8, $9, clock_timestamp()
+            )
+            "#,
+        )
+        .bind(host_attempt_id)
+        .bind(account.billing_scope_id)
+        .bind(host_subscriber_id)
+        .bind(host_target_id)
+        .bind(format!("idem-{host_attempt_id}"))
+        .bind(format!("fingerprint-{host_attempt_id}"))
+        .bind(account.gateway_account_id)
+        .bind(account.gateway_configuration_id)
+        .bind(format!("host-order-{host_attempt_id}"))
+        .execute(&database.pool)
+        .await?;
+        assert!(matches!(
+            fail_review_required_attempt(
+                &database.pool,
+                &coordinator,
+                &host,
+                PaymentAttemptId::new(host_attempt_id),
+            )
+            .await?,
+            ManualAttemptFailureOutcome::Failed(_)
+        ));
+        let host_state: (String, String) = sqlx::query_as(
+            "SELECT attempts.status, targets.status FROM billing_payment_attempts attempts INNER JOIN manual_failure_host_targets targets ON targets.id = attempts.host_charge_target_id WHERE attempts.id = $1",
+        )
+        .bind(host_attempt_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(
+            host_state,
+            ("failed".to_owned(), "payment_failed".to_owned())
+        );
+        Ok(())
+    }
 
     #[derive(Default)]
     struct ExactHostRelease {

@@ -1420,27 +1420,27 @@ pub(crate) async fn find_payment_attempt_by_id_on_connection(
 }
 
 pub(crate) async fn set_enrollment_timeouts(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
     )
     .bind(BILLING_ROW_LOCK_TIMEOUT)
     .bind(BILLING_OPERATION_TIMEOUT)
-    .execute(&mut **transaction)
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
 
 pub(crate) async fn lock_subscription_aggregate(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
         .bind(subscriber_id.as_uuid())
         .bind(plan_key.as_str())
-        .execute(&mut **transaction)
+        .execute(&mut *connection)
         .await?;
     Ok(())
 }
