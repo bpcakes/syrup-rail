@@ -141,7 +141,9 @@ pub async fn submit_admitted_host_charge(
         admission.attempt.identity().attempt_id(),
     )
     .map_err(|_| HostChargeApplicationError::SubmissionIdentityMismatch)?;
-    if reconstructed != admission.reservation
+    if !host_charge_submission_matches_reservation(&reconstructed, &admission.reservation)
+        || admission.attempt.identity() != admission.reservation.identity()
+        || admission.attempt.request() != admission.reservation.request()
         || admission.attempt.status() != PaymentAttemptStatus::Pending
         || admission
             .attempt
@@ -195,6 +197,21 @@ pub async fn submit_admitted_host_charge(
         .await
         .map(HostChargeProviderResult::Payment),
     }
+}
+
+fn host_charge_submission_matches_reservation(
+    reconstructed: &HostChargeReservation,
+    durable: &HostChargeReservation,
+) -> bool {
+    let request = reconstructed.request();
+    let durable_request = durable.request();
+    reconstructed.identity() == durable.identity()
+        && reconstructed.snapshot() == durable.snapshot()
+        && request.target() == durable_request.target()
+        && request.idempotency_key() == durable_request.idempotency_key()
+        && request.fingerprint() == durable_request.fingerprint()
+        && request.amount() == durable_request.amount()
+        && request.gateway_order_id() == durable_request.gateway_order_id()
 }
 
 pub async fn apply_host_charge_gateway_outcome(
@@ -1815,9 +1832,22 @@ mod tests {
             let first =
                 tokio::spawn(async move { first_service.charge_host_target(first_command).await });
             readiness_started_rx.await?;
+            let retry = ChargeHostTarget::new(
+                command.billing_scope_id(),
+                command.subscriber_id(),
+                command.target_id(),
+                command.gateway_configuration_id(),
+                PaymentToken::new("tok_host_resume_retry")?,
+                command.idempotency_key().clone(),
+                Some(BillingContact::new(
+                    None,
+                    None,
+                    Some("retry@example.test".into()),
+                )?),
+            );
             let second_service = service.clone();
             let second =
-                tokio::spawn(async move { second_service.charge_host_target(command).await });
+                tokio::spawn(async move { second_service.charge_host_target(retry).await });
             sale_started_rx.await?;
             gateway.release_readiness.notify_one();
             let first = first.await??;
