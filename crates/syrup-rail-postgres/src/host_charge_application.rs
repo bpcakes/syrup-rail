@@ -769,9 +769,9 @@ mod tests {
     use crate::{
         BillingEventWriteError, BillingTransaction, HostChargeLedgerAdmission,
         HostChargeLedgerAdmissionMode, HostChargeLedgerAdmissionQuery,
-        HostChargeReservationDecision, HostChargeSubmissionAdmission, HostChargeSubmissionDecision,
-        HostChargeTargetReservation, SubscriptionBillingService, SubscriptionOfferStore,
-        host_charge_ledger_admission,
+        HostChargeReservationDecision, HostChargeReservationOutcome, HostChargeSubmissionAdmission,
+        HostChargeSubmissionDecision, HostChargeTargetReservation, SubscriptionBillingService,
+        SubscriptionOfferStore, host_charge_ledger_admission, reserve_host_charge_in_transaction,
         test_support::{TestDatabase, create_gateway_account},
     };
 
@@ -1423,6 +1423,110 @@ mod tests {
                 vec![BillingEventKey::HostChargePaid(HostChargeTargetId::new(
                     target_id
                 ))]
+            );
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reservation_race_replays_durable_winner_request() -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("rail_host_race").await?;
+        let result = async {
+            sqlx::query(
+                r#"
+                CREATE TABLE host_charge_targets (
+                    id uuid PRIMARY KEY,
+                    billing_scope_id uuid NOT NULL,
+                    subscriber_id uuid NOT NULL,
+                    status text NOT NULL,
+                    amount_cents integer NOT NULL,
+                    currency text NOT NULL,
+                    paid_at timestamptz
+                )
+                "#,
+            )
+            .execute(&database.pool)
+            .await?;
+            let account = create_gateway_account(&database.pool, "nmi").await?;
+            let subscriber_id = Uuid::now_v7();
+            let target_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
+            )
+            .bind(target_id)
+            .bind(account.billing_scope_id)
+            .bind(subscriber_id)
+            .execute(&database.pool)
+            .await?;
+            let gateway = resolved_gateway(
+                account,
+                Arc::new(ScriptedGateway {
+                    sale_calls: AtomicUsize::new(0),
+                    outcome: Mutex::new(None),
+                }),
+            );
+            let snapshot = syrup_rail::HostChargeTargetSnapshot::new(
+                HostChargeTargetId::new(target_id),
+                ChargeAmount::new(1250, CurrencyCode::new("USD")?)?,
+            );
+            let command = ChargeHostTarget::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                HostChargeTargetId::new(target_id),
+                GatewayConfigurationId::new(account.gateway_configuration_id),
+                PaymentToken::new("tok_host_winner")?,
+                IdempotencyKey::new("host-reservation-race")?,
+                Some(BillingContact::new(
+                    None,
+                    None,
+                    Some("winner@example.test".into()),
+                )?),
+            );
+            let winner_id = PaymentAttemptId::new(Uuid::now_v7());
+            let winner =
+                HostChargeReservation::from_command(&command, snapshot, &gateway, winner_id)?;
+            let mut transaction = database.pool.begin().await?;
+            let outcome =
+                reserve_host_charge_in_transaction(&mut transaction, &TestTargets, &winner).await?;
+            assert!(matches!(outcome, HostChargeReservationOutcome::Reserved(_)));
+            transaction.commit().await?;
+
+            let retry = ChargeHostTarget::new(
+                command.billing_scope_id(),
+                command.subscriber_id(),
+                command.target_id(),
+                command.gateway_configuration_id(),
+                PaymentToken::new("tok_host_retry")?,
+                command.idempotency_key().clone(),
+                Some(BillingContact::new(
+                    None,
+                    None,
+                    Some("retry@example.test".into()),
+                )?),
+            );
+            let contender = HostChargeReservation::from_command(
+                &retry,
+                snapshot,
+                &gateway,
+                PaymentAttemptId::new(Uuid::now_v7()),
+            )?;
+            let mut transaction = database.pool.begin().await?;
+            let outcome =
+                reserve_host_charge_in_transaction(&mut transaction, &TestTargets, &contender)
+                    .await?;
+            transaction.commit().await?;
+            let HostChargeReservationOutcome::Replay(attempt) = outcome else {
+                panic!("matching contender should replay the durable winner");
+            };
+            assert_eq!(attempt.identity().attempt_id(), winner_id);
+            assert_eq!(
+                attempt.request().billing_contact().email(),
+                Some("winner@example.test")
             );
             Ok::<_, Box<dyn Error>>(())
         }

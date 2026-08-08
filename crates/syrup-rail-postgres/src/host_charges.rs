@@ -487,12 +487,19 @@ fn host_charge_attempt_matches_reservation(
     attempt: &PaymentAttempt,
     reservation: &HostChargeReservation,
 ) -> bool {
-    attempt.identity().billing_scope_id() == reservation.identity().billing_scope_id()
-        && attempt.identity().subscriber_id() == reservation.identity().subscriber_id()
-        && attempt.identity().gateway_account_id() == reservation.identity().gateway_account_id()
-        && attempt.identity().gateway_configuration_id()
-            == reservation.identity().gateway_configuration_id()
-        && attempt.request() == reservation.request()
+    let identity = attempt.identity();
+    let requested_identity = reservation.identity();
+    let request = attempt.request();
+    let requested = reservation.request();
+    attempt.kind() == PaymentAttemptKind::HostCharge
+        && identity.billing_scope_id() == requested_identity.billing_scope_id()
+        && identity.subscriber_id() == requested_identity.subscriber_id()
+        && identity.gateway_account_id() == requested_identity.gateway_account_id()
+        && identity.gateway_configuration_id() == requested_identity.gateway_configuration_id()
+        && request.target() == requested.target()
+        && request.idempotency_key() == requested.idempotency_key()
+        && request.fingerprint() == requested.fingerprint()
+        && request.amount() == requested.amount()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

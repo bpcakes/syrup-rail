@@ -268,7 +268,7 @@ impl SubscriptionBillingService {
             .host_charge_targets
             .as_deref()
             .ok_or(SubscriptionEnrollmentServiceError::HostChargeUnavailable)?;
-        let (snapshot, prepared_attempt_id) =
+        let (snapshot, prepared_reservation) =
             match self.preflight_host_charge(targets, &command).await? {
                 HostChargePreflightOutcome::Continue(snapshot) => (snapshot, None),
                 HostChargePreflightOutcome::Replay(attempt)
@@ -279,10 +279,7 @@ impl SubscriptionBillingService {
                         HostChargeReservation::from_attempt(&attempt).map_err(|_| {
                             SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
                         })?;
-                    (
-                        reservation.snapshot(),
-                        Some(attempt.identity().attempt_id()),
-                    )
+                    (reservation.snapshot(), Some(reservation))
                 }
                 HostChargePreflightOutcome::Replay(attempt) => {
                     return Ok(HostChargePaymentResult::new(*attempt));
@@ -303,7 +300,7 @@ impl SubscriptionBillingService {
                 command.gateway_configuration_id(),
             )
             .await?;
-        if prepared_attempt_id.is_none()
+        if prepared_reservation.is_none()
             && let Some(scope) = self.active_cooldown(&account).await?
         {
             return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
@@ -324,6 +321,18 @@ impl SubscriptionBillingService {
         {
             return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
         }
+        if prepared_reservation.as_ref().is_some_and(|reservation| {
+            reservation.identity().gateway_account_id() != gateway.gateway_account_id()
+                || reservation.request().gateway_order_id()
+                    != &gateway.mutation_reference_factory().for_attempt(
+                        PaymentAttemptKind::HostCharge,
+                        reservation.identity().attempt_id(),
+                    )
+        }) {
+            return Err(SubscriptionEnrollmentServiceError::InvalidState(
+                INVALID_SERVICE_STATE,
+            ));
+        }
         match gateway.account_mode().await {
             Ok(GatewayAccountMode::Live) => {}
             Ok(GatewayAccountMode::Test) => {
@@ -342,7 +351,7 @@ impl SubscriptionBillingService {
             Err(error) => return Err(SubscriptionEnrollmentServiceError::GatewayReadiness(error)),
         }
 
-        if prepared_attempt_id.is_none() {
+        if prepared_reservation.is_none() {
             match self
                 .admission
                 .admit(EndUserMutationCommand::new(
@@ -367,13 +376,17 @@ impl SubscriptionBillingService {
             }
         }
 
-        let candidate_id =
-            prepared_attempt_id.unwrap_or_else(|| PaymentAttemptId::new(uuid::Uuid::now_v7()));
-        let mut reservation =
-            HostChargeReservation::from_command(&command, snapshot, &gateway, candidate_id)
+        let candidate_id = prepared_reservation.as_ref().map_or_else(
+            || PaymentAttemptId::new(uuid::Uuid::now_v7()),
+            |reservation| reservation.identity().attempt_id(),
+        );
+        let mut reservation = match prepared_reservation {
+            Some(reservation) => reservation,
+            None => HostChargeReservation::from_command(&command, snapshot, &gateway, candidate_id)
                 .map_err(|_| {
                     SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
-                })?;
+                })?,
+        };
         let attempt = match self.reserve_host_charge(targets, &reservation).await? {
             HostChargeReservationOutcome::Reserved(attempt)
             | HostChargeReservationOutcome::Replay(attempt)
@@ -400,13 +413,20 @@ impl SubscriptionBillingService {
             }
         };
         if attempt.identity().attempt_id() != candidate_id {
-            reservation = HostChargeReservation::from_command(
-                &command,
-                snapshot,
-                &gateway,
-                attempt.identity().attempt_id(),
-            )
-            .map_err(|_| SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE))?;
+            reservation = HostChargeReservation::from_attempt(&attempt).map_err(|_| {
+                SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
+            })?;
+            if reservation.identity().gateway_account_id() != gateway.gateway_account_id()
+                || reservation.request().gateway_order_id()
+                    != &gateway.mutation_reference_factory().for_attempt(
+                        PaymentAttemptKind::HostCharge,
+                        reservation.identity().attempt_id(),
+                    )
+            {
+                return Err(SubscriptionEnrollmentServiceError::InvalidState(
+                    INVALID_SERVICE_STATE,
+                ));
+            }
         }
 
         if let Some(scope) = self.active_cooldown(&account).await? {
