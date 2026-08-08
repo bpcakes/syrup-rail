@@ -600,7 +600,9 @@ pub async fn attest_external_reversal(
         ));
     }
 
-    if let Some(existing) = attestation_by_charge(&mut transaction, processor_charge_id).await? {
+    if let Some(existing) =
+        attestation_by_charge(&mut transaction, processor_charge_id.into_uuid()).await?
+    {
         let matches = existing.actor_id() == actor_id
             && existing.kind() == kind
             && existing.reason() == reason
@@ -694,7 +696,7 @@ pub async fn attest_external_reversal(
         locator.attempt_id,
     )
     .await?;
-    let attestation = attestation_by_charge(&mut transaction, processor_charge_id)
+    let attestation = attestation_by_charge(&mut transaction, processor_charge_id.into_uuid())
         .await?
         .ok_or(OperatorReviewError::InvalidState(
             "external reversal attestation disappeared while locked",
@@ -772,7 +774,9 @@ async fn lock_processor_charge(
     row.as_ref().map(processor_charge_from_row).transpose()
 }
 
-fn processor_charge_from_row(row: &PgRow) -> Result<ProcessorCharge, OperatorReviewError> {
+pub(crate) fn processor_charge_from_row(
+    row: &PgRow,
+) -> Result<ProcessorCharge, OperatorReviewError> {
     let attempt_id = PaymentAttemptId::new(row.try_get("attempt_id")?);
     let currency = CurrencyCode::new(&row.try_get::<String, _>("currency")?)
         .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
@@ -940,9 +944,9 @@ async fn insert_attestation(
     Ok(())
 }
 
-async fn attestation_by_charge(
-    transaction: &mut Transaction<'_, Postgres>,
-    charge_id: ProcessorChargeId,
+pub(crate) async fn attestation_by_charge(
+    connection: &mut PgConnection,
+    charge_id: Uuid,
 ) -> Result<Option<ExternalReversalAttestation>, OperatorReviewError> {
     let row = sqlx::query(
         r#"
@@ -957,8 +961,8 @@ async fn attestation_by_charge(
         WHERE processor_charge_id = $1 FOR UPDATE
         "#,
     )
-    .bind(charge_id.as_uuid())
-    .fetch_optional(&mut **transaction)
+    .bind(charge_id)
+    .fetch_optional(connection)
     .await?;
     row.as_ref().map(attestation_from_row).transpose()
 }
@@ -1074,7 +1078,7 @@ async fn release_host_target(
     Ok(())
 }
 
-fn attestation_matches_source(
+pub(crate) fn attestation_matches_source(
     attestation: &ExternalReversalAttestation,
     attempt: &PaymentAttempt,
     charge: &ProcessorCharge,

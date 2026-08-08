@@ -42,6 +42,9 @@ and transaction orchestration.
   operator incident review/resolution.
 - `src/operator_review.rs` — immutable processor-charge external-reversal
   attestation and exact host-target release composition.
+- `src/processor_charges.rs` — canonical charge observation, exact replay and
+  transactionless identification, plus bounded compensating persistence after
+  a primary transaction has failed.
 
 ## Edit here for X
 
@@ -92,6 +95,10 @@ and transaction orchestration.
 - Change processor-charge external-reversal attestation in
   `src/operator_review.rs`; preserve exact plan-bearing revalidation, immutable
   evidence, replay/conflict semantics, and same-transaction host release.
+- Change processor-charge observation or compensating persistence in
+  `src/processor_charges.rs`; keep one canonical writer, preserve immutable
+  evidence and transaction ownership, and retry only explicitly transient
+  database failures outside a caller-owned transaction.
 
 ## Invariants
 

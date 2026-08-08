@@ -16,6 +16,7 @@ mod grants;
 mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
 mod operator_review;
+mod processor_charges;
 mod reconciliation;
 mod renewal;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -89,6 +90,11 @@ pub use operator_review::{
     ManualAttemptFailureHostStoreError, ManualAttemptFailureHostTransitionOutcome,
     OperatorReviewError, attempt_review_page, attest_external_reversal,
     fail_review_required_attempt, processor_charge_review_page,
+};
+pub use processor_charges::{
+    CompensatingProcessorChargeOutcome, ProcessorChargeObservationOutcome,
+    ProcessorChargeStoreError, observe_processor_charge_in_transaction,
+    store_compensating_processor_charge,
 };
 pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,

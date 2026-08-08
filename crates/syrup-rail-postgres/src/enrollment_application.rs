@@ -8,7 +8,8 @@ use syrup_rail::{
     GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent,
     GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId, PaymentAttempt,
     PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus, PaymentCardDisplay,
-    PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence, RecoverSubscriptionPayment,
+    PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorChargeProgression,
+    ProcessorChargeRole, ProcessorEvidence, RecoverSubscriptionPayment,
     ReplaceSubscriptionPaymentMethod, ResolvedGateway, SubscriberId, Subscription,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
@@ -28,6 +29,7 @@ use crate::{
         PaymentAttemptStoreError, find_payment_attempt_by_id_on_connection,
         lock_payment_attempt_by_id_on_connection,
     },
+    processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
 };
 
 const BILLING_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
@@ -81,6 +83,22 @@ pub enum SubscriptionEnrollmentApplicationError {
     SubmissionIdentityMismatch,
     #[error("{0}")]
     InvalidState(&'static str),
+}
+
+impl From<crate::processor_charges::ProcessorChargeStoreError>
+    for SubscriptionEnrollmentApplicationError
+{
+    fn from(error: crate::processor_charges::ProcessorChargeStoreError) -> Self {
+        match error {
+            crate::processor_charges::ProcessorChargeStoreError::Sql(error) => Self::Sql(error),
+            crate::processor_charges::ProcessorChargeStoreError::Attempt(error) => {
+                Self::Attempt(error)
+            }
+            crate::processor_charges::ProcessorChargeStoreError::InvalidState(message) => {
+                Self::InvalidState(message)
+            }
+        }
+    }
 }
 
 impl fmt::Debug for SubscriptionEnrollmentApplicationError {
@@ -1403,9 +1421,9 @@ async fn apply_payment_method_replacement_approved_on_connection(
         let subscription = load_applied_subscription(connection, &attempt).await?;
         let progression =
             if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
-                ChargeProgression::Applied
+                ProcessorChargeProgression::Applied
             } else {
-                ChargeProgression::ReconciliationRequired
+                ProcessorChargeProgression::ReconciliationRequired
             };
         observe_processor_charge(connection, &attempt, evidence, progression).await?;
         return Ok((
@@ -1423,7 +1441,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ChargeProgression::ReconciliationRequired,
+            ProcessorChargeProgression::ReconciliationRequired,
         )
         .await?;
         return Ok((
@@ -1435,9 +1453,13 @@ async fn apply_payment_method_replacement_approved_on_connection(
             None,
         ));
     }
-    let observation =
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Pending)
-            .await?;
+    let observation = observe_processor_charge(
+        connection,
+        &attempt,
+        evidence,
+        ProcessorChargeProgression::Pending,
+    )
+    .await?;
     let ObservedCharge::Owned(charge) = observation else {
         let parked = park_locked_attempt(
             connection,
@@ -1449,11 +1471,11 @@ async fn apply_payment_method_replacement_approved_on_connection(
         .await?;
         return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
     };
-    if charge.role == ChargeRole::Additional {
+    if charge.role == ProcessorChargeRole::Additional {
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ReconciliationRequired,
+            ProcessorChargeProgression::ReconciliationRequired,
             None,
         )
         .await?;
@@ -1495,7 +1517,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ReconciliationRequired,
+            ProcessorChargeProgression::ReconciliationRequired,
             Some(PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateSubscriptionIneligible),
         )
         .await?;
@@ -1526,7 +1548,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ReconciliationRequired,
+            ProcessorChargeProgression::ReconciliationRequired,
             Some(code),
         )
         .await?;
@@ -1587,7 +1609,13 @@ async fn apply_payment_method_replacement_approved_on_connection(
     )
     .await?;
     disable_payment_method_if_unreferenced(connection, expected.payment_method_id()).await?;
-    transition_charge(connection, charge.id, ChargeProgression::Applied, None).await?;
+    transition_charge(
+        connection,
+        charge.id,
+        ProcessorChargeProgression::Applied,
+        None,
+    )
+    .await?;
     let attempt = find_payment_attempt_by_id_on_connection(
         connection,
         identity.billing_scope_id(),
@@ -1724,8 +1752,13 @@ async fn apply_renewal_approved_on_connection(
             .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
                 INVALID_APPLICATION_STATE,
             ))?;
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Applied)
-            .await?;
+        observe_processor_charge(
+            connection,
+            &attempt,
+            evidence,
+            ProcessorChargeProgression::Applied,
+        )
+        .await?;
         return Ok((
             SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
             None,
@@ -1741,14 +1774,14 @@ async fn apply_renewal_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
         )
         .await?;
         if let ObservedCharge::Owned(charge) = observation {
             transition_charge(
                 connection,
                 charge.id,
-                ChargeProgression::ExternalReversalRequired,
+                ProcessorChargeProgression::ExternalReversalRequired,
                 None,
             )
             .await?;
@@ -1762,9 +1795,13 @@ async fn apply_renewal_approved_on_connection(
             None,
         ));
     }
-    let observation =
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Pending)
-            .await?;
+    let observation = observe_processor_charge(
+        connection,
+        &attempt,
+        evidence,
+        ProcessorChargeProgression::Pending,
+    )
+    .await?;
     let ObservedCharge::Owned(charge) = observation else {
         let parked = park_locked_attempt(
             connection,
@@ -1776,11 +1813,11 @@ async fn apply_renewal_approved_on_connection(
         .await?;
         return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
     };
-    if charge.role == ChargeRole::Additional {
+    if charge.role == ProcessorChargeRole::Additional {
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
             None,
         )
         .await?;
@@ -1798,7 +1835,7 @@ async fn apply_renewal_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
             Some(PaymentResolutionCode::SubscriptionApprovedRenewalStaleState),
         )
         .await?;
@@ -1860,7 +1897,13 @@ async fn apply_renewal_approved_on_connection(
         expected.payment_method_id(),
     )
     .await?;
-    transition_charge(connection, charge.id, ChargeProgression::Applied, None).await?;
+    transition_charge(
+        connection,
+        charge.id,
+        ProcessorChargeProgression::Applied,
+        None,
+    )
+    .await?;
     let attempt = find_payment_attempt_by_id_on_connection(
         connection,
         identity.billing_scope_id(),
@@ -1921,8 +1964,13 @@ async fn apply_recovery_approved_on_connection(
             .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
                 INVALID_APPLICATION_STATE,
             ))?;
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Applied)
-            .await?;
+        observe_processor_charge(
+            connection,
+            &attempt,
+            evidence,
+            ProcessorChargeProgression::Applied,
+        )
+        .await?;
         return Ok((
             SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
             None,
@@ -1938,14 +1986,14 @@ async fn apply_recovery_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
         )
         .await?;
         if let ObservedCharge::Owned(charge) = observation {
             transition_charge(
                 connection,
                 charge.id,
-                ChargeProgression::ExternalReversalRequired,
+                ProcessorChargeProgression::ExternalReversalRequired,
                 None,
             )
             .await?;
@@ -1960,9 +2008,13 @@ async fn apply_recovery_approved_on_connection(
         ));
     }
 
-    let observation =
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Pending)
-            .await?;
+    let observation = observe_processor_charge(
+        connection,
+        &attempt,
+        evidence,
+        ProcessorChargeProgression::Pending,
+    )
+    .await?;
     let ObservedCharge::Owned(charge) = observation else {
         let parked = park_locked_attempt(
             connection,
@@ -1974,11 +2026,11 @@ async fn apply_recovery_approved_on_connection(
         .await?;
         return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
     };
-    if charge.role == ChargeRole::Additional {
+    if charge.role == ProcessorChargeRole::Additional {
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
             None,
         )
         .await?;
@@ -1996,7 +2048,7 @@ async fn apply_recovery_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
             Some(PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState),
         )
         .await?;
@@ -2072,7 +2124,13 @@ async fn apply_recovery_approved_on_connection(
         method_id,
     )
     .await?;
-    transition_charge(connection, charge.id, ChargeProgression::Applied, None).await?;
+    transition_charge(
+        connection,
+        charge.id,
+        ProcessorChargeProgression::Applied,
+        None,
+    )
+    .await?;
 
     let attempt = find_payment_attempt_by_id_on_connection(
         connection,
@@ -2623,7 +2681,7 @@ async fn resolve_recovery_unknown_outcome(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
         }
@@ -2677,7 +2735,7 @@ async fn resolve_renewal_unknown_outcome(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
         }
@@ -2737,7 +2795,7 @@ async fn resolve_payment_method_replacement_unknown_outcome(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
         }
@@ -2891,7 +2949,7 @@ async fn try_park_payment_method_replacement_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Applied,
+            ProcessorChargeProgression::Applied,
         )
         .await?;
         attempt
@@ -2900,7 +2958,7 @@ async fn try_park_payment_method_replacement_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::ReconciliationRequired,
+            ProcessorChargeProgression::ReconciliationRequired,
         )
         .await?;
         attempt
@@ -2909,7 +2967,7 @@ async fn try_park_payment_method_replacement_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Pending,
+            ProcessorChargeProgression::Pending,
         )
         .await?;
         park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
@@ -2935,7 +2993,7 @@ async fn observe_payment_method_replacement_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
             transaction.commit().await?;
@@ -3114,16 +3172,16 @@ async fn try_park_recovery_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Applied,
+            ProcessorChargeProgression::Applied,
         )
         .await?;
         attempt
     } else if attempt.status().is_terminal() {
         let progression =
             if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
-                ChargeProgression::ExternalReversalRequired
+                ProcessorChargeProgression::ExternalReversalRequired
             } else {
-                ChargeProgression::ReconciliationRequired
+                ProcessorChargeProgression::ReconciliationRequired
             };
         observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
         attempt
@@ -3132,7 +3190,7 @@ async fn try_park_recovery_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Pending,
+            ProcessorChargeProgression::Pending,
         )
         .await?;
         park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
@@ -3162,16 +3220,16 @@ async fn try_park_renewal_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Applied,
+            ProcessorChargeProgression::Applied,
         )
         .await?;
         attempt
     } else if attempt.status().is_terminal() {
         let progression =
             if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
-                ChargeProgression::ExternalReversalRequired
+                ProcessorChargeProgression::ExternalReversalRequired
             } else {
-                ChargeProgression::ReconciliationRequired
+                ProcessorChargeProgression::ReconciliationRequired
             };
         observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
         attempt
@@ -3180,7 +3238,7 @@ async fn try_park_renewal_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Pending,
+            ProcessorChargeProgression::Pending,
         )
         .await?;
         park_locked_renewal_attempt(&mut transaction, &attempt, evidence, None, message).await?
@@ -3204,7 +3262,7 @@ async fn observe_renewal_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
             transaction.commit().await?;
@@ -3240,7 +3298,7 @@ async fn observe_recovery_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
             transaction.commit().await?;
@@ -3614,8 +3672,13 @@ async fn apply_approved_on_connection(
                 INVALID_APPLICATION_STATE,
             ));
         };
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Applied)
-            .await?;
+        observe_processor_charge(
+            connection,
+            &attempt,
+            evidence,
+            ProcessorChargeProgression::Applied,
+        )
+        .await?;
         return Ok((
             SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
             None,
@@ -3633,7 +3696,7 @@ async fn apply_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
         )
         .await?;
         let parked = park_locked_attempt(
@@ -3648,7 +3711,7 @@ async fn apply_approved_on_connection(
             transition_charge(
                 connection,
                 charge.id,
-                ChargeProgression::ExternalReversalRequired,
+                ProcessorChargeProgression::ExternalReversalRequired,
                 None,
             )
             .await?;
@@ -3656,9 +3719,13 @@ async fn apply_approved_on_connection(
         return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
     }
 
-    let observation =
-        observe_processor_charge(connection, &attempt, evidence, ChargeProgression::Pending)
-            .await?;
+    let observation = observe_processor_charge(
+        connection,
+        &attempt,
+        evidence,
+        ProcessorChargeProgression::Pending,
+    )
+    .await?;
     let ObservedCharge::Owned(charge) = observation else {
         let parked = park_locked_attempt(
             connection,
@@ -3670,11 +3737,11 @@ async fn apply_approved_on_connection(
         .await?;
         return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
     };
-    if charge.role == ChargeRole::Additional {
+    if charge.role == ProcessorChargeRole::Additional {
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
             None,
         )
         .await?;
@@ -3693,7 +3760,7 @@ async fn apply_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
             Some(PaymentResolutionCode::SubscriptionInitialCurrentSubscriptionConflict),
         )
         .await?;
@@ -3711,7 +3778,7 @@ async fn apply_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ChargeProgression::ExternalReversalRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
             Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict),
         )
         .await?;
@@ -3751,7 +3818,13 @@ async fn apply_approved_on_connection(
     .await?;
     apply_initial_discount(connection, &attempt, subscription_id, period_start_at).await?;
     mark_attempt_approved(connection, &attempt, evidence, subscription_id, method_id).await?;
-    transition_charge(connection, charge.id, ChargeProgression::Applied, None).await?;
+    transition_charge(
+        connection,
+        charge.id,
+        ProcessorChargeProgression::Applied,
+        None,
+    )
+    .await?;
 
     let attempt = find_payment_attempt_by_id_on_connection(
         connection,
@@ -3925,7 +3998,7 @@ async fn resolve_unknown_outcome(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
         }
@@ -4059,16 +4132,16 @@ async fn try_park_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Applied,
+            ProcessorChargeProgression::Applied,
         )
         .await?;
         attempt
     } else if attempt.status().is_terminal() {
         let progression =
             if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
-                ChargeProgression::ExternalReversalRequired
+                ProcessorChargeProgression::ExternalReversalRequired
             } else {
-                ChargeProgression::ReconciliationRequired
+                ProcessorChargeProgression::ReconciliationRequired
             };
         observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
         attempt
@@ -4077,7 +4150,7 @@ async fn try_park_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ChargeProgression::Pending,
+            ProcessorChargeProgression::Pending,
         )
         .await?;
         park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
@@ -4102,7 +4175,7 @@ async fn observe_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ChargeProgression::Pending,
+                ProcessorChargeProgression::Pending,
             )
             .await?;
             transaction.commit().await?;
@@ -4842,335 +4915,6 @@ async fn update_attempt_resolution(
     .bind(descriptor.card_exp_year())
     .bind(resolution_code.map(PaymentResolutionCode::as_str))
     .bind(allow_terminal_approval_race)
-    .execute(connection)
-    .await?;
-    if result.rows_affected() != 1 {
-        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-            INVALID_APPLICATION_STATE,
-        ));
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChargeRole {
-    Primary,
-    Additional,
-}
-
-impl ChargeRole {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Primary => "primary",
-            Self::Additional => "additional",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChargeProgression {
-    Pending,
-    ReconciliationRequired,
-    ExternalReversalRequired,
-    Applied,
-}
-
-impl ChargeProgression {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::ReconciliationRequired => "reconciliation_required",
-            Self::ExternalReversalRequired => "external_reversal_required",
-            Self::Applied => "applied",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ChargeRecord {
-    id: Uuid,
-    role: ChargeRole,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ObservedCharge {
-    Owned(ChargeRecord),
-    OwnedByOtherAttempt,
-}
-
-async fn observe_processor_charge(
-    connection: &mut PgConnection,
-    attempt: &PaymentAttempt,
-    evidence: &ProcessorEvidence,
-    initial_progression: ChargeProgression,
-) -> Result<ObservedCharge, SubscriptionEnrollmentApplicationError> {
-    let identity = attempt.identity();
-    let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
-    let has_existing_charge: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .fetch_one(&mut *connection)
-    .await?;
-    if let Some(transaction_id) = transaction_id {
-        if processor_charge_owned_by_other_attempt(connection, attempt, transaction_id).await? {
-            return Ok(ObservedCharge::OwnedByOtherAttempt);
-        }
-        if let Some(charge) =
-            identify_transactionless_charge(connection, attempt, evidence, transaction_id).await?
-        {
-            return Ok(ObservedCharge::Owned(charge));
-        }
-    }
-    let role = if has_existing_charge {
-        ChargeRole::Additional
-    } else {
-        ChargeRole::Primary
-    };
-    let descriptor = evidence.descriptor();
-    let inserted = sqlx::query_scalar::<_, Uuid>(
-        r#"
-        INSERT INTO billing_processor_charges (
-            id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
-            gateway_transaction_id, gateway_payment_method_reference,
-            gateway_response, gateway_response_code, gateway_response_text,
-            gateway_condition, payment_type, card_brand, card_last4,
-            card_exp_month, card_exp_year, charge_role, progression_state,
-            reconciliation_required_at, external_reversal_required_at, applied_at,
-            attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-            $14, $15, $16, $17, $18,
-            CASE WHEN $18 = 'reconciliation_required' THEN clock_timestamp() END,
-            CASE WHEN $18 = 'external_reversal_required' THEN clock_timestamp() END,
-            CASE WHEN $18 = 'applied' THEN clock_timestamp() END,
-            $19, $20, NULL, $21, $22
-        )
-        ON CONFLICT DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(Uuid::now_v7())
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(attempt.request().gateway_order_id().expose())
-    .bind(transaction_id)
-    .bind(
-        evidence
-            .payment_method_reference()
-            .map(|value| value.expose()),
-    )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .bind(role.as_str())
-    .bind(initial_progression.as_str())
-    .bind(attempt.kind().as_str())
-    .bind(attempt.request().target().plan_key().map(PlanKey::as_str))
-    .bind(attempt.request().amount().cents())
-    .bind(attempt.request().amount().currency().as_str())
-    .fetch_optional(&mut *connection)
-    .await?;
-    if let Some(id) = inserted {
-        return Ok(ObservedCharge::Owned(ChargeRecord { id, role }));
-    }
-
-    let row = sqlx::query(
-        r#"
-        SELECT id, charge_role,
-            gateway_payment_method_reference IS NOT DISTINCT FROM $3
-                AND gateway_response IS NOT DISTINCT FROM $4
-                AND gateway_response_code IS NOT DISTINCT FROM $5
-                AND gateway_response_text IS NOT DISTINCT FROM $6
-                AND gateway_condition IS NOT DISTINCT FROM $7
-                AND payment_type IS NOT DISTINCT FROM $8
-                AND card_brand IS NOT DISTINCT FROM $9
-                AND card_last4 IS NOT DISTINCT FROM $10
-                AND card_exp_month IS NOT DISTINCT FROM $11
-                AND card_exp_year IS NOT DISTINCT FROM $12 AS evidence_matches
-        FROM billing_processor_charges
-        WHERE attempt_id = $1
-            AND gateway_transaction_id IS NOT DISTINCT FROM $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(transaction_id)
-    .bind(
-        evidence
-            .payment_method_reference()
-            .map(|value| value.expose()),
-    )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .fetch_optional(&mut *connection)
-    .await?;
-    if let Some(row) = row {
-        if !row.try_get::<bool, _>("evidence_matches")? {
-            return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-                "processor charge replay evidence changed",
-            ));
-        }
-        let role = match row.try_get::<String, _>("charge_role")?.as_str() {
-            "primary" => ChargeRole::Primary,
-            "additional" => ChargeRole::Additional,
-            _ => {
-                return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-                    INVALID_APPLICATION_STATE,
-                ));
-            }
-        };
-        return Ok(ObservedCharge::Owned(ChargeRecord {
-            id: row.try_get("id")?,
-            role,
-        }));
-    }
-    if let Some(transaction_id) = transaction_id
-        && processor_charge_owned_by_other_attempt(connection, attempt, transaction_id).await?
-    {
-        return Ok(ObservedCharge::OwnedByOtherAttempt);
-    }
-    Err(SubscriptionEnrollmentApplicationError::InvalidState(
-        INVALID_APPLICATION_STATE,
-    ))
-}
-
-async fn processor_charge_owned_by_other_attempt(
-    connection: &mut PgConnection,
-    attempt: &PaymentAttempt,
-    transaction_id: &str,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1 FROM billing_processor_charges
-            WHERE gateway_account_id = $1 AND gateway_transaction_id = $2
-                AND attempt_id <> $3
-        )
-        "#,
-    )
-    .bind(attempt.identity().gateway_account_id().as_uuid())
-    .bind(transaction_id)
-    .bind(attempt.identity().attempt_id().as_uuid())
-    .fetch_one(connection)
-    .await
-}
-
-async fn identify_transactionless_charge(
-    connection: &mut PgConnection,
-    attempt: &PaymentAttempt,
-    evidence: &ProcessorEvidence,
-    transaction_id: &str,
-) -> Result<Option<ChargeRecord>, SubscriptionEnrollmentApplicationError> {
-    let descriptor = evidence.descriptor();
-    let row = sqlx::query(
-        r#"
-        SELECT id, charge_role,
-            gateway_payment_method_reference IS NOT DISTINCT FROM $2
-                AND gateway_response IS NOT DISTINCT FROM $3
-                AND gateway_response_code IS NOT DISTINCT FROM $4
-                AND gateway_response_text IS NOT DISTINCT FROM $5
-                AND gateway_condition IS NOT DISTINCT FROM $6
-                AND payment_type IS NOT DISTINCT FROM $7
-                AND card_brand IS NOT DISTINCT FROM $8
-                AND card_last4 IS NOT DISTINCT FROM $9
-                AND card_exp_month IS NOT DISTINCT FROM $10
-                AND card_exp_year IS NOT DISTINCT FROM $11 AS evidence_matches
-        FROM billing_processor_charges
-        WHERE attempt_id = $1
-            AND billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL
-        FOR UPDATE
-        "#,
-    )
-    .bind(attempt.identity().attempt_id().as_uuid())
-    .bind(
-        evidence
-            .payment_method_reference()
-            .map(|value| value.expose()),
-    )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .fetch_optional(&mut *connection)
-    .await?;
-    let Some(row) = row else {
-        return Ok(None);
-    };
-    if !row.try_get::<bool, _>("evidence_matches")? {
-        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-            "processor charge identification changed immutable evidence",
-        ));
-    }
-    let charge_id: Uuid = row.try_get("id")?;
-    sqlx::query(
-        "UPDATE billing_processor_charges SET gateway_transaction_id = $2, updated_at = clock_timestamp() WHERE id = $1",
-    )
-    .bind(charge_id)
-    .bind(transaction_id)
-    .execute(connection)
-    .await?;
-    let role = match row.try_get::<String, _>("charge_role")?.as_str() {
-        "primary" => ChargeRole::Primary,
-        "additional" => ChargeRole::Additional,
-        _ => {
-            return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-                INVALID_APPLICATION_STATE,
-            ));
-        }
-    };
-    Ok(Some(ChargeRecord {
-        id: charge_id,
-        role,
-    }))
-}
-
-async fn transition_charge(
-    connection: &mut PgConnection,
-    charge_id: Uuid,
-    progression: ChargeProgression,
-    resolution_code: Option<PaymentResolutionCode>,
-) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let result = sqlx::query(
-        r#"
-        UPDATE billing_processor_charges
-        SET progression_state = $2, state_code = COALESCE(state_code, $3),
-            reconciliation_required_at = CASE WHEN $2 = 'reconciliation_required'
-                THEN COALESCE(reconciliation_required_at, clock_timestamp())
-                ELSE reconciliation_required_at END,
-            external_reversal_required_at = CASE WHEN $2 = 'external_reversal_required'
-                THEN COALESCE(external_reversal_required_at, clock_timestamp())
-                ELSE external_reversal_required_at END,
-            applied_at = CASE WHEN $2 = 'applied'
-                THEN COALESCE(applied_at, clock_timestamp()) ELSE applied_at END,
-            updated_at = clock_timestamp()
-        WHERE id = $1
-            AND progression_state IN ('pending', 'reconciliation_required',
-                'external_reversal_required', 'applied')
-        "#,
-    )
-    .bind(charge_id)
-    .bind(progression.as_str())
-    .bind(resolution_code.map(PaymentResolutionCode::as_str))
     .execute(connection)
     .await?;
     if result.rows_affected() != 1 {
