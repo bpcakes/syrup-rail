@@ -468,14 +468,18 @@ fn host_charge_attempt_matches_command(
     snapshot: Option<HostChargeTargetSnapshot>,
 ) -> bool {
     let identity = attempt.identity();
+    let request = attempt.request();
+    let canonical_fingerprint =
+        PaymentAttemptFingerprint::for_host_charge(command.target_id(), request.amount());
     attempt.kind() == PaymentAttemptKind::HostCharge
         && identity.billing_scope_id() == command.billing_scope_id()
         && identity.subscriber_id() == command.subscriber_id()
         && identity.gateway_configuration_id() == command.gateway_configuration_id()
-        && attempt.request().target().host_charge_target_id() == Some(command.target_id())
+        && request.target().host_charge_target_id() == Some(command.target_id())
+        && request.fingerprint() == &canonical_fingerprint
         && snapshot.is_none_or(|snapshot| {
-            attempt.request().amount() == snapshot.charge().money()
-                && attempt.request().fingerprint()
+            request.amount() == snapshot.charge().money()
+                && request.fingerprint()
                     == &PaymentAttemptFingerprint::for_host_charge(
                         command.target_id(),
                         snapshot.charge().money(),
