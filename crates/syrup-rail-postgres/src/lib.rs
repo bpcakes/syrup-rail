@@ -13,6 +13,7 @@ mod enrollment_application;
 mod entitlement;
 mod gateway_accounts;
 mod grants;
+mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
 mod reconciliation;
 mod renewal;
@@ -65,6 +66,12 @@ pub use entitlement::{
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
 pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
+};
+pub use lifecycle_quarantine::{
+    GatewayLifecycleQuarantineAlert, GatewayLifecycleQuarantineResolutionOutcome,
+    GatewayLifecycleQuarantineResolutionRecord, GatewayLifecycleQuarantineReviewRecord,
+    claim_gateway_lifecycle_quarantine_alert, gateway_lifecycle_quarantine_review_page,
+    resolve_gateway_lifecycle_quarantine,
 };
 pub use lifecycle_reconciliation::{
     GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError,

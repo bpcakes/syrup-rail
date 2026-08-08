@@ -37,6 +37,9 @@ and transaction orchestration.
   and mutable billing-data scrubbing.
 - `src/reconciliation.rs` — complete deterministic registered-account
   reconciliation candidate selection and bounded local account phases.
+- `src/lifecycle_reconciliation.rs` and `src/lifecycle_quarantine.rs` — report
+  lifecycle application, pending evidence, quarantine alert cadence, and
+  operator incident review/resolution.
 
 ## Edit here for X
 
@@ -81,6 +84,9 @@ and transaction orchestration.
   plan-key identity and aggregate locks, keep the fixed per-account envelopes,
   and keep host configuration filtering and queue encoding outside the shared
   operations.
+- Change report lifecycle persistence or operator quarantine review in
+  `src/lifecycle_reconciliation.rs` and `src/lifecycle_quarantine.rs`; keep host
+  alert transport, authorization, cursor encoding, and admin presentation out.
 
 ## Invariants
 

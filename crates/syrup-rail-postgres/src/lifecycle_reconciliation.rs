@@ -1203,7 +1203,7 @@ async fn actionable_pending(
     Ok(pending)
 }
 
-async fn ensure_account(
+pub(crate) async fn ensure_account(
     transaction: &mut Transaction<'_, Postgres>,
     account: &GatewayLifecycleAccount,
 ) -> Result<(), GatewayLifecycleReconciliationError> {
@@ -1231,7 +1231,9 @@ async fn ensure_account(
     }
 }
 
-async fn set_timeouts(transaction: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+pub(crate) async fn set_timeouts(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
     )

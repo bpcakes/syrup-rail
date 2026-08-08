@@ -579,6 +579,48 @@ impl GatewayLifecycleQuarantineReason {
     }
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct GatewayLifecycleQuarantineResolutionReason(String);
+
+impl GatewayLifecycleQuarantineResolutionReason {
+    pub fn new(
+        value: impl Into<String>,
+    ) -> Result<Self, GatewayLifecycleQuarantineResolutionReasonError> {
+        let value = value.into();
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(GatewayLifecycleQuarantineResolutionReasonError::Empty);
+        }
+        if value.chars().count() > 500 {
+            return Err(GatewayLifecycleQuarantineResolutionReasonError::TooLong);
+        }
+        if crate::string_contains_raw_card_data(value) {
+            return Err(GatewayLifecycleQuarantineResolutionReasonError::ContainsRawCardData);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for GatewayLifecycleQuarantineResolutionReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GatewayLifecycleQuarantineResolutionReason([redacted])")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum GatewayLifecycleQuarantineResolutionReasonError {
+    #[error("gateway lifecycle quarantine resolution reason is empty")]
+    Empty,
+    #[error("gateway lifecycle quarantine resolution reason exceeds 500 characters")]
+    TooLong,
+    #[error("gateway lifecycle quarantine resolution reason contains raw payment card data")]
+    ContainsRawCardData,
+}
+
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum GatewayLifecycleQuarantineError {
     #[error("gateway lifecycle quarantine requires a locator unless the report is malformed")]
@@ -1037,6 +1079,26 @@ mod tests {
         assert_eq!(
             GatewayTransactionId::from_correlation("bad selector"),
             Err(GatewayReferenceValueError::UnsupportedCorrelationCharacter)
+        );
+    }
+
+    #[test]
+    fn quarantine_resolution_reason_is_normalized_bounded_and_card_safe() {
+        let reason =
+            GatewayLifecycleQuarantineResolutionReason::new("  reviewed evidence  ").unwrap();
+        assert_eq!(reason.expose(), "reviewed evidence");
+        assert!(!format!("{reason:?}").contains("reviewed evidence"));
+        assert_eq!(
+            GatewayLifecycleQuarantineResolutionReason::new("   "),
+            Err(GatewayLifecycleQuarantineResolutionReasonError::Empty)
+        );
+        assert_eq!(
+            GatewayLifecycleQuarantineResolutionReason::new("x".repeat(501)),
+            Err(GatewayLifecycleQuarantineResolutionReasonError::TooLong)
+        );
+        assert_eq!(
+            GatewayLifecycleQuarantineResolutionReason::new("card 4111111111111111"),
+            Err(GatewayLifecycleQuarantineResolutionReasonError::ContainsRawCardData)
         );
     }
 
