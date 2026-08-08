@@ -13,6 +13,7 @@ mod enrollment_application;
 mod entitlement;
 mod gateway_accounts;
 mod grants;
+mod lifecycle_reconciliation;
 mod reconciliation;
 mod renewal;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -64,6 +65,13 @@ pub use entitlement::{
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
 pub use grants::{
     SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
+};
+pub use lifecycle_reconciliation::{
+    GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError,
+    GatewayLifecycleReconciliationSummary, HostChargeReversal, HostChargeTargetStore,
+    HostChargeTargetStoreError, HostChargeTargetTransitionOutcome,
+    apply_staged_gateway_lifecycle_evidence, gateway_lifecycle_reconciliation_start,
+    reconcile_gateway_transaction_reports, save_gateway_lifecycle_reconciliation_cursor,
 };
 pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,
