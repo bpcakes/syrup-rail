@@ -113,9 +113,16 @@ impl From<&GatewayLifecycleEvidence> for StoredEvidence {
             action: evidence
                 .action()
                 .map(|diagnostic| diagnostic.expose().to_owned()),
-            effective_at: evidence.effective_at().copied(),
+            effective_at: evidence
+                .effective_at()
+                .copied()
+                .map(postgres_timestamp_precision),
         }
     }
+}
+
+fn postgres_timestamp_precision(value: DateTime<Utc>) -> DateTime<Utc> {
+    value - chrono::Duration::nanoseconds(i64::from(value.timestamp_subsec_nanos() % 1_000))
 }
 
 #[derive(Debug)]
@@ -1470,7 +1477,7 @@ mod tests {
         .await?;
         assert_eq!(target.0, "reversed");
         assert_eq!(target.1, "refunded");
-        assert_eq!(target.2, refunded_at);
+        assert_eq!(target.2, postgres_timestamp_precision(refunded_at));
 
         let cursor_key = GatewayLifecycleCursorKey::new("approved_lifecycle")?;
         let initial =
@@ -1488,7 +1495,7 @@ mod tests {
         .await?;
         assert_eq!(
             gateway_lifecycle_reconciliation_start(&database.pool, &account, &cursor_key).await?,
-            Some(later)
+            Some(postgres_timestamp_precision(later))
         );
 
         let wrong_provider = lifecycle_account(fixture, "other");

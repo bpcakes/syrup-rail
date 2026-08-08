@@ -5733,7 +5733,7 @@ mod tests {
             .subscription()
             .expect("approved enrollment creates subscription")
             .id();
-        let period_start_at = Utc::now() - ChronoDuration::hours(1);
+        let requested_period_start_at = Utc::now() - ChronoDuration::hours(1);
         sqlx::query(
             r#"
             UPDATE billing_subscriptions
@@ -5744,9 +5744,14 @@ mod tests {
             "#,
         )
         .bind(subscription_id.as_uuid())
-        .bind(period_start_at)
+        .bind(requested_period_start_at)
         .execute(&fixture.database.pool)
         .await?;
+        let period_start_at: DateTime<Utc> =
+            sqlx::query_scalar("SELECT next_renewal_at FROM billing_subscriptions WHERE id = $1")
+                .bind(subscription_id.as_uuid())
+                .fetch_one(&fixture.database.pool)
+                .await?;
 
         let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
             "txn_renewal_recurring",

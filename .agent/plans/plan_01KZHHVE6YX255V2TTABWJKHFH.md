@@ -1,0 +1,1 @@
+Fix the two preexisting timestamp precision regressions, then implement the three prioritized Fowler refactorings in dependency order: typed locked-state reconstruction, billing orchestration phase extraction, and durable outcome application consolidation. Preserve behavior and commit each independently green slice.
