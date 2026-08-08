@@ -206,7 +206,7 @@ pub async fn attest_external_reversal(
         r#"
         UPDATE billing_processor_charges
         SET progression_state = 'externally_reversed',
-            state_code = COALESCE(state_code, $2),
+            state_code = $2,
             externally_reversed_at = COALESCE(externally_reversed_at, clock_timestamp()),
             updated_at = clock_timestamp()
         WHERE id = $1 AND progression_state = 'external_reversal_required'
@@ -915,6 +915,114 @@ mod tests {
             "SELECT COUNT(*)::bigint, MIN(progression_state) FROM billing_processor_charges WHERE id = $1",
         ).bind(charge_id).fetch_one(&database.pool).await?;
         assert_eq!(counts, (1, "externally_reversed".to_owned()));
+
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("rail_op_grant").await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let attempt_id = Uuid::now_v7();
+        let charge_id = Uuid::now_v7();
+        let subscriber_id = Uuid::now_v7();
+        let order_id = format!("subscription_{}", attempt_id.simple());
+        sqlx::query(
+            r#"
+            INSERT INTO billing_payment_attempts (
+                id, billing_scope_id, subscriber_id, plan_key,
+                attempt_kind, status, idempotency_key, request_fingerprint,
+                amount_cents, currency, gateway_account_id,
+                gateway_configuration_id, gateway_order_id,
+                gateway_transaction_id, gateway_response, gateway_response_code,
+                gateway_response_text, gateway_condition, resolution_code,
+                submitted_at, review_required_at
+            ) VALUES (
+                $1, $2, $3, 'base', 'subscription_initial', 'review_required',
+                $4, $5, 500, 'USD', $6, $7, $8, 'txn-grant-conflict',
+                '1', '100', 'Approved', 'complete',
+                'subscription_initial_current_grant_conflict',
+                clock_timestamp(), clock_timestamp()
+            )
+            "#,
+        )
+        .bind(attempt_id)
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(format!("idem-{attempt_id}"))
+        .bind(format!("fingerprint-{attempt_id}"))
+        .bind(account.gateway_account_id)
+        .bind(account.gateway_configuration_id)
+        .bind(&order_id)
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO billing_processor_charges (
+                id, attempt_id, billing_scope_id, gateway_account_id,
+                gateway_order_id, gateway_transaction_id, gateway_response,
+                gateway_response_code, gateway_response_text, gateway_condition,
+                charge_role, progression_state, state_code, observed_at,
+                attempt_kind, plan_key, amount_cents, currency,
+                external_reversal_required_at
+            ) VALUES (
+                $1, $2, $3, $4, $5, 'txn-grant-conflict', '1', '100',
+                'Approved', 'complete', 'primary', 'external_reversal_required',
+                'processor_charge_external_reversal_required', clock_timestamp(),
+                'subscription_initial', 'base', 500, 'USD', clock_timestamp()
+            )
+            "#,
+        )
+        .bind(charge_id)
+        .bind(attempt_id)
+        .bind(account.billing_scope_id)
+        .bind(account.gateway_account_id)
+        .bind(&order_id)
+        .execute(&database.pool)
+        .await?;
+
+        let host = ExactHostRelease::default();
+        let actor = ActorId::new(Uuid::now_v7());
+        let reason = ExternalReversalReason::new("processor refund verified")?;
+        let transaction_id = GatewayTransactionId::new("txn-grant-conflict")?;
+        let attested = attest_external_reversal(
+            &database.pool,
+            &host,
+            ProcessorChargeId::new(charge_id),
+            actor,
+            ExternalReversalKind::Refund,
+            &transaction_id,
+            &reason,
+        )
+        .await?;
+        assert!(matches!(
+            attested,
+            ExternalReversalAttestationOutcome::Attested { .. }
+        ));
+        let state_code: String =
+            sqlx::query_scalar("SELECT state_code FROM billing_processor_charges WHERE id = $1")
+                .bind(charge_id)
+                .fetch_one(&database.pool)
+                .await?;
+        assert_eq!(
+            state_code,
+            PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict.as_str()
+        );
+        assert!(matches!(
+            attest_external_reversal(
+                &database.pool,
+                &host,
+                ProcessorChargeId::new(charge_id),
+                actor,
+                ExternalReversalKind::Refund,
+                &transaction_id,
+                &reason,
+            )
+            .await?,
+            ExternalReversalAttestationOutcome::Replayed { .. }
+        ));
 
         database.cleanup().await?;
         Ok(())
