@@ -253,7 +253,13 @@ pub async fn preflight_host_charge_in_transaction(
             );
         }
         HostChargeReservationDecision::Rejected { reason } => {
-            return Ok(HostChargePreflightOutcome::Rejected { reason });
+            return Ok(match existing {
+                Some(existing) if host_charge_attempt_matches_command(&existing, command, None) => {
+                    HostChargePreflightOutcome::Replay(Box::new(existing))
+                }
+                Some(_) => HostChargePreflightOutcome::IdempotencyConflict,
+                None => HostChargePreflightOutcome::Rejected { reason },
+            });
         }
     };
     let Some(existing) = existing else {

@@ -174,6 +174,7 @@ pub async fn submit_admitted_host_charge(
         .map(HostChargeProviderResult::Payment),
         Err(GatewayMutationError::NotSubmitted(error)) => {
             let evidence = mutation_error_evidence(error.detail());
+            let release_target = !matches!(error, GatewayNotSubmittedError::RateLimited(_));
             let payment = resolve_host_charge_non_approved(
                 pool,
                 targets,
@@ -182,17 +183,25 @@ pub async fn submit_admitted_host_charge(
                 PaymentAttemptStatus::Failed,
                 Some(not_submitted_resolution_code(&error)),
                 OutcomeResolutionBoundary::AdmittedNotSubmitted,
-                true,
+                release_target,
                 false,
             )
             .await?;
             Ok(HostChargeProviderResult::NotSubmitted { payment, error })
         }
-        Err(GatewayMutationError::RateLimitedIndeterminate(detail))
-        | Err(GatewayMutationError::Indeterminate(detail)) => resolve_host_charge_unknown(
+        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => resolve_host_charge_unknown(
             pool,
             &admission.reservation,
             &mutation_error_evidence(&detail),
+            true,
+        )
+        .await
+        .map(HostChargeProviderResult::Payment),
+        Err(GatewayMutationError::Indeterminate(detail)) => resolve_host_charge_unknown(
+            pool,
+            &admission.reservation,
+            &mutation_error_evidence(&detail),
+            false,
         )
         .await
         .map(HostChargeProviderResult::Payment),
@@ -274,7 +283,7 @@ pub async fn apply_host_charge_gateway_outcome(
             .await
         }
         GatewayPaymentStatus::Unknown => {
-            resolve_host_charge_unknown(pool, reservation, outcome.evidence()).await
+            resolve_host_charge_unknown(pool, reservation, outcome.evidence(), false).await
         }
     }
 }
@@ -312,13 +321,22 @@ pub(crate) async fn resolve_host_charge_before_submission(
     admitted_not_submitted: bool,
     extend_provider_cooldown: bool,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
+    let condition = if matches!(
+        resolution_code,
+        PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission
+            | PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
+    ) {
+        None
+    } else {
+        Some(syrup_rail::GatewayDiagnostic::new("failed"))
+    };
     let evidence = ProcessorEvidence::new(
         None,
         None,
         None,
         None,
         Some(detail),
-        Some(syrup_rail::GatewayDiagnostic::new("failed")),
+        condition,
         syrup_rail::GatewayPaymentDescriptor::default(),
     );
     resolve_host_charge_non_approved(
@@ -389,10 +407,9 @@ async fn apply_host_charge_approved(
         return Ok(HostChargePaymentResult::new(attempt));
     }
     if attempt.status().is_terminal() {
-        let _ = transaction.rollback().await;
-        return Err(HostChargeApplicationError::InvalidState(
-            "an approved host charge raced with a terminal attempt",
-        ));
+        transaction.rollback().await?;
+        return observe_terminal_host_charge_approval(coordinator, reservation, &attempt, evidence)
+            .await;
     }
     let observation = observe_processor_charge(
         connection,
@@ -478,6 +495,50 @@ async fn apply_host_charge_approved(
             ))
         }
     }
+}
+
+async fn observe_terminal_host_charge_approval(
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &HostChargeReservation,
+    terminal_attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
+    let identity = reservation.identity();
+    let mut transaction = coordinator
+        .begin(
+            BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id()),
+            BILLING_LOCK_TIMEOUT,
+        )
+        .await?;
+    let connection = transaction.connection();
+    set_application_timeouts(connection).await?;
+    if matches!(
+        observe_processor_charge(
+            connection,
+            terminal_attempt,
+            evidence,
+            ProcessorChargeProgression::Pending,
+        )
+        .await?,
+        ObservedCharge::OwnedByOtherAttempt
+    ) {
+        let _ = transaction.rollback().await;
+        return Err(HostChargeApplicationError::InvalidState(
+            "the approved gateway transaction belongs to another payment attempt",
+        ));
+    }
+    let locked = lock_expected_host_charge(connection, reservation).await?;
+    if !locked.status().is_terminal() || locked.status() == PaymentAttemptStatus::Approved {
+        let _ = transaction.rollback().await;
+        return Err(HostChargeApplicationError::InvalidState(
+            INVALID_HOST_CHARGE_STATE,
+        ));
+    }
+    transaction.commit().await?;
+    Ok(HostChargePaymentResult::confirmation_pending(
+        locked,
+        evidence.clone(),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -620,6 +681,7 @@ async fn resolve_host_charge_unknown(
     pool: &PgPool,
     reservation: &HostChargeReservation,
     evidence: &ProcessorEvidence,
+    extend_provider_cooldown: bool,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
     let identity = reservation.identity();
     let mut transaction = pool.begin().await?;
@@ -647,6 +709,9 @@ async fn resolve_host_charge_unknown(
             .await?;
         }
     }
+    if extend_provider_cooldown {
+        extend_host_charge_provider_cooldown(&mut transaction, reservation).await?;
+    }
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,
         identity.billing_scope_id(),
@@ -658,6 +723,39 @@ async fn resolve_host_charge_unknown(
     ))?;
     transaction.commit().await?;
     Ok(HostChargePaymentResult::new(attempt))
+}
+
+async fn extend_host_charge_provider_cooldown(
+    connection: &mut PgConnection,
+    reservation: &HostChargeReservation,
+) -> Result<(), HostChargeApplicationError> {
+    let updated = sqlx::query(
+        r#"
+        UPDATE billing_gateway_provider_rate_limits
+        SET rate_limited_until = GREATEST(
+            rate_limited_until,
+            clock_timestamp() + make_interval(secs => $4)
+        )
+        WHERE provider_key = (
+            SELECT provider_key
+            FROM billing_gateway_accounts
+            WHERE id = $1 AND billing_scope_id = $2
+                AND gateway_configuration_id = $3
+        )
+        "#,
+    )
+    .bind(reservation.identity().gateway_account_id().as_uuid())
+    .bind(reservation.identity().billing_scope_id().as_uuid())
+    .bind(reservation.identity().gateway_configuration_id().as_uuid())
+    .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
+    .execute(connection)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(HostChargeApplicationError::InvalidState(
+            INVALID_HOST_CHARGE_STATE,
+        ));
+    }
+    Ok(())
 }
 
 async fn park_host_charge_approved(
@@ -1734,7 +1832,8 @@ mod tests {
                 ))
                 .await?;
 
-            assert_eq!(payment.status(), PaymentAttemptStatus::ReviewRequired);
+            assert_eq!(payment.status(), PaymentAttemptStatus::Unknown);
+            assert_eq!(payment.attempt().status(), PaymentAttemptStatus::Failed);
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             assert!(events.lock().await.is_empty());
             let target_status: String =
@@ -1749,7 +1848,7 @@ mod tests {
             .bind(payment.attempt().identity().attempt_id().as_uuid())
             .fetch_one(&database.pool)
             .await?;
-            assert_eq!(charge_state, "external_reversal_required");
+            assert_eq!(charge_state, "pending");
             Ok::<_, Box<dyn Error>>(())
         }
         .await;

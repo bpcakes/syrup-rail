@@ -431,7 +431,13 @@ impl SubscriptionBillingService {
 
         if let Some(scope) = self.active_cooldown(&account).await? {
             return self
-                .resolve_host_charge_cooldown(targets, &reservation, scope, false)
+                .resolve_host_charge_cooldown(
+                    targets,
+                    &reservation,
+                    &account.provider_key,
+                    scope,
+                    false,
+                )
                 .await;
         }
         match gateway.account_mode().await {
@@ -486,7 +492,13 @@ impl SubscriptionBillingService {
             };
         if let Some(scope) = self.active_cooldown(&account).await? {
             return self
-                .resolve_host_charge_cooldown(targets, &reservation, scope, true)
+                .resolve_host_charge_cooldown(
+                    targets,
+                    &reservation,
+                    &account.provider_key,
+                    scope,
+                    true,
+                )
                 .await;
         }
         match submit_admitted_host_charge(
@@ -1432,16 +1444,18 @@ impl SubscriptionBillingService {
         &self,
         targets: &dyn HostChargeTargetStore,
         reservation: &HostChargeReservation,
+        provider_key: &GatewayProviderKey,
         scope: GatewayMutationCooldownScope,
         admitted_not_submitted: bool,
     ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
+        let provider_name = provider_key.as_str().to_ascii_uppercase();
         let detail = match scope {
-            GatewayMutationCooldownScope::Account => {
-                GatewayDiagnostic::new("gateway account mutation cooldown is active")
-            }
-            GatewayMutationCooldownScope::Provider => {
-                GatewayDiagnostic::new("gateway provider cooldown is active")
-            }
+            GatewayMutationCooldownScope::Account => GatewayDiagnostic::new(&format!(
+                "{provider_name} account mutation cooldown is active."
+            )),
+            GatewayMutationCooldownScope::Provider => GatewayDiagnostic::new(&format!(
+                "{provider_name} system provider cooldown is active."
+            )),
         };
         self.resolve_host_charge_cooldown_with_detail(
             targets,
