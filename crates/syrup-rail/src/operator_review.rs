@@ -5,9 +5,91 @@ use thiserror::Error;
 
 use crate::{
     ActorId, BillingScopeId, ChargeAmount, GatewayAccountId, GatewayConfigurationId,
-    GatewayOrderId, GatewayTransactionId, HostChargeTargetId, PaymentAttemptId, PaymentAttemptKind,
-    PaymentResolutionCode, ProcessorChargeId, ProcessorEvidence, SubscriberId,
+    GatewayOrderId, GatewayTransactionId, HostChargeTargetId, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptKind, PaymentResolutionCode, ProcessorChargeId, ProcessorEvidence, SubscriberId,
 };
+
+pub const OPERATOR_REVIEW_PAGE_LIMIT: i64 = 100;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperatorReviewPageLimit(i64);
+
+impl OperatorReviewPageLimit {
+    pub fn new(value: i64) -> Result<Self, OperatorReviewPageLimitError> {
+        if !(1..=OPERATOR_REVIEW_PAGE_LIMIT).contains(&value) {
+            return Err(OperatorReviewPageLimitError);
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn get(self) -> i64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("operator review page limit must be between 1 and 100")]
+pub struct OperatorReviewPageLimitError;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AttemptReviewCursor {
+    reviewed_at: DateTime<Utc>,
+    attempt_id: PaymentAttemptId,
+}
+
+impl AttemptReviewCursor {
+    pub const fn new(reviewed_at: DateTime<Utc>, attempt_id: PaymentAttemptId) -> Self {
+        Self {
+            reviewed_at,
+            attempt_id,
+        }
+    }
+    pub const fn reviewed_at(self) -> DateTime<Utc> {
+        self.reviewed_at
+    }
+    pub const fn attempt_id(self) -> PaymentAttemptId {
+        self.attempt_id
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptReviewPage {
+    items: Vec<PaymentAttempt>,
+    next_cursor: Option<AttemptReviewCursor>,
+}
+
+impl AttemptReviewPage {
+    pub fn new(items: Vec<PaymentAttempt>, next_cursor: Option<AttemptReviewCursor>) -> Self {
+        Self { items, next_cursor }
+    }
+    pub fn into_items(self) -> Vec<PaymentAttempt> {
+        self.items
+    }
+    pub const fn next_cursor(&self) -> Option<AttemptReviewCursor> {
+        self.next_cursor
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessorChargeReviewCursor {
+    reviewed_at: DateTime<Utc>,
+    processor_charge_id: ProcessorChargeId,
+}
+
+impl ProcessorChargeReviewCursor {
+    pub const fn new(reviewed_at: DateTime<Utc>, processor_charge_id: ProcessorChargeId) -> Self {
+        Self {
+            reviewed_at,
+            processor_charge_id,
+        }
+    }
+    pub const fn reviewed_at(self) -> DateTime<Utc> {
+        self.reviewed_at
+    }
+    pub const fn processor_charge_id(self) -> ProcessorChargeId {
+        self.processor_charge_id
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExternalReversalKind {
@@ -210,6 +292,64 @@ impl ProcessorCharge {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessorChargeReviewItem {
+    attempt: PaymentAttempt,
+    charge: ProcessorCharge,
+    external_reversal_required_at: DateTime<Utc>,
+}
+
+impl ProcessorChargeReviewItem {
+    pub const fn new(
+        attempt: PaymentAttempt,
+        charge: ProcessorCharge,
+        external_reversal_required_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            attempt,
+            charge,
+            external_reversal_required_at,
+        }
+    }
+    pub const fn attempt(&self) -> &PaymentAttempt {
+        &self.attempt
+    }
+    pub const fn charge(&self) -> &ProcessorCharge {
+        &self.charge
+    }
+    pub const fn external_reversal_required_at(&self) -> DateTime<Utc> {
+        self.external_reversal_required_at
+    }
+    pub fn into_parts(self) -> (PaymentAttempt, ProcessorCharge, DateTime<Utc>) {
+        (
+            self.attempt,
+            self.charge,
+            self.external_reversal_required_at,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessorChargeReviewPage {
+    items: Vec<ProcessorChargeReviewItem>,
+    next_cursor: Option<ProcessorChargeReviewCursor>,
+}
+
+impl ProcessorChargeReviewPage {
+    pub fn new(
+        items: Vec<ProcessorChargeReviewItem>,
+        next_cursor: Option<ProcessorChargeReviewCursor>,
+    ) -> Self {
+        Self { items, next_cursor }
+    }
+    pub fn into_items(self) -> Vec<ProcessorChargeReviewItem> {
+        self.items
+    }
+    pub const fn next_cursor(&self) -> Option<ProcessorChargeReviewCursor> {
+        self.next_cursor
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalReversalAttestation {
     processor_charge_id: ProcessorChargeId,
     attempt_id: PaymentAttemptId,
@@ -377,6 +517,25 @@ mod tests {
         assert_eq!(
             ProcessorChargeStateCode::ZeroAmountAdditionalApprovedCharge.as_str(),
             "zero_amount_additional_approved_charge"
+        );
+    }
+
+    #[test]
+    fn operator_review_page_limit_is_closed_and_bounded() {
+        assert_eq!(OperatorReviewPageLimit::new(1).unwrap().get(), 1);
+        assert_eq!(
+            OperatorReviewPageLimit::new(OPERATOR_REVIEW_PAGE_LIMIT)
+                .unwrap()
+                .get(),
+            OPERATOR_REVIEW_PAGE_LIMIT
+        );
+        assert_eq!(
+            OperatorReviewPageLimit::new(0),
+            Err(OperatorReviewPageLimitError)
+        );
+        assert_eq!(
+            OperatorReviewPageLimit::new(OPERATOR_REVIEW_PAGE_LIMIT + 1),
+            Err(OperatorReviewPageLimitError)
         );
     }
 }
