@@ -130,6 +130,40 @@ impl PaymentAttemptFingerprint {
         )
     }
 
+    /// Builds the canonical fingerprint for an automatic charge of one exact
+    /// subscription period. Attempt sequencing is deliberately absent: it is
+    /// reservation identity, not part of the charged economic snapshot.
+    pub fn for_subscription_renewal(
+        plan_key: &PlanKey,
+        subscription_id: SubscriptionId,
+        payment_method_id: PaymentMethodId,
+        period_start_at: DateTime<Utc>,
+        amount: Money,
+    ) -> Self {
+        Self(format!(
+            "subscription_renewal:{plan_key}:{subscription_id}:{payment_method_id}:{period_start_at}:{}:{}",
+            amount.cents(),
+            amount.currency().as_str(),
+        ))
+    }
+
+    pub fn matches_subscription_renewal(
+        &self,
+        plan_key: &PlanKey,
+        subscription_id: SubscriptionId,
+        payment_method_id: PaymentMethodId,
+        period_start_at: DateTime<Utc>,
+        amount: Money,
+    ) -> bool {
+        self == &Self::for_subscription_renewal(
+            plan_key,
+            subscription_id,
+            payment_method_id,
+            period_start_at,
+            amount,
+        )
+    }
+
     /// Builds the canonical fingerprint for replacing one subscription's
     /// stored payment method against its exact current payment baseline.
     pub fn for_subscription_payment_method_update(
