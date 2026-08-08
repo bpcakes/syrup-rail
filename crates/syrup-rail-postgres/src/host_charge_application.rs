@@ -21,9 +21,9 @@ use crate::{
         lock_payment_attempt_by_id_on_connection,
     },
     enrollment_application::{
-        OutcomeResolutionBoundary, SubscriptionEnrollmentApplicationError, mutation_error_evidence,
-        not_submitted_resolution_code, park_locked_attempt, set_application_timeouts,
-        update_attempt_resolution,
+        OutcomeResolutionBoundary, RateLimitCooldown, SubscriptionEnrollmentApplicationError,
+        mutation_error_evidence, not_submitted_resolution_code, park_locked_attempt,
+        set_application_timeouts, update_attempt_resolution,
     },
     processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
 };
@@ -99,6 +99,38 @@ pub enum HostChargeProviderResult {
         payment: HostChargePaymentResult,
         error: GatewayNotSubmittedError,
     },
+}
+
+/// The only pre-submission states host charge can resolve from. Keeping the
+/// boundary and cooldown together makes the two formerly positional flags
+/// explicit at the application boundary.
+#[derive(Clone, Copy)]
+pub(crate) struct HostChargeBeforeSubmissionResolution {
+    boundary: OutcomeResolutionBoundary,
+    cooldown: Option<RateLimitCooldown>,
+}
+
+impl HostChargeBeforeSubmissionResolution {
+    pub(crate) const fn prepared() -> Self {
+        Self {
+            boundary: OutcomeResolutionBoundary::Prepared,
+            cooldown: None,
+        }
+    }
+
+    pub(crate) const fn admitted_not_submitted() -> Self {
+        Self {
+            boundary: OutcomeResolutionBoundary::AdmittedNotSubmitted,
+            cooldown: None,
+        }
+    }
+
+    pub(crate) const fn prepared_provider_rate_limited() -> Self {
+        Self {
+            boundary: OutcomeResolutionBoundary::Prepared,
+            cooldown: Some(RateLimitCooldown::Provider),
+        }
+    }
 }
 
 pub async fn admit_host_charge_submission(
@@ -184,7 +216,7 @@ pub async fn submit_admitted_host_charge(
                 Some(not_submitted_resolution_code(&error)),
                 OutcomeResolutionBoundary::AdmittedNotSubmitted,
                 release_target,
-                false,
+                None,
             )
             .await?;
             Ok(HostChargeProviderResult::NotSubmitted { payment, error })
@@ -193,7 +225,7 @@ pub async fn submit_admitted_host_charge(
             pool,
             &admission.reservation,
             &mutation_error_evidence(&detail),
-            true,
+            Some(RateLimitCooldown::Provider),
         )
         .await
         .map(HostChargeProviderResult::Payment),
@@ -201,7 +233,7 @@ pub async fn submit_admitted_host_charge(
             pool,
             &admission.reservation,
             &mutation_error_evidence(&detail),
-            false,
+            None,
         )
         .await
         .map(HostChargeProviderResult::Payment),
@@ -264,7 +296,7 @@ pub async fn apply_host_charge_gateway_outcome(
                 None,
                 OutcomeResolutionBoundary::Submitted,
                 true,
-                false,
+                None,
             )
             .await
         }
@@ -278,12 +310,12 @@ pub async fn apply_host_charge_gateway_outcome(
                 None,
                 OutcomeResolutionBoundary::Submitted,
                 true,
-                false,
+                None,
             )
             .await
         }
         GatewayPaymentStatus::Unknown => {
-            resolve_host_charge_unknown(pool, reservation, outcome.evidence(), false).await
+            resolve_host_charge_unknown(pool, reservation, outcome.evidence(), None).await
         }
     }
 }
@@ -318,8 +350,7 @@ pub(crate) async fn resolve_host_charge_before_submission(
     reservation: &HostChargeReservation,
     detail: syrup_rail::GatewayDiagnostic,
     resolution_code: PaymentResolutionCode,
-    admitted_not_submitted: bool,
-    extend_provider_cooldown: bool,
+    resolution: HostChargeBeforeSubmissionResolution,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
     let condition = if matches!(
         resolution_code,
@@ -346,13 +377,9 @@ pub(crate) async fn resolve_host_charge_before_submission(
         &evidence,
         PaymentAttemptStatus::Failed,
         Some(resolution_code),
-        if admitted_not_submitted {
-            OutcomeResolutionBoundary::AdmittedNotSubmitted
-        } else {
-            OutcomeResolutionBoundary::Prepared
-        },
+        resolution.boundary,
         false,
-        extend_provider_cooldown,
+        resolution.cooldown,
     )
     .await
 }
@@ -551,7 +578,7 @@ async fn resolve_host_charge_non_approved(
     resolution_code: Option<PaymentResolutionCode>,
     boundary: OutcomeResolutionBoundary,
     release_target: bool,
-    extend_provider_cooldown: bool,
+    cooldown: Option<RateLimitCooldown>,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
     let identity = reservation.identity();
     let mut transaction = pool.begin().await?;
@@ -636,33 +663,8 @@ async fn resolve_host_charge_non_approved(
             .await?;
         }
     }
-    if extend_provider_cooldown {
-        let result = sqlx::query(
-            r#"
-            UPDATE billing_gateway_provider_rate_limits
-            SET rate_limited_until = GREATEST(
-                rate_limited_until,
-                clock_timestamp() + make_interval(secs => $4)
-            )
-            WHERE provider_key = (
-                SELECT provider_key
-                FROM billing_gateway_accounts
-                WHERE id = $1 AND billing_scope_id = $2
-                    AND gateway_configuration_id = $3
-            )
-            "#,
-        )
-        .bind(reservation.identity().gateway_account_id().as_uuid())
-        .bind(reservation.identity().billing_scope_id().as_uuid())
-        .bind(reservation.identity().gateway_configuration_id().as_uuid())
-        .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
-        .execute(&mut *transaction)
-        .await?;
-        if result.rows_affected() != 1 {
-            return Err(HostChargeApplicationError::InvalidState(
-                INVALID_HOST_CHARGE_STATE,
-            ));
-        }
+    if host_charge_provider_cooldown_requested(cooldown) {
+        extend_host_charge_provider_cooldown(&mut transaction, reservation).await?;
     }
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,
@@ -681,7 +683,7 @@ async fn resolve_host_charge_unknown(
     pool: &PgPool,
     reservation: &HostChargeReservation,
     evidence: &ProcessorEvidence,
-    extend_provider_cooldown: bool,
+    cooldown: Option<RateLimitCooldown>,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
     let identity = reservation.identity();
     let mut transaction = pool.begin().await?;
@@ -709,7 +711,7 @@ async fn resolve_host_charge_unknown(
             .await?;
         }
     }
-    if extend_provider_cooldown {
+    if host_charge_provider_cooldown_requested(cooldown) {
         extend_host_charge_provider_cooldown(&mut transaction, reservation).await?;
     }
     let attempt = find_payment_attempt_by_id_on_connection(
@@ -723,6 +725,10 @@ async fn resolve_host_charge_unknown(
     ))?;
     transaction.commit().await?;
     Ok(HostChargePaymentResult::new(attempt))
+}
+
+const fn host_charge_provider_cooldown_requested(cooldown: Option<RateLimitCooldown>) -> bool {
+    matches!(cooldown, Some(RateLimitCooldown::Provider))
 }
 
 async fn extend_host_charge_provider_cooldown(
@@ -889,6 +895,38 @@ mod tests {
         SubscriptionOfferStore, host_charge_ledger_admission, reserve_host_charge_in_transaction,
         test_support::{TestDatabase, create_gateway_account},
     };
+
+    #[test]
+    fn before_submission_resolution_modes_keep_boundary_and_cooldown_distinct() {
+        let prepared = HostChargeBeforeSubmissionResolution::prepared();
+        assert_eq!(prepared.boundary, OutcomeResolutionBoundary::Prepared);
+        assert!(prepared.cooldown.is_none());
+
+        let admitted = HostChargeBeforeSubmissionResolution::admitted_not_submitted();
+        assert_eq!(
+            admitted.boundary,
+            OutcomeResolutionBoundary::AdmittedNotSubmitted
+        );
+        assert!(admitted.cooldown.is_none());
+
+        let rate_limited = HostChargeBeforeSubmissionResolution::prepared_provider_rate_limited();
+        assert_eq!(rate_limited.boundary, OutcomeResolutionBoundary::Prepared);
+        assert!(matches!(
+            rate_limited.cooldown,
+            Some(RateLimitCooldown::Provider)
+        ));
+    }
+
+    #[test]
+    fn host_charge_cooldown_only_extends_provider_scope() {
+        assert!(!host_charge_provider_cooldown_requested(None));
+        assert!(!host_charge_provider_cooldown_requested(Some(
+            RateLimitCooldown::Account
+        )));
+        assert!(host_charge_provider_cooldown_requested(Some(
+            RateLimitCooldown::Provider
+        )));
+    }
 
     struct TestReferenceFactory;
 

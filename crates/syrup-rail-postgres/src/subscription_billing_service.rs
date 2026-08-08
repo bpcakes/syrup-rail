@@ -24,7 +24,9 @@ use syrup_rail::{
 };
 use thiserror::Error;
 
-use crate::host_charge_application::resolve_host_charge_before_submission;
+use crate::host_charge_application::{
+    HostChargeBeforeSubmissionResolution, resolve_host_charge_before_submission,
+};
 use crate::{
     BillingTransactionCoordinator, HostChargeAdmissionOutcome, HostChargeApplicationError,
     HostChargePreflightOutcome, HostChargeProviderResult, HostChargeReservationOutcome,
@@ -436,7 +438,7 @@ impl SubscriptionBillingService {
                     &reservation,
                     &account.provider_key,
                     scope,
-                    false,
+                    HostChargeBeforeSubmissionResolution::prepared(),
                 )
                 .await;
         }
@@ -449,8 +451,7 @@ impl SubscriptionBillingService {
                         &reservation,
                         GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
                         PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
-                        false,
-                        false,
+                        HostChargeBeforeSubmissionResolution::prepared(),
                     )
                     .await;
             }
@@ -461,8 +462,7 @@ impl SubscriptionBillingService {
                         &reservation,
                         GatewayMutationCooldownScope::Provider,
                         detail,
-                        false,
-                        true,
+                        HostChargeBeforeSubmissionResolution::prepared_provider_rate_limited(),
                     )
                     .await;
             }
@@ -473,8 +473,7 @@ impl SubscriptionBillingService {
                         &reservation,
                         GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
                         PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
-                        false,
-                        false,
+                        HostChargeBeforeSubmissionResolution::prepared(),
                     )
                     .await;
             }
@@ -497,7 +496,7 @@ impl SubscriptionBillingService {
                     &reservation,
                     &account.provider_key,
                     scope,
-                    true,
+                    HostChargeBeforeSubmissionResolution::admitted_not_submitted(),
                 )
                 .await;
         }
@@ -568,31 +567,12 @@ impl SubscriptionBillingService {
             }
         }
 
-        let account = self
-            .gateway_account(
+        let (account, gateway) = self
+            .resolve_active_gateway(
                 command.billing_scope_id(),
                 command.gateway_configuration_id(),
             )
             .await?;
-        if let Some(scope) = self.active_cooldown(&account).await? {
-            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
-        }
-        let gateway = self
-            .resolver
-            .resolve(
-                command.billing_scope_id(),
-                account.account_id,
-                command.gateway_configuration_id(),
-                account.provider_key.clone(),
-            )
-            .await?;
-        if gateway.billing_scope_id() != command.billing_scope_id()
-            || gateway.gateway_account_id() != account.account_id
-            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
-            || gateway.provider_key() != &account.provider_key
-        {
-            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
-        }
         let mut reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)
             .map_err(map_reservation_build_error)?;
 
@@ -905,31 +885,12 @@ impl SubscriptionBillingService {
             }
         }
 
-        let account = self
-            .gateway_account(
+        let (account, gateway) = self
+            .resolve_active_gateway(
                 command.billing_scope_id(),
                 command.gateway_configuration_id(),
             )
             .await?;
-        if let Some(scope) = self.active_cooldown(&account).await? {
-            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
-        }
-        let gateway = self
-            .resolver
-            .resolve(
-                command.billing_scope_id(),
-                account.account_id,
-                command.gateway_configuration_id(),
-                account.provider_key.clone(),
-            )
-            .await?;
-        if gateway.billing_scope_id() != command.billing_scope_id()
-            || gateway.gateway_account_id() != account.account_id
-            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
-            || gateway.provider_key() != &account.provider_key
-        {
-            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
-        }
 
         let (reservation, attempt) = match self.reserve_recovery(&command, &gateway).await? {
             SubscriptionRecoveryReservationOutcome::Reserved(reservation, attempt) => {
@@ -1110,31 +1071,12 @@ impl SubscriptionBillingService {
                 return Err(SubscriptionEnrollmentServiceError::AdmissionUnavailable);
             }
         }
-        let account = self
-            .gateway_account(
+        let (account, gateway) = self
+            .resolve_active_gateway(
                 command.billing_scope_id(),
                 command.gateway_configuration_id(),
             )
             .await?;
-        if let Some(scope) = self.active_cooldown(&account).await? {
-            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
-        }
-        let gateway = self
-            .resolver
-            .resolve(
-                command.billing_scope_id(),
-                account.account_id,
-                command.gateway_configuration_id(),
-                account.provider_key.clone(),
-            )
-            .await?;
-        if gateway.billing_scope_id() != command.billing_scope_id()
-            || gateway.gateway_account_id() != account.account_id
-            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
-            || gateway.provider_key() != &account.provider_key
-        {
-            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
-        }
         let (reservation, attempt) = match self
             .reserve_payment_method_replacement(&command, &gateway)
             .await?
@@ -1424,8 +1366,7 @@ impl SubscriptionBillingService {
         reservation: &HostChargeReservation,
         detail: GatewayDiagnostic,
         code: PaymentResolutionCode,
-        admitted_not_submitted: bool,
-        extend_provider_cooldown: bool,
+        resolution: HostChargeBeforeSubmissionResolution,
     ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
         resolve_host_charge_before_submission(
             &self.pool,
@@ -1433,8 +1374,7 @@ impl SubscriptionBillingService {
             reservation,
             detail,
             code,
-            admitted_not_submitted,
-            extend_provider_cooldown,
+            resolution,
         )
         .await
         .map_err(Into::into)
@@ -1446,7 +1386,7 @@ impl SubscriptionBillingService {
         reservation: &HostChargeReservation,
         provider_key: &GatewayProviderKey,
         scope: GatewayMutationCooldownScope,
-        admitted_not_submitted: bool,
+        resolution: HostChargeBeforeSubmissionResolution,
     ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
         let provider_name = provider_key.as_str().to_ascii_uppercase();
         let detail = match scope {
@@ -1462,8 +1402,7 @@ impl SubscriptionBillingService {
             reservation,
             scope,
             detail,
-            admitted_not_submitted,
-            false,
+            resolution,
         )
         .await
     }
@@ -1474,8 +1413,7 @@ impl SubscriptionBillingService {
         reservation: &HostChargeReservation,
         scope: GatewayMutationCooldownScope,
         detail: GatewayDiagnostic,
-        admitted_not_submitted: bool,
-        extend_provider_cooldown: bool,
+        resolution: HostChargeBeforeSubmissionResolution,
     ) -> Result<HostChargePaymentResult, SubscriptionEnrollmentServiceError> {
         let code = match scope {
             GatewayMutationCooldownScope::Account => {
@@ -1486,14 +1424,7 @@ impl SubscriptionBillingService {
             }
         };
         let payment = self
-            .resolve_host_charge_readiness(
-                targets,
-                reservation,
-                detail,
-                code,
-                admitted_not_submitted,
-                extend_provider_cooldown,
-            )
+            .resolve_host_charge_readiness(targets, reservation, detail, code, resolution)
             .await?;
         if payment.attempt().state().resolution_code() == Some(code) {
             Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope })
@@ -1597,6 +1528,43 @@ impl SubscriptionBillingService {
         let result = payment_result_for_attempt(&mut transaction, attempt).await?;
         transaction.commit().await?;
         Ok(result)
+    }
+
+    /// Resolves the canonical account after the caller's operation-specific
+    /// preflight and admission phases. The three subscriber-initiated paths
+    /// share the same cooldown and exact resolver-identity contract.
+    async fn resolve_active_gateway(
+        &self,
+        billing_scope_id: BillingScopeId,
+        gateway_configuration_id: syrup_rail::GatewayConfigurationId,
+    ) -> Result<
+        (GatewayAccountSnapshot, syrup_rail::ResolvedGateway),
+        SubscriptionEnrollmentServiceError,
+    > {
+        let account = self
+            .gateway_account(billing_scope_id, gateway_configuration_id)
+            .await?;
+        if let Some(scope) = self.active_cooldown(&account).await? {
+            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
+        }
+        let expected = ExpectedGatewayIdentity::for_account(
+            billing_scope_id,
+            gateway_configuration_id,
+            &account,
+        );
+        let gateway = self
+            .resolver
+            .resolve(
+                expected.billing_scope_id,
+                expected.gateway_account_id,
+                expected.gateway_configuration_id,
+                expected.provider_key.clone(),
+            )
+            .await?;
+        if !expected.matches(&gateway) {
+            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
+        }
+        Ok((account, gateway))
     }
 
     async fn gateway_account(
@@ -2166,6 +2134,52 @@ struct GatewayAccountSnapshot {
     provider_key: GatewayProviderKey,
 }
 
+/// Canonical identity the resolver must return for subscriber-initiated
+/// gateway mutations.
+struct ExpectedGatewayIdentity<'a> {
+    billing_scope_id: BillingScopeId,
+    gateway_account_id: GatewayAccountId,
+    gateway_configuration_id: syrup_rail::GatewayConfigurationId,
+    provider_key: &'a GatewayProviderKey,
+}
+
+impl<'a> ExpectedGatewayIdentity<'a> {
+    const fn for_account(
+        billing_scope_id: BillingScopeId,
+        gateway_configuration_id: syrup_rail::GatewayConfigurationId,
+        account: &'a GatewayAccountSnapshot,
+    ) -> Self {
+        Self {
+            billing_scope_id,
+            gateway_account_id: account.account_id,
+            gateway_configuration_id,
+            provider_key: &account.provider_key,
+        }
+    }
+
+    fn matches(&self, gateway: &syrup_rail::ResolvedGateway) -> bool {
+        self.matches_components(
+            gateway.billing_scope_id(),
+            gateway.gateway_account_id(),
+            gateway.gateway_configuration_id(),
+            gateway.provider_key(),
+        )
+    }
+
+    fn matches_components(
+        &self,
+        billing_scope_id: BillingScopeId,
+        gateway_account_id: GatewayAccountId,
+        gateway_configuration_id: syrup_rail::GatewayConfigurationId,
+        provider_key: &GatewayProviderKey,
+    ) -> bool {
+        billing_scope_id == self.billing_scope_id
+            && gateway_account_id == self.gateway_account_id
+            && gateway_configuration_id == self.gateway_configuration_id
+            && provider_key == self.provider_key
+    }
+}
+
 struct RenewalGatewayAccountSnapshot {
     account_id: GatewayAccountId,
     configuration_id: syrup_rail::GatewayConfigurationId,
@@ -2192,5 +2206,58 @@ const fn map_reservation_build_error(
         | SubscriptionEnrollmentReservationBuildError::InvalidCharge => {
             SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_gateway_identity_requires_every_resolved_component() {
+        let provider_key = GatewayProviderKey::new("nmi").expect("valid provider key");
+        let account = GatewayAccountSnapshot {
+            account_id: GatewayAccountId::new(uuid::Uuid::from_u128(1)),
+            provider_key: provider_key.clone(),
+        };
+        let billing_scope_id = BillingScopeId::new(uuid::Uuid::from_u128(2));
+        let gateway_configuration_id =
+            syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(3));
+        let expected = ExpectedGatewayIdentity::for_account(
+            billing_scope_id,
+            gateway_configuration_id,
+            &account,
+        );
+
+        assert!(expected.matches_components(
+            billing_scope_id,
+            account.account_id,
+            gateway_configuration_id,
+            &provider_key,
+        ));
+        assert!(!expected.matches_components(
+            BillingScopeId::new(uuid::Uuid::from_u128(4)),
+            account.account_id,
+            gateway_configuration_id,
+            &provider_key,
+        ));
+        assert!(!expected.matches_components(
+            billing_scope_id,
+            GatewayAccountId::new(uuid::Uuid::from_u128(5)),
+            gateway_configuration_id,
+            &provider_key,
+        ));
+        assert!(!expected.matches_components(
+            billing_scope_id,
+            account.account_id,
+            syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(6)),
+            &provider_key,
+        ));
+        assert!(!expected.matches_components(
+            billing_scope_id,
+            account.account_id,
+            gateway_configuration_id,
+            &GatewayProviderKey::new("other_gateway").expect("valid provider key"),
+        ));
     }
 }
