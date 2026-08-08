@@ -1169,6 +1169,16 @@ mod tests {
 
     #[async_trait]
     impl HostChargeTargetStore for ExactHostTargets {
+        async fn preflight_target(
+            &self,
+            _connection: &mut PgConnection,
+            _reservation: &crate::HostChargeTargetReservation,
+        ) -> Result<crate::HostChargeReservationDecision, crate::HostChargeTargetError> {
+            Ok(crate::HostChargeReservationDecision::Rejected {
+                reason: syrup_rail::HostChargeTargetRejection::TargetUnavailable,
+            })
+        }
+
         async fn reserve_target(
             &self,
             _connection: &mut PgConnection,

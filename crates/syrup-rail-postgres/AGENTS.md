@@ -142,6 +142,8 @@ and transaction orchestration.
   one-shot submission, and durable evidence rules. Host target policy stays
   behind `HostChargeTargetStore`, whose operations use only the supplied
   connection and lock the target before entering the canonical ledger.
+  Preflight snapshots without changing host business state; reservation may
+  perform the host's retryable-target transition before the attempt insert.
 - Initial approval begins with the host recipient lock, then the shared
   payment-method domain and exact plan aggregate. Method, subscription,
   discount/claim, attempt, processor charge, and `SubscriptionStarted` event

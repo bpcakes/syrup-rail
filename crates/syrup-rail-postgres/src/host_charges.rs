@@ -151,6 +151,14 @@ pub enum HostChargeSubmissionDecision {
 /// submission lock the target before calling [`host_charge_ledger_admission`].
 #[async_trait]
 pub trait HostChargeTargetStore: Send + Sync {
+    /// Locks and snapshots the target for replay/conflict preflight without
+    /// changing host business state.
+    async fn preflight_target(
+        &self,
+        connection: &mut PgConnection,
+        reservation: &HostChargeTargetReservation,
+    ) -> Result<HostChargeReservationDecision, HostChargeTargetError>;
+
     async fn reserve_target(
         &self,
         connection: &mut PgConnection,
@@ -221,7 +229,7 @@ pub async fn preflight_host_charge_in_transaction(
         command.idempotency_key().clone(),
     );
     let decision = targets
-        .reserve_target(transaction, &target_reservation)
+        .preflight_target(transaction, &target_reservation)
         .await?;
     let existing = crate::lock_payment_attempt_by_idempotency_in_transaction(
         transaction,

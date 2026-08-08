@@ -1033,6 +1033,14 @@ mod tests {
 
     #[async_trait]
     impl HostChargeTargetStore for TestTargets {
+        async fn preflight_target(
+            &self,
+            connection: &mut PgConnection,
+            reservation: &HostChargeTargetReservation,
+        ) -> Result<HostChargeReservationDecision, HostChargeTargetError> {
+            self.reserve_target(connection, reservation).await
+        }
+
         async fn reserve_target(
             &self,
             connection: &mut PgConnection,
