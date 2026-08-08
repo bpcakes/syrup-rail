@@ -77,8 +77,9 @@ and transaction orchestration.
   retained-subject work in the host transaction.
 - Change registered-account reconciliation selection or local stale-attempt
   phases in `src/reconciliation.rs`; preserve persisted plan-key aggregate
-  locks for enrollment cleanup, and keep host configuration filtering and
-  queue encoding outside the shared operations.
+  locks for enrollment cleanup and pending processor-charge classification,
+  and keep host configuration filtering and queue encoding outside the shared
+  operations.
 
 ## Invariants
 
