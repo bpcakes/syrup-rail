@@ -19,7 +19,7 @@ use syrup_rail::{
     SubscriptionRecoveryReservation, SubscriptionRecoveryReservationOutcome,
     SubscriptionRecoveryReservationRejection, SubscriptionRecoverySubmissionRejection,
     SubscriptionRenewalOutcome, SubscriptionRenewalReservation,
-    SubscriptionRenewalReservationOutcome,
+    SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
 };
 use thiserror::Error;
 
@@ -94,6 +94,8 @@ pub enum SubscriptionEnrollmentServiceError {
     RecoveryReservationRejected(SubscriptionRecoveryReservationRejection),
     #[error("subscription recovery submission was rejected")]
     RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection),
+    #[error("subscription renewal reservation was rejected")]
+    RenewalReservationRejected(SubscriptionRenewalReservationRejection),
     #[error("subscription payment method replacement reservation was rejected")]
     PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection),
     #[error("subscription payment method replacement submission was rejected")]
@@ -155,6 +157,10 @@ impl fmt::Debug for SubscriptionEnrollmentServiceError {
                 .finish(),
             Self::RecoverySubmissionRejected(reason) => formatter
                 .debug_tuple("SubscriptionEnrollmentServiceError::RecoverySubmissionRejected")
+                .field(reason)
+                .finish(),
+            Self::RenewalReservationRejected(reason) => formatter
+                .debug_tuple("SubscriptionEnrollmentServiceError::RenewalReservationRejected")
                 .field(reason)
                 .finish(),
             Self::PaymentMethodReplacementReservationRejected(reason) => formatter
@@ -447,6 +453,20 @@ impl SubscriptionBillingService {
             SubscriptionRenewalReservationOutcome::Reserved(reservation, attempt) => {
                 (*reservation, *attempt)
             }
+            SubscriptionRenewalReservationOutcome::Rejected(
+                SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
+            ) => {
+                return Err(
+                    SubscriptionEnrollmentServiceError::RenewalReservationRejected(
+                        SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
+                    ),
+                );
+            }
+            SubscriptionRenewalReservationOutcome::Rejected(
+                SubscriptionRenewalReservationRejection::GatewayConfigurationChanged,
+            ) => {
+                return Err(SubscriptionEnrollmentServiceError::GatewayConfigurationChanged);
+            }
             SubscriptionRenewalReservationOutcome::Rejected(_) => {
                 return Ok(SubscriptionRenewalOutcome::Noop);
             }
@@ -471,8 +491,23 @@ impl SubscriptionBillingService {
             return Ok(SubscriptionRenewalOutcome::Noop);
         }
 
-        let admission =
-            match admit_subscription_renewal_submission(&self.pool, &reservation).await? {
+        let admission = match admit_subscription_renewal_submission(&self.pool, &reservation).await
+        {
+            Err(error) if is_retryable_renewal_admission_error(&error) => {
+                self.resolve_renewal_readiness_failure(
+                    &reservation,
+                    GatewayDiagnostic::new(
+                        "subscription billing state could not be locked for final admission",
+                    ),
+                    PaymentResolutionCode::SubscriptionRenewalRetryStateChangedBeforeCharge,
+                    None,
+                    OutcomeResolutionBoundary::Prepared,
+                )
+                .await?;
+                return Ok(SubscriptionRenewalOutcome::Noop);
+            }
+            Err(error) => return Err(error.into()),
+            Ok(outcome) => match outcome {
                 SubscriptionRenewalAdmissionOutcome::Admitted(admission) => *admission,
                 SubscriptionRenewalAdmissionOutcome::AlreadyAdmitted(attempt) => {
                     return self
@@ -488,7 +523,8 @@ impl SubscriptionBillingService {
                         .map(Box::new)
                         .map(SubscriptionRenewalOutcome::Payment);
                 }
-            };
+            },
+        };
         if let Some(scope) = self.active_cooldown(&account.as_gateway_snapshot()).await? {
             self.resolve_renewal_cooldown(
                 &reservation,
@@ -510,13 +546,10 @@ impl SubscriptionBillingService {
                 Ok(SubscriptionRenewalOutcome::Payment(Box::new(payment)))
             }
             SubscriptionRenewalProviderResult::NotSubmitted { payment, error } => {
-                if matches!(error, GatewayNotSubmittedError::RateLimited(_)) {
-                    Ok(SubscriptionRenewalOutcome::Payment(Box::new(payment)))
-                } else {
-                    Err(SubscriptionEnrollmentServiceError::GatewayNotSubmitted(
-                        error,
-                    ))
-                }
+                Ok(SubscriptionRenewalOutcome::NotSubmitted {
+                    payment: Box::new(payment),
+                    error,
+                })
             }
         }
     }
@@ -1508,6 +1541,13 @@ impl SubscriptionBillingService {
         .await?;
         transaction.commit().await?;
         if attempt_state.blocks_automatic_retry(now) || has_payment_method_update {
+            if has_payment_method_update {
+                return Err(
+                    SubscriptionEnrollmentServiceError::RenewalReservationRejected(
+                        SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
+                    ),
+                );
+            }
             return Ok(None);
         }
         Some((account_id, configuration_id, provider_key))
@@ -1664,6 +1704,20 @@ fn preserve_concurrent_terminal_payment(
     } else {
         Ok(payment)
     }
+}
+
+fn is_retryable_renewal_admission_error(error: &SubscriptionEnrollmentApplicationError) -> bool {
+    let sqlstate = match error {
+        SubscriptionEnrollmentApplicationError::Sql(sqlx::Error::Database(error)) => error.code(),
+        SubscriptionEnrollmentApplicationError::Attempt(PaymentAttemptStoreError::Sql(
+            sqlx::Error::Database(error),
+        )) => error.code(),
+        _ => None,
+    };
+    matches!(
+        sqlstate.as_deref(),
+        Some("40001" | "40P01" | "55P03" | "57014")
+    )
 }
 
 struct GatewayAccountSnapshot {

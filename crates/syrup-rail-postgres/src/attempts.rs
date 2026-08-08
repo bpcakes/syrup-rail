@@ -632,7 +632,7 @@ pub async fn reserve_subscription_renewal_in_transaction(
             next_renewal_at <= clock_timestamp() AS is_due
         FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND id = $2
-        FOR UPDATE
+        FOR SHARE
         "#,
     )
     .bind(command.billing_scope_id().as_uuid())
@@ -2299,6 +2299,7 @@ async fn renewal_subscription_state_matches(
         FROM billing_subscriptions
         WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
             AND gateway_account_id = $4 AND plan_key = $5
+        FOR NO KEY UPDATE
         "#,
     )
     .bind(reservation.subscription_id().as_uuid())

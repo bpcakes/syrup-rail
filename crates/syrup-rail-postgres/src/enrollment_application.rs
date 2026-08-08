@@ -4686,18 +4686,72 @@ async fn update_attempt_resolution(
     allow_terminal_approval_race: bool,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
     let descriptor = evidence.descriptor();
+    if subscription_id.is_some() || payment_method_id.is_some() {
+        let result = sqlx::query(
+            r#"
+            UPDATE billing_payment_attempts
+            SET status = $2, subscription_id = COALESCE($3, subscription_id),
+                payment_method_id = COALESCE($4, payment_method_id),
+                gateway_transaction_id = $5,
+                gateway_payment_method_reference = $6,
+                gateway_response = $7, gateway_response_code = $8,
+                gateway_response_text = $9, gateway_condition = $10,
+                payment_type = $11, card_brand = $12, card_last4 = $13,
+                card_exp_month = $14, card_exp_year = $15,
+                resolution_code = $16,
+                resolved_at = CASE WHEN $2 IN ('approved', 'declined', 'failed')
+                    THEN clock_timestamp() ELSE resolved_at END,
+                review_required_at = CASE WHEN $2 = 'review_required'
+                    THEN COALESCE(review_required_at, clock_timestamp()) ELSE review_required_at END,
+                updated_at = clock_timestamp()
+            WHERE id = $1
+                AND (
+                    status IN ('pending', 'unknown', 'review_required')
+                    OR ($17 AND status IN ('declined', 'failed'))
+                )
+            "#,
+        )
+        .bind(attempt.identity().attempt_id().as_uuid())
+        .bind(status.as_str())
+        .bind(subscription_id.map(SubscriptionId::into_uuid))
+        .bind(payment_method_id.map(PaymentMethodId::into_uuid))
+        .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
+        .bind(
+            evidence
+                .payment_method_reference()
+                .map(|value| value.expose()),
+        )
+        .bind(evidence.response().map(GatewayDiagnostic::expose))
+        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
+        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
+        .bind(evidence.condition().map(GatewayDiagnostic::expose))
+        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
+        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
+        .bind(descriptor.card_last_four().map(|value| value.expose()))
+        .bind(descriptor.card_exp_month())
+        .bind(descriptor.card_exp_year())
+        .bind(resolution_code.map(PaymentResolutionCode::as_str))
+        .bind(allow_terminal_approval_race)
+        .execute(&mut *connection)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ));
+        }
+        return Ok(());
+    }
     let result = sqlx::query(
         r#"
         UPDATE billing_payment_attempts
-        SET status = $2, subscription_id = COALESCE($3, subscription_id),
-            payment_method_id = COALESCE($4, payment_method_id),
-            gateway_transaction_id = $5,
-            gateway_payment_method_reference = $6,
-            gateway_response = $7, gateway_response_code = $8,
-            gateway_response_text = $9, gateway_condition = $10,
-            payment_type = $11, card_brand = $12, card_last4 = $13,
-            card_exp_month = $14, card_exp_year = $15,
-            resolution_code = $16,
+        SET status = $2,
+            gateway_transaction_id = $3,
+            gateway_payment_method_reference = $4,
+            gateway_response = $5, gateway_response_code = $6,
+            gateway_response_text = $7, gateway_condition = $8,
+            payment_type = $9, card_brand = $10, card_last4 = $11,
+            card_exp_month = $12, card_exp_year = $13,
+            resolution_code = $14,
             resolved_at = CASE WHEN $2 IN ('approved', 'declined', 'failed')
                 THEN clock_timestamp() ELSE resolved_at END,
             review_required_at = CASE WHEN $2 = 'review_required'
@@ -4706,14 +4760,12 @@ async fn update_attempt_resolution(
         WHERE id = $1
             AND (
                 status IN ('pending', 'unknown', 'review_required')
-                OR ($17 AND status IN ('declined', 'failed'))
+                OR ($15 AND status IN ('declined', 'failed'))
             )
         "#,
     )
     .bind(attempt.identity().attempt_id().as_uuid())
     .bind(status.as_str())
-    .bind(subscription_id.map(SubscriptionId::into_uuid))
-    .bind(payment_method_id.map(PaymentMethodId::into_uuid))
     .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
     .bind(
         evidence
@@ -5934,10 +5986,10 @@ mod tests {
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
 
-        assert_eq!(
+        assert!(matches!(
             service.renew(command).await?,
             SubscriptionRenewalOutcome::Noop
-        );
+        ));
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         let events = fixture.coordinator.events.lock().await;

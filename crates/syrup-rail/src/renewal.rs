@@ -198,10 +198,14 @@ pub enum SubscriptionRenewalSubmissionOutcome {
     },
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum SubscriptionRenewalOutcome {
     Noop,
     Payment(Box<crate::SubscriptionEnrollmentPaymentResult>),
+    NotSubmitted {
+        payment: Box<crate::SubscriptionEnrollmentPaymentResult>,
+        error: crate::GatewayNotSubmittedError,
+    },
 }
 
 impl SubscriptionRenewalReservation {
