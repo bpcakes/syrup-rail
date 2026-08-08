@@ -15,6 +15,7 @@ mod gateway_accounts;
 mod grants;
 mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
+mod operator_review;
 mod reconciliation;
 mod renewal;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -81,6 +82,10 @@ pub use lifecycle_reconciliation::{
     gateway_lifecycle_reconciliation_start, reconcile_gateway_transaction_reports,
     record_gateway_lifecycle_quarantines, save_gateway_lifecycle_reconciliation_cursor,
     stage_gateway_lifecycle_evidence,
+};
+pub use operator_review::{
+    ExternalReversalAttestationOutcome, ExternalReversalHostStore, ExternalReversalHostStoreError,
+    ExternalReversalHostTransitionOutcome, OperatorReviewError, attest_external_reversal,
 };
 pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,

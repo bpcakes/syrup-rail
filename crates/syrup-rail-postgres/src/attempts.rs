@@ -57,7 +57,7 @@ const PAYMENT_METHOD_REPLACEMENT_STATE_CHANGED_TEXT: &str =
 const PAYMENT_METHOD_REPLACEMENT_CONFIGURATION_CHANGED_TEXT: &str = "Payment method replacement was canceled before submission because payment configuration changed.";
 const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
 
-const PAYMENT_ATTEMPT_SELECT: &str = r#"
+pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = r#"
     SELECT id, billing_scope_id, subscriber_id, plan_key,
         host_charge_target_id, subscription_id, payment_method_id,
         attempt_kind, status, idempotency_key, request_fingerprint,
@@ -1432,7 +1432,7 @@ pub(crate) async fn set_enrollment_timeouts(
     Ok(())
 }
 
-async fn lock_subscription_aggregate(
+pub(crate) async fn lock_subscription_aggregate(
     transaction: &mut Transaction<'_, Postgres>,
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
@@ -3152,7 +3152,9 @@ fn enrollment_discount_from_row(
     )))
 }
 
-fn processor_evidence_from_row(row: &PgRow) -> Result<ProcessorEvidence, PaymentAttemptStoreError> {
+pub(crate) fn processor_evidence_from_row(
+    row: &PgRow,
+) -> Result<ProcessorEvidence, PaymentAttemptStoreError> {
     let card_last_four = row.try_get::<Option<String>, _>("card_last4")?;
     let card_exp_month = row.try_get::<Option<i16>, _>("card_exp_month")?;
     let card_exp_year = row.try_get::<Option<i16>, _>("card_exp_year")?;

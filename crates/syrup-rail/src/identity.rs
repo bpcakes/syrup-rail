@@ -55,6 +55,7 @@ uuid_id!(SubscriberId);
 uuid_id!(SubscriptionId);
 uuid_id!(PaymentMethodId);
 uuid_id!(PaymentAttemptId);
+uuid_id!(ProcessorChargeId);
 uuid_id!(HostChargeTargetId);
 uuid_id!(GatewayAccountId);
 uuid_id!(GatewayConfigurationId);
