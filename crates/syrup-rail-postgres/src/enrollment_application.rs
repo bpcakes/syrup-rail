@@ -989,54 +989,57 @@ fn reconciled_outcome_with_persisted_evidence(
 ) -> GatewayPaymentOutcome {
     let observed = outcome.evidence();
     let persisted = attempt.state().processor_evidence();
-    let observed_descriptor = observed.descriptor();
-    let persisted_descriptor = persisted.descriptor();
+    let preserve_review_evidence = attempt.status() == PaymentAttemptStatus::ReviewRequired;
+    let (primary, fallback) = if preserve_review_evidence {
+        (persisted, observed)
+    } else {
+        (observed, persisted)
+    };
+    let primary_descriptor = primary.descriptor();
+    let fallback_descriptor = fallback.descriptor();
     let descriptor = GatewayPaymentDescriptor::from_provider_parts(
-        observed_descriptor
+        primary_descriptor
             .payment_type()
-            .or_else(|| persisted_descriptor.payment_type())
+            .or_else(|| fallback_descriptor.payment_type())
             .cloned(),
-        observed_descriptor
+        primary_descriptor
             .card_brand()
-            .or_else(|| persisted_descriptor.card_brand())
+            .or_else(|| fallback_descriptor.card_brand())
             .cloned(),
-        observed_descriptor
+        primary_descriptor
             .card_last_four()
-            .or_else(|| persisted_descriptor.card_last_four())
+            .or_else(|| fallback_descriptor.card_last_four())
             .map(|value| value.expose()),
-        observed_descriptor
+        primary_descriptor
             .card_exp_month()
-            .or_else(|| persisted_descriptor.card_exp_month()),
-        observed_descriptor
+            .or_else(|| fallback_descriptor.card_exp_month()),
+        primary_descriptor
             .card_exp_year()
-            .or_else(|| persisted_descriptor.card_exp_year()),
+            .or_else(|| fallback_descriptor.card_exp_year()),
     );
     GatewayPaymentOutcome::new(
         outcome.status(),
         ProcessorEvidence::new(
-            observed
+            primary
                 .transaction_id()
-                .or_else(|| persisted.transaction_id())
+                .or_else(|| fallback.transaction_id())
                 .cloned(),
-            observed
+            primary
                 .payment_method_reference()
-                .or_else(|| persisted.payment_method_reference())
+                .or_else(|| fallback.payment_method_reference())
                 .cloned(),
-            observed
-                .response()
-                .or_else(|| persisted.response())
-                .cloned(),
-            observed
+            primary.response().or_else(|| fallback.response()).cloned(),
+            primary
                 .response_code()
-                .or_else(|| persisted.response_code())
+                .or_else(|| fallback.response_code())
                 .cloned(),
-            observed
+            primary
                 .response_text()
-                .or_else(|| persisted.response_text())
+                .or_else(|| fallback.response_text())
                 .cloned(),
-            observed
+            primary
                 .condition()
-                .or_else(|| persisted.condition())
+                .or_else(|| fallback.condition())
                 .cloned(),
             descriptor,
         ),
@@ -1951,20 +1954,24 @@ async fn resolve_payment_method_replacement_unknown_outcome(
     .await?;
     let attempt =
         lock_expected_payment_method_replacement_attempt(&mut transaction, reservation).await?;
-    if attempt.status().is_resolvable() && attempt.status() != PaymentAttemptStatus::ReviewRequired
-    {
+    if attempt.status().is_resolvable() {
+        let status = if attempt.status() == PaymentAttemptStatus::ReviewRequired {
+            PaymentAttemptStatus::ReviewRequired
+        } else {
+            PaymentAttemptStatus::Unknown
+        };
         update_attempt_resolution(
             &mut transaction,
             &attempt,
             evidence,
-            PaymentAttemptStatus::Unknown,
+            status,
             None,
             None,
             None,
             false,
         )
         .await?;
-        if evidence_looks_approved(evidence) {
+        if status != PaymentAttemptStatus::ReviewRequired && evidence_looks_approved(evidence) {
             observe_processor_charge(
                 &mut transaction,
                 &attempt,
