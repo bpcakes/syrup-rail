@@ -372,6 +372,46 @@ pub async fn reconcile_gateway_transaction_reports(
     Ok(summary)
 }
 
+pub async fn apply_gateway_lifecycle_evidence(
+    pool: &PgPool,
+    host_charge_targets: &dyn HostChargeTargetStore,
+    account: &GatewayLifecycleAccount,
+    evidence: &GatewayLifecycleEvidence,
+) -> Result<GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError> {
+    apply_or_stage_evidence(
+        pool,
+        host_charge_targets,
+        account,
+        StoredEvidence::from(evidence),
+        None,
+    )
+    .await
+}
+
+pub async fn stage_gateway_lifecycle_evidence(
+    pool: &PgPool,
+    account: &GatewayLifecycleAccount,
+    evidence: &GatewayLifecycleEvidence,
+) -> Result<(), GatewayLifecycleReconciliationError> {
+    let mut transaction = pool.begin().await?;
+    set_timeouts(&mut transaction).await?;
+    ensure_account(&mut transaction, account).await?;
+    stage_evidence(&mut transaction, account, &StoredEvidence::from(evidence)).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+pub async fn record_gateway_lifecycle_quarantines(
+    pool: &PgPool,
+    account: &GatewayLifecycleAccount,
+    quarantines: &[GatewayLifecycleQuarantine],
+) -> Result<(), GatewayLifecycleReconciliationError> {
+    for quarantine in quarantines {
+        record_quarantine(pool, account, quarantine).await?;
+    }
+    Ok(())
+}
+
 pub async fn apply_staged_gateway_lifecycle_evidence(
     pool: &PgPool,
     host_charge_targets: &dyn HostChargeTargetStore,

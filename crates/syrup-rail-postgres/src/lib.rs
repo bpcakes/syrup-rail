@@ -70,8 +70,10 @@ pub use lifecycle_reconciliation::{
     GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError,
     GatewayLifecycleReconciliationSummary, HostChargeReversal, HostChargeTargetStore,
     HostChargeTargetStoreError, HostChargeTargetTransitionOutcome,
-    apply_staged_gateway_lifecycle_evidence, gateway_lifecycle_reconciliation_start,
-    reconcile_gateway_transaction_reports, save_gateway_lifecycle_reconciliation_cursor,
+    apply_gateway_lifecycle_evidence, apply_staged_gateway_lifecycle_evidence,
+    gateway_lifecycle_reconciliation_start, reconcile_gateway_transaction_reports,
+    record_gateway_lifecycle_quarantines, save_gateway_lifecycle_reconciliation_cursor,
+    stage_gateway_lifecycle_evidence,
 };
 pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,
