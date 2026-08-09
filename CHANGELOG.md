@@ -21,6 +21,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 - Restore clean-runner Jig bootstrap and enforce schema-backed SQLx metadata in
   repository policy CI.
+- Add a release preflight and a manual crates.io trusted-publishing workflow
+  that uses short-lived OIDC credentials.
 
 ## [0.1.0] - 2026-08-08
 

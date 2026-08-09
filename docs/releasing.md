@@ -37,7 +37,9 @@ do not add a long-lived crates.io token to repository secrets.
 
 One-time setup:
 
-1. Create a protected GitHub environment named `release` and require a reviewer.
+1. Create a GitHub environment named `release` and restrict it to the `main`
+   deployment branch. Require a reviewer when the repository's GitHub plan
+   supports deployment reviewers.
 2. In the crates.io settings for each publishable crate, add the same GitHub
    trusted publisher:
    - repository owner: `bpcakes`
