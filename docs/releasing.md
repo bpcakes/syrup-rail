@@ -1,0 +1,62 @@
+# Releasing Syrup Rail
+
+Syrup Rail releases all four publishable crates at the same version. Publish
+them in dependency order:
+
+1. `syrup-rail`
+2. `syrup-rail-nmi-client`
+3. `syrup-rail-postgres`
+4. `syrup-rail-nmi`
+
+The workspace dependency requirements must match the release version. In
+particular, the Postgres and NMI packages can use APIs added in the matching
+core release and must not claim compatibility with an older core package.
+
+## Preflight
+
+Update the workspace version, internal dependency requirements, `Cargo.lock`,
+and `CHANGELOG.md`. Then run:
+
+```console
+scripts/check-release.sh 0.1.1 --allow-dirty
+scripts/jig check contract
+scripts/jig check fmt
+scripts/jig check clippy
+scripts/jig check test-locked
+scripts/jig check sqlx
+```
+
+Commit the release preparation, push `main`, wait for required CI to pass, and
+rerun `scripts/check-release.sh VERSION` from the clean release commit.
+
+## Trusted publishing
+
+The preferred release path is the manual `Publish crates.io` GitHub Actions
+workflow. It uses crates.io trusted publishing to obtain a short-lived token;
+do not add a long-lived crates.io token to repository secrets.
+
+One-time setup:
+
+1. Create a protected GitHub environment named `release` and require a reviewer.
+2. In the crates.io settings for each publishable crate, add the same GitHub
+   trusted publisher:
+   - repository owner: `bpcakes`
+   - repository: `syrup-rail`
+   - workflow: `release.yml`
+   - environment: `release`
+3. In GitHub Actions, run `Publish crates.io` from `main` and enter the version
+   already recorded in the release commit.
+
+The workflow validates metadata and package contents, runs the repository
+gates, publishes in dependency order, waits for each package to become visible,
+and finally creates and pushes the annotated `vVERSION` tag. A partially
+completed workflow can be rerun: immutable crate versions already present on
+crates.io are skipped, and the remaining packages continue in order.
+
+## Local fallback
+
+If trusted publishing is unavailable, authenticate Cargo through a configured
+credential provider and run the preflight from a clean `main`. Publish each
+crate in the order above with `cargo publish --locked -p CRATE`, checking its
+package first with `--dry-run`. Push an annotated `vVERSION` tag only after all
+four crate versions are visible on crates.io.

@@ -17,6 +17,11 @@ Reusable subscription billing crates for Banana Pancakes applications.
 - `scripts/jig check test`
 - `cargo test -p syrup-rail-nmi-client`
 
+## Releasing
+
+See [docs/releasing.md](docs/releasing.md) for the local preflight and the
+manual, trusted-publishing workflow.
+
 Private Cargo consumers pin one exact Git revision with
 `git = "ssh://git@github.com/bpcakes/syrup-rail.git"` and set
 `CARGO_NET_GIT_FETCH_WITH_CLI=true` so authentication uses the system Git client.

@@ -1,0 +1,1 @@
+Curate the 0.1.1 changelog, bump all publishable workspace crates and internal dependency requirements, add a repeatable release preflight and release runbook, run required gates, publish crates.io packages in dependency order, and tag the verified release commit.
