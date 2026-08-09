@@ -1,12 +1,12 @@
-_commit = ""
-_src_path = "embedded:jig-sh"
+_commit = "ecd216698e3ba46faf47ab74926efd5e683c5df2"
+_src_path = "https://github.com/bpcakes/jig-sh.git"
 _template_mode = ""
 _template_local_path = ""
 repo_name = "syrup-rail"
 default_branch = "main"
 ci_github_runner = "ubuntu-latest"
 jig_version = "0.2.0"
-template_source_url = ""
+template_source_url = "https://github.com/bpcakes/jig-sh.git"
 harness_footprint = "full"
 sqlx_enabled = true
 rust_crate_roots = ["crates"]
@@ -84,4 +84,3 @@ tool = "jig.sqlx_check"
 id = "jig-skills"
 source = "bpcakes/jig-skills"
 plugins = ["jig-rust@jig-skills", "jig-swift@jig-skills", "jig-typescript@jig-skills", "jig-exec-plans@jig-skills"]
-

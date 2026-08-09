@@ -1,0 +1,1 @@
+Pin the clean-runner Jig bootstrap source, align Repo Policy with the project-owned SQLx metadata gate, run local repository gates, and verify all GitHub Actions workflows pass on main.

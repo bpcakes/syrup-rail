@@ -92,8 +92,8 @@ jobs:
           scripts/jig check rust-file-loc --changed-against "$base_ref"
 
 
-  sqlx-unchecked-queries:
-    name: Verify non-test SQLx queries are compile-time checked
+  sqlx-metadata:
+    name: Verify SQLx metadata against schema v1
     runs-on: "ubuntu-latest"
     defaults:
       run:
@@ -106,9 +106,13 @@ jobs:
         with:
           cache: false
           rustflags: ""
-      - name: Check unchecked SQLx query usage in non-test code
+      - name: Install SQLx CLI
+        uses: taiki-e/install-action@v2.85.11
+        with:
+          tool: sqlx-cli@0.8.6
+      - name: Check SQLx metadata
         run: |
-          scripts/jig check sqlx-unchecked-non-test
+          scripts/jig check sqlx
 
   migration-immutability:
     name: Enforce migration immutability
