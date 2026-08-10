@@ -140,14 +140,16 @@ async fn v1_active_recovery_authority_survives_the_v2_cutover() -> Result<(), Bo
 
         let first = &fixtures[0];
         let fresh_command = RecoverSubscriptionPayment::new(
-            PaymentAttemptId::new(Uuid::now_v7()),
-            BillingScopeId::new(account.billing_scope_id),
-            first.subscriber_id,
+            syrup_rail::SubscriptionPaymentContext::new(
+                PaymentAttemptId::new(Uuid::now_v7()),
+                BillingScopeId::new(account.billing_scope_id),
+                first.subscriber_id,
+                GatewayConfigurationId::new(account.gateway_configuration_id),
+                IdempotencyKey::new("fresh-active-recovery-after-cutover")?,
+                PaymentToken::new("opaque-fresh-recovery-token")?,
+                BillingContact::new(None, None, Some("fresh@example.test".to_owned()))?,
+            ),
             PlanKey::new("base_subscription")?,
-            GatewayConfigurationId::new(account.gateway_configuration_id),
-            IdempotencyKey::new("fresh-active-recovery-after-cutover")?,
-            PaymentToken::new("opaque-fresh-recovery-token")?,
-            BillingContact::new(None, None, Some("fresh@example.test".to_owned()))?,
         );
         let mut transaction = database.pool.begin().await?;
         let fresh = reserve_subscription_recovery_in_transaction(

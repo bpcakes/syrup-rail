@@ -12,13 +12,15 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     };
     let subscriber_id = SubscriberId::new(Uuid::now_v7());
     let command = syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("paid-trial-primary")?,
-        PaymentToken::new("opaque-paid-trial-token")?,
-        BillingContact::new(None, None, Some("trial@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("paid-trial-primary")?,
+            PaymentToken::new("opaque-paid-trial-token")?,
+            BillingContact::new(None, None, Some("trial@example.test".to_owned()))?,
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(offer),
     );
     let enrollment = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;

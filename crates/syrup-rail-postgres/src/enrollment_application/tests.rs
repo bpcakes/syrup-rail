@@ -536,17 +536,19 @@ async fn enrollment_fixture(
     };
     let attempt_id = PaymentAttemptId::new(Uuid::now_v7());
     let command = EnrollSubscription::new(
-        attempt_id,
-        BillingScopeId::new(account.billing_scope_id),
-        SubscriberId::new(subscriber_id),
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("application-key")?,
-        PaymentToken::new("opaque-payment-token")?,
-        BillingContact::new(
-            Some("Ada".to_owned()),
-            Some("Lovelace".to_owned()),
-            Some("ada@example.test".to_owned()),
-        )?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            attempt_id,
+            BillingScopeId::new(account.billing_scope_id),
+            SubscriberId::new(subscriber_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("application-key")?,
+            PaymentToken::new("opaque-payment-token")?,
+            BillingContact::new(
+                Some("Ada".to_owned()),
+                Some("Lovelace".to_owned()),
+                Some("ada@example.test".to_owned()),
+            )?,
+        ),
         expected_charge,
     );
     let gateway = ResolvedGateway::new(

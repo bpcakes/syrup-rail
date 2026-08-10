@@ -69,13 +69,15 @@ async fn approved_application_projects_the_locked_attempt_not_mismatched_reserva
 -> Result<(), Box<dyn Error>> {
     let fixture = application_fixture("durable_terms", false, false).await?;
     let mismatched_command = EnrollSubscription::new(
-        fixture.command.attempt_id(),
-        fixture.command.billing_scope_id(),
-        fixture.command.subscriber_id(),
-        fixture.command.gateway_configuration_id(),
-        fixture.command.idempotency_key().clone(),
-        fixture.command.payment_token().clone(),
-        fixture.command.billing_contact().clone(),
+        syrup_rail::SubscriptionPaymentContext::new(
+            fixture.command.attempt_id(),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            fixture.command.idempotency_key().clone(),
+            fixture.command.payment_token().clone(),
+            fixture.command.billing_contact().clone(),
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(immediate_offer(
             PlanKey::new("base_subscription")?,
             ChargeAmount::new(700, CurrencyCode::new("USD")?)?,

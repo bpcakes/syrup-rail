@@ -56,13 +56,15 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         ChargeAmount::new(2_320, CurrencyCode::new("USD")?)?,
     )?;
     let command = syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("paid-trial-recovery")?,
-        PaymentToken::new("opaque-paid-trial-token")?,
-        BillingContact::new(None, None, Some("discount@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("paid-trial-recovery")?,
+            PaymentToken::new("opaque-paid-trial-token")?,
+            BillingContact::new(None, None, Some("discount@example.test".to_owned()))?,
+        ),
         SubscriptionEnrollmentExpectedTerms::discounted(offer, discount)?,
     );
     let enrollment = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
@@ -176,14 +178,16 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     .fetch_one(&database.pool)
     .await?;
     let failed_recovery_command = RecoverSubscriptionPayment::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("paid-trial-failed-recovery")?,
+            PaymentToken::new("opaque-failed-recovery-token")?,
+            BillingContact::new(None, None, Some("failed-recovery@example.test".to_owned()))?,
+        ),
         PlanKey::new("identity_pro")?,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("paid-trial-failed-recovery")?,
-        PaymentToken::new("opaque-failed-recovery-token")?,
-        BillingContact::new(None, None, Some("failed-recovery@example.test".to_owned()))?,
     );
     let failed_recovery =
         reserve_and_admit_recovery(&database.pool, &gateway, &failed_recovery_command).await?;
@@ -207,14 +211,16 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     assert_eq!(retry_after_failed_recovery, scheduled_retry);
 
     let recovery_command = RecoverSubscriptionPayment::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("paid-trial-user-recovery")?,
+            PaymentToken::new("opaque-recovery-token")?,
+            BillingContact::new(None, None, Some("recovery@example.test".to_owned()))?,
+        ),
         PlanKey::new("identity_pro")?,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("paid-trial-user-recovery")?,
-        PaymentToken::new("opaque-recovery-token")?,
-        BillingContact::new(None, None, Some("recovery@example.test".to_owned()))?,
     );
     let recovery = reserve_and_admit_recovery(&database.pool, &gateway, &recovery_command).await?;
     assert_eq!(recovery.request().amount().cents(), 2_320);
@@ -236,14 +242,16 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     assert_eq!(retry_after_unknown, scheduled_retry);
 
     let blocked_recovery = RecoverSubscriptionPayment::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("paid-trial-blocked-recovery")?,
+            PaymentToken::new("opaque-blocked-recovery-token")?,
+            BillingContact::new(None, None, Some("blocked@example.test".to_owned()))?,
+        ),
         PlanKey::new("identity_pro")?,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("paid-trial-blocked-recovery")?,
-        PaymentToken::new("opaque-blocked-recovery-token")?,
-        BillingContact::new(None, None, Some("blocked@example.test".to_owned()))?,
     );
     let mut transaction = database.pool.begin().await?;
     let blocked =

@@ -210,14 +210,16 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         Arc::new(fixture.coordinator.clone()),
     );
     let command = RecoverSubscriptionPayment::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        fixture.command.billing_scope_id(),
-        fixture.command.subscriber_id(),
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("recovery-key")?,
+            PaymentToken::new("opaque-recovery-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
         fixture.command.plan_key().clone(),
-        fixture.command.gateway_configuration_id(),
-        IdempotencyKey::new("recovery-key")?,
-        PaymentToken::new("opaque-recovery-token")?,
-        fixture.command.billing_contact().clone(),
     );
 
     let result = service.recover(command.clone()).await?;
@@ -342,14 +344,16 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         Arc::new(fixture.coordinator.clone()),
     );
     let command = ReplaceSubscriptionPaymentMethod::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        fixture.command.billing_scope_id(),
-        fixture.command.subscriber_id(),
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("replace-method-key")?,
+            PaymentToken::new("opaque-replacement-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
         fixture.command.plan_key().clone(),
-        fixture.command.gateway_configuration_id(),
-        IdempotencyKey::new("replace-method-key")?,
-        PaymentToken::new("opaque-replacement-token")?,
-        fixture.command.billing_contact().clone(),
     );
 
     let result = service.replace_payment_method(command.clone()).await?;
@@ -498,13 +502,15 @@ async fn foreground_service_resumes_the_durable_attempt_not_the_retry_candidate_
     transaction.commit().await?;
 
     let retry = EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        fixture.command.billing_scope_id(),
-        fixture.command.subscriber_id(),
-        fixture.command.gateway_configuration_id(),
-        fixture.command.idempotency_key().clone(),
-        fixture.command.payment_token().clone(),
-        fixture.command.billing_contact().clone(),
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            fixture.command.idempotency_key().clone(),
+            fixture.command.payment_token().clone(),
+            fixture.command.billing_contact().clone(),
+        ),
         fixture.command.expected_terms().clone(),
     );
     let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(

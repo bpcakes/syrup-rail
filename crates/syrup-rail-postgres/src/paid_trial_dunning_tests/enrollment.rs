@@ -81,13 +81,15 @@ async fn enrollment_offer_hook_excludes_one_in_flight_identity_across_both_stage
     };
     let subscriber_id = SubscriberId::new(Uuid::now_v7());
     let command = syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("trial-history-context")?,
-        PaymentToken::new("opaque-history-token")?,
-        BillingContact::new(None, None, Some("history@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("trial-history-context")?,
+            PaymentToken::new("opaque-history-token")?,
+            BillingContact::new(None, None, Some("history@example.test".to_owned()))?,
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(offer),
     );
     let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
@@ -137,13 +139,15 @@ async fn enrollment_offer_hook_excludes_one_in_flight_identity_across_both_stage
     );
 
     let later_command = syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("trial-history-later")?,
-        PaymentToken::new("opaque-later-token")?,
-        BillingContact::new(None, None, Some("history@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("trial-history-later")?,
+            PaymentToken::new("opaque-later-token")?,
+            BillingContact::new(None, None, Some("history@example.test".to_owned()))?,
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(paid_trial_offer()?),
     );
     let later_reservation =
@@ -347,13 +351,15 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
     };
     let declined_subscriber = SubscriberId::new(Uuid::now_v7());
     let declined_command = syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        declined_subscriber,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("trial-declined")?,
-        PaymentToken::new("opaque-declined-token")?,
-        BillingContact::new(None, None, Some("declined@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            declined_subscriber,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("trial-declined")?,
+            PaymentToken::new("opaque-declined-token")?,
+            BillingContact::new(None, None, Some("declined@example.test".to_owned()))?,
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer.clone()),
     );
     let declined_reservation =
@@ -401,13 +407,15 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
     let reconciled_subscriber = SubscriberId::new(Uuid::now_v7());
     let reconciled_attempt_id = PaymentAttemptId::new(Uuid::now_v7());
     let reconciled_command = syrup_rail::EnrollSubscription::new(
-        reconciled_attempt_id,
-        BillingScopeId::new(account.billing_scope_id),
-        reconciled_subscriber,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("trial-reconciled")?,
-        PaymentToken::new("opaque-reconciled-token")?,
-        BillingContact::new(None, None, Some("reconciled@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            reconciled_attempt_id,
+            BillingScopeId::new(account.billing_scope_id),
+            reconciled_subscriber,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("trial-reconciled")?,
+            PaymentToken::new("opaque-reconciled-token")?,
+            BillingContact::new(None, None, Some("reconciled@example.test".to_owned()))?,
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer.clone()),
     );
     let reconciled_reservation =
@@ -488,13 +496,15 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
     )?;
     let mismatch_subscriber = SubscriberId::new(Uuid::now_v7());
     let mismatch_command = syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        mismatch_subscriber,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new("trial-term-mismatch")?,
-        PaymentToken::new("opaque-mismatch-token")?,
-        BillingContact::new(None, None, Some("mismatch@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            mismatch_subscriber,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("trial-term-mismatch")?,
+            PaymentToken::new("opaque-mismatch-token")?,
+            BillingContact::new(None, None, Some("mismatch@example.test".to_owned()))?,
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer),
     );
     let mismatch_reservation =

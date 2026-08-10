@@ -459,13 +459,15 @@ async fn approve_enrollment(
     payment_method_reference: &str,
 ) -> Result<SubscriptionEnrollmentPaymentResult, Box<dyn Error>> {
     let command = syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::now_v7()),
-        BillingScopeId::new(account.billing_scope_id),
-        subscriber_id,
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new(idempotency_key)?,
-        PaymentToken::new("opaque-enrollment-token")?,
-        BillingContact::new(None, None, Some("subscriber@example.test".to_owned()))?,
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            subscriber_id,
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new(idempotency_key)?,
+            PaymentToken::new("opaque-enrollment-token")?,
+            BillingContact::new(None, None, Some("subscriber@example.test".to_owned()))?,
+        ),
         expected_terms,
     );
     let reservation = SubscriptionEnrollmentReservation::from_command(&command, gateway)?;

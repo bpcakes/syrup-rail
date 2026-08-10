@@ -318,14 +318,16 @@ mod tests {
         );
 
         let recovery = crate::RecoverSubscriptionPayment::new(
-            PaymentAttemptId::new(Uuid::from_u128(9)),
-            gateway.billing_scope_id(),
-            subscriber_id,
+            crate::SubscriptionPaymentContext::new(
+                PaymentAttemptId::new(Uuid::from_u128(9)),
+                gateway.billing_scope_id(),
+                subscriber_id,
+                gateway.gateway_configuration_id(),
+                IdempotencyKey::new("recovery-key").unwrap(),
+                PaymentToken::new("recovery-token").unwrap(),
+                BillingContact::new(None, Some("Test".to_owned()), None).unwrap(),
+            ),
             plan_key.clone(),
-            gateway.gateway_configuration_id(),
-            IdempotencyKey::new("recovery-key").unwrap(),
-            PaymentToken::new("recovery-token").unwrap(),
-            BillingContact::new(None, Some("Test".to_owned()), None).unwrap(),
         );
         assert_eq!(
             crate::SubscriptionRecoveryReservation::from_locked_subscription(
@@ -355,14 +357,16 @@ mod tests {
         );
 
         let replacement = crate::ReplaceSubscriptionPaymentMethod::new(
-            PaymentAttemptId::new(Uuid::from_u128(10)),
-            gateway.billing_scope_id(),
-            subscriber_id,
+            crate::SubscriptionPaymentContext::new(
+                PaymentAttemptId::new(Uuid::from_u128(10)),
+                gateway.billing_scope_id(),
+                subscriber_id,
+                gateway.gateway_configuration_id(),
+                IdempotencyKey::new("replacement-key").unwrap(),
+                PaymentToken::new("replacement-token").unwrap(),
+                BillingContact::new(None, Some("Test".to_owned()), None).unwrap(),
+            ),
             plan_key,
-            gateway.gateway_configuration_id(),
-            IdempotencyKey::new("replacement-key").unwrap(),
-            PaymentToken::new("replacement-token").unwrap(),
-            BillingContact::new(None, Some("Test".to_owned()), None).unwrap(),
         );
         let currency = CurrencyCode::new("USD").unwrap();
         assert_eq!(

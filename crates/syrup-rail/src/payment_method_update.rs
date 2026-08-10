@@ -6,7 +6,7 @@ use crate::{
     PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
     PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId,
     PaymentMethodUpdateSnapshot, PaymentToken, PlanKey, ResolvedGateway, SubscriberId,
-    SubscriptionId,
+    SubscriptionId, SubscriptionPaymentContext,
 };
 use thiserror::Error;
 
@@ -16,63 +16,42 @@ use thiserror::Error;
 /// current method/initial-transaction baseline are derived under lock.
 #[derive(Clone)]
 pub struct ReplaceSubscriptionPaymentMethod {
-    attempt_id: PaymentAttemptId,
-    billing_scope_id: BillingScopeId,
-    subscriber_id: SubscriberId,
+    context: SubscriptionPaymentContext,
     plan_key: PlanKey,
-    gateway_configuration_id: GatewayConfigurationId,
-    idempotency_key: IdempotencyKey,
-    payment_token: PaymentToken,
-    billing_contact: BillingContact,
 }
 
 impl ReplaceSubscriptionPaymentMethod {
-    #[allow(clippy::too_many_arguments)]
-    pub const fn new(
-        attempt_id: PaymentAttemptId,
-        billing_scope_id: BillingScopeId,
-        subscriber_id: SubscriberId,
-        plan_key: PlanKey,
-        gateway_configuration_id: GatewayConfigurationId,
-        idempotency_key: IdempotencyKey,
-        payment_token: PaymentToken,
-        billing_contact: BillingContact,
-    ) -> Self {
-        Self {
-            attempt_id,
-            billing_scope_id,
-            subscriber_id,
-            plan_key,
-            gateway_configuration_id,
-            idempotency_key,
-            payment_token,
-            billing_contact,
-        }
+    pub const fn new(context: SubscriptionPaymentContext, plan_key: PlanKey) -> Self {
+        Self { context, plan_key }
+    }
+
+    pub const fn context(&self) -> &SubscriptionPaymentContext {
+        &self.context
     }
 
     pub const fn attempt_id(&self) -> PaymentAttemptId {
-        self.attempt_id
+        self.context.attempt_id()
     }
     pub const fn billing_scope_id(&self) -> BillingScopeId {
-        self.billing_scope_id
+        self.context.billing_scope_id()
     }
     pub const fn subscriber_id(&self) -> SubscriberId {
-        self.subscriber_id
+        self.context.subscriber_id()
     }
     pub const fn plan_key(&self) -> &PlanKey {
         &self.plan_key
     }
     pub const fn gateway_configuration_id(&self) -> GatewayConfigurationId {
-        self.gateway_configuration_id
+        self.context.gateway_configuration_id()
     }
     pub const fn idempotency_key(&self) -> &IdempotencyKey {
-        &self.idempotency_key
+        self.context.idempotency_key()
     }
     pub const fn payment_token(&self) -> &PaymentToken {
-        &self.payment_token
+        self.context.payment_token()
     }
     pub const fn billing_contact(&self) -> &BillingContact {
-        &self.billing_contact
+        self.context.billing_contact()
     }
 }
 
@@ -80,11 +59,11 @@ impl fmt::Debug for ReplaceSubscriptionPaymentMethod {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ReplaceSubscriptionPaymentMethod")
-            .field("attempt_id", &self.attempt_id)
-            .field("billing_scope_id", &self.billing_scope_id)
-            .field("subscriber_id", &self.subscriber_id)
+            .field("attempt_id", &self.attempt_id())
+            .field("billing_scope_id", &self.billing_scope_id())
+            .field("subscriber_id", &self.subscriber_id())
             .field("plan_key", &self.plan_key)
-            .field("gateway_configuration_id", &self.gateway_configuration_id)
+            .field("gateway_configuration_id", &self.gateway_configuration_id())
             .field("has_idempotency_key", &true)
             .field("has_payment_token", &true)
             .field("has_billing_contact", &true)

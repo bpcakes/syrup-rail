@@ -166,18 +166,20 @@ fn enrollment_command(
     expected_charge: syrup_rail::SubscriptionEnrollmentExpectedTerms,
 ) -> syrup_rail::EnrollSubscription {
     syrup_rail::EnrollSubscription::new(
-        PaymentAttemptId::new(attempt_id),
-        BillingScopeId::new(account.billing_scope_id),
-        SubscriberId::new(subscriber_id),
-        GatewayConfigurationId::new(account.gateway_configuration_id),
-        IdempotencyKey::new(idempotency_key).unwrap(),
-        syrup_rail::PaymentToken::new("token-secret").unwrap(),
-        syrup_rail::BillingContact::new(
-            Some("Sensitive".to_owned()),
-            Some("Name".to_owned()),
-            Some("secret@example.test".to_owned()),
-        )
-        .unwrap(),
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(attempt_id),
+            BillingScopeId::new(account.billing_scope_id),
+            SubscriberId::new(subscriber_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new(idempotency_key).unwrap(),
+            syrup_rail::PaymentToken::new("token-secret").unwrap(),
+            syrup_rail::BillingContact::new(
+                Some("Sensitive".to_owned()),
+                Some("Name".to_owned()),
+                Some("secret@example.test".to_owned()),
+            )
+            .unwrap(),
+        ),
         expected_charge,
     )
 }

@@ -255,18 +255,20 @@ fn discounted_terms_reject_a_currency_mismatch() {
 #[test]
 fn enrollment_debug_omits_token_key_and_contact_values() {
     let command = EnrollSubscription::new(
-        PaymentAttemptId::new(Uuid::from_u128(1)),
-        BillingScopeId::new(Uuid::from_u128(2)),
-        SubscriberId::new(Uuid::from_u128(3)),
-        GatewayConfigurationId::new(Uuid::from_u128(4)),
-        IdempotencyKey::new("secret-key").unwrap(),
-        PaymentToken::new("secret-token").unwrap(),
-        BillingContact::new(
-            None,
-            Some("Secret Name".to_owned()),
-            Some("secret@example.test".to_owned()),
-        )
-        .unwrap(),
+        SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::from_u128(1)),
+            BillingScopeId::new(Uuid::from_u128(2)),
+            SubscriberId::new(Uuid::from_u128(3)),
+            GatewayConfigurationId::new(Uuid::from_u128(4)),
+            IdempotencyKey::new("secret-key").unwrap(),
+            PaymentToken::new("secret-token").unwrap(),
+            BillingContact::new(
+                None,
+                Some("Secret Name".to_owned()),
+                Some("secret@example.test".to_owned()),
+            )
+            .unwrap(),
+        ),
         SubscriptionEnrollmentExpectedTerms::full_price(offer(plan("basic"), 1000)),
     );
     let debug = format!("{command:?}");

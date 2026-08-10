@@ -25,6 +25,7 @@ mod renewal;
 mod resolution;
 mod resolver;
 mod subscription;
+mod subscription_payment_context;
 mod terms;
 
 pub use admission::*;
@@ -47,6 +48,7 @@ pub use renewal::*;
 pub use resolution::*;
 pub use resolver::*;
 pub use subscription::*;
+pub use subscription_payment_context::*;
 pub use terms::*;
 
 /// Workspace package version exposed for consumer pinning diagnostics.
