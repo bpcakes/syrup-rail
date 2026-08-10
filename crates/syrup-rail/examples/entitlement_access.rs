@@ -1,22 +1,9 @@
-use syrup_rail::{Entitlement, PastDueAccess};
+use syrup_rail::Entitlement;
 
-/// Converts Syrup Rail's closed entitlement result into a host product-access
-/// decision without treating every payment-state transition as suspension.
+/// Applies Syrup Rail's subscription-entitlement policy to a product-access
+/// decision. This does not authenticate or authorize the host's subject.
 pub const fn permits_product_access(entitlement: &Entitlement) -> bool {
-    match entitlement {
-        Entitlement::PaidActive { .. }
-        | Entitlement::PaidThroughCancellation { .. }
-        | Entitlement::Granted { .. }
-        | Entitlement::PastDue {
-            access: PastDueAccess::AllowedDuringDunning,
-            ..
-        } => true,
-        Entitlement::Missing { .. }
-        | Entitlement::PastDue {
-            access: PastDueAccess::Suspended,
-            ..
-        } => false,
-    }
+    entitlement.permits_product_access()
 }
 
 fn main() {}

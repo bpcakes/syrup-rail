@@ -2,7 +2,11 @@ use chrono::TimeZone;
 use uuid::Uuid;
 
 use super::*;
-use crate::{CurrencyCode, MoneyError};
+use crate::{
+    BillingPeriod, CurrencyCode, DunningExhaustion, DunningSchedule, MoneyError, PaymentMethodId,
+    RenewalFailurePolicy, SubscriptionId, SubscriptionPeriodRule, SubscriptionPhase,
+    SubscriptionStatus,
+};
 
 #[test]
 fn canonical_discount_code_has_one_probe_identity() {
@@ -146,4 +150,82 @@ fn entitlement_variants_cannot_mix_grant_and_paid_owners() {
         Entitlement::Granted { grant },
         Entitlement::Granted { .. }
     ));
+}
+
+#[test]
+fn entitlement_product_access_policy_covers_every_variant() {
+    let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+    let subscription = Subscription::new(
+        SubscriptionId::new(Uuid::from_u128(1)),
+        PlanKey::new("plan").unwrap(),
+        SubscriptionStatus::Active,
+        SubscriptionPhase::Recurring,
+        PaymentMethodId::new(Uuid::from_u128(2)),
+        ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+        SubscriptionPeriodRule::calendar_months(1).unwrap(),
+        RenewalFailurePolicy::new(
+            DunningSchedule::default(),
+            DunningExhaustion::MarkUnpaid,
+            PastDueAccessPolicy::SuspendImmediately,
+        ),
+        BillingPeriod::new(starts, starts + chrono::Duration::days(30)).unwrap(),
+        starts,
+        None,
+    );
+    let grant = SubscriptionGrant::new(
+        SubscriptionGrantId::new(Uuid::from_u128(3)),
+        PlanKey::new("plan").unwrap(),
+        SubscriptionGrantKind::Promotion,
+        starts,
+        starts + chrono::Duration::days(30),
+        ActorId::new(Uuid::from_u128(4)),
+    )
+    .unwrap();
+
+    let decisions = [
+        (
+            Entitlement::Missing {
+                next_action: MissingSubscriptionAction::StartSubscription,
+                saved_discount: None,
+            },
+            false,
+        ),
+        (
+            Entitlement::PaidActive {
+                subscription: subscription.clone(),
+                applied_discount: None,
+            },
+            true,
+        ),
+        (
+            Entitlement::PaidThroughCancellation {
+                subscription: subscription.clone(),
+                applied_discount: None,
+            },
+            true,
+        ),
+        (
+            Entitlement::PastDue {
+                subscription: subscription.clone(),
+                access: PastDueAccess::AllowedDuringDunning,
+                next_action: PastDueAction::RecoverPayment,
+                applied_discount: None,
+            },
+            true,
+        ),
+        (
+            Entitlement::PastDue {
+                subscription,
+                access: PastDueAccess::Suspended,
+                next_action: PastDueAction::RecoverPayment,
+                applied_discount: None,
+            },
+            false,
+        ),
+        (Entitlement::Granted { grant }, true),
+    ];
+
+    for (entitlement, expected_access) in decisions {
+        assert_eq!(entitlement.permits_product_access(), expected_access);
+    }
 }

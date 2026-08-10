@@ -65,6 +65,30 @@ pub enum Entitlement {
     },
 }
 
+impl Entitlement {
+    /// Returns whether this subscription entitlement permits product access.
+    ///
+    /// This applies Syrup Rail's subscription-entitlement policy only. Hosts
+    /// must authenticate and authorize the subject before using the result to
+    /// grant access to their product.
+    pub const fn permits_product_access(&self) -> bool {
+        match self {
+            Self::PaidActive { .. }
+            | Self::PaidThroughCancellation { .. }
+            | Self::Granted { .. }
+            | Self::PastDue {
+                access: PastDueAccess::AllowedDuringDunning,
+                ..
+            } => true,
+            Self::Missing { .. }
+            | Self::PastDue {
+                access: PastDueAccess::Suspended,
+                ..
+            } => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EntitlementQuery {
     billing_scope_id: BillingScopeId,
