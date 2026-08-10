@@ -1,6 +1,6 @@
 use syrup_rail::{
-    ChargeAmount, CurrencyCode, DunningExhaustion, DunningSchedule, PaidTrialTerms,
-    PastDueAccessPolicy, PlanKey, RecurringSubscriptionTerms, RenewalFailurePolicy,
+    ChargeAmount, CurrencyCode, DunningExhaustion, DunningRetryDelay, DunningSchedule,
+    PaidTrialTerms, PastDueAccessPolicy, PlanKey, RecurringSubscriptionTerms, RenewalFailurePolicy,
     SubscriptionOffer, SubscriptionPeriodRule, SubscriptionStart,
 };
 
@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SubscriptionPeriodRule::calendar_months(1)?,
     );
     let dunning = RenewalFailurePolicy::new(
-        DunningSchedule::from_seconds([86_400, 259_200])?,
+        DunningSchedule::from_delays([DunningRetryDelay::days(1)?, DunningRetryDelay::days(3)?])?,
         DunningExhaustion::MarkUnpaid,
         PastDueAccessPolicy::ContinueUntilDunningExhausted,
     );

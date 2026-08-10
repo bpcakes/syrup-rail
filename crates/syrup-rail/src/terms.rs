@@ -1,6 +1,7 @@
 use std::{
     num::{NonZeroU16, NonZeroU32},
     str::FromStr,
+    time::Duration,
 };
 
 use thiserror::Error;
@@ -15,6 +16,10 @@ pub enum SubscriptionTermsError {
     ZeroPeriodCount,
     #[error("dunning retry delay must be positive")]
     ZeroDunningDelay,
+    #[error("dunning retry delay must be a whole number of seconds")]
+    NonWholeSecondDunningDelay,
+    #[error("dunning retry delay exceeds the supported whole-second range")]
+    DunningDelaySecondsOutOfRange,
     #[error("dunning schedule exceeds the supported retry-step limit")]
     TooManyDunningRetrySteps,
     #[error("paid-trial and recurring charges must use the same currency")]
@@ -142,10 +147,36 @@ pub struct DunningRetryDelay {
 }
 
 impl DunningRetryDelay {
+    const SECONDS_PER_HOUR: u32 = 60 * 60;
+    const SECONDS_PER_DAY: u32 = 24 * Self::SECONDS_PER_HOUR;
+
     pub fn new(seconds: u32) -> Result<Self, SubscriptionTermsError> {
         NonZeroU32::new(seconds)
             .map(|seconds| Self { seconds })
             .ok_or(SubscriptionTermsError::ZeroDunningDelay)
+    }
+
+    /// Constructs a delay from an exact, positive whole-second duration.
+    pub fn from_duration(duration: Duration) -> Result<Self, SubscriptionTermsError> {
+        if duration.is_zero() {
+            return Err(SubscriptionTermsError::ZeroDunningDelay);
+        }
+        if duration.subsec_nanos() != 0 {
+            return Err(SubscriptionTermsError::NonWholeSecondDunningDelay);
+        }
+        let seconds = u32::try_from(duration.as_secs())
+            .map_err(|_| SubscriptionTermsError::DunningDelaySecondsOutOfRange)?;
+        Self::new(seconds)
+    }
+
+    /// Constructs a delay from a positive number of whole hours.
+    pub fn hours(hours: u32) -> Result<Self, SubscriptionTermsError> {
+        Self::from_whole_units(hours, Self::SECONDS_PER_HOUR)
+    }
+
+    /// Constructs a delay from a positive number of whole days.
+    pub fn days(days: u32) -> Result<Self, SubscriptionTermsError> {
+        Self::from_whole_units(days, Self::SECONDS_PER_DAY)
     }
 
     pub const fn from_non_zero_seconds(seconds: NonZeroU32) -> Self {
@@ -154,6 +185,32 @@ impl DunningRetryDelay {
 
     pub const fn seconds(self) -> NonZeroU32 {
         self.seconds
+    }
+
+    /// Returns this delay as an exact whole-second duration.
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(u64::from(self.seconds.get()))
+    }
+
+    fn from_whole_units(units: u32, seconds_per_unit: u32) -> Result<Self, SubscriptionTermsError> {
+        let seconds = units
+            .checked_mul(seconds_per_unit)
+            .ok_or(SubscriptionTermsError::DunningDelaySecondsOutOfRange)?;
+        Self::new(seconds)
+    }
+}
+
+impl TryFrom<Duration> for DunningRetryDelay {
+    type Error = SubscriptionTermsError;
+
+    fn try_from(duration: Duration) -> Result<Self, Self::Error> {
+        Self::from_duration(duration)
+    }
+}
+
+impl From<DunningRetryDelay> for Duration {
+    fn from(delay: DunningRetryDelay) -> Self {
+        delay.duration()
     }
 }
 
@@ -168,6 +225,18 @@ impl DunningSchedule {
             return Err(SubscriptionTermsError::TooManyDunningRetrySteps);
         }
         Ok(Self { retry_delays })
+    }
+
+    /// Constructs a schedule from validated retry delays, including arrays.
+    pub fn from_delays<I>(retry_delays: I) -> Result<Self, SubscriptionTermsError>
+    where
+        I: IntoIterator<Item = DunningRetryDelay>,
+    {
+        let retry_delays = retry_delays
+            .into_iter()
+            .take(MAX_DUNNING_RETRY_STEPS + 1)
+            .collect();
+        Self::new(retry_delays)
     }
 
     pub fn from_seconds<I>(seconds: I) -> Result<Self, SubscriptionTermsError>
@@ -346,6 +415,8 @@ impl SubscriptionOffer {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::CurrencyCode;
 
@@ -363,21 +434,77 @@ mod tests {
             DunningRetryDelay::new(0),
             Err(SubscriptionTermsError::ZeroDunningDelay)
         );
+        assert_eq!(
+            DunningRetryDelay::from_duration(Duration::ZERO),
+            Err(SubscriptionTermsError::ZeroDunningDelay)
+        );
+        assert_eq!(
+            DunningRetryDelay::hours(0),
+            Err(SubscriptionTermsError::ZeroDunningDelay)
+        );
+        assert_eq!(
+            DunningRetryDelay::days(0),
+            Err(SubscriptionTermsError::ZeroDunningDelay)
+        );
     }
 
     #[test]
-    fn schedule_accepts_empty_and_sixteen_steps_but_not_seventeen() {
+    fn duration_conversion_requires_representable_whole_seconds() {
+        let one_second = DunningRetryDelay::from_duration(Duration::from_secs(1)).unwrap();
+        assert_eq!(one_second.seconds().get(), 1);
+        assert_eq!(one_second.duration(), Duration::from_secs(1));
+        assert_eq!(Duration::from(one_second), Duration::from_secs(1));
+        assert_eq!(
+            DunningRetryDelay::try_from(Duration::from_secs(1)),
+            Ok(one_second)
+        );
+
+        let max =
+            DunningRetryDelay::from_duration(Duration::from_secs(u64::from(u32::MAX))).unwrap();
+        assert_eq!(max.seconds().get(), u32::MAX);
+
+        assert_eq!(
+            DunningRetryDelay::from_duration(Duration::from_millis(1)),
+            Err(SubscriptionTermsError::NonWholeSecondDunningDelay)
+        );
+        assert_eq!(
+            DunningRetryDelay::from_duration(Duration::new(1, 1)),
+            Err(SubscriptionTermsError::NonWholeSecondDunningDelay)
+        );
+        assert_eq!(
+            DunningRetryDelay::from_duration(Duration::from_secs(u64::from(u32::MAX) + 1)),
+            Err(SubscriptionTermsError::DunningDelaySecondsOutOfRange)
+        );
+    }
+
+    #[test]
+    fn whole_hour_and_day_factories_are_checked() {
+        assert_eq!(DunningRetryDelay::hours(1).unwrap().seconds().get(), 3_600);
+        assert_eq!(DunningRetryDelay::days(1).unwrap().seconds().get(), 86_400);
+        assert_eq!(DunningRetryDelay::days(3).unwrap().seconds().get(), 259_200);
+        assert_eq!(
+            DunningRetryDelay::hours(u32::MAX),
+            Err(SubscriptionTermsError::DunningDelaySecondsOutOfRange)
+        );
+        assert_eq!(
+            DunningRetryDelay::days(u32::MAX),
+            Err(SubscriptionTermsError::DunningDelaySecondsOutOfRange)
+        );
+    }
+
+    #[test]
+    fn schedule_accepts_arrays_through_the_retry_cap() {
         assert!(DunningSchedule::new(Vec::new()).unwrap().is_empty());
         let delay = DunningRetryDelay::new(1).unwrap();
         assert_eq!(
-            DunningSchedule::new(vec![delay; MAX_DUNNING_RETRY_STEPS])
+            DunningSchedule::from_delays([delay; MAX_DUNNING_RETRY_STEPS])
                 .unwrap()
                 .retry_delays()
                 .len(),
             MAX_DUNNING_RETRY_STEPS
         );
         assert_eq!(
-            DunningSchedule::new(vec![delay; MAX_DUNNING_RETRY_STEPS + 1]),
+            DunningSchedule::from_delays([delay; MAX_DUNNING_RETRY_STEPS + 1]),
             Err(SubscriptionTermsError::TooManyDunningRetrySteps)
         );
     }
