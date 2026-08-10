@@ -25,6 +25,7 @@ mod renewal;
 mod resolution;
 mod resolver;
 mod subscription;
+mod terms;
 
 pub use admission::*;
 pub use attempt::*;
@@ -46,6 +47,7 @@ pub use renewal::*;
 pub use resolution::*;
 pub use resolver::*;
 pub use subscription::*;
+pub use terms::*;
 
 /// Workspace package version exposed for consumer pinning diagnostics.
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");

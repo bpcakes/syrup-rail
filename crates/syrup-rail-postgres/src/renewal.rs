@@ -38,12 +38,10 @@ pub async fn due_renewals(pool: &PgPool) -> Result<Vec<RenewalDispatch>, Renewal
         return Err(RenewalStoreError::MissingProviderCooldown);
     }
 
-    let retry_accounting_excluded =
-        resolution_strings(PaymentResolutionCode::RENEWAL_RETRY_ACCOUNTING_EXCLUDED);
-    let retry_pacing_excluded =
-        resolution_strings(PaymentResolutionCode::RENEWAL_RETRY_PACING_EXCLUDED);
     let infrastructure_retry_codes =
         resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_RETRY_CODES);
+    let infrastructure_pacing_codes =
+        resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES);
     let rows = sqlx::query(
         r#"
         WITH renewal_attempts AS (
@@ -51,29 +49,28 @@ pub async fn due_renewals(pool: &PgPool) -> Result<Vec<RenewalDispatch>, Renewal
                 attempts.subscription_id,
                 attempts.billing_period_start_at,
                 COUNT(*) FILTER (
-                    WHERE attempts.status IN ('declined', 'failed')
-                        AND COALESCE(attempts.resolution_code <> ALL($1::text[]), true)
-                ) AS terminal_attempt_count,
-                COUNT(*) FILTER (
+                    WHERE attempts.attempt_kind = 'subscription_renewal'
+                        AND attempts.status = 'failed'
+                        AND attempts.resolution_code = ANY($1::text[])
+                        AND attempts.gateway_configuration_id IS NOT DISTINCT FROM
+                            current_accounts.gateway_configuration_id
+                ) AS automatic_infrastructure_attempt_count,
+                MAX(attempts.resolved_at) FILTER (
                     WHERE attempts.attempt_kind = 'subscription_renewal'
                         AND attempts.status = 'failed'
                         AND attempts.resolution_code = ANY($2::text[])
                         AND attempts.gateway_configuration_id IS NOT DISTINCT FROM
                             current_accounts.gateway_configuration_id
-                ) AS automatic_infrastructure_attempt_count,
-                MAX(attempts.resolved_at) FILTER (
-                    WHERE attempts.status IN ('declined', 'failed')
-                        AND COALESCE(attempts.resolution_code <> ALL($3::text[]), true)
-                ) AS last_terminal_at,
+                ) AS last_automatic_infrastructure_failure_at,
                 COUNT(*) FILTER (
                     WHERE attempts.attempt_kind = 'subscription_renewal'
                         AND attempts.status = 'failed'
-                        AND attempts.resolution_code = $4
+                        AND attempts.resolution_code = $3
                 ) AS provider_rate_limited_attempt_count,
                 MAX(attempts.resolved_at) FILTER (
                     WHERE attempts.attempt_kind = 'subscription_renewal'
                         AND attempts.status = 'failed'
-                        AND attempts.resolution_code = $4
+                        AND attempts.resolution_code = $3
                 ) AS last_provider_rate_limited_at,
                 COUNT(*) AS attempt_sequence_count,
                 BOOL_OR(attempts.status IN ('pending', 'unknown', 'review_required', 'approved'))
@@ -102,7 +99,7 @@ pub async fn due_renewals(pool: &PgPool) -> Result<Vec<RenewalDispatch>, Renewal
             ON renewal_attempts.subscription_id = subscriptions.id
             AND renewal_attempts.billing_period_start_at = subscriptions.next_renewal_at
         WHERE subscriptions.status IN ('active', 'past_due')
-            AND subscriptions.next_renewal_at <= clock_timestamp()
+            AND subscriptions.next_payment_attempt_at <= clock_timestamp()
             AND provider_limits.rate_limited_until <= clock_timestamp()
             AND (
                 accounts.mutation_rate_limited_until IS NULL
@@ -119,17 +116,15 @@ pub async fn due_renewals(pool: &PgPool) -> Result<Vec<RenewalDispatch>, Renewal
                         update_attempts.status = 'pending'
                         AND update_attempts.submitted_at IS NULL
                         AND update_attempts.created_at <= clock_timestamp()
-                            - ($5::bigint * interval '1 second')
+                            - ($4::bigint * interval '1 second')
                     )
             )
-            AND COALESCE(renewal_attempts.terminal_attempt_count, 0)
-                < $6
             AND COALESCE(renewal_attempts.automatic_infrastructure_attempt_count, 0)
-                < $7
+                < $5
             AND (
-                renewal_attempts.last_terminal_at IS NULL
-                OR renewal_attempts.last_terminal_at <= clock_timestamp()
-                    - ($8::bigint * interval '1 second')
+                renewal_attempts.last_automatic_infrastructure_failure_at IS NULL
+                OR renewal_attempts.last_automatic_infrastructure_failure_at
+                    <= clock_timestamp() - ($6::bigint * interval '1 second')
             )
             AND (
                 renewal_attempts.last_provider_rate_limited_at IS NULL
@@ -138,23 +133,22 @@ pub async fn due_renewals(pool: &PgPool) -> Result<Vec<RenewalDispatch>, Renewal
                         CASE WHEN COALESCE(
                             renewal_attempts.provider_rate_limited_attempt_count,
                             0
-                        ) >= $9 THEN $8::bigint ELSE $10::bigint END
+                        ) >= $7 THEN $8::bigint ELSE $9::bigint END
                         * interval '1 second'
                     )
             )
-        ORDER BY subscriptions.next_renewal_at ASC, subscriptions.id ASC
+        ORDER BY subscriptions.next_payment_attempt_at ASC, subscriptions.id ASC
         LIMIT 100
         "#,
     )
-    .bind(&retry_accounting_excluded)
     .bind(&infrastructure_retry_codes)
-    .bind(&retry_pacing_excluded)
+    .bind(&infrastructure_pacing_codes)
     .bind(PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission.as_str())
     .bind(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS)
-    .bind(syrup_rail::MAX_RENEWAL_TERMINAL_ATTEMPTS_PER_PERIOD)
     .bind(syrup_rail::MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION)
-    .bind(syrup_rail::RENEWAL_RETRY_AFTER_SECONDS)
+    .bind(syrup_rail::RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS)
     .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS)
+    .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS)
     .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
     .fetch_all(pool)
     .await?;
@@ -177,21 +171,28 @@ pub async fn renewal_attempt_state(
     period_start_at: DateTime<Utc>,
     excluded_attempt_id: Option<PaymentAttemptId>,
 ) -> Result<RenewalAttemptState, RenewalStoreError> {
-    let retry_accounting_excluded =
-        resolution_strings(PaymentResolutionCode::RENEWAL_RETRY_ACCOUNTING_EXCLUDED);
-    let retry_pacing_excluded =
-        resolution_strings(PaymentResolutionCode::RENEWAL_RETRY_PACING_EXCLUDED);
     let infrastructure_retry_codes =
         resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_RETRY_CODES);
+    let infrastructure_pacing_codes =
+        resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES);
     let row = sqlx::query(
         r#"
         SELECT
             COUNT(*) AS attempt_sequence_count,
             COUNT(*) FILTER (
-                WHERE status IN ('declined', 'failed')
-                    AND COALESCE(resolution_code <> ALL($4::text[]), true)
-            ) AS terminal_attempt_count,
-            COUNT(*) FILTER (
+                WHERE attempt_kind = 'subscription_renewal'
+                    AND status = 'failed'
+                    AND resolution_code = ANY($4::text[])
+                    AND gateway_configuration_id = (
+                        SELECT accounts.gateway_configuration_id
+                        FROM billing_subscriptions AS subscriptions
+                        JOIN billing_gateway_accounts AS accounts
+                            ON accounts.id = subscriptions.gateway_account_id
+                            AND accounts.billing_scope_id = subscriptions.billing_scope_id
+                        WHERE subscriptions.id = $1
+                    )
+            ) AS automatic_infrastructure_attempt_count,
+            MAX(resolved_at) FILTER (
                 WHERE attempt_kind = 'subscription_renewal'
                     AND status = 'failed'
                     AND resolution_code = ANY($5::text[])
@@ -203,20 +204,16 @@ pub async fn renewal_attempt_state(
                             AND accounts.billing_scope_id = subscriptions.billing_scope_id
                         WHERE subscriptions.id = $1
                     )
-            ) AS automatic_infrastructure_attempt_count,
-            MAX(resolved_at) FILTER (
-                WHERE status IN ('declined', 'failed')
-                    AND COALESCE(resolution_code <> ALL($6::text[]), true)
-            ) AS last_terminal_at,
+            ) AS last_automatic_infrastructure_failure_at,
             COUNT(*) FILTER (
                 WHERE attempt_kind = 'subscription_renewal'
                     AND status = 'failed'
-                    AND resolution_code = $7
+                    AND resolution_code = $6
             ) AS provider_rate_limited_attempt_count,
             MAX(resolved_at) FILTER (
                 WHERE attempt_kind = 'subscription_renewal'
                     AND status = 'failed'
-                    AND resolution_code = $7
+                    AND resolution_code = $6
             ) AS last_provider_rate_limited_at,
             COALESCE(
                 BOOL_OR(status IN ('pending', 'unknown', 'review_required', 'approved')),
@@ -232,18 +229,17 @@ pub async fn renewal_attempt_state(
     .bind(subscription_id.as_uuid())
     .bind(period_start_at)
     .bind(excluded_attempt_id.map(PaymentAttemptId::into_uuid))
-    .bind(&retry_accounting_excluded)
     .bind(&infrastructure_retry_codes)
-    .bind(&retry_pacing_excluded)
+    .bind(&infrastructure_pacing_codes)
     .bind(PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission.as_str())
     .fetch_one(&mut **transaction)
     .await?;
     Ok(RenewalAttemptState {
         attempt_sequence_count: row.try_get("attempt_sequence_count")?,
-        terminal_attempt_count: row.try_get("terminal_attempt_count")?,
         automatic_infrastructure_attempt_count: row
             .try_get("automatic_infrastructure_attempt_count")?,
-        last_terminal_at: row.try_get("last_terminal_at")?,
+        last_automatic_infrastructure_failure_at: row
+            .try_get("last_automatic_infrastructure_failure_at")?,
         provider_rate_limited_attempt_count: row.try_get("provider_rate_limited_attempt_count")?,
         last_provider_rate_limited_at: row.try_get("last_provider_rate_limited_at")?,
         has_blocking_attempt: row.try_get("has_blocking_attempt")?,
@@ -295,8 +291,14 @@ mod tests {
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
-                initial_transaction_id
-            ) VALUES ($1, $2, $3, $4, 'active', $5, $6, 1900, 'USD', $7, $8, $8, $9)
+                initial_transaction_id, phase, recurring_period_kind,
+                recurring_period_count, dunning_retry_delays_seconds,
+                dunning_exhaustion, past_due_access, next_payment_attempt_at
+            ) VALUES (
+                $1, $2, $3, $4, 'active', $5, $6, 1900, 'USD', $7, $8, $8, $9,
+                'recurring', 'calendar_months', 1, ARRAY[]::bigint[],
+                'remain_past_due', 'suspend_immediately', $8
+            )
             "#,
         )
         .bind(subscription_id)
@@ -414,7 +416,6 @@ mod tests {
         transaction.rollback().await?;
         assert_eq!(state.attempt_sequence_count, 2);
         assert_eq!(state.automatic_infrastructure_attempt_count, 1);
-        assert_eq!(state.terminal_attempt_count, 0);
 
         database.cleanup().await
     }

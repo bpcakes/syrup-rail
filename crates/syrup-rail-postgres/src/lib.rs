@@ -18,12 +18,17 @@ mod host_charges;
 mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
 mod operator_review;
+#[cfg(test)]
+mod paid_trial_dunning_tests;
+mod processor_charge_persistence;
 mod processor_charges;
 mod reconciliation;
 mod renewal;
+mod renewal_failure;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 pub mod schema_contract;
 mod subscription_billing_service;
+mod subscription_persistence;
 #[cfg(test)]
 mod test_support;
 mod transactions;

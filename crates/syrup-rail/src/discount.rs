@@ -172,11 +172,18 @@ impl SubscriptionDiscountCodeQuote {
         if code.plan_key() != offer.plan_key() {
             return Err(SubscriptionDiscountError::InvalidState);
         }
-        let discounted_charge =
-            discounted_charge(offer.base_charge(), code.currency(), code.kind())?;
+        if matches!(
+            code.duration(),
+            SubscriptionDiscountDuration::LimitedMonths(_)
+        ) && !offer.recurring().period().is_one_calendar_month()
+        {
+            return Err(SubscriptionDiscountError::LimitedDiscountCadence);
+        }
+        let base_charge = offer.recurring().charge();
+        let discounted_charge = discounted_charge(base_charge, code.currency(), code.kind())?;
         Ok(Self {
             code,
-            base_charge: offer.base_charge(),
+            base_charge,
             discounted_charge,
         })
     }
@@ -519,8 +526,56 @@ pub(crate) fn normalize_label(
 
 #[cfg(test)]
 mod tests {
+    use chrono::TimeZone;
+    use uuid::Uuid;
+
     use super::*;
-    use crate::{LimitedDiscountMonths, PercentOffBasisPoints, PositiveDiscountCents};
+    use crate::{
+        DunningExhaustion, DunningSchedule, LimitedDiscountMonths, PaidTrialTerms,
+        PastDueAccessPolicy, PercentOffBasisPoints, PositiveDiscountCents,
+        RecurringSubscriptionTerms, RenewalFailurePolicy, SubscriptionPeriodRule,
+        SubscriptionStart,
+    };
+
+    fn code_record(duration: SubscriptionDiscountDuration) -> SubscriptionDiscountCodeRecord {
+        let now = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+        SubscriptionDiscountCodeRecord::new(
+            DiscountCodeId::new(Uuid::from_u128(1)),
+            BillingScopeId::new(Uuid::from_u128(2)),
+            PlanKey::new("basic").unwrap(),
+            SubscriptionDiscountCode::new("SAVE10").unwrap(),
+            "SAVE10".to_owned(),
+            None,
+            SubscriptionDiscountCodeStatus::Active,
+            SubscriptionDiscountKind::AmountOffCents(PositiveDiscountCents::new(100).unwrap()),
+            CurrencyCode::new("USD").unwrap(),
+            duration,
+            now,
+            now,
+        )
+        .unwrap()
+    }
+
+    fn offer(trial_cents: i32, recurring_period: SubscriptionPeriodRule) -> SubscriptionOffer {
+        let usd = CurrencyCode::new("USD").unwrap();
+        SubscriptionOffer::new(
+            PlanKey::new("basic").unwrap(),
+            RecurringSubscriptionTerms::new(
+                ChargeAmount::new(1_000, usd).unwrap(),
+                recurring_period,
+            ),
+            SubscriptionStart::PaidTrial(PaidTrialTerms::new(
+                ChargeAmount::new(trial_cents, usd).unwrap(),
+                SubscriptionPeriodRule::fixed_days(7).unwrap(),
+            )),
+            RenewalFailurePolicy::new(
+                DunningSchedule::default(),
+                DunningExhaustion::RemainPastDue,
+                PastDueAccessPolicy::SuspendImmediately,
+            ),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn quotes_preserve_integer_discount_behavior() {
@@ -573,5 +628,36 @@ mod tests {
         let duration =
             SubscriptionDiscountDuration::LimitedMonths(LimitedDiscountMonths::new(3).unwrap());
         assert_eq!(duration.as_str(), "limited_months");
+    }
+
+    #[test]
+    fn discount_quote_uses_recurring_charge_not_trial_charge() {
+        let first = SubscriptionDiscountCodeQuote::new(
+            code_record(SubscriptionDiscountDuration::Indefinite),
+            &offer(100, SubscriptionPeriodRule::calendar_months(1).unwrap()),
+        )
+        .unwrap();
+        let second = SubscriptionDiscountCodeQuote::new(
+            code_record(SubscriptionDiscountDuration::Indefinite),
+            &offer(500, SubscriptionPeriodRule::calendar_months(1).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(first.base_charge(), second.base_charge());
+        assert_eq!(first.discounted_charge(), second.discounted_charge());
+        assert_eq!(first.discounted_charge().cents(), 900);
+    }
+
+    #[test]
+    fn limited_month_quote_rejects_nonmonthly_recurring_cadence() {
+        let result = SubscriptionDiscountCodeQuote::new(
+            code_record(SubscriptionDiscountDuration::LimitedMonths(
+                LimitedDiscountMonths::new(3).unwrap(),
+            )),
+            &offer(100, SubscriptionPeriodRule::fixed_days(30).unwrap()),
+        );
+        assert_eq!(
+            result,
+            Err(SubscriptionDiscountError::LimitedDiscountCadence)
+        );
     }
 }

@@ -9,467 +9,17 @@ use crate::{
     HostChargeTargetId, IdempotencyKey, Money, PaymentAttemptId, PaymentAttemptKind,
     PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence,
     SubscriberId, SubscriptionDiscountDuration, SubscriptionDiscountKind,
-    SubscriptionEnrollmentDiscountSnapshot, SubscriptionId, SubscriptionStatus,
+    SubscriptionEnrollmentDiscountSnapshot, SubscriptionId, SubscriptionOffer, SubscriptionStatus,
 };
 
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub enum PaymentAttemptFingerprintError {
-    #[error("payment attempt fingerprint is empty")]
-    Empty,
-}
+pub use fingerprint::{PaymentAttemptFingerprint, PaymentAttemptFingerprintError};
+pub use snapshots::{
+    BillingContactSnapshot, PaymentAttemptSnapshotError, PaymentAttemptTimestamps,
+    PaymentMethodUpdateSnapshot, SubscriptionPaymentStateSnapshot,
+};
 
-/// Opaque durable equality key for one payment request.
-///
-/// Fingerprints contain only canonical billing identities and economic/state
-/// snapshots. They never contain a payment token, credential, or raw billing
-/// contact. Ordinary formatting is redacted so callers must opt into exposing
-/// the value at the persistence boundary.
-#[derive(Clone, Eq, Hash, PartialEq)]
-pub struct PaymentAttemptFingerprint(String);
-
-impl PaymentAttemptFingerprint {
-    pub fn new(value: impl Into<String>) -> Result<Self, PaymentAttemptFingerprintError> {
-        let value = value.into();
-        if value.trim().is_empty() {
-            return Err(PaymentAttemptFingerprintError::Empty);
-        }
-        Ok(Self(value))
-    }
-
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-
-    /// Builds the canonical fingerprint for one opaque host target charge.
-    pub fn for_host_charge(target_id: HostChargeTargetId, amount: Money) -> Self {
-        Self(format!(
-            "host_charge:{target_id}:{}:{}",
-            amount.cents(),
-            amount.currency().as_str(),
-        ))
-    }
-
-    /// Builds the historical plan-bearing initial-enrollment fingerprint.
-    ///
-    /// Existing plan keys therefore retain their exact pre-extraction bytes,
-    /// while every host receives the same canonical grammar with its own plan
-    /// key.
-    pub fn for_subscription_initial(
-        plan_key: &PlanKey,
-        amount: Money,
-        discount: Option<&SubscriptionEnrollmentDiscountSnapshot>,
-    ) -> Self {
-        let currency_code = amount.currency();
-        let currency = currency_code.as_str();
-        let authoritative = match discount {
-            Some(discount) => {
-                let snapshot = discount.snapshot();
-                format!(
-                    "subscription_initial:{plan_key}:{}:{currency}:discount:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                    amount.cents(),
-                    discount.claim_id(),
-                    discount.code_id(),
-                    snapshot.code().as_str(),
-                    snapshot.kind().as_str(),
-                    discount_amount_off(snapshot.kind()),
-                    discount_percent_off(snapshot.kind()),
-                    snapshot.currency().as_str(),
-                    snapshot.base_charge().cents(),
-                    snapshot.discounted_charge().cents(),
-                    snapshot.duration().as_str(),
-                    discount_duration_months(snapshot.duration()),
-                )
-            }
-            None => format!(
-                "subscription_initial:{plan_key}:{}:{currency}:discount:none",
-                amount.cents()
-            ),
-        };
-        let expected =
-            subscription_initial_expected_fingerprint(amount, discount.map(|d| d.snapshot()));
-        Self(format!("{authoritative}:expected:{expected}"))
-    }
-
-    pub fn matches_subscription_initial_expected_charge(
-        &self,
-        plan_key: &PlanKey,
-        expected: &crate::SubscriptionEnrollmentExpectedCharge,
-    ) -> bool {
-        if expected.plan_key() != plan_key {
-            return false;
-        }
-        let expected_fingerprint = subscription_initial_expected_fingerprint(
-            expected.charge().money(),
-            expected.discount_snapshot(),
-        );
-        self.0
-            .ends_with(&format!(":expected:{expected_fingerprint}"))
-    }
-
-    /// Builds the canonical fingerprint for a subscriber-initiated recovery
-    /// of one exact subscription period.
-    pub fn for_subscription_recovery(
-        plan_key: &PlanKey,
-        subscription_id: SubscriptionId,
-        payment_method_id: PaymentMethodId,
-        period_start_at: DateTime<Utc>,
-        amount: Money,
-    ) -> Self {
-        Self(format!(
-            "subscription_recovery:{plan_key}:{subscription_id}:{payment_method_id}:{period_start_at}:{}:{}",
-            amount.cents(),
-            amount.currency().as_str(),
-        ))
-    }
-
-    pub fn matches_subscription_recovery(
-        &self,
-        plan_key: &PlanKey,
-        subscription_id: SubscriptionId,
-        payment_method_id: PaymentMethodId,
-        period_start_at: DateTime<Utc>,
-        amount: Money,
-    ) -> bool {
-        self == &Self::for_subscription_recovery(
-            plan_key,
-            subscription_id,
-            payment_method_id,
-            period_start_at,
-            amount,
-        )
-    }
-
-    /// Builds the canonical fingerprint for an automatic charge of one exact
-    /// subscription period. Attempt sequencing is deliberately absent: it is
-    /// reservation identity, not part of the charged economic snapshot.
-    pub fn for_subscription_renewal(
-        plan_key: &PlanKey,
-        subscription_id: SubscriptionId,
-        payment_method_id: PaymentMethodId,
-        period_start_at: DateTime<Utc>,
-        amount: Money,
-    ) -> Self {
-        Self(format!(
-            "subscription_renewal:{plan_key}:{subscription_id}:{payment_method_id}:{period_start_at}:{}:{}",
-            amount.cents(),
-            amount.currency().as_str(),
-        ))
-    }
-
-    pub fn matches_subscription_renewal(
-        &self,
-        plan_key: &PlanKey,
-        subscription_id: SubscriptionId,
-        payment_method_id: PaymentMethodId,
-        period_start_at: DateTime<Utc>,
-        amount: Money,
-    ) -> bool {
-        self == &Self::for_subscription_renewal(
-            plan_key,
-            subscription_id,
-            payment_method_id,
-            period_start_at,
-            amount,
-        )
-    }
-
-    /// Builds the canonical fingerprint for replacing one subscription's
-    /// stored payment method against its exact current payment baseline.
-    pub fn for_subscription_payment_method_update(
-        plan_key: &PlanKey,
-        subscription_id: SubscriptionId,
-        payment_method_id: PaymentMethodId,
-        expected_initial_transaction_id: &GatewayTransactionId,
-    ) -> Self {
-        Self(format!(
-            "subscription_payment_method_update:{plan_key}:{subscription_id}:{payment_method_id}:{}",
-            expected_initial_transaction_id.expose(),
-        ))
-    }
-
-    pub fn matches_subscription_payment_method_update(
-        &self,
-        plan_key: &PlanKey,
-        expected: &PaymentMethodUpdateSnapshot,
-    ) -> bool {
-        self == &Self::for_subscription_payment_method_update(
-            plan_key,
-            expected.subscription_id(),
-            expected.payment_method_id(),
-            expected.expected_initial_transaction_id(),
-        )
-    }
-}
-
-fn subscription_initial_expected_fingerprint(
-    amount: Money,
-    discount: Option<&crate::SubscriptionDiscountSnapshot>,
-) -> String {
-    let currency_code = amount.currency();
-    let currency = currency_code.as_str();
-    match discount {
-        Some(snapshot) => format!(
-            "discounted:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-            snapshot.code().as_str(),
-            snapshot.kind().as_str(),
-            discount_amount_off(snapshot.kind()),
-            discount_percent_off(snapshot.kind()),
-            snapshot.duration().as_str(),
-            discount_duration_months(snapshot.duration()),
-            snapshot.currency().as_str(),
-            snapshot.base_charge().cents(),
-            snapshot.discounted_charge().cents(),
-        ),
-        None => format!("full_price:{}:{currency}", amount.cents()),
-    }
-}
-
-fn discount_amount_off(kind: SubscriptionDiscountKind) -> String {
-    match kind {
-        SubscriptionDiscountKind::AmountOffCents(value) => value.get().to_string(),
-        SubscriptionDiscountKind::PercentOffBasisPoints(_) => "none".to_owned(),
-    }
-}
-
-fn discount_percent_off(kind: SubscriptionDiscountKind) -> String {
-    match kind {
-        SubscriptionDiscountKind::AmountOffCents(_) => "none".to_owned(),
-        SubscriptionDiscountKind::PercentOffBasisPoints(value) => value.get().to_string(),
-    }
-}
-
-fn discount_duration_months(duration: SubscriptionDiscountDuration) -> String {
-    match duration {
-        SubscriptionDiscountDuration::Indefinite => "none".to_owned(),
-        SubscriptionDiscountDuration::LimitedMonths(value) => value.get().to_string(),
-    }
-}
-
-impl fmt::Debug for PaymentAttemptFingerprint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("PaymentAttemptFingerprint([redacted])")
-    }
-}
-
-impl fmt::Display for PaymentAttemptFingerprint {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("[redacted]")
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PaymentAttemptTimestamps {
-    submitted_at: Option<DateTime<Utc>>,
-    resolved_at: Option<DateTime<Utc>>,
-    review_required_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
-
-impl PaymentAttemptTimestamps {
-    pub const fn new(
-        submitted_at: Option<DateTime<Utc>>,
-        resolved_at: Option<DateTime<Utc>>,
-        review_required_at: Option<DateTime<Utc>>,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-    ) -> Self {
-        Self {
-            submitted_at,
-            resolved_at,
-            review_required_at,
-            created_at,
-            updated_at,
-        }
-    }
-
-    pub const fn submitted_at(self) -> Option<DateTime<Utc>> {
-        self.submitted_at
-    }
-
-    pub const fn resolved_at(self) -> Option<DateTime<Utc>> {
-        self.resolved_at
-    }
-
-    pub const fn review_required_at(self) -> Option<DateTime<Utc>> {
-        self.review_required_at
-    }
-
-    pub const fn created_at(self) -> DateTime<Utc> {
-        self.created_at
-    }
-
-    pub const fn updated_at(self) -> DateTime<Utc> {
-        self.updated_at
-    }
-
-    pub const fn submitted_or_created_at(self) -> DateTime<Utc> {
-        match self.submitted_at {
-            Some(submitted_at) => submitted_at,
-            None => self.created_at,
-        }
-    }
-}
-
-/// Durable contact metadata attached to an attempt.
-///
-/// The command-side [`crate::BillingContact`] remains the provider-neutral
-/// structured input. This snapshot mirrors the deliberately smaller durable
-/// projection used for receipts and support, and keeps ordinary formatting
-/// value-free.
-#[derive(Clone, Eq, PartialEq)]
-pub struct BillingContactSnapshot {
-    name: Option<String>,
-    email: Option<String>,
-}
-
-impl BillingContactSnapshot {
-    pub fn new(name: Option<String>, email: Option<String>) -> Self {
-        Self {
-            name: normalize_optional(name),
-            email: normalize_optional(email),
-        }
-    }
-
-    pub fn from_billing_contact(contact: &BillingContact) -> Self {
-        let name = [contact.first_name(), contact.last_name()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ");
-        Self::new(
-            (!name.is_empty()).then_some(name),
-            contact.email().map(ToOwned::to_owned),
-        )
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-
-    pub fn email(&self) -> Option<&str> {
-        self.email.as_deref()
-    }
-
-    pub const fn is_empty(&self) -> bool {
-        self.name.is_none() && self.email.is_none()
-    }
-}
-
-impl fmt::Debug for BillingContactSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("BillingContactSnapshot")
-            .field("has_name", &self.name.is_some())
-            .field("has_email", &self.email.is_some())
-            .finish()
-    }
-}
-
-#[derive(Clone, Debug, Error, Eq, PartialEq)]
-pub enum PaymentAttemptSnapshotError {
-    #[error("subscription payment-state snapshot cannot use a canceled subscription")]
-    CanceledSubscription,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct PaymentMethodUpdateSnapshot {
-    subscription_id: SubscriptionId,
-    payment_method_id: PaymentMethodId,
-    expected_initial_transaction_id: GatewayTransactionId,
-}
-
-impl PaymentMethodUpdateSnapshot {
-    pub const fn new(
-        subscription_id: SubscriptionId,
-        payment_method_id: PaymentMethodId,
-        expected_initial_transaction_id: GatewayTransactionId,
-    ) -> Self {
-        Self {
-            subscription_id,
-            payment_method_id,
-            expected_initial_transaction_id,
-        }
-    }
-
-    pub const fn subscription_id(&self) -> SubscriptionId {
-        self.subscription_id
-    }
-
-    pub const fn payment_method_id(&self) -> PaymentMethodId {
-        self.payment_method_id
-    }
-
-    pub const fn expected_initial_transaction_id(&self) -> &GatewayTransactionId {
-        &self.expected_initial_transaction_id
-    }
-}
-
-impl fmt::Debug for PaymentMethodUpdateSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PaymentMethodUpdateSnapshot")
-            .field("subscription_id", &self.subscription_id)
-            .field("payment_method_id", &self.payment_method_id)
-            .field("has_expected_initial_transaction_id", &true)
-            .finish()
-    }
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct SubscriptionPaymentStateSnapshot {
-    subscription_id: SubscriptionId,
-    payment_method_id: PaymentMethodId,
-    initial_transaction_id: GatewayTransactionId,
-    status: SubscriptionStatus,
-}
-
-impl SubscriptionPaymentStateSnapshot {
-    pub fn new(
-        subscription_id: SubscriptionId,
-        payment_method_id: PaymentMethodId,
-        initial_transaction_id: GatewayTransactionId,
-        status: SubscriptionStatus,
-    ) -> Result<Self, PaymentAttemptSnapshotError> {
-        if status == SubscriptionStatus::Canceled {
-            return Err(PaymentAttemptSnapshotError::CanceledSubscription);
-        }
-        Ok(Self {
-            subscription_id,
-            payment_method_id,
-            initial_transaction_id,
-            status,
-        })
-    }
-
-    pub const fn subscription_id(&self) -> SubscriptionId {
-        self.subscription_id
-    }
-
-    pub const fn payment_method_id(&self) -> PaymentMethodId {
-        self.payment_method_id
-    }
-
-    pub const fn initial_transaction_id(&self) -> &GatewayTransactionId {
-        &self.initial_transaction_id
-    }
-
-    pub const fn status(&self) -> SubscriptionStatus {
-        self.status
-    }
-}
-
-impl fmt::Debug for SubscriptionPaymentStateSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SubscriptionPaymentStateSnapshot")
-            .field("subscription_id", &self.subscription_id)
-            .field("payment_method_id", &self.payment_method_id)
-            .field("has_initial_transaction_id", &true)
-            .field("status", &self.status)
-            .finish()
-    }
-}
+mod fingerprint;
+mod snapshots;
 
 /// Initial-enrollment rows gain application identities only after provider
 /// submission has produced a payment method and the host has attempted its
@@ -503,13 +53,41 @@ impl SubscriptionInitialApplication {
 /// The mutually exclusive business target and optimistic snapshot for an
 /// attempt. This replaces the persistence table's nullable-column bag at the
 /// domain boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentTermsVersion {
+    V1,
+    V2,
+}
+
+impl SubscriptionEnrollmentTermsVersion {
+    pub const fn get(self) -> u16 {
+        match self {
+            Self::V1 => 1,
+            Self::V2 => 2,
+        }
+    }
+}
+
+impl TryFrom<u16> for SubscriptionEnrollmentTermsVersion {
+    type Error = PaymentAttemptSnapshotError;
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::V1),
+            2 => Ok(Self::V2),
+            _ => Err(PaymentAttemptSnapshotError::InvalidEnrollmentTermsVersion),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PaymentAttemptTarget {
     HostCharge {
         target_id: HostChargeTargetId,
     },
     SubscriptionInitial {
-        plan_key: PlanKey,
+        terms_version: SubscriptionEnrollmentTermsVersion,
+        offer: SubscriptionOffer,
         discount: Option<SubscriptionEnrollmentDiscountSnapshot>,
         application: Option<SubscriptionInitialApplication>,
     },
@@ -548,8 +126,8 @@ impl PaymentAttemptTarget {
     pub const fn plan_key(&self) -> Option<&PlanKey> {
         match self {
             Self::HostCharge { .. } => None,
-            Self::SubscriptionInitial { plan_key, .. }
-            | Self::SubscriptionRenewal { plan_key, .. }
+            Self::SubscriptionInitial { offer, .. } => Some(offer.plan_key()),
+            Self::SubscriptionRenewal { plan_key, .. }
             | Self::SubscriptionRecovery { plan_key, .. }
             | Self::SubscriptionPaymentMethodUpdate { plan_key, .. } => Some(plan_key),
         }
@@ -609,6 +187,20 @@ impl PaymentAttemptTarget {
     pub const fn enrollment_discount(&self) -> Option<&SubscriptionEnrollmentDiscountSnapshot> {
         match self {
             Self::SubscriptionInitial { discount, .. } => discount.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub const fn enrollment_terms_version(&self) -> Option<SubscriptionEnrollmentTermsVersion> {
+        match self {
+            Self::SubscriptionInitial { terms_version, .. } => Some(*terms_version),
+            _ => None,
+        }
+    }
+
+    pub const fn enrollment_offer(&self) -> Option<&SubscriptionOffer> {
+        match self {
+            Self::SubscriptionInitial { offer, .. } => Some(offer),
             _ => None,
         }
     }
@@ -986,368 +578,4 @@ fn lifecycle_amount_is_valid(state: &GatewayLifecycleState, amount_cents: i32) -
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::TimeZone;
-    use uuid::Uuid;
-
-    use super::*;
-    use crate::{
-        CumulativeRefundCents, CurrencyCode, GatewayPaymentDescriptor,
-        GatewayPaymentMethodReference,
-    };
-
-    fn subscription(value: u128) -> SubscriptionId {
-        SubscriptionId::new(Uuid::from_u128(value))
-    }
-
-    fn method(value: u128) -> PaymentMethodId {
-        PaymentMethodId::new(Uuid::from_u128(value))
-    }
-
-    fn target(value: u128) -> HostChargeTargetId {
-        HostChargeTargetId::new(Uuid::from_u128(value))
-    }
-
-    fn identity() -> PaymentAttemptIdentity {
-        PaymentAttemptIdentity::new(
-            PaymentAttemptId::new(Uuid::from_u128(10)),
-            BillingScopeId::new(Uuid::from_u128(11)),
-            SubscriberId::new(Uuid::from_u128(12)),
-            GatewayAccountId::new(Uuid::from_u128(13)),
-            GatewayConfigurationId::new(Uuid::from_u128(14)),
-        )
-    }
-
-    fn request(target: PaymentAttemptTarget, cents: i32) -> PaymentAttemptRequest {
-        PaymentAttemptRequest::new(
-            target,
-            IdempotencyKey::new("idempotency-secret").unwrap(),
-            PaymentAttemptFingerprint::new("fingerprint-secret").unwrap(),
-            Money::new(cents, CurrencyCode::new("USD").unwrap()).unwrap(),
-            GatewayOrderId::from_correlation("order-secret").unwrap(),
-            BillingContactSnapshot::new(
-                Some("Sensitive Name".to_owned()),
-                Some("secret@example.test".to_owned()),
-            ),
-        )
-    }
-
-    fn instant(second: u32) -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, second).unwrap()
-    }
-
-    fn state(
-        status: PaymentAttemptStatus,
-        resolved_at: Option<DateTime<Utc>>,
-        review_required_at: Option<DateTime<Utc>>,
-    ) -> PaymentAttemptState {
-        PaymentAttemptState::new(
-            status,
-            None,
-            ProcessorEvidence::default(),
-            PaymentAttemptLifecycle::default(),
-            PaymentAttemptTimestamps::new(
-                None,
-                resolved_at,
-                review_required_at,
-                instant(0),
-                instant(1),
-            ),
-        )
-    }
-
-    fn initial_target(application: Option<SubscriptionInitialApplication>) -> PaymentAttemptTarget {
-        PaymentAttemptTarget::SubscriptionInitial {
-            plan_key: PlanKey::new("basic").unwrap(),
-            discount: None,
-            application,
-        }
-    }
-
-    #[test]
-    fn fingerprints_are_nonempty_and_value_safe_to_format() {
-        assert_eq!(
-            PaymentAttemptFingerprint::new(" "),
-            Err(PaymentAttemptFingerprintError::Empty),
-        );
-        let fingerprint = PaymentAttemptFingerprint::new("secret:economics").unwrap();
-        assert_eq!(fingerprint.expose(), "secret:economics");
-        assert!(!format!("{fingerprint:?}").contains("secret:economics"));
-        assert_eq!(fingerprint.to_string(), "[redacted]");
-    }
-
-    #[test]
-    fn payment_state_snapshots_are_typed_and_redact_transaction_identity() {
-        let transaction = GatewayTransactionId::new("txn-secret").unwrap();
-        let update =
-            PaymentMethodUpdateSnapshot::new(subscription(1), method(2), transaction.clone());
-        let state = SubscriptionPaymentStateSnapshot::new(
-            subscription(1),
-            method(2),
-            transaction,
-            SubscriptionStatus::PastDue,
-        )
-        .unwrap();
-        assert_eq!(state.status(), SubscriptionStatus::PastDue);
-        assert!(!format!("{update:?}").contains("txn-secret"));
-        assert!(!format!("{state:?}").contains("txn-secret"));
-        assert_eq!(
-            SubscriptionPaymentStateSnapshot::new(
-                subscription(1),
-                method(2),
-                GatewayTransactionId::new("txn").unwrap(),
-                SubscriptionStatus::Canceled,
-            ),
-            Err(PaymentAttemptSnapshotError::CanceledSubscription),
-        );
-    }
-
-    #[test]
-    fn attempt_timestamps_choose_submission_as_the_economic_boundary() {
-        let created = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
-        let submitted = Utc.with_ymd_and_hms(2026, 8, 1, 0, 1, 0).unwrap();
-        assert_eq!(
-            PaymentAttemptTimestamps::new(Some(submitted), None, None, created, submitted,)
-                .submitted_or_created_at(),
-            submitted,
-        );
-        assert_eq!(
-            PaymentAttemptTimestamps::new(None, None, None, created, created)
-                .submitted_or_created_at(),
-            created,
-        );
-    }
-
-    #[test]
-    fn amount_shape_follows_attempt_kind() {
-        assert_eq!(
-            PaymentAttempt::new(
-                identity(),
-                request(
-                    PaymentAttemptTarget::HostCharge {
-                        target_id: target(20),
-                    },
-                    0,
-                ),
-                state(PaymentAttemptStatus::Pending, None, None),
-            ),
-            Err(PaymentAttemptError::ZeroAmountRequiresPaymentMethodUpdate),
-        );
-
-        let update = PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
-            plan_key: PlanKey::new("basic").unwrap(),
-            payment_method_id: method(22),
-            expected_state: PaymentMethodUpdateSnapshot::new(
-                subscription(21),
-                method(22),
-                GatewayTransactionId::new("txn-initial").unwrap(),
-            ),
-        };
-        assert_eq!(
-            PaymentAttempt::new(
-                identity(),
-                request(update.clone(), 1),
-                state(PaymentAttemptStatus::Pending, None, None),
-            ),
-            Err(PaymentAttemptError::PaymentMethodUpdateRequiresZeroAmount),
-        );
-        let accepted = PaymentAttempt::new(
-            identity(),
-            request(update, 0),
-            state(PaymentAttemptStatus::Pending, None, None),
-        )
-        .unwrap();
-        assert_eq!(
-            accepted.kind(),
-            PaymentAttemptKind::SubscriptionPaymentMethodUpdate
-        );
-    }
-
-    #[test]
-    fn initial_application_identity_follows_resolution_state() {
-        let application = SubscriptionInitialApplication::new(Some(subscription(30)), method(31));
-        assert_eq!(
-            PaymentAttempt::new(
-                identity(),
-                request(initial_target(Some(application)), 1_000),
-                state(PaymentAttemptStatus::Pending, None, None),
-            ),
-            Err(PaymentAttemptError::InitialApplicationBeforeResolution),
-        );
-        assert_eq!(
-            PaymentAttempt::new(
-                identity(),
-                request(initial_target(None), 1_000),
-                state(PaymentAttemptStatus::Approved, Some(instant(2)), None),
-            ),
-            Err(PaymentAttemptError::ApprovedInitialMissingApplication),
-        );
-        let approved = PaymentAttempt::new(
-            identity(),
-            request(initial_target(Some(application)), 1_000),
-            state(PaymentAttemptStatus::Approved, Some(instant(2)), None),
-        )
-        .unwrap();
-        assert_eq!(
-            approved.request().target().subscription_id(),
-            Some(subscription(30))
-        );
-        assert_eq!(
-            approved.request().target().payment_method_id(),
-            Some(method(31))
-        );
-    }
-
-    #[test]
-    fn terminal_and_review_states_require_their_durable_boundaries() {
-        let host = || PaymentAttemptTarget::HostCharge {
-            target_id: target(40),
-        };
-        assert_eq!(
-            PaymentAttempt::new(
-                identity(),
-                request(host(), 1_000),
-                state(PaymentAttemptStatus::Failed, None, None),
-            ),
-            Err(PaymentAttemptError::TerminalAttemptMissingResolvedAt),
-        );
-        assert_eq!(
-            PaymentAttempt::new(
-                identity(),
-                request(host(), 1_000),
-                state(PaymentAttemptStatus::ReviewRequired, None, None),
-            ),
-            Err(PaymentAttemptError::ReviewAttemptMissingReviewRequiredAt),
-        );
-        assert!(
-            PaymentAttempt::new(
-                identity(),
-                request(host(), 1_000),
-                state(PaymentAttemptStatus::ReviewRequired, None, Some(instant(2)),),
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn lifecycle_refund_amount_must_match_the_attempt_amount() {
-        let lifecycle = PaymentAttemptLifecycle::new(
-            GatewayLifecycleState::Refunded {
-                cumulative_refunded_cents: CumulativeRefundCents::new(999).unwrap(),
-            },
-            None,
-            None,
-            None,
-        );
-        let invalid_state = PaymentAttemptState::new(
-            PaymentAttemptStatus::Pending,
-            None,
-            ProcessorEvidence::default(),
-            lifecycle,
-            PaymentAttemptTimestamps::new(None, None, None, instant(0), instant(1)),
-        );
-        assert_eq!(
-            PaymentAttempt::new(
-                identity(),
-                request(
-                    PaymentAttemptTarget::HostCharge {
-                        target_id: target(50),
-                    },
-                    1_000,
-                ),
-                invalid_state,
-            ),
-            Err(PaymentAttemptError::InvalidLifecycleAmount),
-        );
-    }
-
-    #[test]
-    fn typed_targets_preserve_exact_relationships() {
-        let period = BillingPeriod::new(instant(0), instant(2)).unwrap();
-        let expected_state = SubscriptionPaymentStateSnapshot::new(
-            subscription(60),
-            method(61),
-            GatewayTransactionId::new("txn-original").unwrap(),
-            SubscriptionStatus::PastDue,
-        )
-        .unwrap();
-        let renewal = PaymentAttemptTarget::SubscriptionRenewal {
-            plan_key: PlanKey::new("premium").unwrap(),
-            payment_method_id: method(62),
-            period: period.clone(),
-            expected_state: expected_state.clone(),
-        };
-        assert_eq!(renewal.kind(), PaymentAttemptKind::SubscriptionRenewal);
-        assert_eq!(renewal.plan_key().unwrap().as_str(), "premium");
-        assert_eq!(renewal.subscription_id(), Some(subscription(60)));
-        assert_eq!(renewal.payment_method_id(), Some(method(62)));
-        assert_eq!(
-            renewal
-                .subscription_payment_state_snapshot()
-                .unwrap()
-                .payment_method_id(),
-            method(61)
-        );
-        assert_eq!(renewal.period(), Some(&period));
-        assert_eq!(
-            renewal.subscription_payment_state_snapshot(),
-            Some(&expected_state)
-        );
-        assert_eq!(renewal.host_charge_target_id(), None);
-    }
-
-    #[test]
-    fn durable_attempt_debug_is_value_free() {
-        let evidence = ProcessorEvidence::new(
-            Some(GatewayTransactionId::new("transaction-secret").unwrap()),
-            Some(GatewayPaymentMethodReference::new("method-secret").unwrap()),
-            Some(GatewayDiagnostic::new("response-secret")),
-            Some(GatewayDiagnostic::new("code-secret")),
-            Some(GatewayDiagnostic::new("text-secret")),
-            Some(GatewayDiagnostic::new("condition-secret")),
-            GatewayPaymentDescriptor::default(),
-        );
-        let state = PaymentAttemptState::new(
-            PaymentAttemptStatus::Pending,
-            None,
-            evidence,
-            PaymentAttemptLifecycle::new(
-                GatewayLifecycleState::Unknown,
-                Some(GatewayDiagnostic::new("action-secret")),
-                None,
-                None,
-            ),
-            PaymentAttemptTimestamps::new(None, None, None, instant(0), instant(1)),
-        );
-        let attempt = PaymentAttempt::new(
-            identity(),
-            request(
-                PaymentAttemptTarget::HostCharge {
-                    target_id: target(70),
-                },
-                1_000,
-            ),
-            state,
-        )
-        .unwrap();
-        let debug = format!("{attempt:?}");
-        for secret in [
-            "idempotency-secret",
-            "fingerprint-secret",
-            "order-secret",
-            "Sensitive Name",
-            "secret@example.test",
-            "transaction-secret",
-            "method-secret",
-            "response-secret",
-            "code-secret",
-            "text-secret",
-            "condition-secret",
-            "action-secret",
-        ] {
-            assert!(!debug.contains(secret), "debug leaked {secret}");
-        }
-        assert!(debug.contains("has_idempotency_key"));
-        assert!(debug.contains("has_transaction_id"));
-    }
-}
+mod tests;

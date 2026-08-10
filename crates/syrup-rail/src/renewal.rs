@@ -5,16 +5,59 @@ use crate::{
     BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, GatewayAccountId,
     GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
     PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
-    PaymentAttemptTarget, PaymentMethodId, PlanKey, ResolvedGateway, SubscriberId, SubscriptionId,
-    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
+    PaymentAttemptTarget, PaymentMethodId, PlanKey, RenewalFailurePolicy, ResolvedGateway,
+    SubscriberId, SubscriptionId, SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 
 pub const RENEWAL_DISPATCH_LIMIT: i64 = 100;
-pub const RENEWAL_RETRY_AFTER_SECONDS: i64 = 24 * 60 * 60;
+pub const RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS: i64 = 24 * 60 * 60;
+pub const RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS: i64 = 24 * 60 * 60;
 pub const RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS: i64 = 60;
-pub const MAX_RENEWAL_TERMINAL_ATTEMPTS_PER_PERIOD: i64 = 5;
 pub const MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION: i64 = 8;
 pub const RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS: i64 = 5;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenewalFailureDisposition {
+    RetryScheduled { retry_at: DateTime<Utc> },
+    RemainPastDue { exhausted_at: DateTime<Utc> },
+    MarkUnpaid { ended_at: DateTime<Utc> },
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum RenewalFailurePolicyError {
+    #[error("automatic renewal failure count is one-based")]
+    ZeroFailureCount,
+    #[error("dunning retry timestamp overflowed the supported date range")]
+    RetryTimestampOverflow,
+}
+
+pub fn renewal_failure_disposition(
+    policy: &RenewalFailurePolicy,
+    automatic_failure_count: u16,
+    failed_at: DateTime<Utc>,
+) -> Result<RenewalFailureDisposition, RenewalFailurePolicyError> {
+    let schedule_index = automatic_failure_count
+        .checked_sub(1)
+        .ok_or(RenewalFailurePolicyError::ZeroFailureCount)?;
+    if let Some(delay) = policy
+        .schedule()
+        .retry_delays()
+        .get(usize::from(schedule_index))
+    {
+        let retry_at = failed_at
+            .checked_add_signed(Duration::seconds(i64::from(delay.seconds().get())))
+            .ok_or(RenewalFailurePolicyError::RetryTimestampOverflow)?;
+        return Ok(RenewalFailureDisposition::RetryScheduled { retry_at });
+    }
+    Ok(match policy.exhaustion() {
+        crate::DunningExhaustion::RemainPastDue => RenewalFailureDisposition::RemainPastDue {
+            exhausted_at: failed_at,
+        },
+        crate::DunningExhaustion::MarkUnpaid => RenewalFailureDisposition::MarkUnpaid {
+            ended_at: failed_at,
+        },
+    })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RenewalDispatch {
@@ -92,9 +135,8 @@ impl ChargeRenewal {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RenewalAttemptState {
     pub attempt_sequence_count: i64,
-    pub terminal_attempt_count: i64,
     pub automatic_infrastructure_attempt_count: i64,
-    pub last_terminal_at: Option<DateTime<Utc>>,
+    pub last_automatic_infrastructure_failure_at: Option<DateTime<Utc>>,
     pub provider_rate_limited_attempt_count: i64,
     pub last_provider_rate_limited_at: Option<DateTime<Utc>>,
     pub has_blocking_attempt: bool,
@@ -102,11 +144,14 @@ pub struct RenewalAttemptState {
 
 impl RenewalAttemptState {
     pub fn blocks_automatic_retry(&self, now: DateTime<Utc>) -> bool {
-        self.terminal_attempt_count >= MAX_RENEWAL_TERMINAL_ATTEMPTS_PER_PERIOD
-            || self.automatic_infrastructure_attempt_count
-                >= MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION
+        self.automatic_infrastructure_attempt_count
+            >= MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION
             || self.has_blocking_attempt
-            || !retry_window_elapsed(self.last_terminal_at, now, RENEWAL_RETRY_AFTER_SECONDS)
+            || !retry_window_elapsed(
+                self.last_automatic_infrastructure_failure_at,
+                now,
+                RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS,
+            )
             || !retry_window_elapsed(
                 self.last_provider_rate_limited_at,
                 now,
@@ -117,7 +162,7 @@ impl RenewalAttemptState {
 
 pub const fn provider_rate_limit_retry_after_seconds(attempt_count: i64) -> i64 {
     if attempt_count >= RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS {
-        RENEWAL_RETRY_AFTER_SECONDS
+        RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS
     } else {
         RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS
     }
@@ -445,12 +490,15 @@ mod tests {
     fn retry_boundaries_are_inclusive() {
         let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         let mut state = RenewalAttemptState {
-            last_terminal_at: Some(now - Duration::seconds(RENEWAL_RETRY_AFTER_SECONDS)),
+            last_automatic_infrastructure_failure_at: Some(
+                now - Duration::seconds(RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS),
+            ),
             ..RenewalAttemptState::default()
         };
         assert!(!state.blocks_automatic_retry(now));
-        state.last_terminal_at =
-            Some(now - Duration::seconds(RENEWAL_RETRY_AFTER_SECONDS.saturating_sub(1)));
+        state.last_automatic_infrastructure_failure_at = Some(
+            now - Duration::seconds(RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS.saturating_sub(1)),
+        );
         assert!(state.blocks_automatic_retry(now));
     }
 
@@ -459,7 +507,67 @@ mod tests {
         assert_eq!(provider_rate_limit_retry_after_seconds(4), 60);
         assert_eq!(
             provider_rate_limit_retry_after_seconds(5),
-            RENEWAL_RETRY_AFTER_SECONDS
+            RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS
+        );
+    }
+
+    fn failure_policy(
+        delays: &[u32],
+        exhaustion: crate::DunningExhaustion,
+    ) -> RenewalFailurePolicy {
+        RenewalFailurePolicy::new(
+            crate::DunningSchedule::from_seconds(delays.iter().copied()).unwrap(),
+            exhaustion,
+            crate::PastDueAccessPolicy::SuspendImmediately,
+        )
+    }
+
+    #[test]
+    fn dunning_failure_count_is_one_based_and_indexes_the_current_step() {
+        let failed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let policy = failure_policy(&[60, 300], crate::DunningExhaustion::RemainPastDue);
+        assert_eq!(
+            renewal_failure_disposition(&policy, 0, failed_at),
+            Err(RenewalFailurePolicyError::ZeroFailureCount)
+        );
+        assert_eq!(
+            renewal_failure_disposition(&policy, 1, failed_at),
+            Ok(RenewalFailureDisposition::RetryScheduled {
+                retry_at: failed_at + Duration::seconds(60),
+            })
+        );
+        assert_eq!(
+            renewal_failure_disposition(&policy, 2, failed_at),
+            Ok(RenewalFailureDisposition::RetryScheduled {
+                retry_at: failed_at + Duration::seconds(300),
+            })
+        );
+        assert_eq!(
+            renewal_failure_disposition(&policy, 3, failed_at),
+            Ok(RenewalFailureDisposition::RemainPastDue {
+                exhausted_at: failed_at,
+            })
+        );
+    }
+
+    #[test]
+    fn empty_schedule_and_mark_unpaid_exhaust_immediately() {
+        let failed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let policy = failure_policy(&[], crate::DunningExhaustion::MarkUnpaid);
+        assert_eq!(
+            renewal_failure_disposition(&policy, 1, failed_at),
+            Ok(RenewalFailureDisposition::MarkUnpaid {
+                ended_at: failed_at,
+            })
+        );
+    }
+
+    #[test]
+    fn retry_timestamp_overflow_is_typed() {
+        let policy = failure_policy(&[u32::MAX], crate::DunningExhaustion::RemainPastDue);
+        assert_eq!(
+            renewal_failure_disposition(&policy, 1, DateTime::<Utc>::MAX_UTC),
+            Err(RenewalFailurePolicyError::RetryTimestampOverflow)
         );
     }
 }

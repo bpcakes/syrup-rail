@@ -11,7 +11,7 @@ on:
       - "scripts/jig"
       - "scripts/install-jig.sh"
 
-      - "crates/syrup-rail-postgres/schema/v1/**"
+      - "crates/syrup-rail-postgres/schema/**"
 
       - ".github/workflows/repo-policy.yml"
   push:
@@ -26,7 +26,7 @@ on:
       - "scripts/jig"
       - "scripts/install-jig.sh"
 
-      - "crates/syrup-rail-postgres/schema/v1/**"
+      - "crates/syrup-rail-postgres/schema/**"
 
       - ".github/workflows/repo-policy.yml"
   merge_group:

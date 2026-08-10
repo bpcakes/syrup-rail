@@ -11,7 +11,7 @@ harness_footprint = "full"
 sqlx_enabled = true
 rust_crate_roots = ["crates"]
 
-rust_migration_dir = "crates/syrup-rail-postgres/schema/v1"
+rust_migration_dir = "crates/syrup-rail-postgres/schema"
 rust_sqlx_metadata_dir = "crates/syrup-rail-postgres/.sqlx"
 
 schema_dump_enabled = false

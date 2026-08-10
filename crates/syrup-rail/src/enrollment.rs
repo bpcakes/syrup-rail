@@ -63,91 +63,227 @@ impl SubscriptionEnrollmentDiscountSnapshot {
     }
 }
 
-/// The exact economic terms a subscriber accepted for a new subscription.
-///
-/// A full-price expectation follows the current locked offer. A discounted
-/// expectation follows the immutable saved-claim snapshot while still requiring
-/// the requested plan to have a current locked offer. This distinction prevents
-/// a saved claim from being silently removed or introduced between the request,
-/// durable reservation, and final gateway admission.
-#[derive(Clone, Eq, PartialEq)]
-pub enum SubscriptionEnrollmentExpectedCharge {
-    FullPrice(SubscriptionOffer),
-    Discounted {
-        plan_key: PlanKey,
-        snapshot: SubscriptionDiscountSnapshot,
-    },
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentTermsError {
+    #[error("saved discount currency does not match the accepted offer")]
+    CurrencyMismatch,
+    #[error("limited-month discounts require a one-calendar-month recurring period")]
+    LimitedDiscountCadence,
 }
 
-impl fmt::Debug for SubscriptionEnrollmentExpectedCharge {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::FullPrice(offer) => formatter
-                .debug_struct("SubscriptionEnrollmentExpectedCharge::FullPrice")
-                .field("plan_key", offer.plan_key())
-                .field("charge", &offer.base_charge())
-                .finish(),
-            Self::Discounted { plan_key, snapshot } => formatter
-                .debug_struct("SubscriptionEnrollmentExpectedCharge::Discounted")
-                .field("plan_key", plan_key)
-                .field("has_code", &true)
-                .field("has_label", &snapshot.label().is_some())
-                .field("kind", &snapshot.kind())
-                .field("duration", &snapshot.duration())
-                .field("base_charge", &snapshot.base_charge())
-                .field("discounted_charge", &snapshot.discounted_charge())
-                .finish(),
+/// The complete lifecycle and price projection produced when accepted terms
+/// create a subscription.
+///
+/// `SubscriptionEnrollmentExpectedTerms::activation_projection` is the only
+/// construction path, so any offer and saved-discount pairing has already
+/// passed the accepted-terms invariants. Durable attempts retain those same
+/// immutable terms for replay and reconciliation.
+///
+/// A paid trial charges and schedules its trial period without consuming a
+/// recurring discount. An immediate recurring start charges its discounted
+/// recurring amount and consumes one discount period. Consequently, a
+/// one-month discount returns the base recurring charge after an immediate
+/// enrollment, but remains discounted after a paid-trial enrollment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SubscriptionActivationProjection {
+    phase: crate::SubscriptionPhase,
+    initial_charge: ChargeAmount,
+    initial_period_rule: crate::SubscriptionPeriodRule,
+    recurring_charge_after_initial: ChargeAmount,
+    discount_periods_applied: u8,
+}
+
+impl SubscriptionActivationProjection {
+    const fn from_expected_terms(expected: &SubscriptionEnrollmentExpectedTerms) -> Self {
+        let offer = &expected.offer;
+        let discount_snapshot = expected.discount_snapshot.as_ref();
+        let start = offer.start();
+        let (phase, initial_charge, initial_period_rule) = match start {
+            crate::SubscriptionStart::RecurringImmediately => (
+                crate::SubscriptionPhase::Recurring,
+                match discount_snapshot {
+                    Some(snapshot) => snapshot.discounted_charge(),
+                    None => offer.recurring().charge(),
+                },
+                offer.recurring().period(),
+            ),
+            crate::SubscriptionStart::PaidTrial(trial) => (
+                crate::SubscriptionPhase::PaidTrial,
+                trial.charge(),
+                trial.period(),
+            ),
+        };
+        let discount_periods_applied = match (start, discount_snapshot) {
+            (crate::SubscriptionStart::RecurringImmediately, Some(_)) => 1,
+            (crate::SubscriptionStart::PaidTrial(_), _) | (_, None) => 0,
+        };
+        let recurring_charge_after_initial = match discount_snapshot {
+            None => offer.recurring().charge(),
+            Some(snapshot) => match snapshot.duration() {
+                crate::SubscriptionDiscountDuration::Indefinite => snapshot.discounted_charge(),
+                crate::SubscriptionDiscountDuration::LimitedMonths(months)
+                    if months.get() <= discount_periods_applied =>
+                {
+                    snapshot.base_charge()
+                }
+                crate::SubscriptionDiscountDuration::LimitedMonths(_) => {
+                    snapshot.discounted_charge()
+                }
+            },
+        };
+        Self {
+            phase,
+            initial_charge,
+            initial_period_rule,
+            recurring_charge_after_initial,
+            discount_periods_applied,
         }
     }
-}
 
-impl SubscriptionEnrollmentExpectedCharge {
-    pub const fn full_price(offer: SubscriptionOffer) -> Self {
-        Self::FullPrice(offer)
+    /// Phase persisted on the newly activated subscription.
+    pub const fn phase(self) -> crate::SubscriptionPhase {
+        self.phase
     }
 
-    pub const fn discounted(plan_key: PlanKey, snapshot: SubscriptionDiscountSnapshot) -> Self {
-        Self::Discounted { plan_key, snapshot }
+    /// Exact charge authorized by the enrollment payment attempt.
+    pub const fn initial_charge(self) -> ChargeAmount {
+        self.initial_charge
+    }
+
+    /// Period opened by a successful enrollment charge.
+    pub const fn initial_period_rule(self) -> crate::SubscriptionPeriodRule {
+        self.initial_period_rule
+    }
+
+    /// Recurring charge persisted for the payment after the initial period.
+    pub const fn recurring_charge_after_initial(self) -> ChargeAmount {
+        self.recurring_charge_after_initial
+    }
+
+    /// Recurring discount periods consumed by the enrollment charge.
+    pub const fn discount_periods_applied(self) -> u8 {
+        self.discount_periods_applied
+    }
+}
+
+/// The complete commercial and renewal-failure terms accepted at enrollment.
+///
+/// A saved discount remains the recurring-price authority after all non-price
+/// offer terms match. It never changes the paid-trial charge or cadence.
+#[derive(Clone, Eq, PartialEq)]
+pub struct SubscriptionEnrollmentExpectedTerms {
+    offer: SubscriptionOffer,
+    discount_snapshot: Option<SubscriptionDiscountSnapshot>,
+}
+
+impl fmt::Debug for SubscriptionEnrollmentExpectedTerms {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut debug = formatter.debug_struct("SubscriptionEnrollmentExpectedTerms");
+        debug
+            .field("offer", &self.offer)
+            .field("has_discount", &self.discount_snapshot.is_some());
+        if let Some(snapshot) = &self.discount_snapshot {
+            debug
+                .field("has_code", &true)
+                .field("has_label", &snapshot.label().is_some())
+                .field("discount_kind", &snapshot.kind())
+                .field("discount_duration", &snapshot.duration())
+                .field("saved_base_charge", &snapshot.base_charge())
+                .field("saved_discounted_charge", &snapshot.discounted_charge());
+        }
+        debug.finish()
+    }
+}
+
+impl SubscriptionEnrollmentExpectedTerms {
+    pub const fn full_price(offer: SubscriptionOffer) -> Self {
+        Self {
+            offer,
+            discount_snapshot: None,
+        }
+    }
+
+    pub fn discounted(
+        offer: SubscriptionOffer,
+        snapshot: SubscriptionDiscountSnapshot,
+    ) -> Result<Self, SubscriptionEnrollmentTermsError> {
+        if offer.currency() != *snapshot.currency() {
+            return Err(SubscriptionEnrollmentTermsError::CurrencyMismatch);
+        }
+        if matches!(
+            snapshot.duration(),
+            crate::SubscriptionDiscountDuration::LimitedMonths(_)
+        ) && !offer.recurring().period().is_one_calendar_month()
+        {
+            return Err(SubscriptionEnrollmentTermsError::LimitedDiscountCadence);
+        }
+        Ok(Self {
+            offer,
+            discount_snapshot: Some(snapshot),
+        })
+    }
+
+    pub const fn offer(&self) -> &SubscriptionOffer {
+        &self.offer
     }
 
     pub const fn plan_key(&self) -> &PlanKey {
-        match self {
-            Self::FullPrice(offer) => offer.plan_key(),
-            Self::Discounted { plan_key, .. } => plan_key,
-        }
+        self.offer.plan_key()
     }
 
-    pub const fn charge(&self) -> ChargeAmount {
-        match self {
-            Self::FullPrice(offer) => offer.base_charge(),
-            Self::Discounted { snapshot, .. } => snapshot.discounted_charge(),
-        }
+    /// Projects the exact accepted terms into their initial subscription state.
+    pub const fn activation_projection(&self) -> SubscriptionActivationProjection {
+        SubscriptionActivationProjection::from_expected_terms(self)
+    }
+
+    /// Exact charge authorized by the enrollment payment attempt.
+    pub const fn initial_charge(&self) -> ChargeAmount {
+        self.activation_projection().initial_charge()
     }
 
     pub const fn discount_snapshot(&self) -> Option<&SubscriptionDiscountSnapshot> {
-        match self {
-            Self::FullPrice(_) => None,
-            Self::Discounted { snapshot, .. } => Some(snapshot),
-        }
+        self.discount_snapshot.as_ref()
     }
 
-    /// Compares the accepted terms with rows locked by the owning transaction.
+    /// Returns the offer representation persisted on a durable initial attempt.
     ///
-    /// A saved discount deliberately keeps its captured economics when the host
-    /// later changes the catalog price. The current offer is still required so
-    /// a removed plan cannot be enrolled through an old claim.
+    /// A saved discount's captured base charge replaces later catalog price
+    /// drift while trial, cadence, and failure policy remain unchanged.
+    pub fn durable_offer(&self) -> SubscriptionOffer {
+        let recurring_charge = self
+            .discount_snapshot
+            .as_ref()
+            .map_or(self.offer.recurring().charge(), |snapshot| {
+                snapshot.base_charge()
+            });
+        SubscriptionOffer::new(
+            self.offer.plan_key().clone(),
+            crate::RecurringSubscriptionTerms::new(
+                recurring_charge,
+                self.offer.recurring().period(),
+            ),
+            self.offer.start(),
+            self.offer.renewal_failure().clone(),
+        )
+        .expect("validated expected terms preserve one currency")
+    }
+
+    /// Compares accepted terms with rows locked by the owning transaction.
+    ///
+    /// For a discounted enrollment, catalog recurring-price drift is ignored
+    /// only after plan, trial, cadence, currency, failure policy, and saved
+    /// discount identity all match.
     pub fn matches_locked_terms(
         &self,
         current_offer: &SubscriptionOffer,
         saved_discount: Option<&SubscriptionDiscountSnapshot>,
     ) -> bool {
-        if self.plan_key() != current_offer.plan_key() {
-            return false;
-        }
-        match (self, saved_discount) {
-            (Self::FullPrice(expected), None) => expected == current_offer,
-            (Self::Discounted { snapshot, .. }, Some(saved)) => {
-                snapshot.has_same_charge_terms(saved)
+        match (&self.discount_snapshot, saved_discount) {
+            (None, None) => &self.offer == current_offer,
+            (Some(expected_snapshot), Some(saved_snapshot)) => {
+                self.offer.has_same_non_price_terms(current_offer)
+                    && current_offer.currency() == *expected_snapshot.currency()
+                    && expected_snapshot.has_same_charge_terms(saved_snapshot)
             }
             _ => false,
         }
@@ -167,7 +303,7 @@ pub struct EnrollSubscription {
     idempotency_key: IdempotencyKey,
     payment_token: PaymentToken,
     billing_contact: BillingContact,
-    expected_charge: SubscriptionEnrollmentExpectedCharge,
+    expected_terms: SubscriptionEnrollmentExpectedTerms,
 }
 
 impl EnrollSubscription {
@@ -180,7 +316,7 @@ impl EnrollSubscription {
         idempotency_key: IdempotencyKey,
         payment_token: PaymentToken,
         billing_contact: BillingContact,
-        expected_charge: SubscriptionEnrollmentExpectedCharge,
+        expected_terms: SubscriptionEnrollmentExpectedTerms,
     ) -> Self {
         Self {
             attempt_id,
@@ -190,7 +326,7 @@ impl EnrollSubscription {
             idempotency_key,
             payment_token,
             billing_contact,
-            expected_charge,
+            expected_terms,
         }
     }
 
@@ -207,7 +343,7 @@ impl EnrollSubscription {
     }
 
     pub const fn plan_key(&self) -> &PlanKey {
-        self.expected_charge.plan_key()
+        self.expected_terms.plan_key()
     }
 
     pub const fn gateway_configuration_id(&self) -> GatewayConfigurationId {
@@ -226,8 +362,8 @@ impl EnrollSubscription {
         &self.billing_contact
     }
 
-    pub const fn expected_charge(&self) -> &SubscriptionEnrollmentExpectedCharge {
-        &self.expected_charge
+    pub const fn expected_terms(&self) -> &SubscriptionEnrollmentExpectedTerms {
+        &self.expected_terms
     }
 }
 
@@ -243,7 +379,7 @@ impl fmt::Debug for EnrollSubscription {
             .field("has_idempotency_key", &true)
             .field("has_payment_token", &true)
             .field("has_billing_contact", &true)
-            .field("expected_charge", &self.expected_charge)
+            .field("expected_terms", &self.expected_terms)
             .finish()
     }
 }
@@ -256,6 +392,8 @@ pub enum SubscriptionEnrollmentReservationBuildError {
     AttemptKindMismatch,
     #[error("subscription-initial attempt has an invalid charge amount")]
     InvalidCharge,
+    #[error("subscription-initial attempt has invalid accepted terms")]
+    InvalidTerms,
 }
 
 /// Secret-free input for the durable enrollment reservation transaction.
@@ -269,7 +407,7 @@ pub struct SubscriptionEnrollmentReservation {
     idempotency_key: IdempotencyKey,
     gateway_order_id: GatewayOrderId,
     billing_contact: BillingContactSnapshot,
-    expected_charge: SubscriptionEnrollmentExpectedCharge,
+    expected_terms: SubscriptionEnrollmentExpectedTerms,
 }
 
 impl SubscriptionEnrollmentReservation {
@@ -313,7 +451,7 @@ impl SubscriptionEnrollmentReservation {
             billing_contact: BillingContactSnapshot::from_billing_contact(
                 command.billing_contact(),
             ),
-            expected_charge: command.expected_charge().clone(),
+            expected_terms: command.expected_terms().clone(),
         })
     }
 
@@ -329,24 +467,18 @@ impl SubscriptionEnrollmentReservation {
     ) -> Result<Self, SubscriptionEnrollmentReservationBuildError> {
         let request = attempt.request();
         let PaymentAttemptTarget::SubscriptionInitial {
-            plan_key, discount, ..
+            offer, discount, ..
         } = request.target()
         else {
             return Err(SubscriptionEnrollmentReservationBuildError::AttemptKindMismatch);
         };
-        let expected_charge = match discount {
-            Some(discount) => SubscriptionEnrollmentExpectedCharge::discounted(
-                plan_key.clone(),
+        let expected_terms = match discount {
+            Some(discount) => SubscriptionEnrollmentExpectedTerms::discounted(
+                offer.clone(),
                 discount.snapshot().clone(),
-            ),
-            None => {
-                let charge = ChargeAmount::try_from(request.amount())
-                    .map_err(|_| SubscriptionEnrollmentReservationBuildError::InvalidCharge)?;
-                SubscriptionEnrollmentExpectedCharge::full_price(SubscriptionOffer::new(
-                    plan_key.clone(),
-                    charge,
-                ))
-            }
+            )
+            .map_err(|_| SubscriptionEnrollmentReservationBuildError::InvalidTerms)?,
+            None => SubscriptionEnrollmentExpectedTerms::full_price(offer.clone()),
         };
         Ok(Self {
             identity: attempt.identity(),
@@ -354,7 +486,7 @@ impl SubscriptionEnrollmentReservation {
             idempotency_key: request.idempotency_key().clone(),
             gateway_order_id: request.gateway_order_id().clone(),
             billing_contact: request.billing_contact().clone(),
-            expected_charge,
+            expected_terms,
         })
     }
 
@@ -378,12 +510,12 @@ impl SubscriptionEnrollmentReservation {
         &self.billing_contact
     }
 
-    pub const fn expected_charge(&self) -> &SubscriptionEnrollmentExpectedCharge {
-        &self.expected_charge
+    pub const fn expected_terms(&self) -> &SubscriptionEnrollmentExpectedTerms {
+        &self.expected_terms
     }
 
     pub const fn plan_key(&self) -> &PlanKey {
-        self.expected_charge.plan_key()
+        self.expected_terms.plan_key()
     }
 }
 
@@ -396,7 +528,7 @@ impl fmt::Debug for SubscriptionEnrollmentReservation {
             .field("has_idempotency_key", &true)
             .field("has_gateway_order_id", &true)
             .field("billing_contact", &self.billing_contact)
-            .field("expected_charge", &self.expected_charge)
+            .field("expected_terms", &self.expected_terms)
             .finish()
     }
 }
@@ -529,138 +661,4 @@ impl SubscriptionEnrollmentPaymentResult {
 }
 
 #[cfg(test)]
-mod tests {
-    use uuid::Uuid;
-
-    use super::*;
-    use crate::{
-        CurrencyCode, LimitedDiscountMonths, PercentOffBasisPoints, SubscriptionDiscountCode,
-        SubscriptionDiscountDuration, SubscriptionDiscountKind,
-    };
-
-    fn plan(value: &str) -> PlanKey {
-        PlanKey::new(value).unwrap()
-    }
-
-    fn offer(plan_key: PlanKey, cents: i32) -> SubscriptionOffer {
-        SubscriptionOffer::new(
-            plan_key,
-            ChargeAmount::new(cents, CurrencyCode::new("USD").unwrap()).unwrap(),
-        )
-    }
-
-    fn discount(base_cents: i32, discounted_cents: i32) -> SubscriptionDiscountSnapshot {
-        let currency = CurrencyCode::new("USD").unwrap();
-        SubscriptionDiscountSnapshot::new(
-            SubscriptionDiscountCode::new("SAVE20").unwrap(),
-            Some("Launch offer".to_owned()),
-            SubscriptionDiscountKind::PercentOffBasisPoints(
-                PercentOffBasisPoints::new(2000).unwrap(),
-            ),
-            SubscriptionDiscountDuration::LimitedMonths(LimitedDiscountMonths::new(3).unwrap()),
-            ChargeAmount::new(base_cents, currency).unwrap(),
-            ChargeAmount::new(discounted_cents, currency).unwrap(),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn full_price_requires_the_exact_plan_offer_and_no_saved_claim() {
-        let expected = SubscriptionEnrollmentExpectedCharge::full_price(offer(plan("basic"), 1000));
-        assert!(expected.matches_locked_terms(&offer(plan("basic"), 1000), None));
-        assert!(!expected.matches_locked_terms(&offer(plan("premium"), 1000), None));
-        assert!(!expected.matches_locked_terms(&offer(plan("basic"), 1200), None));
-        let saved = discount(1000, 800);
-        assert!(!expected.matches_locked_terms(&offer(plan("basic"), 1000), Some(&saved)));
-    }
-
-    #[test]
-    fn saved_discount_keeps_its_snapshot_while_the_plan_must_still_exist() {
-        let saved = discount(1000, 800);
-        let expected =
-            SubscriptionEnrollmentExpectedCharge::discounted(plan("basic"), saved.clone());
-        assert!(expected.matches_locked_terms(&offer(plan("basic"), 1400), Some(&saved)));
-        let labeled = SubscriptionDiscountSnapshot::new(
-            saved.code().clone(),
-            Some("Internal campaign label".to_owned()),
-            saved.kind(),
-            saved.duration(),
-            saved.base_charge(),
-            saved.discounted_charge(),
-        )
-        .unwrap();
-        assert!(expected.matches_locked_terms(&offer(plan("basic"), 1400), Some(&labeled)));
-        assert!(!expected.matches_locked_terms(&offer(plan("premium"), 1400), Some(&saved)));
-        assert!(
-            !expected
-                .matches_locked_terms(&offer(plan("basic"), 1400), Some(&discount(1000, 750)),)
-        );
-        assert!(!expected.matches_locked_terms(&offer(plan("basic"), 1400), None));
-    }
-
-    #[test]
-    fn enrollment_debug_omits_token_key_and_contact_values() {
-        let command = EnrollSubscription::new(
-            PaymentAttemptId::new(Uuid::from_u128(1)),
-            BillingScopeId::new(Uuid::from_u128(2)),
-            SubscriberId::new(Uuid::from_u128(3)),
-            GatewayConfigurationId::new(Uuid::from_u128(4)),
-            IdempotencyKey::new("secret-key").unwrap(),
-            PaymentToken::new("secret-token").unwrap(),
-            BillingContact::new(
-                None,
-                Some("Secret Name".to_owned()),
-                Some("secret@example.test".to_owned()),
-            )
-            .unwrap(),
-            SubscriptionEnrollmentExpectedCharge::full_price(offer(plan("basic"), 1000)),
-        );
-        let debug = format!("{command:?}");
-        for secret in [
-            "secret-key",
-            "secret-token",
-            "Secret Name",
-            "secret@example.test",
-        ] {
-            assert!(!debug.contains(secret));
-        }
-        assert!(debug.contains("has_payment_token"));
-    }
-
-    #[test]
-    fn durable_discount_debug_omits_code_and_label_values() {
-        let expected = SubscriptionEnrollmentExpectedCharge::discounted(
-            plan("basic"),
-            SubscriptionDiscountSnapshot::new(
-                SubscriptionDiscountCode::new("SECRET20").unwrap(),
-                Some("Sensitive campaign label".to_owned()),
-                SubscriptionDiscountKind::PercentOffBasisPoints(
-                    PercentOffBasisPoints::new(2_000).unwrap(),
-                ),
-                SubscriptionDiscountDuration::LimitedMonths(LimitedDiscountMonths::new(3).unwrap()),
-                ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
-                ChargeAmount::new(800, CurrencyCode::new("USD").unwrap()).unwrap(),
-            )
-            .unwrap(),
-        );
-        let expected_debug = format!("{expected:?}");
-        assert!(!expected_debug.contains("SECRET20"));
-        assert!(!expected_debug.contains("Sensitive campaign label"));
-        assert!(expected_debug.contains("has_code"));
-        assert!(expected_debug.contains("has_label"));
-
-        let snapshot = SubscriptionEnrollmentDiscountSnapshot::new(
-            DiscountClaimId::new(Uuid::from_u128(10)),
-            DiscountCodeId::new(Uuid::from_u128(11)),
-            expected
-                .discount_snapshot()
-                .expect("discounted expectation should retain snapshot")
-                .clone(),
-        );
-        let debug = format!("{snapshot:?}");
-        assert!(!debug.contains("SECRET20"));
-        assert!(!debug.contains("Sensitive campaign label"));
-        assert!(debug.contains("has_code"));
-        assert!(debug.contains("has_label"));
-    }
-}
+mod tests;

@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     BillingPeriod, BillingScopeId, CardLastFour, ChargeAmount, GatewayDiagnostic,
-    HostChargeTargetId, PaymentAttemptId, PlanKey, SubscriberId, SubscriptionId,
+    HostChargeTargetId, PaymentAttemptId, PlanKey, SubscriberId, SubscriptionId, SubscriptionPhase,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -69,9 +69,33 @@ pub enum BillingEventKey {
     SubscriptionStarted(SubscriptionId),
     SubscriptionRenewed(PaymentAttemptId),
     SubscriptionPaymentFailed(PaymentAttemptId),
+    SubscriptionEnded(SubscriptionId),
     SubscriptionCanceled(SubscriptionId),
     PaymentMethodChanged(PaymentAttemptId),
     HostChargePaid(HostChargeTargetId),
+}
+
+/// The durable scheduler or lifecycle consequence of a subscription payment
+/// failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionPaymentFailureDisposition {
+    /// Automatic dunning remains open and will retry at `retry_at`.
+    RetryScheduled { retry_at: DateTime<Utc> },
+    /// Automatic dunning ended at `exhausted_at`, but the subscription remains
+    /// past due rather than ending.
+    ///
+    /// Under [`crate::PastDueAccessPolicy::ContinueUntilDunningExhausted`],
+    /// hosts that mirror product access must treat this as the access-revocation
+    /// signal. No [`BillingEvent::SubscriptionEnded`] event follows it.
+    DunningExhausted { exhausted_at: DateTime<Utc> },
+    /// Nonpayment ended the subscription at `ended_at`; a matching
+    /// [`BillingEvent::SubscriptionEnded`] follows in the same transaction.
+    SubscriptionEnded { ended_at: DateTime<Utc> },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SubscriptionEndReason {
+    NonPayment,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +106,7 @@ pub enum BillingEvent {
         plan_key: PlanKey,
         charge: ChargeAmount,
         period: BillingPeriod,
+        phase: SubscriptionPhase,
     },
     SubscriptionRenewed {
         attempt_id: PaymentAttemptId,
@@ -94,7 +119,15 @@ pub enum BillingEvent {
         attempt_id: PaymentAttemptId,
         subscription_id: SubscriptionId,
         plan_key: PlanKey,
-        retry_at: DateTime<Utc>,
+        disposition: SubscriptionPaymentFailureDisposition,
+    },
+    SubscriptionEnded {
+        attempt_id: PaymentAttemptId,
+        subscription_id: SubscriptionId,
+        plan_key: PlanKey,
+        reason: SubscriptionEndReason,
+        ended_at: DateTime<Utc>,
+        access_ends_at: DateTime<Utc>,
     },
     SubscriptionCanceled {
         subscription_id: SubscriptionId,
@@ -126,6 +159,9 @@ impl BillingEvent {
             Self::SubscriptionPaymentFailed { attempt_id, .. } => {
                 BillingEventKey::SubscriptionPaymentFailed(*attempt_id)
             }
+            Self::SubscriptionEnded {
+                subscription_id, ..
+            } => BillingEventKey::SubscriptionEnded(*subscription_id),
             Self::SubscriptionCanceled {
                 subscription_id, ..
             } => BillingEventKey::SubscriptionCanceled(*subscription_id),
@@ -169,6 +205,7 @@ mod tests {
                     plan_key: plan_key.clone(),
                     charge,
                     period: period.clone(),
+                    phase: SubscriptionPhase::Recurring,
                 },
                 BillingEventKey::SubscriptionStarted(subscription(2)),
             ),
@@ -187,9 +224,22 @@ mod tests {
                     attempt_id: attempt(4),
                     subscription_id: subscription(2),
                     plan_key: plan_key.clone(),
-                    retry_at: end,
+                    disposition: SubscriptionPaymentFailureDisposition::RetryScheduled {
+                        retry_at: end,
+                    },
                 },
                 BillingEventKey::SubscriptionPaymentFailed(attempt(4)),
+            ),
+            (
+                BillingEvent::SubscriptionEnded {
+                    attempt_id: attempt(4),
+                    subscription_id: subscription(2),
+                    plan_key: plan_key.clone(),
+                    reason: SubscriptionEndReason::NonPayment,
+                    ended_at: end,
+                    access_ends_at: end,
+                },
+                BillingEventKey::SubscriptionEnded(subscription(2)),
             ),
             (
                 BillingEvent::SubscriptionCanceled {

@@ -52,17 +52,6 @@ impl PaymentResolutionCode {
         Self::SubscriptionApprovedPaymentMethodUpdateInactiveReplacementMethod,
     ];
 
-    pub const RENEWAL_RETRY_ACCOUNTING_EXCLUDED: &'static [Self] = &[
-        Self::SubscriptionRenewalRetryStateChangedBeforeCharge,
-        Self::GatewayLiveReadinessFailedBeforeSubmission,
-        Self::GatewayMalformedBeforeSubmission,
-        Self::GatewayRequestRejectedBeforeSubmission,
-        Self::GatewayConfigurationBeforeSubmission,
-        Self::GatewayUnavailableBeforeSubmission,
-        Self::GatewayProviderRateLimitedBeforeSubmission,
-        Self::GatewayAccountMutationCooldownBeforeSubmission,
-    ];
-
     pub const RENEWAL_INFRASTRUCTURE_RETRY_CODES: &'static [Self] = &[
         Self::GatewayLiveReadinessFailedBeforeSubmission,
         Self::GatewayMalformedBeforeSubmission,
@@ -73,10 +62,12 @@ impl PaymentResolutionCode {
         Self::GatewayAccountMutationCooldownBeforeSubmission,
     ];
 
-    pub const RENEWAL_RETRY_PACING_EXCLUDED: &'static [Self] = &[
-        Self::SubscriptionRenewalRetryStateChangedBeforeCharge,
-        Self::GatewayProviderRateLimitedBeforeSubmission,
-        Self::GatewayAccountMutationCooldownBeforeSubmission,
+    pub const RENEWAL_INFRASTRUCTURE_PACING_CODES: &'static [Self] = &[
+        Self::GatewayLiveReadinessFailedBeforeSubmission,
+        Self::GatewayMalformedBeforeSubmission,
+        Self::GatewayRequestRejectedBeforeSubmission,
+        Self::GatewayConfigurationBeforeSubmission,
+        Self::GatewayUnavailableBeforeSubmission,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -245,20 +236,23 @@ mod tests {
     #[test]
     fn retry_policy_sets_preserve_the_characterized_membership() {
         assert_eq!(
-            PaymentResolutionCode::RENEWAL_RETRY_ACCOUNTING_EXCLUDED.len(),
-            8
-        );
-        assert_eq!(
             PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_RETRY_CODES.len(),
             7
         );
         assert_eq!(
-            PaymentResolutionCode::RENEWAL_RETRY_PACING_EXCLUDED.len(),
-            3
+            PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES.len(),
+            5
+        );
+        let pacing = PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES;
+        assert!(
+            !pacing.contains(&PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
         );
         assert!(
-            PaymentResolutionCode::RENEWAL_RETRY_PACING_EXCLUDED
-                .contains(&PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
+            !pacing
+                .contains(&PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission)
         );
+        for code in pacing {
+            assert!(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_RETRY_CODES.contains(code));
+        }
     }
 }

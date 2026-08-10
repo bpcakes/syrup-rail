@@ -36,7 +36,9 @@ This repository uses the shared `jig.sh` workflow. Keep repo-local business rule
 - Treat `crates` as Rust crate roots.
 - Add crate-level `AGENTS.md` files when a crate has meaningful ownership, entrypoint, or invariant guidance that should travel with that crate.
 
-- SQL migrations live under `crates/syrup-rail-postgres/schema/v1`.
+- Versioned SQL schema artifacts live under
+  `crates/syrup-rail-postgres/schema`; follow the crate guide for the current
+  artifact and immutable shipped versions.
 - SQLx metadata is committed in `crates/syrup-rail-postgres/.sqlx`.
 
 - Keep transport logic thin and business logic in the owning crate.
@@ -63,8 +65,6 @@ No web apps are configured in `.jig.toml`.
 
 - `scripts/jig check sqlx`
 
-- `scripts/jig migration-add NAME`
-
 - `scripts/jig check contract`
 
 ## Done Means
@@ -88,3 +88,12 @@ When a backend crate has a crate-level `AGENTS.md`, use these sections:
 - `## Invariants`
 - `## Common commands`
 <!-- END JIG MANAGED BLOCK -->
+
+## Repository-specific schema workflow
+
+The PostgreSQL distribution schema uses complete versioned artifacts, not a
+flat SQLx migration directory. Schema v2 is current and `schema/v1/**` is
+immutable. Do not use `scripts/jig migration-add` for these artifacts; edit the
+current version only when it has not shipped, and otherwise add the next
+forward-only version and cutover artifact as directed by the PostgreSQL crate
+guide.

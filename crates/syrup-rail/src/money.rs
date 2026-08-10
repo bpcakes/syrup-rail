@@ -3,8 +3,6 @@ use std::{fmt, str::FromStr};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-use crate::PlanKey;
-
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum CurrencyCodeError {
     #[error("currency code must contain exactly three uppercase ASCII characters")]
@@ -168,29 +166,6 @@ impl BillingPeriod {
 
     pub const fn end_at(&self) -> &DateTime<Utc> {
         &self.end_at
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SubscriptionOffer {
-    plan_key: PlanKey,
-    base_charge: ChargeAmount,
-}
-
-impl SubscriptionOffer {
-    pub const fn new(plan_key: PlanKey, base_charge: ChargeAmount) -> Self {
-        Self {
-            plan_key,
-            base_charge,
-        }
-    }
-
-    pub const fn plan_key(&self) -> &PlanKey {
-        &self.plan_key
-    }
-
-    pub const fn base_charge(&self) -> ChargeAmount {
-        self.base_charge
     }
 }
 

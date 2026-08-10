@@ -626,10 +626,20 @@ mod tests {
                 currency,
                 gateway_account_id,
                 gateway_configuration_id,
-                gateway_order_id
+                gateway_order_id,
+                subscription_initial_terms_version,
+                subscription_initial_start_kind,
+                subscription_initial_recurring_base_amount_cents,
+                subscription_initial_recurring_period_kind,
+                subscription_initial_recurring_period_count,
+                subscription_initial_dunning_retry_delays_seconds,
+                subscription_initial_dunning_exhaustion,
+                subscription_initial_past_due_access
             ) VALUES (
                 $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
-                100, 'USD', $7, $8, $9
+                100, 'USD', $7, $8, $9, 2, 'recurring_immediately', 100,
+                'calendar_months', 1, ARRAY[]::bigint[],
+                'remain_past_due', 'suspend_immediately'
             )
             "#,
         )

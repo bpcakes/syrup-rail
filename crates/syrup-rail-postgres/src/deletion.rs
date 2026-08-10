@@ -455,12 +455,18 @@ mod tests {
                     id, billing_scope_id, subscriber_id, plan_key, status,
                     gateway_account_id, payment_method_id, amount_cents,
                     currency, current_period_start_at, current_period_end_at,
-                    next_renewal_at, initial_transaction_id
+                    next_renewal_at, initial_transaction_id, phase,
+                    recurring_period_kind, recurring_period_count,
+                    dunning_retry_delays_seconds, dunning_exhaustion,
+                    past_due_access, next_payment_attempt_at
                 ) SELECT
                     $1, $2, $3, 'plan_a', 'active', $4, $5, 100, 'USD',
                     observed_at - interval '1 day',
                     observed_at + interval '1 day',
-                    observed_at + interval '1 day', $6
+                    observed_at + interval '1 day', $6, 'recurring',
+                    'calendar_months', 1, ARRAY[]::bigint[],
+                    'remain_past_due', 'suspend_immediately',
+                    observed_at + interval '1 day'
                 FROM clock
                 "#,
             )
@@ -522,7 +528,7 @@ mod tests {
             transaction.rollback().await?;
 
             sqlx::query(
-                "UPDATE billing_subscriptions SET status = 'canceled', canceled_at = clock_timestamp() WHERE id = $1",
+                "UPDATE billing_subscriptions SET status = 'canceled', canceled_at = clock_timestamp(), next_payment_attempt_at = NULL WHERE id = $1",
             )
             .bind(subscription)
             .execute(&database.pool)

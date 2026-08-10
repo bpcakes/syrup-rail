@@ -411,16 +411,18 @@ pub enum SubscriptionStatus {
     Active,
     PastDue,
     Canceled,
+    Unpaid,
 }
 
 impl SubscriptionStatus {
-    pub const ALL: [Self; 3] = [Self::Active, Self::PastDue, Self::Canceled];
+    pub const ALL: [Self; 4] = [Self::Active, Self::PastDue, Self::Canceled, Self::Unpaid];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Active => "active",
             Self::PastDue => "past_due",
             Self::Canceled => "canceled",
+            Self::Unpaid => "unpaid",
         }
     }
 }
@@ -437,7 +439,41 @@ impl FromStr for SubscriptionStatus {
             "active" => Ok(Self::Active),
             "past_due" => Ok(Self::PastDue),
             "canceled" => Ok(Self::Canceled),
+            "unpaid" => Ok(Self::Unpaid),
             _ => Err(SubscriptionStatusParseError),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum SubscriptionPhase {
+    PaidTrial,
+    Recurring,
+}
+
+impl SubscriptionPhase {
+    pub const ALL: [Self; 2] = [Self::PaidTrial, Self::Recurring];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::PaidTrial => "paid_trial",
+            Self::Recurring => "recurring",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("unknown subscription phase")]
+pub struct SubscriptionPhaseParseError;
+
+impl FromStr for SubscriptionPhase {
+    type Err = SubscriptionPhaseParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "paid_trial" => Ok(Self::PaidTrial),
+            "recurring" => Ok(Self::Recurring),
+            _ => Err(SubscriptionPhaseParseError),
         }
     }
 }
@@ -468,6 +504,12 @@ mod tests {
         }
         for status in PaymentAttemptStatus::ALL {
             assert_eq!(status.as_str().parse(), Ok(status));
+        }
+        for status in SubscriptionStatus::ALL {
+            assert_eq!(status.as_str().parse(), Ok(status));
+        }
+        for phase in SubscriptionPhase::ALL {
+            assert_eq!(phase.as_str().parse(), Ok(phase));
         }
         assert!("order_sale".parse::<PaymentAttemptKind>().is_err());
     }

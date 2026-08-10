@@ -14,6 +14,15 @@ Adapt the raw NMI client to Syrup Rail gateway and lifecycle-evidence contracts.
 - `src/lib.rs` exports the adapter and retains the raw client re-export for
   hosts that construct short-lived clients from their own credential stores.
 
+## Edit here for X
+
+- Change one-shot sale, stored-method, exact-query, or report-page adaptation
+  in `src/adapter.rs` while preserving the retry-free raw-client boundary.
+- Change provider lifecycle vocabulary mapping only in `src/lifecycle.rs`;
+  unknown evidence remains quarantined rather than guessed.
+- Change generated mutation references in `src/reference.rs` and preserve the
+  exact durable-attempt correlation required for reconciliation.
+
 ## Invariants
 
 - Depends on `syrup-rail` and `syrup-rail-nmi-client` only among Syrup Rail

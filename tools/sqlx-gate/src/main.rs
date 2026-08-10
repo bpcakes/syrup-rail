@@ -14,8 +14,8 @@ use std::{
 use postgres_test_harness::{HarnessConfig, PostgresHarness};
 use sqlx::postgres::PgPoolOptions;
 
-const V1_INSTALL_SQL: &str =
-    include_str!("../../../crates/syrup-rail-postgres/schema/v1/install.sql");
+const CURRENT_INSTALL_SQL: &str =
+    include_str!("../../../crates/syrup-rail-postgres/schema/v2/install.sql");
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -76,11 +76,11 @@ fn postgres_crate_root() -> Result<PathBuf, String> {
 }
 
 fn load_install_sql(crate_root: &Path) -> Result<&'static str, String> {
-    let install_path = crate_root.join("schema/v1/install.sql");
+    let install_path = crate_root.join("schema/v2/install.sql");
     match std::fs::read_to_string(&install_path) {
-        Ok(on_disk) if on_disk == V1_INSTALL_SQL => Ok(V1_INSTALL_SQL),
+        Ok(on_disk) if on_disk == CURRENT_INSTALL_SQL => Ok(CURRENT_INSTALL_SQL),
         Ok(_) => Err(format!(
-            "{} differs from the SQLx gate's embedded schema-v1 artifact",
+            "{} differs from the SQLx gate's embedded current schema artifact",
             install_path.display()
         )),
         Err(error) => Err(format!(
@@ -106,7 +106,7 @@ async fn run_gate(
         .execute(&pool)
         .await
         .map(|_| ())
-        .map_err(|error| format!("failed to apply schema/v1/install.sql: {error}"));
+        .map_err(|error| format!("failed to apply schema/v2/install.sql: {error}"));
     pool.close().await;
     install_result?;
 

@@ -7,7 +7,7 @@ on:
       - "crates/**"
 
 
-      - "crates/syrup-rail-postgres/schema/v1/**"
+      - "crates/syrup-rail-postgres/schema/**"
       - "crates/syrup-rail-postgres/.sqlx/**"
 
       - "Cargo.toml"
@@ -30,7 +30,7 @@ on:
       - "crates/**"
 
 
-      - "crates/syrup-rail-postgres/schema/v1/**"
+      - "crates/syrup-rail-postgres/schema/**"
       - "crates/syrup-rail-postgres/.sqlx/**"
 
       - "Cargo.toml"

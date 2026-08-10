@@ -17,13 +17,14 @@ use crate::{
     HostChargeStoreError, HostChargeSubmissionOutcome, HostChargeTargetError,
     HostChargeTargetStore, ProcessorChargeStoreError, admit_host_charge_submission_in_transaction,
     attempts::{
-        PaymentAttemptStoreError, find_payment_attempt_by_id_on_connection,
-        lock_payment_attempt_by_id_on_connection,
+        AttemptApproval, AttemptResolutionStatus, AttemptTransition, PaymentAttemptStoreError,
+        find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
+        persist_attempt_transition,
     },
     enrollment_application::{
         OutcomeResolutionBoundary, RateLimitCooldown, SubscriptionEnrollmentApplicationError,
-        mutation_error_evidence, not_submitted_resolution_code, park_locked_attempt,
-        set_application_timeouts, update_attempt_resolution,
+        map_attempt_transition_error, mutation_error_evidence, not_submitted_resolution_code,
+        park_locked_attempt, set_application_timeouts,
     },
     processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
 };
@@ -212,7 +213,7 @@ pub async fn submit_admitted_host_charge(
                 targets,
                 &admission.reservation,
                 &evidence,
-                PaymentAttemptStatus::Failed,
+                AttemptResolutionStatus::Failed,
                 Some(not_submitted_resolution_code(&error)),
                 OutcomeResolutionBoundary::AdmittedNotSubmitted,
                 release_target,
@@ -292,7 +293,7 @@ pub async fn apply_host_charge_gateway_outcome(
                 targets,
                 reservation,
                 outcome.evidence(),
-                PaymentAttemptStatus::Declined,
+                AttemptResolutionStatus::Declined,
                 None,
                 OutcomeResolutionBoundary::Submitted,
                 true,
@@ -306,7 +307,7 @@ pub async fn apply_host_charge_gateway_outcome(
                 targets,
                 reservation,
                 outcome.evidence(),
-                PaymentAttemptStatus::Failed,
+                AttemptResolutionStatus::Failed,
                 None,
                 OutcomeResolutionBoundary::Submitted,
                 true,
@@ -375,7 +376,7 @@ pub(crate) async fn resolve_host_charge_before_submission(
         targets,
         reservation,
         &evidence,
-        PaymentAttemptStatus::Failed,
+        AttemptResolutionStatus::Failed,
         Some(resolution_code),
         resolution.boundary,
         false,
@@ -460,17 +461,14 @@ async fn apply_host_charge_approved(
     match target_outcome {
         HostChargeTargetTransitionOutcome::Applied
         | HostChargeTargetTransitionOutcome::ExactReplay => {
-            update_attempt_resolution(
+            persist_attempt_transition(
                 connection,
                 &attempt,
                 evidence,
-                PaymentAttemptStatus::Approved,
-                None,
-                None,
-                None,
-                false,
+                AttemptTransition::Approved(AttemptApproval::HostCharge),
             )
-            .await?;
+            .await
+            .map_err(map_attempt_transition_error)?;
             transition_charge(
                 connection,
                 charge.id,
@@ -574,7 +572,7 @@ async fn resolve_host_charge_non_approved(
     targets: &dyn HostChargeTargetStore,
     reservation: &HostChargeReservation,
     evidence: &ProcessorEvidence,
-    status: PaymentAttemptStatus,
+    status: AttemptResolutionStatus,
     resolution_code: Option<PaymentResolutionCode>,
     boundary: OutcomeResolutionBoundary,
     release_target: bool,
@@ -633,17 +631,17 @@ async fn resolve_host_charge_non_approved(
         return Ok(HostChargePaymentResult::new(attempt));
     }
     if may_resolve {
-        update_attempt_resolution(
+        persist_attempt_transition(
             &mut transaction,
             &attempt,
             evidence,
-            status,
-            resolution_code,
-            None,
-            None,
-            false,
+            AttemptTransition::Resolved {
+                status,
+                resolution_code,
+            },
         )
-        .await?;
+        .await
+        .map_err(map_attempt_transition_error)?;
         if evidence_looks_approved(evidence) {
             observe_processor_charge(
                 &mut transaction,
@@ -690,17 +688,17 @@ async fn resolve_host_charge_unknown(
     set_application_timeouts(&mut transaction).await?;
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
     if !attempt.status().is_terminal() {
-        update_attempt_resolution(
+        persist_attempt_transition(
             &mut transaction,
             &attempt,
             evidence,
-            PaymentAttemptStatus::Unknown,
-            None,
-            None,
-            None,
-            false,
+            AttemptTransition::Resolved {
+                status: AttemptResolutionStatus::Unknown,
+                resolution_code: None,
+            },
         )
-        .await?;
+        .await
+        .map_err(map_attempt_transition_error)?;
         if evidence_looks_approved(evidence) {
             observe_processor_charge(
                 &mut transaction,

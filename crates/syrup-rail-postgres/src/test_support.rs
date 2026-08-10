@@ -4,7 +4,13 @@ use postgres_test_harness::{DatabaseLease, HarnessConfig, PostgresHarness};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
-use crate::schema_contract::V1_INSTALL_SQL;
+use syrup_rail::{
+    ChargeAmount, DunningExhaustion, DunningSchedule, PastDueAccessPolicy, PlanKey,
+    RecurringSubscriptionTerms, RenewalFailurePolicy, SubscriptionOffer, SubscriptionPeriodRule,
+    SubscriptionStart,
+};
+
+use crate::schema_contract::{V1_INSTALL_SQL, V1_TO_V2_UPGRADE_SQL, V2_INSTALL_SQL};
 
 pub(crate) struct TestDatabase {
     harness: PostgresHarness,
@@ -19,8 +25,45 @@ pub(crate) struct GatewayAccountFixture {
     pub(crate) gateway_configuration_id: Uuid,
 }
 
+pub(crate) fn immediate_offer(plan_key: PlanKey, charge: ChargeAmount) -> SubscriptionOffer {
+    SubscriptionOffer::new(
+        plan_key,
+        RecurringSubscriptionTerms::new(
+            charge,
+            SubscriptionPeriodRule::calendar_months(1).expect("valid test cadence"),
+        ),
+        SubscriptionStart::RecurringImmediately,
+        RenewalFailurePolicy::new(
+            DunningSchedule::default(),
+            DunningExhaustion::RemainPastDue,
+            PastDueAccessPolicy::SuspendImmediately,
+        ),
+    )
+    .expect("valid immediate test offer")
+}
+
 impl TestDatabase {
     pub(crate) async fn start(project: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_install(project, V2_INSTALL_SQL).await
+    }
+
+    pub(crate) async fn start_v1(project: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_install(project, V1_INSTALL_SQL).await
+    }
+
+    pub(crate) async fn start_v1_then_upgrade(project: &str) -> Result<Self, Box<dyn Error>> {
+        let database = Self::start_v1(project).await?;
+        {
+            let mut transaction = database.pool.begin().await?;
+            sqlx::raw_sql(V1_TO_V2_UPGRADE_SQL)
+                .execute(&mut *transaction)
+                .await?;
+            transaction.commit().await?;
+        }
+        Ok(database)
+    }
+
+    async fn start_with_install(project: &str, install_sql: &str) -> Result<Self, Box<dyn Error>> {
         let harness =
             PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await?;
         let lease = harness.empty_database().await?;
@@ -28,7 +71,7 @@ impl TestDatabase {
             .max_connections(4)
             .connect(lease.database_url())
             .await?;
-        sqlx::raw_sql(V1_INSTALL_SQL).execute(&pool).await?;
+        sqlx::raw_sql(install_sql).execute(&pool).await?;
         Ok(Self {
             harness,
             lease,
