@@ -23,9 +23,9 @@ use syrup_rail::{
 use syrup_rail_postgres::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
     BillingTransactionError, BillingTransactionSubjectState, RenewalStoreError,
-    SubscriptionBillingPortalQueryError, SubscriptionBillingService,
-    SubscriptionBillingServiceError, SubscriptionOfferStore, due_renewals_page,
-    subscription_billing_portal, subscription_payment_history_page,
+    SchemaConformanceError, SubscriptionBillingPortalQueryError, SubscriptionBillingService,
+    SubscriptionBillingServiceError, SubscriptionOfferStore, assert_runtime_schema_v2_compatible,
+    due_renewals_page, subscription_billing_portal, subscription_payment_history_page,
 };
 
 /// Host-owned implementations required by [`SubscriptionBillingService`].
@@ -83,6 +83,19 @@ pub fn build_subscription_billing_service(
         ports.admission,
         transactions,
     )
+}
+
+/// Verifies the host-applied database migration before this process serves
+/// billing traffic.
+///
+/// Run the host's immutable Syrup Rail install or forward-only upgrade
+/// migration through its normal deployment workflow first. This assertion uses
+/// one repeatable-read, read-only catalog snapshot; it never installs,
+/// upgrades, preflights, audits, or otherwise changes the schema.
+pub async fn assert_host_runtime_schema_compatibility(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v2_compatible(pool).await
 }
 
 /// The host-specific half of Syrup Rail's transaction boundary.

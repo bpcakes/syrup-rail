@@ -1,24 +1,33 @@
-//! Versioned schema installation, upgrade, and host-conformance support.
+//! Read-only canonical schema conformance and feature-gated artifact support.
 
 use std::collections::BTreeSet;
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 
+// These artifacts are intentionally unavailable to ordinary production
+// dependencies. Hosts materialize them through their own migration system;
+// the explicit feature is for contract fixtures and migration tests only.
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The immutable version-1 fresh-install artifact.
 pub const V1_INSTALL_SQL: &str = include_str!("../schema/v1/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The immutable version-2 fresh-install artifact.
 pub const V2_INSTALL_SQL: &str = include_str!("../schema/v2/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The read-only version-1-to-version-2 upgrade preflight.
 pub const V1_TO_V2_PREFLIGHT_SQL: &str = include_str!("../schema/v2/preflight_from_v1.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The read-only audit of v1 retry histories reclassified by version 2.
 pub const V1_TO_V2_RETRY_RECLASSIFICATION_AUDIT_SQL: &str =
     include_str!("../schema/v2/audit_retry_reclassification_from_v1.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The immutable forward-only version-1-to-version-2 upgrade artifact.
 pub const V1_TO_V2_UPGRADE_SQL: &str = include_str!("../schema/v2/upgrade_from_v1.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
 const V2_CATALOG_FINGERPRINT: u64 = 0x0da8_83df_aab0_1e30;
 
@@ -76,6 +85,7 @@ const PAYMENT_FACT_COLUMNS: &[&str] = &[
     "refunded_amount_cents",
 ];
 
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V1_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "id",
     "billing_scope_id",
@@ -127,7 +137,11 @@ const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "unpaid_at",
 ];
 
-/// Why a host database does not satisfy the immutable version-1 contract.
+/// Why a host database does not satisfy a canonical schema contract.
+///
+/// [`crate::assert_runtime_schema_v2_compatible`] reports version `2` in its
+/// [`Self::Contract`] diagnostic. Database failures include inability to begin
+/// or commit the read-only catalog snapshot.
 #[derive(Debug, Error)]
 pub enum SchemaConformanceError {
     #[error("schema conformance query failed: {0}")]
@@ -136,26 +150,19 @@ pub enum SchemaConformanceError {
     Contract { version: u16, detail: String },
 }
 
-/// Asserts that an already-migrated host database contains the canonical v1
-/// objects without re-running or exposing a production migrator.
+/// Asserts that a host database is compatible with the canonical schema-v2
+/// contract before the host accepts billing work.
 ///
-/// Separately named host objects are permitted. Canonical relations, views,
-/// functions, triggers, validated constraints, and bounded host read surfaces
-/// must remain present and retain their neutral vocabulary.
-pub async fn assert_v1_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
-    assert_schema_conforms(
-        pool,
-        1,
-        V1_CURRENT_SUBSCRIPTION_COLUMNS,
-        V1_CATALOG_FINGERPRINT,
-    )
-    .await
-}
-
-/// Asserts that an already-migrated host database contains the canonical v2
-/// objects without exposing a production runtime migrator.
-pub async fn assert_v2_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
-    assert_schema_conforms(
+/// Call this after the host has applied its immutable Syrup Rail install or
+/// forward-only upgrade migration through its normal migration deployment.
+/// This function does not install, upgrade, preflight, audit, or otherwise
+/// mutate the schema. It runs the same full canonical v2 catalog conformance
+/// and fingerprint check used by the schema-contract tests in one
+/// `REPEATABLE READ READ ONLY` PostgreSQL transaction.
+pub async fn assert_runtime_schema_v2_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
         pool,
         2,
         V2_CURRENT_SUBSCRIPTION_COLUMNS,
@@ -164,33 +171,89 @@ pub async fn assert_v2_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
     .await
 }
 
-async fn assert_schema_conforms(
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v1
+/// objects without re-running or exposing a production migrator.
+///
+/// Separately named host objects are permitted. Canonical relations, views,
+/// functions, triggers, validated constraints, and bounded host read surfaces
+/// must remain present and retain their neutral vocabulary.
+pub async fn assert_v1_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        1,
+        V1_CURRENT_SUBSCRIPTION_COLUMNS,
+        V1_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v2
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v2_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v2_compatible(pool).await
+}
+
+async fn assert_schema_conforms_in_read_only_snapshot(
     pool: &PgPool,
     version: u16,
     current_subscription_columns: &[&str],
     expected_fingerprint: u64,
 ) -> Result<(), SchemaConformanceError> {
-    require_relations(pool, version, 'r', REQUIRED_TABLES).await?;
-    require_relations(pool, version, 'v', REQUIRED_VIEWS).await?;
-    require_functions(pool, version).await?;
-    require_triggers(pool, version).await?;
-    require_view_columns(pool, version, "billing_payment_facts", PAYMENT_FACT_COLUMNS).await?;
+    let mut transaction = pool
+        .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .await?;
+    let result = assert_schema_conforms(
+        &mut transaction,
+        version,
+        current_subscription_columns,
+        expected_fingerprint,
+    )
+    .await;
+    match result {
+        Ok(()) => transaction.commit().await?,
+        Err(error) => {
+            transaction.rollback().await?;
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+async fn assert_schema_conforms(
+    connection: &mut PgConnection,
+    version: u16,
+    current_subscription_columns: &[&str],
+    expected_fingerprint: u64,
+) -> Result<(), SchemaConformanceError> {
+    require_relations(connection, version, 'r', REQUIRED_TABLES).await?;
+    require_relations(connection, version, 'v', REQUIRED_VIEWS).await?;
+    require_functions(connection, version).await?;
+    require_triggers(connection, version).await?;
     require_view_columns(
-        pool,
+        connection,
+        version,
+        "billing_payment_facts",
+        PAYMENT_FACT_COLUMNS,
+    )
+    .await?;
+    require_view_columns(
+        connection,
         version,
         "billing_current_subscriptions",
         current_subscription_columns,
     )
     .await?;
-    reject_legacy_columns(pool, version).await?;
-    require_validated_constraints(pool, version).await?;
-    require_account_scoped_order_index(pool, version).await?;
-    require_catalog_fingerprint(pool, version, expected_fingerprint).await?;
+    reject_legacy_columns(connection, version).await?;
+    require_validated_constraints(connection, version).await?;
+    require_account_scoped_order_index(connection, version).await?;
+    require_catalog_fingerprint(connection, version, expected_fingerprint).await?;
     Ok(())
 }
 
 async fn require_relations(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     version: u16,
     relation_kind: char,
     expected: &[&str],
@@ -213,12 +276,15 @@ async fn require_relations(
     )
     .bind(relation_kind.to_string())
     .bind(&expected_names)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     require_exact_set(version, "relations", expected, actual)
 }
 
-async fn require_functions(pool: &PgPool, version: u16) -> Result<(), SchemaConformanceError> {
+async fn require_functions(
+    connection: &mut PgConnection,
+    version: u16,
+) -> Result<(), SchemaConformanceError> {
     let expected = REQUIRED_FUNCTIONS
         .iter()
         .map(|name| (*name).to_owned())
@@ -236,12 +302,15 @@ async fn require_functions(pool: &PgPool, version: u16) -> Result<(), SchemaConf
         "#,
     )
     .bind(&expected)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     require_exact_set(version, "functions", REQUIRED_FUNCTIONS, actual)
 }
 
-async fn require_triggers(pool: &PgPool, version: u16) -> Result<(), SchemaConformanceError> {
+async fn require_triggers(
+    connection: &mut PgConnection,
+    version: u16,
+) -> Result<(), SchemaConformanceError> {
     let expected = REQUIRED_TRIGGERS
         .iter()
         .map(|name| (*name).to_owned())
@@ -262,13 +331,13 @@ async fn require_triggers(pool: &PgPool, version: u16) -> Result<(), SchemaConfo
         "#,
     )
     .bind(&expected)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     require_exact_set(version, "triggers", REQUIRED_TRIGGERS, actual)
 }
 
 async fn require_view_columns(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     version: u16,
     view: &str,
     expected_columns: &[&str],
@@ -283,7 +352,7 @@ async fn require_view_columns(
         "#,
     )
     .bind(view)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let expected = expected_columns
         .iter()
@@ -299,7 +368,10 @@ async fn require_view_columns(
     }
 }
 
-async fn reject_legacy_columns(pool: &PgPool, version: u16) -> Result<(), SchemaConformanceError> {
+async fn reject_legacy_columns(
+    connection: &mut PgConnection,
+    version: u16,
+) -> Result<(), SchemaConformanceError> {
     let tables = REQUIRED_TABLES
         .iter()
         .map(|name| (*name).to_owned())
@@ -329,7 +401,7 @@ async fn reject_legacy_columns(pool: &PgPool, version: u16) -> Result<(), Schema
         "#,
     )
     .bind(&tables)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     if legacy.is_empty() {
         Ok(())
@@ -342,7 +414,7 @@ async fn reject_legacy_columns(pool: &PgPool, version: u16) -> Result<(), Schema
 }
 
 async fn require_validated_constraints(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     version: u16,
 ) -> Result<(), SchemaConformanceError> {
     let tables = REQUIRED_TABLES
@@ -365,7 +437,7 @@ async fn require_validated_constraints(
         "#,
     )
     .bind(&tables)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     if invalid.is_empty() {
         Ok(())
@@ -378,7 +450,7 @@ async fn require_validated_constraints(
 }
 
 async fn require_account_scoped_order_index(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     version: u16,
 ) -> Result<(), SchemaConformanceError> {
     let definition = sqlx::query_scalar::<_, String>(
@@ -392,7 +464,7 @@ async fn require_account_scoped_order_index(
                 'billing_payment_attempts_gateway_order_idx'
         "#,
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *connection)
     .await?;
     match definition {
         Some(definition) if definition.contains("(gateway_account_id, gateway_order_id)") => Ok(()),
@@ -408,11 +480,11 @@ async fn require_account_scoped_order_index(
 }
 
 async fn require_catalog_fingerprint(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     version: u16,
     expected: u64,
 ) -> Result<(), SchemaConformanceError> {
-    let actual = canonical_catalog_fingerprint(pool).await?;
+    let actual = canonical_catalog_fingerprint(connection).await?;
     if actual == expected {
         Ok(())
     } else {
@@ -425,7 +497,9 @@ async fn require_catalog_fingerprint(
     }
 }
 
-async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConformanceError> {
+async fn canonical_catalog_fingerprint(
+    connection: &mut PgConnection,
+) -> Result<u64, SchemaConformanceError> {
     let tables = REQUIRED_TABLES
         .iter()
         .map(|name| (*name).to_owned())
@@ -462,7 +536,7 @@ async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConfo
         "#,
     )
     .bind(&tables)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let constraints = sqlx::query_scalar::<_, String>(
         r#"
@@ -486,7 +560,7 @@ async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConfo
         "#,
     )
     .bind(&tables)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let indexes = sqlx::query_scalar::<_, String>(
         r#"
@@ -510,7 +584,7 @@ async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConfo
         "#,
     )
     .bind(&tables)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let view_definitions = sqlx::query_scalar::<_, String>(
         r#"
@@ -529,7 +603,7 @@ async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConfo
         "#,
     )
     .bind(&views)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let function_definitions = sqlx::query_scalar::<_, String>(
         r#"
@@ -555,7 +629,7 @@ async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConfo
         "#,
     )
     .bind(&functions)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
     let trigger_definitions = sqlx::query_scalar::<_, String>(
         r#"
@@ -578,7 +652,7 @@ async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConfo
         "#,
     )
     .bind(&triggers)
-    .fetch_all(pool)
+    .fetch_all(&mut *connection)
     .await?;
 
     Ok(catalog_fingerprint([
@@ -589,6 +663,14 @@ async fn canonical_catalog_fingerprint(pool: &PgPool) -> Result<u64, SchemaConfo
         ("functions", function_definitions.as_slice()),
         ("triggers", trigger_definitions.as_slice()),
     ]))
+}
+
+#[cfg(test)]
+async fn canonical_catalog_fingerprint_for_pool(
+    pool: &PgPool,
+) -> Result<u64, SchemaConformanceError> {
+    let mut connection = pool.acquire().await?;
+    canonical_catalog_fingerprint(&mut connection).await
 }
 
 fn catalog_fingerprint<'a>(categories: impl IntoIterator<Item = (&'a str, &'a [String])>) -> u64 {

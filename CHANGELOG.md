@@ -44,6 +44,11 @@ separate release task.
   taking a cross-page snapshot, so concurrent mutable candidates can wait for
   a fresh scan; it is not a queue lease, and `due_renewals` remains the
   compatible fixed-first-page helper.
+- Add default-feature `assert_runtime_schema_v2_compatible` startup validation.
+  It uses the exact schema-contract catalog and fingerprint checks in one
+  repeatable-read, read-only transaction, accepts host-prefixed extensions, and
+  fails closed for v1 or canonical drift without embedding or exposing a
+  production migrator.
 
 ### Changed
 

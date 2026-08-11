@@ -15,7 +15,7 @@ The behavior is observable through public API tests and PostgreSQL integration s
 - [x] (2026-08-11) Add and commit the high-level cancellation and discount subscriber facade, including atomic host-event cancellation, typed exact clear commands, admission coverage, and gateway-free discount paths.
 - [x] (2026-08-11) Add and commit typed billing-portal and payment-history reads, preserving the canonical entitlement projection inside one read-only repeatable-read snapshot and keeping customer-facing payment facts redacted.
 - [x] (2026-08-11) Add and commit stable renewal-dispatch pagination.
-- [ ] Add and commit the production runtime schema-v2 compatibility check.
+- [x] (2026-08-11) Add and commit the production runtime schema-v2 compatibility check.
 - [ ] Add and commit structured service-error dispositions and non-exhaustive operational-error hardening.
 - [ ] Run all repository gates, audit every requirement in this plan against current evidence, and record the final outcome.
 
@@ -63,6 +63,15 @@ The behavior is observable through public API tests and PostgreSQL integration s
   Resolution: record the parallel harness-capacity caveat with the validation
   evidence rather than treating it as a product failure or changing test
   behavior.
+
+- Observation: the existing catalog checks issued every query through the pool,
+  so concurrent DDL could theoretically make one assertion observe more than
+  one catalog state even though every individual query was read-only.
+  Evidence: the former `assert_schema_conforms` helper accepted `&PgPool` and
+  each catalog query called `fetch_*` on that pool.
+  Resolution: the production assertion and feature-gated v1/v2 test wrappers
+  now begin one PostgreSQL `REPEATABLE READ READ ONLY` transaction and delegate
+  every existing canonical check and fingerprint query to its connection.
 
 ## Decision Log
 
@@ -115,6 +124,18 @@ The behavior is observable through public API tests and PostgreSQL integration s
   Rationale: The coordinator's required host-recipient lock and transactional outbox projection protect event-producing cancellation. Discount operations already own all canonical/offer locks needed for their durable state, and introducing an empty host transaction would add host coupling without an atomic host side effect.
   Date/Author: 2026-08-11 / Codex.
 
+- Decision: Expose only `assert_runtime_schema_v2_compatible` and
+  `SchemaConformanceError` from a default production build. Keep the
+  install/preflight/audit/upgrade SQL constants and v1/v2 fixture wrappers in
+  the public `schema_contract` module only under tests or the existing
+  `schema-contract-test-support` feature.
+  Rationale: A host needs a fail-closed startup assertion, not a crate-owned
+  migration runner. Reusing the exact canonical machinery prevents version
+  drift between runtime and test checks, while a repeatable-read, read-only
+  snapshot gives one coherent catalog view and PostgreSQL-enforced no-write
+  semantics.
+  Date/Author: 2026-08-11 / Codex.
+
 ## Outcomes & Retrospective
 
 Milestone 1 is complete: the public service now admits and executes exact cancellation, discount claim, and discount clear commands. Cancellation keeps canonical mutation, typed event append, and commit on the coordinator's single host-prepared transaction; semantic replays/blockers emit no event, while mutation or append errors roll back. Discount mutations preserve existing typed outcomes without gateway resolution or provider I/O. Core identity/admission tests and PostgreSQL integration scenarios cover allowed and denied admission, atomic append/mutation rollback, replay, blockers, and discount paths. The final retrospective will add the complete cross-milestone commit list and repository-wide validation evidence.
@@ -136,6 +157,19 @@ later-due exclusion, current gate rechecks, every realizable legacy gate,
 frozen clock windows, and the legacy wrapper. The cursor freezes time
 eligibility rather than a cross-page MVCC snapshot, so concurrent mutable
 candidates behind the key become work for a fresh scan.
+
+Milestone 4 is complete: ordinary production builds now expose
+`assert_runtime_schema_v2_compatible(&PgPool)` and `SchemaConformanceError`.
+The assertion runs the existing full v2 relation, view, function, trigger,
+column, constraint, index, legacy-vocabulary, and catalog-fingerprint checks
+inside one `REPEATABLE READ READ ONLY` PostgreSQL transaction. It performs no
+DDL or migration/preflight/audit work, accepts valid host-prefixed extensions,
+and reports unchanged v1 as a version-2 contract failure. The checked-in
+install and upgrade SQL constants remain available only to crate tests or the
+explicit `schema-contract-test-support` feature, so default binaries do not
+embed or expose a migrator. Fresh-v2, checked-in v1-upgrade, host-extension,
+unchanged-v1, and canonical-drift coverage exercise the public runtime API;
+the default-feature host example compiles a recommended startup helper.
 
 ## Context and Orientation
 

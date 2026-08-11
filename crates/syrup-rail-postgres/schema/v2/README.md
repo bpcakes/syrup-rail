@@ -67,8 +67,15 @@ offer terms for the affected plan and idempotency key; changing those terms is
 an intentional replay conflict. Already-submitted initial attempts reconcile
 from their durable snapshot and do not require a live offer lookup.
 
-The Rust package exports the exact artifacts as `V2_INSTALL_SQL`,
+The checked-in artifacts are exported as `V2_INSTALL_SQL`,
 `V1_TO_V2_PREFLIGHT_SQL`, `V1_TO_V2_RETRY_RECLASSIFICATION_AUDIT_SQL`, and
-`V1_TO_V2_UPGRADE_SQL`. After release, all four SQL files are immutable
-distribution artifacts. Hosts may add separately named host objects after
-installation, subject to the canonical conformance rules.
+`V1_TO_V2_UPGRADE_SQL` only for crate tests or the explicit
+`schema-contract-test-support` feature. Ordinary production dependencies do
+not embed or expose them as a runtime migrator. Hosts copy the checked-in SQL
+into their own immutable migration deployment, then may call
+`assert_runtime_schema_v2_compatible` before serving billing traffic. That
+read-only runtime assertion verifies the full v2 catalog and fingerprint; it
+does not run any install, upgrade, preflight, or audit SQL. After release, all
+four SQL files are immutable distribution artifacts. Hosts may add separately
+named host objects after installation, subject to the canonical conformance
+rules.

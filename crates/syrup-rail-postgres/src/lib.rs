@@ -26,8 +26,14 @@ mod processor_charges;
 mod reconciliation;
 mod renewal;
 mod renewal_failure;
+// Production hosts receive only the runtime compatibility assertion. The
+// feature-gated public module retains the checked-in install/upgrade artifacts
+// for schema-contract fixtures and explicit test support without embedding a
+// migrator in ordinary binaries.
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 pub mod schema_contract;
+#[cfg(not(any(test, feature = "schema-contract-test-support")))]
+mod schema_contract;
 mod subscription_billing_service;
 mod subscription_persistence;
 #[cfg(test)]
@@ -127,6 +133,7 @@ pub use reconciliation::{
     fail_stale_unsubmitted_subscription_enrollments, reconciliation_gateway_accounts,
 };
 pub use renewal::{RenewalStoreError, due_renewals, due_renewals_page, renewal_attempt_state};
+pub use schema_contract::{SchemaConformanceError, assert_runtime_schema_v2_compatible};
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,
 };

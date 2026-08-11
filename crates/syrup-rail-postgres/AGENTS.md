@@ -16,8 +16,11 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — read-only catalog conformance; version-specific,
-  upgrade, and shared fixture tests live under `src/schema_contract/tests/`.
+- `src/schema_contract.rs` — production read-only v2 runtime compatibility
+  assertion plus canonical catalog conformance. Version-specific, upgrade, and
+  shared fixture tests live under `src/schema_contract/tests/`; checked-in
+  install/upgrade SQL constants remain behind tests or the explicit
+  `schema-contract-test-support` feature.
   `src/schema_contract/tests/upgrade/retry_reclassification.rs` owns the
   executable contract for the read-only cutover audit.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
@@ -187,11 +190,14 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
+- `assert_runtime_schema_v2_compatible` must reuse the complete canonical v2
+  catalog/fingerprint check in one read-only snapshot; hosts apply versioned
+  install and forward-only upgrade artifacts through their own migrations.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
-- `assert_v1_conforms` and `assert_v2_conforms` are read-only; mutation and
-  locking behavior belongs in package fixtures and host-seeded integration
-  tests.
+- The feature-gated `assert_v1_conforms` and `assert_v2_conforms` wrappers are
+  also read-only; mutation and locking behavior belongs in package fixtures
+  and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;
   `billing_*` constraint and index names are reserved for canonical objects.
 - Host code composes transaction-local operations on its existing connection;

@@ -75,6 +75,17 @@ outbox boundary, service construction, authorized command construction, and
 durable enrollment-result handling. It is intentionally provider-neutral and
 does not install or run a database migrator.
 
+After the host has applied its immutable v2 install or forward-only v1-to-v2
+upgrade migration, call
+`assert_runtime_schema_v2_compatible(&pool).await` during process startup and
+before accepting billing traffic. The assertion checks the complete canonical
+v2 catalog and fingerprint inside one repeatable-read, read-only transaction;
+it permits explicit host-prefixed extensions but fails closed for v1 or
+canonical drift. It never executes install, upgrade, preflight, or audit SQL.
+Hosts remain responsible for applying and coordinating their own migrations.
+The compiled host integration example includes a default-feature helper for
+this startup check.
+
 After the host has authenticated and authorized an exact billing scope,
 subscriber, and plan, the same service also exposes `cancel`, `claim_discount`,
 and `clear_discount`. Cancellation changes canonical state and appends its

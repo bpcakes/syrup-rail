@@ -3,19 +3,20 @@ use super::storage_fixtures::*;
 use super::*;
 
 #[tokio::test]
-async fn schema_v2_fresh_install_conforms() -> Result<(), Box<dyn Error>> {
+async fn runtime_schema_v2_compatibility_accepts_a_fresh_v2_install() -> Result<(), Box<dyn Error>>
+{
     if V2_INSTALL_SQL.trim().is_empty() {
         return Err(io::Error::other("version-2 install artifact is empty").into());
     }
     let database = TestDatabase::start("sr_schema_v2").await?;
-    let result = assert_v2_conforms(&database.pool).await;
+    let result = crate::assert_runtime_schema_v2_compatible(&database.pool).await;
     let cleanup = database.cleanup().await;
     result?;
     cleanup
 }
 
 #[tokio::test]
-async fn schema_v2_catalog_conformance_accepts_host_prefixed_extensions()
+async fn runtime_schema_v2_compatibility_accepts_host_prefixed_extensions()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_catalog_v2").await?;
     let result = async {
@@ -52,7 +53,81 @@ async fn schema_v2_catalog_conformance_accepts_host_prefixed_extensions()
         )
         .execute(&database.pool)
         .await?;
-        assert_v2_conforms(&database.pool).await?;
+        crate::assert_runtime_schema_v2_compatible(&database.pool).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn runtime_schema_v2_compatibility_accepts_a_checked_in_v1_upgrade()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start_v1_then_upgrade("sr_rt_up_v2").await?;
+    let result = crate::assert_runtime_schema_v2_compatible(&database.pool).await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn runtime_schema_v2_compatibility_rejects_an_unchanged_v1_catalog()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start_v1("sr_rt_v1").await?;
+    let result = match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+        Err(crate::SchemaConformanceError::Contract { version, detail })
+            if version == 2 && !detail.trim().is_empty() =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(io::Error::other(format!(
+            "expected an explicit schema-v2 catalog diagnostic, got {error}"
+        ))),
+        Ok(()) => Err(io::Error::other(
+            "runtime schema-v2 compatibility accepted an unchanged v1 catalog",
+        )),
+    };
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn runtime_schema_v2_compatibility_rejects_canonical_drift() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_rt_drift").await?;
+    let result = async {
+        sqlx::query(
+            r#"
+            CREATE INDEX billing_gateway_accounts_runtime_drift_idx
+            ON billing_gateway_accounts (updated_at)
+            "#,
+        )
+        .execute(&database.pool)
+        .await?;
+
+        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+            Err(crate::SchemaConformanceError::Contract { version, detail })
+                if version == 2 && detail.contains("canonical catalog fingerprint differs") => {}
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "expected schema-v2 fingerprint drift diagnostic, got {error}"
+                ))
+                .into());
+            }
+            Ok(()) => {
+                return Err(io::Error::other(
+                    "runtime schema-v2 compatibility accepted canonical drift",
+                )
+                .into());
+            }
+        }
+
+        sqlx::query("DROP INDEX billing_gateway_accounts_runtime_drift_idx")
+            .execute(&database.pool)
+            .await?;
+        crate::assert_runtime_schema_v2_compatible(&database.pool).await?;
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
