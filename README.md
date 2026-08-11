@@ -94,6 +94,20 @@ payment-method references, transaction identifiers, contacts, gateway
 responses, and raw diagnostics; hosts still own presentation and
 authorization.
 
+For automatic renewal dispatches, call `due_renewals_page(pool, None)` and
+continue with its returned `RenewalDispatchPageCursor` until no next cursor is
+present. PostgreSQL observes the first page's timestamp and the cursor reuses
+it for every time-based due, cooldown, stale-update, and retry-window gate,
+while strict `(next_payment_attempt_at, subscription_id)` ordering avoids
+offset and timestamp-tie gaps or repeats for unchanged candidates. It is not a
+cross-page MVCC snapshot: concurrently inserted, retimed, or newly unblocked
+candidates behind the continuation key wait for a fresh scan. Persist or
+reconstruct cursors only in trusted host code from a prior page—never accept a
+cursor from an end user. This is not a lease or queue writer: the host writes
+its own outbox/queue record and each eventual renewal still rechecks current
+canonical state. `due_renewals` remains the compatible fixed-100 first-page
+helper.
+
 Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
 compile the integration boundary without contacting a database or provider.
 

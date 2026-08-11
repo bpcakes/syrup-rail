@@ -14,7 +14,7 @@ The behavior is observable through public API tests and PostgreSQL integration s
 - [x] (2026-08-11) Commit the already-verified consumer API cutover that was present in the worktree before this plan (`25f4823fc90101a2adcc4f118cb61f83c8d1c44b`).
 - [x] (2026-08-11) Add and commit the high-level cancellation and discount subscriber facade, including atomic host-event cancellation, typed exact clear commands, admission coverage, and gateway-free discount paths.
 - [x] (2026-08-11) Add and commit typed billing-portal and payment-history reads, preserving the canonical entitlement projection inside one read-only repeatable-read snapshot and keeping customer-facing payment facts redacted.
-- [ ] Add and commit stable renewal-dispatch pagination.
+- [x] (2026-08-11) Add and commit stable renewal-dispatch pagination.
 - [ ] Add and commit the production runtime schema-v2 compatibility check.
 - [ ] Add and commit structured service-error dispositions and non-exhaustive operational-error hardening.
 - [ ] Run all repository gates, audit every requirement in this plan against current evidence, and record the final outcome.
@@ -43,6 +43,27 @@ The behavior is observable through public API tests and PostgreSQL integration s
   Evidence: `crates/syrup-rail-postgres/src/transactions.rs` and the former signature of `cancel_subscription_in_transaction` in `crates/syrup-rail-postgres/src/cancellation.rs`.
   Resolution: retain the public transaction-local primitive as a wrapper and use a crate-visible connection-local implementation from the high-level facade, so no second transaction can break cancellation/event atomicity.
 
+- Observation: a valid schema-v2 catalog cannot contain a gateway account without
+  its provider cooldown row because `billing_gateway_accounts.provider_key` has
+  a foreign key to `billing_gateway_provider_rate_limits`.
+  Evidence: `crates/syrup-rail-postgres/schema/v2/install.sql` and the renewal
+  pagination fixture attempt, which PostgreSQL rejected with the named foreign
+  key.
+  Resolution: retain the defensive `MissingProviderCooldown` query/error for
+  catalog drift, but test all realizable candidate gates through valid
+  schema-backed rows rather than disabling a canonical constraint.
+
+- Observation: one parallel full PostgreSQL library-suite invocation exhausted
+  container startup capacity for seven unrelated tests, while the other 125
+  tests (including every renewal pagination test) passed.
+  Evidence: the captured `cargo test -p syrup-rail-postgres --lib --locked`
+  exit was 101 with only `ContainerStart { WaitContainer(StartupTimeout) }`
+  failures; a sequential status-wrapped retry of the exact seven tests passed
+  all seven in roughly three seconds each.
+  Resolution: record the parallel harness-capacity caveat with the validation
+  evidence rather than treating it as a product failure or changing test
+  behavior.
+
 ## Decision Log
 
 - Decision: Keep this work inside the existing version-2 schema and public 0.2 API cutover. Do not add free trials, arbitrary pricing phases, proration, plan changes, provider-managed recurring plans, email, or queue transports.
@@ -51,6 +72,27 @@ The behavior is observable through public API tests and PostgreSQL integration s
 
 - Decision: Add stable renewal scan pagination rather than a canonical dispatch lease.
   Rationale: Queue transport and encoding remain host-owned. A canonical lease without an atomic host-outbox write creates a lost-dispatch interval; a new arbitrary SQL callback would violate the transaction-boundary guide. A database-observed scan timestamp plus a strict `(next_payment_attempt_at, subscription_id)` continuation key lets a host drain the observed due set, while the existing reservation and service preflights remain the authority against stale or duplicate work.
+  Date/Author: 2026-08-11 / Codex.
+
+- Decision: Bind the first page's observed PostgreSQL timestamp into every
+  time-dependent renewal eligibility gate, not only the due predicate.
+  Rationale: Re-evaluating provider/account cooldowns, stale unsubmitted
+  update age, infrastructure pacing, or provider-rate retry windows against a
+  later continuation clock would add candidates partway through a scan. The
+  cursor freezes the eligibility-time cut while each continuation still reads
+  current mutable rows and retains their structural gates. It is not a
+  cross-page MVCC snapshot: concurrent candidates inserted, retimed, or
+  unblocked behind the key wait for a new scan.
+  Date/Author: 2026-08-11 / Codex.
+
+- Decision: Treat `RenewalDispatchPageCursor` as a trusted host persistence
+  value, even though its public constructor permits reconstructing a prior
+  cursor after process restart.
+  Rationale: The cursor contains only bound time/identity values and cannot
+  inject SQL, while host code already owns renewal dispatch authorization and
+  queue/outbox state. Accepting it from an end user would let that caller steer
+  host work selection, so hosts must reconstruct it only from a prior trusted
+  page rather than expose it as a user-controlled token.
   Date/Author: 2026-08-11 / Codex.
 
 - Decision: Customer read models expose only provider-neutral lifecycle, money, cadence, masked card display, and timestamps. They do not expose provider payment-method references, transaction IDs, response text, billing contacts, or raw diagnostics.
@@ -79,6 +121,22 @@ Milestone 1 is complete: the public service now admits and executes exact cancel
 
 Milestone 2 is complete: public core types now model an authorized exact billing portal query, canonical entitlement snapshot, optional masked-card display, checked payment-history page size, strict cursor, and safe payment-history facts. PostgreSQL retains the existing entitlement SQL as the authority and evaluates it with the card projection in one `REPEATABLE READ READ ONLY` snapshot. The history reader uses a narrow, explicit select list and strict descending `(created_at, id)` pagination with one extra row; it never constructs `PaymentAttempt` or selects protected provider/contact/diagnostic columns. Core and PostgreSQL tests cover value-free formatting, bounds, empty/active/trial/dunning/canceled/grant/scrubbed snapshots, saved/applied discounts, exact identity isolation, timestamp ties, zero-value method updates, host-charge exclusion, and redaction.
 
+Milestone 3 is complete: `RenewalDispatchPageCursor` carries a
+PostgreSQL-observed scan time and the last strict ascending scheduling key, and
+`RenewalDispatchPage` exposes a bounded dispatch slice plus an optional next
+cursor. `due_renewals_page` fetches one hundred and one eligible rows, returns
+at most one hundred, and freezes every time-dependent due, cooldown,
+stale-update, infrastructure, and provider-rate gate at the first page's
+timestamp. It rechecks current structural eligibility on every continuation;
+it does not claim, lease, or enqueue work. `due_renewals` now delegates to the
+new API's first page and preserves its fixed-order, fixed-limit compatibility
+contract. Core and PostgreSQL tests cover 205 tied rows over three pages,
+strict UUID tie-breaking with no gaps/no duplicates for unchanged candidates,
+later-due exclusion, current gate rechecks, every realizable legacy gate,
+frozen clock windows, and the legacy wrapper. The cursor freezes time
+eligibility rather than a cross-page MVCC snapshot, so concurrent mutable
+candidates behind the key become work for a fresh scan.
+
 ## Context and Orientation
 
 The workspace contains four publishable Rust crates. `crates/syrup-rail` owns provider-neutral validated values, commands, outcomes, and policies. `crates/syrup-rail-postgres` owns canonical PostgreSQL queries and orchestration on host-supplied transactions. Hosts own authentication and authorization, plan catalog rows, provider credentials, queue transport, outbox encoding, and presentation.
@@ -89,7 +147,7 @@ Cancellation policy lives in `crates/syrup-rail-postgres/src/cancellation.rs`. `
 
 Entitlement policy lives in `crates/syrup-rail/src/subscription/access.rs`, and its PostgreSQL projection lives in `crates/syrup-rail-postgres/src/entitlement.rs`. A billing-portal snapshot is a read-only customer-facing projection; it is not authorization. The host must authorize scope, subscriber, and plan before querying it. A payment-history cursor is a validated continuation fact from a previous page, not arbitrary SQL supplied by a caller.
 
-`due_renewals` in `crates/syrup-rail-postgres/src/renewal.rs` selects active or past-due subscriptions whose `next_payment_attempt_at` is due, whose gateway cooldowns and operational pacing permit work, and which have no blocking attempt. A renewal scan timestamp is the PostgreSQL time captured for the first page. Every continuation page uses that same upper time bound and selects rows strictly after its prior `(next_payment_attempt_at, subscription_id)` key. This stabilizes which newly due rows belong to the scan without weakening the later `SubscriptionBillingService::renew` preflight.
+`due_renewals` in `crates/syrup-rail-postgres/src/renewal.rs` selects active or past-due subscriptions whose `next_payment_attempt_at` is due, whose gateway cooldowns and operational pacing permit work, and which have no blocking attempt. A renewal scan timestamp is the PostgreSQL time captured for the first page. Every continuation page binds that same time to the due, provider/account cooldown, stale-update, infrastructure, and provider-rate windows, then selects rows strictly after its prior `(next_payment_attempt_at, subscription_id)` key. This avoids offset/timestamp-tie gaps and repeats for unchanged candidates, but freezes time eligibility without promising a cross-page MVCC snapshot: inserted, retimed, or newly unblocked rows behind the key wait for a fresh scan. A cursor is trusted host state reconstructed only from a prior page, not an end-user token, and this does not weaken the later `SubscriptionBillingService::renew` preflight.
 
 Full catalog conformance is implemented in `crates/syrup-rail-postgres/src/schema_contract.rs`. It compares canonical relations, views, functions, triggers, constraints, indexes, and a catalog fingerprint while permitting explicitly host-prefixed objects. The runtime addition must reuse that exact read-only logic without installing or exposing a production migrator by default.
 

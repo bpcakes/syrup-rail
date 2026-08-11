@@ -37,6 +37,10 @@ and transaction orchestration.
   approval mutations live in their nested `approval.rs` modules.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
+- `src/renewal.rs` — deterministic due-renewal selection and stable
+  cursor-paginated dispatch pages. The scan timestamp is observed by
+  PostgreSQL; host queue/outbox persistence and eventual renewal submission
+  remain outside this crate.
 - `src/paid_trial_dunning_tests.rs` — cross-module acceptance scenarios for
   paid-trial enrollment, dunning, recovery, reconciliation, entitlement, and
   cancellation.
@@ -130,6 +134,15 @@ and transaction orchestration.
   Preserve the exact entitlement projection and one-snapshot transaction;
   never use broad payment-attempt loaders or select provider references,
   transaction IDs, contacts, response text, or diagnostics for this surface.
+- Change due-renewal pagination in `src/renewal.rs`. Preserve every current
+  eligibility gate, bind the first page's database-observed timestamp into all
+  time-dependent gates on every continuation, retain strict ascending
+  `(next_payment_attempt_at, subscription_id)` keyset order, and keep
+  `due_renewals` as the fixed-limit first-page compatibility wrapper. Do not
+  introduce a canonical lease or queue writer; host outbox/queue transactions
+  remain host-owned. This freezes eligibility time rather than holding a
+  cross-page MVCC snapshot, so concurrent candidates behind a cursor can wait
+  for a fresh scan.
 - Change grant mutation policy in `src/grants.rs`; keep host user existence,
   actor authorization, and actor presentation in the host transaction.
 - Change reusable discount operations or the offer-store port in

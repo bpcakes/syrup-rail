@@ -16,8 +16,8 @@ command/outcome types for application-independent subscription billing.
   host-charge reservations, preflight and submission outcomes, durable payment
   results, attempt fingerprints and state snapshots, exact-plan cancellation
   outcomes, typed entitlement guards, subscriber billing-data scrub
-  commands/results, and the closed host admission boundary for end-user
-  billing mutations.
+  commands/results, stable renewal-dispatch scan cursor/page values, and the
+  closed host admission boundary for end-user billing mutations.
 - `src/attempt/{fingerprint,snapshots}.rs` own canonical request equality and
   optimistic/durable snapshots; `src/attempt.rs` remains the attempt lifecycle
   and target facade.
@@ -51,6 +51,11 @@ command/outcome types for application-independent subscription billing.
 - Change reusable customer billing-read values in `src/billing_portal.rs`.
   Keep fields private, payment-method formatting value-free, and provider
   identifiers, contacts, and diagnostics outside these types.
+- Change provider-neutral renewal dispatch facts in `src/renewal.rs`. Keep
+  cursor fields private and preserve the database-observed scan timestamp with
+  its strict scheduling continuation key; queue/outbox ownership stays with
+  the host. Cursors are trusted host persistence facts from prior pages, never
+  end-user input, and do not create a cross-page database snapshot.
 
 ## Invariants
 

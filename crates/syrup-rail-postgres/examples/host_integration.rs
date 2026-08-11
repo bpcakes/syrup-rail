@@ -13,16 +13,18 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use syrup_rail::{
     BillingEvent, BillingEventSubject, CancelSubscription, CancelSubscriptionOutcome,
     ClearSubscriptionDiscount, EndUserMutationAdmission, EnrollSubscription, GatewayResolver,
-    PaymentAttemptId, PaymentAttemptStatus, SubscriptionBillingPortalQuery,
-    SubscriptionBillingPortalSnapshot, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
-    SubscriptionDiscountClearOutcome, SubscriptionEnrollmentExpectedTerms, SubscriptionId,
-    SubscriptionPaymentContext, SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
+    PaymentAttemptId, PaymentAttemptStatus, RenewalDispatchPage, RenewalDispatchPageCursor,
+    SubscriptionBillingPortalQuery, SubscriptionBillingPortalSnapshot, SubscriptionDiscountClaim,
+    SubscriptionDiscountClaimOutcome, SubscriptionDiscountClearOutcome,
+    SubscriptionEnrollmentExpectedTerms, SubscriptionId, SubscriptionPaymentContext,
+    SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
     SubscriptionPaymentHistoryPageLimit,
 };
 use syrup_rail_postgres::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
-    BillingTransactionError, BillingTransactionSubjectState, SubscriptionBillingPortalQueryError,
-    SubscriptionBillingService, SubscriptionBillingServiceError, SubscriptionOfferStore,
+    BillingTransactionError, BillingTransactionSubjectState, RenewalStoreError,
+    SubscriptionBillingPortalQueryError, SubscriptionBillingService,
+    SubscriptionBillingServiceError, SubscriptionOfferStore, due_renewals_page,
     subscription_billing_portal, subscription_payment_history_page,
 };
 
@@ -297,6 +299,21 @@ pub async fn read_authorized_subscription_payment_history(
     limit: SubscriptionPaymentHistoryPageLimit,
 ) -> Result<SubscriptionPaymentHistoryPage, SubscriptionBillingPortalQueryError> {
     subscription_payment_history_page(pool, query, cursor, limit).await
+}
+
+/// Reads one stable page of automatic renewal dispatch candidates.
+///
+/// The host keeps the returned cursor until the scan ends, then writes each
+/// selected dispatch to its own queue/outbox. This page is deliberately not a
+/// lease, claim, or cross-page snapshot: concurrent candidates behind the key
+/// can wait for a fresh scan, and eventual renewal submission still revalidates
+/// current canonical state. Persist/reconstruct a cursor only from trusted
+/// host state returned by a prior page, never from end-user input.
+pub async fn read_renewal_dispatch_page(
+    pool: &PgPool,
+    cursor: Option<&RenewalDispatchPageCursor>,
+) -> Result<RenewalDispatchPage, RenewalStoreError> {
+    due_renewals_page(pool, cursor).await
 }
 
 fn main() {}

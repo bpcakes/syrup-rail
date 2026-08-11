@@ -37,6 +37,13 @@ separate release task.
   only a value-redacted masked-card display; history uses a checked cursor page
   size and excludes provider references, transaction IDs, contacts, responses,
   and raw diagnostics.
+- Add stable `due_renewals_page` dispatch pagination. Its cursor carries the
+  first PostgreSQL-observed scan timestamp and strict scheduling key so hosts
+  can drain more than one hundred unchanged due subscriptions without
+  offset/timestamp-tie gaps or repeats. It freezes eligibility time rather than
+  taking a cross-page snapshot, so concurrent mutable candidates can wait for
+  a fresh scan; it is not a queue lease, and `due_renewals` remains the
+  compatible fixed-first-page helper.
 
 ### Changed
 

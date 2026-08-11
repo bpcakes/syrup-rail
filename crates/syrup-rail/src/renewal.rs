@@ -99,6 +99,93 @@ impl RenewalDispatch {
     }
 }
 
+/// Continuation key returned by a prior renewal-dispatch page.
+///
+/// `observed_at` is the PostgreSQL clock timestamp captured when the scan's
+/// first page was read. Every continuation retains that same eligibility-time
+/// bound. The remaining fields are the last returned row's strict ascending
+/// `(next_payment_attempt_at, subscription_id)` key; they are data values,
+/// never caller-supplied SQL.
+///
+/// Hosts may reconstruct this value from their own trusted persisted page
+/// state. It must originate from a prior renewal page and must never be
+/// accepted from an end user; the host remains the trusted dispatch boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RenewalDispatchPageCursor {
+    observed_at: DateTime<Utc>,
+    next_payment_attempt_at: DateTime<Utc>,
+    subscription_id: SubscriptionId,
+}
+
+impl RenewalDispatchPageCursor {
+    pub const fn new(
+        observed_at: DateTime<Utc>,
+        next_payment_attempt_at: DateTime<Utc>,
+        subscription_id: SubscriptionId,
+    ) -> Self {
+        Self {
+            observed_at,
+            next_payment_attempt_at,
+            subscription_id,
+        }
+    }
+
+    /// Database time observed for the first page of this scan.
+    pub const fn observed_at(self) -> DateTime<Utc> {
+        self.observed_at
+    }
+
+    /// Scheduling timestamp from the last row returned by the prior page.
+    pub const fn next_payment_attempt_at(self) -> DateTime<Utc> {
+        self.next_payment_attempt_at
+    }
+
+    /// Subscription identifier from the last row returned by the prior page.
+    pub const fn subscription_id(self) -> SubscriptionId {
+        self.subscription_id
+    }
+}
+
+/// One deterministic, bounded page of due renewal dispatches.
+///
+/// A next cursor is present only when PostgreSQL observed another eligible row
+/// after this page. For candidates whose ordering and eligibility do not
+/// change during traversal, strict keyset order avoids offset and timestamp-tie
+/// gaps or repeats. This is not a cross-page snapshot: inserted, retimed, or
+/// newly unblocked candidates behind the continuation key can wait for a fresh
+/// scan. Hosts own queue/outbox dispatch and should still submit every item
+/// through the normal renewal preflight, which revalidates mutable current
+/// state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenewalDispatchPage {
+    dispatches: Vec<RenewalDispatch>,
+    next_cursor: Option<RenewalDispatchPageCursor>,
+}
+
+impl RenewalDispatchPage {
+    pub fn new(
+        dispatches: Vec<RenewalDispatch>,
+        next_cursor: Option<RenewalDispatchPageCursor>,
+    ) -> Self {
+        Self {
+            dispatches,
+            next_cursor,
+        }
+    }
+
+    pub fn dispatches(&self) -> &[RenewalDispatch] {
+        &self.dispatches
+    }
+
+    pub fn into_dispatches(self) -> Vec<RenewalDispatch> {
+        self.dispatches
+    }
+
+    pub const fn next_cursor(&self) -> Option<RenewalDispatchPageCursor> {
+        self.next_cursor
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ChargeRenewal {
     billing_scope_id: BillingScopeId,
@@ -485,6 +572,30 @@ impl std::fmt::Debug for SubscriptionRenewalReservation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn renewal_dispatch_page_keeps_its_observed_scan_and_strict_key() {
+        let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let next_payment_attempt_at = observed_at + Duration::seconds(60);
+        let subscription_id = SubscriptionId::new(Uuid::from_u128(2));
+        let cursor =
+            RenewalDispatchPageCursor::new(observed_at, next_payment_attempt_at, subscription_id);
+        let dispatch = RenewalDispatch::new(
+            BillingScopeId::new(Uuid::from_u128(1)),
+            subscription_id,
+            observed_at,
+            3,
+        );
+        let page = RenewalDispatchPage::new(vec![dispatch.clone()], Some(cursor));
+
+        assert_eq!(cursor.observed_at(), observed_at);
+        assert_eq!(cursor.next_payment_attempt_at(), next_payment_attempt_at);
+        assert_eq!(cursor.subscription_id(), subscription_id);
+        assert_eq!(page.dispatches(), std::slice::from_ref(&dispatch));
+        assert_eq!(page.next_cursor(), Some(cursor));
+        assert_eq!(page.into_dispatches(), vec![dispatch]);
+    }
 
     #[test]
     fn retry_boundaries_are_inclusive() {
