@@ -136,6 +136,7 @@ pub use renewal::{RenewalStoreError, due_renewals, due_renewals_page, renewal_at
 pub use schema_contract::{SchemaConformanceError, assert_runtime_schema_v2_compatible};
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,
+    SubscriptionBillingServiceErrorDisposition,
 };
 pub use transactions::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,

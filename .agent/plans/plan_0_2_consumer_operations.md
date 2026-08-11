@@ -16,7 +16,7 @@ The behavior is observable through public API tests and PostgreSQL integration s
 - [x] (2026-08-11) Add and commit typed billing-portal and payment-history reads, preserving the canonical entitlement projection inside one read-only repeatable-read snapshot and keeping customer-facing payment facts redacted.
 - [x] (2026-08-11) Add and commit stable renewal-dispatch pagination.
 - [x] (2026-08-11) Add and commit the production runtime schema-v2 compatibility check.
-- [ ] Add and commit structured service-error dispositions and non-exhaustive operational-error hardening.
+- [x] (2026-08-11) Add and commit structured service-error dispositions and non-exhaustive operational-error hardening.
 - [ ] Run all repository gates, audit every requirement in this plan against current evidence, and record the final outcome.
 
 ## Surprises & Discoveries
@@ -136,6 +136,18 @@ The behavior is observable through public API tests and PostgreSQL integration s
   semantics.
   Date/Author: 2026-08-11 / Codex.
 
+- Decision: Classify configuration/authority snapshots as conflicts, explicit
+  temporary admission/provider conditions as safely resubmittable with the
+  same idempotency command, and malformed gateway request/response paths as
+  internal contract faults. Return an exact delay only for admission denial.
+  Rationale: A changed configuration or billing snapshot needs reload/rebuild
+  or idempotency reconciliation rather than an unchanged retry. Gateway or
+  account cooldowns are temporary but do not carry a trustworthy exact delay,
+  while malformed provider boundaries do not establish that another submission
+  is safe. The service maps every outer and relevant nested current variant
+  explicitly so new cases require a policy choice.
+  Date/Author: 2026-08-11 / Codex.
+
 ## Outcomes & Retrospective
 
 Milestone 1 is complete: the public service now admits and executes exact cancellation, discount claim, and discount clear commands. Cancellation keeps canonical mutation, typed event append, and commit on the coordinator's single host-prepared transaction; semantic replays/blockers emit no event, while mutation or append errors roll back. Discount mutations preserve existing typed outcomes without gateway resolution or provider I/O. Core identity/admission tests and PostgreSQL integration scenarios cover allowed and denied admission, atomic append/mutation rollback, replay, blockers, and discount paths. The final retrospective will add the complete cross-milestone commit list and repository-wide validation evidence.
@@ -170,6 +182,17 @@ explicit `schema-contract-test-support` feature, so default binaries do not
 embed or expose a migrator. Fresh-v2, checked-in v1-upgrade, host-extension,
 unchanged-v1, and canonical-drift coverage exercise the public runtime API;
 the default-feature host example compiles a recommended startup helper.
+
+Milestone 5 is complete: `SubscriptionBillingServiceError` and its public,
+copyable `SubscriptionBillingServiceErrorDisposition` are non-exhaustive.
+Hosts can use `disposition`, `is_retryable`, `is_conflict`, and `retry_after`
+without exposing nested diagnostics or matching the full error. Retryability
+means only that resubmitting the same idempotent command is safe; it does not
+promise success. Admission denial retains its exact delay, while account and
+gateway cooldowns deliberately report no fabricated delay. Exhaustive service,
+cancellation, discount, resolution, readiness, and definitely-not-submitted
+mapping coverage makes every current category an intentional policy decision;
+the host integration helper uses a wildcard for future dispositions.
 
 ## Context and Orientation
 

@@ -73,6 +73,141 @@ fn billing_service_error_name_and_generic_messages_cover_the_whole_facade() {
 }
 
 #[test]
+fn service_error_disposition_matrix_covers_each_current_variant() {
+    macro_rules! assert_disposition_matrix {
+        ($($error:expr => $expected:expr),+ $(,)?) => {
+            $(
+                let error = $error;
+                assert_eq!(
+                    error.disposition(),
+                    $expected,
+                    "unexpected disposition for {}",
+                    stringify!($error),
+                );
+            )+
+        };
+    }
+
+    use SubscriptionBillingServiceErrorDisposition::{
+        Conflict, Internal, Misconfigured, Rejected, TemporarilyUnavailable,
+    };
+
+    // `SubscriptionBillingServiceError::disposition` and its nested helpers
+    // intentionally have exhaustive matches with no wildcard arms. Adding a
+    // service or mapped nested variant therefore fails compilation until this
+    // matrix receives an explicit policy decision.
+    assert_disposition_matrix!(
+        SubscriptionBillingServiceError::Sql(sqlx::Error::RowNotFound) => Internal,
+        SubscriptionBillingServiceError::Attempt(PaymentAttemptStoreError::InvalidState("test")) => Internal,
+        SubscriptionBillingServiceError::Application(SubscriptionEnrollmentApplicationError::InvalidState("test")) => Internal,
+        SubscriptionBillingServiceError::HostChargeApplication(HostChargeApplicationError::InvalidState("test")) => Internal,
+        SubscriptionBillingServiceError::HostChargeStore(HostChargeStoreError::InvalidState) => Internal,
+        SubscriptionBillingServiceError::Cancellation(crate::SubscriptionCancellationError::Sql(sqlx::Error::RowNotFound)) => Internal,
+        SubscriptionBillingServiceError::Cancellation(crate::SubscriptionCancellationError::InvalidState("test")) => Internal,
+        SubscriptionBillingServiceError::Discount(crate::SubscriptionDiscountOperationError::Sql(sqlx::Error::RowNotFound)) => Internal,
+        SubscriptionBillingServiceError::Discount(crate::SubscriptionDiscountOperationError::OfferUnavailable) => Misconfigured,
+        SubscriptionBillingServiceError::Discount(crate::SubscriptionDiscountOperationError::OfferPlanMismatch) => Conflict,
+        SubscriptionBillingServiceError::Discount(crate::SubscriptionDiscountOperationError::InvalidConfiguration) => Misconfigured,
+        SubscriptionBillingServiceError::Discount(crate::SubscriptionDiscountOperationError::LimitedDiscountCadence) => Misconfigured,
+        SubscriptionBillingServiceError::Discount(crate::SubscriptionDiscountOperationError::InvalidState("test")) => Internal,
+        SubscriptionBillingServiceError::BillingTransaction(crate::BillingTransactionError::new(io::Error::other("test"))) => Internal,
+        SubscriptionBillingServiceError::BillingEvent(crate::BillingEventWriteError::new(io::Error::other("test"))) => Internal,
+        SubscriptionBillingServiceError::HostChargeUnavailable => Misconfigured,
+        SubscriptionBillingServiceError::IdempotencyConflict => Conflict,
+        SubscriptionBillingServiceError::AdmissionDenied { retry_after: std::time::Duration::from_secs(7) } => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::AdmissionTimeout => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::AdmissionUnavailable => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayConfigurationChanged => Conflict,
+        SubscriptionBillingServiceError::GatewayResolution(GatewayResolutionError::NotFound) => Misconfigured,
+        SubscriptionBillingServiceError::GatewayResolution(GatewayResolutionError::ConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::GatewayResolution(GatewayResolutionError::InvalidConfiguration) => Misconfigured,
+        SubscriptionBillingServiceError::GatewayResolution(GatewayResolutionError::Unavailable) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch => Internal,
+        SubscriptionBillingServiceError::GatewayMutationCooldown { scope: GatewayMutationCooldownScope::Account } => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayMutationCooldown { scope: GatewayMutationCooldownScope::Provider } => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::CurrentSubscription) => Rejected,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::ActiveGrant) => Rejected,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::UnresolvedProcessorCharge) => Rejected,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged) => Conflict,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::AttemptInProgress) => Rejected,
+        SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::BillingStateChanged) => Conflict,
+        SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged) => Conflict,
+        SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::TargetUnavailable) => Rejected,
+        SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::ChargeChanged) => Conflict,
+        SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::LedgerUnsafe) => Rejected,
+        SubscriptionBillingServiceError::HostChargeSubmissionRejected(HostChargeTargetRejection::TargetUnavailable) => Rejected,
+        SubscriptionBillingServiceError::HostChargeSubmissionRejected(HostChargeTargetRejection::ChargeChanged) => Conflict,
+        SubscriptionBillingServiceError::HostChargeSubmissionRejected(HostChargeTargetRejection::LedgerUnsafe) => Rejected,
+        SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::SubscriptionNotFound) => Rejected,
+        SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::PaymentNotDue) => Rejected,
+        SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::AttemptInProgress) => Rejected,
+        SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::PaymentMethodUpdateInProgress) => Rejected,
+        SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection::BillingStateChanged) => Conflict,
+        SubscriptionBillingServiceError::RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::SubscriptionNotFound) => Rejected,
+        SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::PaymentNotDue) => Rejected,
+        SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::AttemptInProgress) => Rejected,
+        SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress) => Rejected,
+        SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::RetryBlocked) => Rejected,
+        SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::SubscriptionNotFound) => Rejected,
+        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::SubscriptionIneligible) => Rejected,
+        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::ChargeAttemptInProgress) => Rejected,
+        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::PaymentMethodUpdateInProgress) => Rejected,
+        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::PaymentMethodReplacementSubmissionRejected(SubscriptionPaymentMethodReplacementSubmissionRejection::BillingStateChanged) => Conflict,
+        SubscriptionBillingServiceError::PaymentMethodReplacementSubmissionRejected(SubscriptionPaymentMethodReplacementSubmissionRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::RequestRejected(GatewayDiagnostic::new("test"))) => Rejected,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Malformed(GatewayDiagnostic::new("test"))) => Internal,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Configuration(GatewayDiagnostic::new("test"))) => Misconfigured,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Unavailable(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::RateLimited(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayReadiness(GatewayError::RequestRejected(GatewayDiagnostic::new("test"))) => Rejected,
+        SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Malformed(GatewayDiagnostic::new("test"))) => Internal,
+        SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Configuration(GatewayDiagnostic::new("test"))) => Misconfigured,
+        SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Unavailable(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayReadiness(GatewayError::RateLimited(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::InvalidState("test") => Internal,
+    );
+}
+
+#[test]
+fn service_error_retry_helpers_preserve_exact_admission_delay_only() {
+    let retry_after = std::time::Duration::from_secs(7);
+    let denied = SubscriptionBillingServiceError::AdmissionDenied { retry_after };
+    assert_eq!(
+        denied.disposition(),
+        SubscriptionBillingServiceErrorDisposition::TemporarilyUnavailable
+    );
+    assert!(denied.is_retryable());
+    assert!(!denied.is_conflict());
+    assert_eq!(denied.retry_after(), Some(retry_after));
+
+    for scope in [
+        GatewayMutationCooldownScope::Account,
+        GatewayMutationCooldownScope::Provider,
+    ] {
+        let cooldown = SubscriptionBillingServiceError::GatewayMutationCooldown { scope };
+        assert!(cooldown.is_retryable());
+        assert_eq!(cooldown.retry_after(), None);
+    }
+
+    let unavailable = SubscriptionBillingServiceError::GatewayNotSubmitted(
+        GatewayNotSubmittedError::Unavailable(GatewayDiagnostic::new("test")),
+    );
+    assert!(unavailable.is_retryable());
+    assert_eq!(unavailable.retry_after(), None);
+
+    let conflict = SubscriptionBillingServiceError::GatewayConfigurationChanged;
+    assert!(conflict.is_conflict());
+    assert!(!conflict.is_retryable());
+    assert_eq!(conflict.retry_after(), None);
+}
+
+#[test]
 fn subscriber_admission_mapping_preserves_each_error_variant() {
     assert!(map_subscriber_mutation_admission(EndUserMutationAdmissionResult::Allowed).is_ok());
     let retry_after = std::time::Duration::from_secs(7);

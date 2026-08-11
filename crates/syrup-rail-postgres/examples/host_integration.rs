@@ -24,8 +24,9 @@ use syrup_rail_postgres::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
     BillingTransactionError, BillingTransactionSubjectState, RenewalStoreError,
     SchemaConformanceError, SubscriptionBillingPortalQueryError, SubscriptionBillingService,
-    SubscriptionBillingServiceError, SubscriptionOfferStore, assert_runtime_schema_v2_compatible,
-    due_renewals_page, subscription_billing_portal, subscription_payment_history_page,
+    SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
+    SubscriptionOfferStore, assert_runtime_schema_v2_compatible, due_renewals_page,
+    subscription_billing_portal, subscription_payment_history_page,
 };
 
 /// Host-owned implementations required by [`SubscriptionBillingService`].
@@ -223,6 +224,46 @@ pub enum EnrollmentDecision {
         attempt_id: PaymentAttemptId,
         status: PaymentAttemptStatus,
     },
+}
+
+/// Conservative automatic-retry action for a failed authorized billing
+/// command.
+///
+/// [`ResubmitSameIdempotentCommand`](Self::ResubmitSameIdempotentCommand)
+/// means the host must retain the exact command and idempotency key. It does
+/// not promise that a later attempt will succeed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuthorizedBillingCommandRetry {
+    DoNotRetry,
+    ResubmitSameIdempotentCommand { retry_after: Option<Duration> },
+}
+
+/// Chooses a conservative retry action without inspecting service-error
+/// variants or provider diagnostics.
+///
+/// A conflict is not retried as-is: the host normally reloads/rebuilds current
+/// authority or reconciles the existing idempotency key. A temporary error can
+/// be resubmitted only as the same idempotent command. Gateway/account
+/// cooldowns have no fabricated delay, so their retry action can carry `None`.
+pub fn retry_action_for_authorized_billing_command(
+    error: &SubscriptionBillingServiceError,
+) -> AuthorizedBillingCommandRetry {
+    match error.disposition() {
+        SubscriptionBillingServiceErrorDisposition::TemporarilyUnavailable => {
+            AuthorizedBillingCommandRetry::ResubmitSameIdempotentCommand {
+                retry_after: error.retry_after(),
+            }
+        }
+        SubscriptionBillingServiceErrorDisposition::Conflict
+        | SubscriptionBillingServiceErrorDisposition::Rejected
+        | SubscriptionBillingServiceErrorDisposition::Misconfigured
+        | SubscriptionBillingServiceErrorDisposition::Internal => {
+            AuthorizedBillingCommandRetry::DoNotRetry
+        }
+        // Future service dispositions are deliberately non-retryable until
+        // this host policy has an explicit decision for them.
+        _ => AuthorizedBillingCommandRetry::DoNotRetry,
+    }
 }
 
 /// Enrolls a subject that the host has already authenticated and authorized.

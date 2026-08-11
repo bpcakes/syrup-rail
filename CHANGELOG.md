@@ -49,6 +49,11 @@ separate release task.
   repeatable-read, read-only transaction, accepts host-prefixed extensions, and
   fails closed for v1 or canonical drift without embedding or exposing a
   production migrator.
+- Add non-exhaustive `SubscriptionBillingServiceError` dispositions for
+  conflict, rejected, temporarily unavailable, misconfigured, and internal
+  failures. Hosts can use the conservative retry helpers without exposing
+  gateway diagnostics; retryability permits only resubmitting the same
+  idempotent command and does not guarantee success.
 
 ### Changed
 
@@ -69,6 +74,10 @@ separate release task.
 - Give subscriber-specific enrollment offer locks a typed reservation context
   with lifecycle stage, stable attempt identity, and idempotency identity.
   Attempt-history eligibility must exclude the supplied in-flight attempt.
+- Mark `SubscriptionBillingServiceError` non-exhaustive. Consumers must retain
+  a wildcard when matching its disposition, use `retry_after()` only as an
+  exact delay when it is present, and rebuild/reconcile rather than retry a
+  conflict as-is.
 
 ### Migration
 

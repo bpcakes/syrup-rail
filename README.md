@@ -95,6 +95,16 @@ their typed outcomes, use no gateway or provider I/O, and do not emit billing
 events. The host integration example includes compiled helpers for all three
 operations.
 
+For a failed high-level billing command, hosts can branch on
+`SubscriptionBillingServiceError::disposition()` instead of matching internal
+error variants. The disposition enum is non-exhaustive, so consumer matches
+must retain a conservative wildcard. `is_retryable()` means it is safe to
+resubmit the **same idempotent command and key** later; it does not guarantee
+success. `retry_after()` returns an exact delay only for admission denial.
+Gateway and account cooldowns are temporarily unavailable but deliberately do
+not receive a fabricated delay. Conflicts are not retryable as-is: reload and
+rebuild against current authority, or reconcile the existing idempotency key.
+
 For customer billing pages, construct a `SubscriptionBillingPortalQuery` from
 that same authorized exact identity and call `subscription_billing_portal`. It
 returns the canonical `Entitlement`, including current terms and saved or

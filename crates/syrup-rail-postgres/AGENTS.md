@@ -48,7 +48,8 @@ and transaction orchestration.
   paid-trial enrollment, dunning, recovery, reconciliation, entitlement, and
   cancellation.
 - `src/subscription_billing_service.rs` — stable service type, shared closed
-  readiness facts, and facade. Its `subscription_billing_service/{enrollment,
+  readiness facts, conservative non-exhaustive service-error dispositions, and
+  facade. Its `subscription_billing_service/{enrollment,
   recovery,renewal,payment_method_replacement,host_charge,reconciliation,
   subscriber,subscriber_mutation}.rs` modules own the corresponding
   orchestration and shared subscriber-admission boundary. The
@@ -202,6 +203,11 @@ and transaction orchestration.
   `billing_*` constraint and index names are reserved for canonical objects.
 - Host code composes transaction-local operations on its existing connection;
   shared operations never persist or receive plaintext provider credentials.
+- Hosts classify high-level service failures through
+  `SubscriptionBillingServiceError::disposition()` with a conservative wildcard
+  branch. A retryable disposition permits only the same idempotent command and
+  key; it never guarantees success. Do not fabricate a cooldown delay when
+  `retry_after()` is absent, and do not retry conflicts as-is.
 - Offer-dependent discount operations lock the exact host plan row through the
   caller's connection; implementations must not open a second connection.
 - Enrollment offer locks receive one stable reservation context at both
