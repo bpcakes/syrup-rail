@@ -123,7 +123,7 @@ pub use reconciliation::{
 };
 pub use renewal::{RenewalStoreError, due_renewals, renewal_attempt_state};
 pub use subscription_billing_service::{
-    GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionEnrollmentServiceError,
+    GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,
 };
 pub use transactions::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,

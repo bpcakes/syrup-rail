@@ -9,14 +9,14 @@ impl SubscriptionBillingService {
     pub async fn enroll(
         &self,
         command: EnrollSubscription,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         match self.preflight(&command).await? {
             SubscriptionEnrollmentPreflightOutcome::Continue => {}
             SubscriptionEnrollmentPreflightOutcome::Replay(attempt) => {
                 return self.payment_result(*attempt).await;
             }
             SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict => {
-                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
         }
 
@@ -48,15 +48,13 @@ impl SubscriptionBillingService {
                 return self.payment_result(attempt).await;
             }
             SubscriptionEnrollmentReservationOutcome::IdempotencyConflict => {
-                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
             SubscriptionEnrollmentReservationOutcome::Rejected(reason) => {
-                return Err(SubscriptionEnrollmentServiceError::ReservationRejected(
-                    reason,
-                ));
+                return Err(SubscriptionBillingServiceError::ReservationRejected(reason));
             }
             SubscriptionEnrollmentReservationOutcome::Reserved(_) => {
-                return Err(SubscriptionEnrollmentServiceError::InvalidState(
+                return Err(SubscriptionBillingServiceError::InvalidState(
                     INVALID_SERVICE_STATE,
                 ));
             }
@@ -101,9 +99,7 @@ impl SubscriptionBillingService {
                 return self.payment_result(attempt).await;
             }
             SubscriptionEnrollmentAdmissionOutcome::Rejected { reason, .. } => {
-                return Err(SubscriptionEnrollmentServiceError::SubmissionRejected(
-                    reason,
-                ));
+                return Err(SubscriptionBillingServiceError::SubmissionRejected(reason));
             }
         };
 
@@ -135,7 +131,7 @@ impl SubscriptionBillingService {
     pub(super) async fn preflight(
         &self,
         command: &EnrollSubscription,
-    ) -> Result<SubscriptionEnrollmentPreflightOutcome, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPreflightOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let outcome =
             preflight_subscription_enrollment_in_transaction(&mut transaction, command).await?;
@@ -146,7 +142,7 @@ impl SubscriptionBillingService {
     pub(super) async fn reserve(
         &self,
         reservation: &SubscriptionEnrollmentReservation,
-    ) -> Result<SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentReservationOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let outcome = reserve_subscription_enrollment_in_transaction(
             &mut transaction,
@@ -161,7 +157,7 @@ impl SubscriptionBillingService {
     pub(super) async fn payment_result(
         &self,
         attempt: PaymentAttempt,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let result = payment_result_for_attempt(&mut transaction, attempt).await?;
         transaction.commit().await?;

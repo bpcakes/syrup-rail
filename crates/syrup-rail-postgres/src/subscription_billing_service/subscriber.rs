@@ -6,7 +6,7 @@ impl SubscriptionBillingService {
         billing_scope_id: BillingScopeId,
         subscriber_id: syrup_rail::SubscriberId,
         operation: EndUserMutationOperation,
-    ) -> Result<(), SubscriptionEnrollmentServiceError> {
+    ) -> Result<(), SubscriptionBillingServiceError> {
         let result = self
             .admission
             .admit(EndUserMutationCommand::new(
@@ -27,13 +27,13 @@ impl SubscriptionBillingService {
         gateway_configuration_id: syrup_rail::GatewayConfigurationId,
     ) -> Result<
         (GatewayAccountSnapshot, syrup_rail::ResolvedGateway),
-        SubscriptionEnrollmentServiceError,
+        SubscriptionBillingServiceError,
     > {
         let account = self
             .gateway_account(billing_scope_id, gateway_configuration_id)
             .await?;
         if let Some(scope) = self.active_cooldown(&account).await? {
-            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
+            return Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope });
         }
         let expected = ExpectedGatewayIdentity::for_account(
             billing_scope_id,
@@ -50,7 +50,7 @@ impl SubscriptionBillingService {
             )
             .await?;
         if !expected.matches(&gateway) {
-            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
+            return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
         Ok((account, gateway))
     }
@@ -59,7 +59,7 @@ impl SubscriptionBillingService {
         &self,
         billing_scope_id: BillingScopeId,
         gateway_configuration_id: syrup_rail::GatewayConfigurationId,
-    ) -> Result<GatewayAccountSnapshot, SubscriptionEnrollmentServiceError> {
+    ) -> Result<GatewayAccountSnapshot, SubscriptionBillingServiceError> {
         let row = sqlx::query_as::<_, (uuid::Uuid, String)>(
             r#"
             SELECT id, provider_key
@@ -71,9 +71,9 @@ impl SubscriptionBillingService {
         .bind(gateway_configuration_id.as_uuid())
         .fetch_optional(&self.pool)
         .await?
-        .ok_or(SubscriptionEnrollmentServiceError::GatewayConfigurationChanged)?;
+        .ok_or(SubscriptionBillingServiceError::GatewayConfigurationChanged)?;
         let provider_key = GatewayProviderKey::new(&row.1)
-            .map_err(|_| SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE))?;
+            .map_err(|_| SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE))?;
         Ok(GatewayAccountSnapshot {
             account_id: GatewayAccountId::new(row.0),
             provider_key,
@@ -83,7 +83,7 @@ impl SubscriptionBillingService {
     pub(super) async fn active_cooldown(
         &self,
         account: &GatewayAccountSnapshot,
-    ) -> Result<Option<GatewayMutationCooldownScope>, SubscriptionEnrollmentServiceError> {
+    ) -> Result<Option<GatewayMutationCooldownScope>, SubscriptionBillingServiceError> {
         let row = sqlx::query_as::<_, (bool, bool)>(
             r#"
             SELECT
@@ -99,7 +99,7 @@ impl SubscriptionBillingService {
         .bind(account.provider_key.as_str())
         .fetch_optional(&self.pool)
         .await?
-        .ok_or(SubscriptionEnrollmentServiceError::GatewayConfigurationChanged)?;
+        .ok_or(SubscriptionBillingServiceError::GatewayConfigurationChanged)?;
         Ok(if row.1 {
             Some(GatewayMutationCooldownScope::Provider)
         } else if row.0 {
@@ -114,7 +114,7 @@ impl SubscriptionBillingService {
         reservation: SubscriberInitiatedReservation<'_>,
         failure: SubscriberReadinessFailure,
         boundary: OutcomeResolutionBoundary,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let code = failure.resolution_code();
         let cooldown = failure.cooldown();
         let cooldown_error_scope = failure.cooldown_error_scope();
@@ -131,11 +131,11 @@ impl SubscriptionBillingService {
         let payment = reservation
             .resolve_non_approved(&self.pool, &evidence, code, cooldown, boundary)
             .await
-            .map_err(SubscriptionEnrollmentServiceError::from)?;
+            .map_err(SubscriptionBillingServiceError::from)?;
         if let Some(scope) = cooldown_error_scope
             && payment.attempt().state().resolution_code() == Some(code)
         {
-            return Err(SubscriptionEnrollmentServiceError::GatewayMutationCooldown { scope });
+            return Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope });
         }
         Ok(payment)
     }

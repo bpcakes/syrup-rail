@@ -30,15 +30,19 @@ The callback uses only the supplied transaction connection.
 Each dunning delay is relative to the preceding submitted, determinate
 automatic-renewal failure. In the example, collection occurs at the economic
 period boundary, then one day after the first customer-payment failure, then
-three days after the second. User recovery, unknown outcomes, provider
-throttling, and failures before submission do not consume those steps;
-infrastructure retries retain their separate bounded pacing.
+three days after the second. The example uses the checked
+`DunningRetryDelay::days` and `DunningSchedule::from_delays` APIs rather than
+unlabelled second counts. User recovery, unknown outcomes, provider throttling,
+and failures before submission do not consume those steps; infrastructure
+retries retain their separate bounded pacing.
 
 `Entitlement::PastDue` is a payment-state fact, not an access denial by itself.
-Hosts must inspect its `PastDueAccess`: `AllowedDuringDunning` continues both
-reads and protected writes, while `Suspended` denies them. The compiled
-[`entitlement_access` example](crates/syrup-rail/examples/entitlement_access.rs)
-shows an exhaustive host-side access decision.
+Use `Entitlement::permits_product_access()` for the canonical subscription
+decision after the host has authenticated and authorized its subject.
+`AllowedDuringDunning` continues both reads and protected writes, while
+`Suspended` denies them. The compiled [`entitlement_access`
+example](crates/syrup-rail/examples/entitlement_access.rs) shows the host
+security boundary and canonical method call.
 
 `MarkUnpaid` makes the subscription terminal after the schedule is exhausted:
 it removes renewal and recovery authority and grants no subscription
@@ -61,6 +65,18 @@ PostgreSQL schema v2 is the current contract. New hosts install
 [`schema/v2/install.sql`](crates/syrup-rail-postgres/schema/v2/install.sql),
 while v1 hosts follow the checked-in
 [`v1` to `v2` cutover guide](crates/syrup-rail-postgres/schema/v2/README.md).
+
+## PostgreSQL host integration
+
+The compiled [`host_integration`
+example](crates/syrup-rail-postgres/examples/host_integration.rs) shows the
+host-owned offer lock, gateway resolution, end-user admission, transaction and
+outbox boundary, service construction, authorized command construction, and
+durable enrollment-result handling. It is intentionally provider-neutral and
+does not install or run a database migrator.
+
+Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
+compile the integration boundary without contacting a database or provider.
 
 ## Development
 

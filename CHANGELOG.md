@@ -13,6 +13,14 @@ separate release task.
 - Add explicit immediate-recurring and positive paid-trial offer terms with
   fixed-day or calendar-month billing periods, separate introductory and
   recurring prices, and durable versioned enrollment snapshots.
+- Add `Entitlement::permits_product_access()` as the canonical subscription
+  entitlement decision while retaining host authentication and authorization
+  as host responsibilities.
+- Add the redacted, request-scoped `SubscriptionPaymentContext` shared by
+  enrollment, recovery, and payment-method replacement commands.
+- Add checked `DunningRetryDelay` constructors for whole hours, whole days, and
+  exact `std::time::Duration` values, plus array-friendly
+  `DunningSchedule::from_delays` construction.
 - Add per-subscription relative dunning schedules, configurable exhausted
   behavior and past-due access, terminal `unpaid` state, and provider-neutral
   nonpayment lifecycle events.
@@ -57,6 +65,17 @@ separate release task.
 
 ### API migration from 0.1
 
+- Construct one `SubscriptionPaymentContext` from the authorized subscriber
+  payment request, then pass it with operation-specific data to
+  `EnrollSubscription::new`, `RecoverSubscriptionPayment::new`, or
+  `ReplaceSubscriptionPaymentMethod::new`. The context keeps ordinary debug
+  output free of idempotency-key, payment-token, and billing-contact values.
+- Rename `SubscriptionEnrollmentServiceError` to
+  `SubscriptionBillingServiceError`. The service error covers enrollment,
+  recovery, renewal, payment-method replacement, reconciliation, and optional
+  host-charge orchestration. Its generic storage and application messages now
+  use billing/payment terminology; variant-specific behavior and error sources
+  are unchanged.
 - Replace `next_monthly_billing_period` and `MonthlyBillingPeriodError` with
   `next_billing_period(start_at, rule)` and `BillingPeriodPolicyError`. Pass
   `SubscriptionPeriodRule::calendar_months(1)` for the former monthly behavior.
@@ -93,16 +112,19 @@ separate release task.
   `RENEWAL_RETRY_AFTER_SECONDS` with the offer's `RenewalFailurePolicy`. Use
   `RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS` or
   `RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS` only for their named
-  operational pacing paths.
+  operational pacing paths. Prefer checked `DunningRetryDelay::hours`,
+  `DunningRetryDelay::days`, or `DunningRetryDelay::try_from(Duration)` values
+  with `DunningSchedule::from_delays`; the second-based APIs remain available
+  for persistence adapters.
 - Update event consumers for `SubscriptionStarted.phase`, the closed
   `SubscriptionPaymentFailureDisposition`, and the new `SubscriptionEnded`
   event. `Subscription` now exposes phase, recurring-period, failure-policy,
   and scheduler facts. `Entitlement::PastDue` no longer inherently means that
-  product access is suspended: allow access when its `access` field is
-  `PastDueAccess::AllowedDuringDunning`, and deny it only when classified as
-  `Suspended`. With `ContinueUntilDunningExhausted` plus `RemainPastDue`,
-  `DunningExhausted` is the access-revocation signal and no
-  `SubscriptionEnded` event follows it.
+  product access is suspended: use `Entitlement::permits_product_access()` for
+  the canonical subscription decision. Inspect `PastDueAccess` separately only
+  when the host needs to present the dunning reason. With
+  `ContinueUntilDunningExhausted` plus `RemainPastDue`, `DunningExhausted` is
+  the access-revocation signal and no `SubscriptionEnded` event follows it.
 
 ## [0.1.1] - 2026-08-09
 

@@ -5,14 +5,14 @@ impl SubscriptionBillingService {
     pub async fn replace_payment_method(
         &self,
         command: ReplaceSubscriptionPaymentMethod,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         match self.preflight_payment_method_replacement(&command).await? {
             SubscriptionPaymentMethodReplacementPreflightOutcome::Continue => {}
             SubscriptionPaymentMethodReplacementPreflightOutcome::Replay(attempt) => {
                 return self.payment_result(*attempt).await;
             }
             SubscriptionPaymentMethodReplacementPreflightOutcome::IdempotencyConflict => {
-                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
         }
         self.admit_subscriber_mutation(
@@ -39,11 +39,11 @@ impl SubscriptionBillingService {
                 return self.payment_result(*attempt).await;
             }
             SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict => {
-                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
             SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(reason) => {
                 return Err(
-                    SubscriptionEnrollmentServiceError::PaymentMethodReplacementReservationRejected(
+                    SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(
                         reason,
                     ),
                 );
@@ -53,7 +53,7 @@ impl SubscriptionBillingService {
             || attempt.state().timestamps().submitted_at().is_some()
             || attempt.identity() != reservation.identity()
         {
-            return Err(SubscriptionEnrollmentServiceError::InvalidState(
+            return Err(SubscriptionBillingServiceError::InvalidState(
                 INVALID_SERVICE_STATE,
             ));
         }
@@ -135,10 +135,8 @@ impl SubscriptionBillingService {
     pub(super) async fn preflight_payment_method_replacement(
         &self,
         command: &ReplaceSubscriptionPaymentMethod,
-    ) -> Result<
-        SubscriptionPaymentMethodReplacementPreflightOutcome,
-        SubscriptionEnrollmentServiceError,
-    > {
+    ) -> Result<SubscriptionPaymentMethodReplacementPreflightOutcome, SubscriptionBillingServiceError>
+    {
         let mut transaction = self.pool.begin().await?;
         let outcome = preflight_subscription_payment_method_replacement_in_transaction(
             &mut transaction,
@@ -155,7 +153,7 @@ impl SubscriptionBillingService {
         gateway: &syrup_rail::ResolvedGateway,
     ) -> Result<
         SubscriptionPaymentMethodReplacementReservationOutcome,
-        SubscriptionEnrollmentServiceError,
+        SubscriptionBillingServiceError,
     > {
         let mut transaction = self.pool.begin().await?;
         let outcome = reserve_subscription_payment_method_replacement_in_transaction(

@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn billing_service_error_name_and_generic_messages_cover_the_whole_facade() {
+    let sql = SubscriptionBillingServiceError::Sql(sqlx::Error::RowNotFound);
+    assert_eq!(sql.to_string(), "subscription billing storage failed");
+    assert_eq!(format!("{sql:?}"), "SubscriptionBillingServiceError::Sql");
+
+    let attempt = SubscriptionBillingServiceError::Attempt(PaymentAttemptStoreError::InvalidState(
+        "test payment attempt state",
+    ));
+    assert_eq!(attempt.to_string(), "payment attempt storage failed");
+    assert_eq!(
+        format!("{attempt:?}"),
+        "SubscriptionBillingServiceError::Attempt"
+    );
+
+    let application = SubscriptionBillingServiceError::Application(
+        SubscriptionEnrollmentApplicationError::InvalidState("test application state"),
+    );
+    assert_eq!(
+        application.to_string(),
+        "subscription payment application failed"
+    );
+    assert_eq!(
+        format!("{application:?}"),
+        "SubscriptionBillingServiceError::Application"
+    );
+}
+
+#[test]
 fn subscriber_admission_mapping_preserves_each_error_variant() {
     assert!(map_subscriber_mutation_admission(EndUserMutationAdmissionResult::Allowed).is_ok());
     let retry_after = std::time::Duration::from_secs(7);
@@ -9,17 +37,17 @@ fn subscriber_admission_mapping_preserves_each_error_variant() {
             retry_after: syrup_rail::EndUserMutationRetryAfter::new(retry_after)
                 .expect("positive retry-after"),
         }),
-        Err(SubscriptionEnrollmentServiceError::AdmissionDenied {
+        Err(SubscriptionBillingServiceError::AdmissionDenied {
             retry_after: actual
         }) if actual == retry_after
     ));
     assert!(matches!(
         map_subscriber_mutation_admission(EndUserMutationAdmissionResult::Timeout),
-        Err(SubscriptionEnrollmentServiceError::AdmissionTimeout)
+        Err(SubscriptionBillingServiceError::AdmissionTimeout)
     ));
     assert!(matches!(
         map_subscriber_mutation_admission(EndUserMutationAdmissionResult::Unavailable),
-        Err(SubscriptionEnrollmentServiceError::AdmissionUnavailable)
+        Err(SubscriptionBillingServiceError::AdmissionUnavailable)
     ));
 }
 

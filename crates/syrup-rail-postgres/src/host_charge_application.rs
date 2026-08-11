@@ -1758,7 +1758,7 @@ mod tests {
                 .expect_err("provider throttle must be reported");
             assert!(matches!(
                 error,
-                crate::SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+                crate::SubscriptionBillingServiceError::GatewayMutationCooldown {
                     scope: crate::GatewayMutationCooldownScope::Provider
                 }
             ));

@@ -33,7 +33,7 @@ use super::*;
 use crate::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
     BillingTransactionSubjectState, GatewayMutationCooldownScope, SubscriptionBillingService,
-    SubscriptionEnrollmentServiceError, SubscriptionOfferStore,
+    SubscriptionBillingServiceError, SubscriptionOfferStore,
     reserve_subscription_enrollment_in_transaction,
     test_support::{TestDatabase, create_gateway_account, immediate_offer},
 };

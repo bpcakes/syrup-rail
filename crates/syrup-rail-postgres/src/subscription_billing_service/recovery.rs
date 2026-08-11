@@ -9,14 +9,14 @@ impl SubscriptionBillingService {
     pub async fn recover(
         &self,
         command: RecoverSubscriptionPayment,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         match self.preflight_recovery(&command).await? {
             SubscriptionRecoveryPreflightOutcome::Continue => {}
             SubscriptionRecoveryPreflightOutcome::Replay(attempt) => {
                 return self.payment_result(*attempt).await;
             }
             SubscriptionRecoveryPreflightOutcome::IdempotencyConflict => {
-                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
         }
 
@@ -42,19 +42,17 @@ impl SubscriptionBillingService {
                 return self.payment_result(*attempt).await;
             }
             SubscriptionRecoveryReservationOutcome::IdempotencyConflict => {
-                return Err(SubscriptionEnrollmentServiceError::IdempotencyConflict);
+                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
             SubscriptionRecoveryReservationOutcome::Rejected(reason) => {
-                return Err(
-                    SubscriptionEnrollmentServiceError::RecoveryReservationRejected(reason),
-                );
+                return Err(SubscriptionBillingServiceError::RecoveryReservationRejected(reason));
             }
         };
         if attempt.status() != PaymentAttemptStatus::Pending
             || attempt.state().timestamps().submitted_at().is_some()
             || attempt.identity() != reservation.identity()
         {
-            return Err(SubscriptionEnrollmentServiceError::InvalidState(
+            return Err(SubscriptionBillingServiceError::InvalidState(
                 INVALID_SERVICE_STATE,
             ));
         }
@@ -134,7 +132,7 @@ impl SubscriptionBillingService {
     pub(super) async fn preflight_recovery(
         &self,
         command: &RecoverSubscriptionPayment,
-    ) -> Result<SubscriptionRecoveryPreflightOutcome, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionRecoveryPreflightOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let outcome =
             preflight_subscription_recovery_in_transaction(&mut transaction, command).await?;
@@ -146,7 +144,7 @@ impl SubscriptionBillingService {
         &self,
         command: &RecoverSubscriptionPayment,
         gateway: &syrup_rail::ResolvedGateway,
-    ) -> Result<SubscriptionRecoveryReservationOutcome, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionRecoveryReservationOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let outcome =
             reserve_subscription_recovery_in_transaction(&mut transaction, command, gateway)

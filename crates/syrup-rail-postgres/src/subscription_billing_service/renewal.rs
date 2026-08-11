@@ -9,7 +9,7 @@ impl SubscriptionBillingService {
     pub async fn renew(
         &self,
         command: ChargeRenewal,
-    ) -> Result<SubscriptionRenewalOutcome, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionRenewalOutcome, SubscriptionBillingServiceError> {
         let Some(account) = self.renewal_gateway_account(command).await? else {
             return Ok(SubscriptionRenewalOutcome::Noop);
         };
@@ -34,12 +34,12 @@ impl SubscriptionBillingService {
             || gateway.gateway_configuration_id() != account.configuration_id
             || gateway.provider_key() != &account.provider_key
         {
-            return Err(SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch);
+            return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
         match gateway.account_mode().await {
             Ok(GatewayAccountMode::Live) => {}
             Ok(GatewayAccountMode::Test) => {
-                return Err(SubscriptionEnrollmentServiceError::GatewayReadiness(
+                return Err(SubscriptionBillingServiceError::GatewayReadiness(
                     GatewayError::Configuration(GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT)),
                 ));
             }
@@ -47,7 +47,7 @@ impl SubscriptionBillingService {
                 self.extend_provider_cooldown(&account.provider_key).await?;
                 return Ok(SubscriptionRenewalOutcome::Noop);
             }
-            Err(error) => return Err(SubscriptionEnrollmentServiceError::GatewayReadiness(error)),
+            Err(error) => return Err(SubscriptionBillingServiceError::GatewayReadiness(error)),
         }
 
         let (reservation, attempt) = match self.reserve_renewal(command, &gateway).await? {
@@ -57,16 +57,14 @@ impl SubscriptionBillingService {
             SubscriptionRenewalReservationOutcome::Rejected(
                 SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
             ) => {
-                return Err(
-                    SubscriptionEnrollmentServiceError::RenewalReservationRejected(
-                        SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
-                    ),
-                );
+                return Err(SubscriptionBillingServiceError::RenewalReservationRejected(
+                    SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
+                ));
             }
             SubscriptionRenewalReservationOutcome::Rejected(
                 SubscriptionRenewalReservationRejection::GatewayConfigurationChanged,
             ) => {
-                return Err(SubscriptionEnrollmentServiceError::GatewayConfigurationChanged);
+                return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
             }
             SubscriptionRenewalReservationOutcome::Rejected(_) => {
                 return Ok(SubscriptionRenewalOutcome::Noop);
@@ -76,7 +74,7 @@ impl SubscriptionBillingService {
             || attempt.state().timestamps().submitted_at().is_some()
             || attempt.identity() != reservation.identity()
         {
-            return Err(SubscriptionEnrollmentServiceError::InvalidState(
+            return Err(SubscriptionBillingServiceError::InvalidState(
                 INVALID_SERVICE_STATE,
             ));
         }
@@ -159,7 +157,7 @@ impl SubscriptionBillingService {
         &self,
         command: ChargeRenewal,
         gateway: &syrup_rail::ResolvedGateway,
-    ) -> Result<SubscriptionRenewalReservationOutcome, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionRenewalReservationOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let outcome =
             reserve_subscription_renewal_in_transaction(&mut transaction, command, gateway).await?;
@@ -170,7 +168,7 @@ impl SubscriptionBillingService {
     pub(super) async fn renewal_gateway_account(
         &self,
         command: ChargeRenewal,
-    ) -> Result<Option<RenewalGatewayAccountSnapshot>, SubscriptionEnrollmentServiceError> {
+    ) -> Result<Option<RenewalGatewayAccountSnapshot>, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String)>(
             r#"
@@ -202,9 +200,9 @@ impl SubscriptionBillingService {
         )
         .await
         .map_err(|error| match error {
-            crate::RenewalStoreError::Sql(error) => SubscriptionEnrollmentServiceError::Sql(error),
+            crate::RenewalStoreError::Sql(error) => SubscriptionBillingServiceError::Sql(error),
             crate::RenewalStoreError::MissingProviderCooldown => {
-                SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
+                SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
             }
         })?;
         let now = sqlx::query_scalar("SELECT clock_timestamp()")
@@ -230,11 +228,9 @@ impl SubscriptionBillingService {
         transaction.commit().await?;
         if attempt_state.blocks_automatic_retry(now) || has_payment_method_update {
             if has_payment_method_update {
-                return Err(
-                    SubscriptionEnrollmentServiceError::RenewalReservationRejected(
-                        SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
-                    ),
-                );
+                return Err(SubscriptionBillingServiceError::RenewalReservationRejected(
+                    SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
+                ));
             }
             return Ok(None);
         }
@@ -244,7 +240,7 @@ impl SubscriptionBillingService {
                     account_id: GatewayAccountId::new(account_id),
                     configuration_id: syrup_rail::GatewayConfigurationId::new(configuration_id),
                     provider_key: GatewayProviderKey::new(provider_key).map_err(|_| {
-                        SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
+                        SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
                     })?,
                 })
             })
@@ -254,7 +250,7 @@ impl SubscriptionBillingService {
     pub(super) async fn extend_provider_cooldown(
         &self,
         provider_key: &GatewayProviderKey,
-    ) -> Result<(), SubscriptionEnrollmentServiceError> {
+    ) -> Result<(), SubscriptionBillingServiceError> {
         let result = sqlx::query(
             r#"
             UPDATE billing_gateway_provider_rate_limits
@@ -270,7 +266,7 @@ impl SubscriptionBillingService {
         .execute(&self.pool)
         .await?;
         if result.rows_affected() != 1 {
-            return Err(SubscriptionEnrollmentServiceError::InvalidState(
+            return Err(SubscriptionBillingServiceError::InvalidState(
                 INVALID_SERVICE_STATE,
             ));
         }
@@ -282,7 +278,7 @@ impl SubscriptionBillingService {
         reservation: &SubscriptionRenewalReservation,
         scope: GatewayMutationCooldownScope,
         boundary: OutcomeResolutionBoundary,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let (message, code) = match scope {
             GatewayMutationCooldownScope::Account => (
                 "gateway account mutation cooldown is active",
@@ -308,7 +304,7 @@ impl SubscriptionBillingService {
         reservation: &SubscriptionRenewalReservation,
         gateway: &syrup_rail::ResolvedGateway,
         boundary: OutcomeResolutionBoundary,
-    ) -> Result<bool, SubscriptionEnrollmentServiceError> {
+    ) -> Result<bool, SubscriptionBillingServiceError> {
         match gateway.account_mode().await {
             Ok(GatewayAccountMode::Live) => Ok(true),
             Ok(GatewayAccountMode::Test) => {
@@ -354,7 +350,7 @@ impl SubscriptionBillingService {
         code: PaymentResolutionCode,
         cooldown: Option<RateLimitCooldown>,
         boundary: OutcomeResolutionBoundary,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let condition = (code != PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
             .then(|| GatewayDiagnostic::new("failed"));
         let evidence = ProcessorEvidence::new(
@@ -376,6 +372,6 @@ impl SubscriptionBillingService {
             boundary,
         )
         .await
-        .map_err(SubscriptionEnrollmentServiceError::from)
+        .map_err(SubscriptionBillingServiceError::from)
     }
 }

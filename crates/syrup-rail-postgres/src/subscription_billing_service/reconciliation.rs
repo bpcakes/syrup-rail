@@ -11,7 +11,7 @@ impl SubscriptionBillingService {
         billing_scope_id: BillingScopeId,
         attempt_id: PaymentAttemptId,
         outcome: &GatewayPaymentOutcome,
-    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let attempt = crate::find_payment_attempt_by_id_in_transaction(
             &mut transaction,
@@ -19,7 +19,7 @@ impl SubscriptionBillingService {
             attempt_id,
         )
         .await?
-        .ok_or(SubscriptionEnrollmentServiceError::InvalidState(
+        .ok_or(SubscriptionBillingServiceError::InvalidState(
             "reconciled subscription payment attempt was not found",
         ))?;
         transaction.commit().await?;

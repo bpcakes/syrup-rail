@@ -69,7 +69,7 @@ mod recovery;
 mod renewal;
 mod subscriber;
 
-const INVALID_SERVICE_STATE: &str = "canonical subscription enrollment service state is invalid";
+const INVALID_SERVICE_STATE: &str = "canonical subscription billing service state is invalid";
 const LIVE_READINESS_FAILED_TEXT: &str =
     "Payment was not submitted because the payment processor was not ready for live transactions.";
 
@@ -79,13 +79,17 @@ pub enum GatewayMutationCooldownScope {
     Provider,
 }
 
+/// Failure returned by the high-level subscription billing facade.
+///
+/// This covers enrollment, recovery, renewal, payment-method replacement,
+/// reconciliation, and the optional host-charge capability.
 #[derive(Error)]
-pub enum SubscriptionEnrollmentServiceError {
-    #[error("subscription enrollment storage failed")]
+pub enum SubscriptionBillingServiceError {
+    #[error("subscription billing storage failed")]
     Sql(#[from] sqlx::Error),
-    #[error("subscription enrollment attempt storage failed")]
+    #[error("payment attempt storage failed")]
     Attempt(#[from] PaymentAttemptStoreError),
-    #[error("subscription enrollment application failed")]
+    #[error("subscription payment application failed")]
     Application(#[from] SubscriptionEnrollmentApplicationError),
     #[error("host charge application failed")]
     HostChargeApplication(#[from] HostChargeApplicationError),
@@ -137,97 +141,99 @@ pub enum SubscriptionEnrollmentServiceError {
     InvalidState(&'static str),
 }
 
-impl fmt::Debug for SubscriptionEnrollmentServiceError {
+impl fmt::Debug for SubscriptionBillingServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Sql(_) => formatter.write_str("SubscriptionEnrollmentServiceError::Sql"),
-            Self::Attempt(_) => formatter.write_str("SubscriptionEnrollmentServiceError::Attempt"),
+            Self::Sql(_) => formatter.write_str("SubscriptionBillingServiceError::Sql"),
+            Self::Attempt(_) => formatter.write_str("SubscriptionBillingServiceError::Attempt"),
             Self::Application(_) => {
-                formatter.write_str("SubscriptionEnrollmentServiceError::Application")
+                formatter.write_str("SubscriptionBillingServiceError::Application")
             }
             Self::HostChargeApplication(_) => {
-                formatter.write_str("SubscriptionEnrollmentServiceError::HostChargeApplication")
+                formatter.write_str("SubscriptionBillingServiceError::HostChargeApplication")
             }
             Self::HostChargeStore(_) => {
-                formatter.write_str("SubscriptionEnrollmentServiceError::HostChargeStore")
+                formatter.write_str("SubscriptionBillingServiceError::HostChargeStore")
             }
-            Self::HostChargeUnavailable => formatter
-                .write_str("SubscriptionEnrollmentServiceError::HostChargeUnavailable"),
+            Self::HostChargeUnavailable => {
+                formatter.write_str("SubscriptionBillingServiceError::HostChargeUnavailable")
+            }
             Self::IdempotencyConflict => {
-                formatter.write_str("SubscriptionEnrollmentServiceError::IdempotencyConflict")
+                formatter.write_str("SubscriptionBillingServiceError::IdempotencyConflict")
             }
             Self::AdmissionDenied { retry_after } => formatter
-                .debug_struct("SubscriptionEnrollmentServiceError::AdmissionDenied")
+                .debug_struct("SubscriptionBillingServiceError::AdmissionDenied")
                 .field("retry_after", retry_after)
                 .finish(),
             Self::AdmissionTimeout => {
-                formatter.write_str("SubscriptionEnrollmentServiceError::AdmissionTimeout")
+                formatter.write_str("SubscriptionBillingServiceError::AdmissionTimeout")
             }
             Self::AdmissionUnavailable => {
-                formatter.write_str("SubscriptionEnrollmentServiceError::AdmissionUnavailable")
+                formatter.write_str("SubscriptionBillingServiceError::AdmissionUnavailable")
             }
-            Self::GatewayConfigurationChanged => formatter
-                .write_str("SubscriptionEnrollmentServiceError::GatewayConfigurationChanged"),
+            Self::GatewayConfigurationChanged => {
+                formatter.write_str("SubscriptionBillingServiceError::GatewayConfigurationChanged")
+            }
             Self::GatewayResolution(error) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::GatewayResolution")
+                .debug_tuple("SubscriptionBillingServiceError::GatewayResolution")
                 .field(error)
                 .finish(),
             Self::ResolvedGatewayIdentityMismatch => formatter
-                .write_str("SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch"),
+                .write_str("SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch"),
             Self::GatewayMutationCooldown { scope } => formatter
-                .debug_struct("SubscriptionEnrollmentServiceError::GatewayMutationCooldown")
+                .debug_struct("SubscriptionBillingServiceError::GatewayMutationCooldown")
                 .field("scope", scope)
                 .finish(),
             Self::ReservationRejected(reason) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::ReservationRejected")
+                .debug_tuple("SubscriptionBillingServiceError::ReservationRejected")
                 .field(reason)
                 .finish(),
             Self::SubmissionRejected(reason) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::SubmissionRejected")
+                .debug_tuple("SubscriptionBillingServiceError::SubmissionRejected")
                 .field(reason)
                 .finish(),
             Self::HostChargeReservationRejected(reason) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::HostChargeReservationRejected")
+                .debug_tuple("SubscriptionBillingServiceError::HostChargeReservationRejected")
                 .field(reason)
                 .finish(),
             Self::HostChargeSubmissionRejected(reason) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::HostChargeSubmissionRejected")
+                .debug_tuple("SubscriptionBillingServiceError::HostChargeSubmissionRejected")
                 .field(reason)
                 .finish(),
             Self::RecoveryReservationRejected(reason) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::RecoveryReservationRejected")
+                .debug_tuple("SubscriptionBillingServiceError::RecoveryReservationRejected")
                 .field(reason)
                 .finish(),
             Self::RecoverySubmissionRejected(reason) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::RecoverySubmissionRejected")
+                .debug_tuple("SubscriptionBillingServiceError::RecoverySubmissionRejected")
                 .field(reason)
                 .finish(),
             Self::RenewalReservationRejected(reason) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::RenewalReservationRejected")
+                .debug_tuple("SubscriptionBillingServiceError::RenewalReservationRejected")
                 .field(reason)
                 .finish(),
             Self::PaymentMethodReplacementReservationRejected(reason) => formatter
                 .debug_tuple(
-                    "SubscriptionEnrollmentServiceError::PaymentMethodReplacementReservationRejected",
+                    "SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected",
                 )
                 .field(reason)
                 .finish(),
             Self::PaymentMethodReplacementSubmissionRejected(reason) => formatter
                 .debug_tuple(
-                    "SubscriptionEnrollmentServiceError::PaymentMethodReplacementSubmissionRejected",
+                    "SubscriptionBillingServiceError::PaymentMethodReplacementSubmissionRejected",
                 )
                 .field(reason)
                 .finish(),
             Self::GatewayNotSubmitted(error) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::GatewayNotSubmitted")
+                .debug_tuple("SubscriptionBillingServiceError::GatewayNotSubmitted")
                 .field(error)
                 .finish(),
             Self::GatewayReadiness(error) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::GatewayReadiness")
+                .debug_tuple("SubscriptionBillingServiceError::GatewayReadiness")
                 .field(error)
                 .finish(),
             Self::InvalidState(detail) => formatter
-                .debug_tuple("SubscriptionEnrollmentServiceError::InvalidState")
+                .debug_tuple("SubscriptionBillingServiceError::InvalidState")
                 .field(detail)
                 .finish(),
         }
@@ -382,19 +388,19 @@ impl SubscriberReadinessFailure {
 
 fn map_subscriber_mutation_admission(
     result: EndUserMutationAdmissionResult,
-) -> Result<(), SubscriptionEnrollmentServiceError> {
+) -> Result<(), SubscriptionBillingServiceError> {
     match result {
         EndUserMutationAdmissionResult::Allowed => Ok(()),
         EndUserMutationAdmissionResult::Denied { retry_after } => {
-            Err(SubscriptionEnrollmentServiceError::AdmissionDenied {
+            Err(SubscriptionBillingServiceError::AdmissionDenied {
                 retry_after: retry_after.get(),
             })
         }
         EndUserMutationAdmissionResult::Timeout => {
-            Err(SubscriptionEnrollmentServiceError::AdmissionTimeout)
+            Err(SubscriptionBillingServiceError::AdmissionTimeout)
         }
         EndUserMutationAdmissionResult::Unavailable => {
-            Err(SubscriptionEnrollmentServiceError::AdmissionUnavailable)
+            Err(SubscriptionBillingServiceError::AdmissionUnavailable)
         }
     }
 }
@@ -415,13 +421,11 @@ async fn subscriber_gateway_readiness_failure(
 fn preserve_concurrent_terminal_payment(
     payment: SubscriptionEnrollmentPaymentResult,
     error: GatewayNotSubmittedError,
-) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentServiceError> {
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
     if payment.attempt().state().resolution_code()
         == Some(crate::enrollment_application::not_submitted_resolution_code(&error))
     {
-        Err(SubscriptionEnrollmentServiceError::GatewayNotSubmitted(
-            error,
-        ))
+        Err(SubscriptionBillingServiceError::GatewayNotSubmitted(error))
     } else {
         Ok(payment)
     }
@@ -509,15 +513,15 @@ impl RenewalGatewayAccountSnapshot {
 
 const fn map_reservation_build_error(
     error: SubscriptionEnrollmentReservationBuildError,
-) -> SubscriptionEnrollmentServiceError {
+) -> SubscriptionBillingServiceError {
     match error {
         SubscriptionEnrollmentReservationBuildError::GatewayIdentityMismatch => {
-            SubscriptionEnrollmentServiceError::ResolvedGatewayIdentityMismatch
+            SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch
         }
         SubscriptionEnrollmentReservationBuildError::AttemptKindMismatch
         | SubscriptionEnrollmentReservationBuildError::InvalidCharge
         | SubscriptionEnrollmentReservationBuildError::InvalidTerms => {
-            SubscriptionEnrollmentServiceError::InvalidState(INVALID_SERVICE_STATE)
+            SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
         }
     }
 }

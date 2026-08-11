@@ -283,7 +283,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     .await?;
     assert!(matches!(
         service.recover(command).await,
-        Err(SubscriptionEnrollmentServiceError::IdempotencyConflict)
+        Err(SubscriptionBillingServiceError::IdempotencyConflict)
     ));
     assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
     let events = fixture.coordinator.events.lock().await;
@@ -470,7 +470,7 @@ async fn foreground_service_pre_reservation_cooldown_creates_no_attempt_or_provi
         .expect_err("active local cooldown must reject before reservation");
     assert!(matches!(
         error,
-        SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+        SubscriptionBillingServiceError::GatewayMutationCooldown {
             scope: GatewayMutationCooldownScope::Account
         }
     ));
@@ -572,7 +572,7 @@ async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_at
         .expect_err("provider readiness throttle must return a typed cooldown");
     assert!(matches!(
         error,
-        SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+        SubscriptionBillingServiceError::GatewayMutationCooldown {
             scope: GatewayMutationCooldownScope::Provider
         }
     ));
@@ -634,7 +634,7 @@ async fn foreground_fresh_cooldown_after_readiness_prevents_the_admitted_sale()
         .expect_err("fresh cooldown must close the one-shot sale boundary");
     assert!(matches!(
         error,
-        SubscriptionEnrollmentServiceError::GatewayMutationCooldown {
+        SubscriptionBillingServiceError::GatewayMutationCooldown {
             scope: GatewayMutationCooldownScope::Account
         }
     ));
