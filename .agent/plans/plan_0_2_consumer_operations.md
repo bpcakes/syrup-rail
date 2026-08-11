@@ -17,7 +17,7 @@ The behavior is observable through public API tests and PostgreSQL integration s
 - [x] (2026-08-11) Add and commit stable renewal-dispatch pagination.
 - [x] (2026-08-11) Add and commit the production runtime schema-v2 compatibility check.
 - [x] (2026-08-11) Add and commit structured service-error dispositions and non-exhaustive operational-error hardening.
-- [ ] Run all repository gates, audit every requirement in this plan against current evidence, and record the final outcome.
+- [x] (2026-08-11) Run all repository gates, audit every requirement and milestone commit against current evidence, restore the schema-v1 documentation baseline, and record the final outcome.
 
 ## Surprises & Discoveries
 
@@ -72,6 +72,16 @@ The behavior is observable through public API tests and PostgreSQL integration s
   Resolution: the production assertion and feature-gated v1/v2 test wrappers
   now begin one PostgreSQL `REPEATABLE READ READ ONLY` transaction and delegate
   every existing canonical check and fingerprint query to its connection.
+
+- Observation: the runtime-schema milestone changed
+  `crates/syrup-rail-postgres/schema/v1/README.md`, despite the repository rule
+  that `schema/v1/**` is immutable.
+  Evidence: `git diff --name-status 005a9ad..HEAD --
+  crates/syrup-rail-postgres/schema/v1` identified only that README change;
+  the v1 install SQL was never changed.
+  Resolution: the final documentation-only completion commit restores the README
+  exactly to its pre-work content. After that forward correction, the complete
+  v1 directory matches the pre-work baseline.
 
 ## Decision Log
 
@@ -150,7 +160,7 @@ The behavior is observable through public API tests and PostgreSQL integration s
 
 ## Outcomes & Retrospective
 
-Milestone 1 is complete: the public service now admits and executes exact cancellation, discount claim, and discount clear commands. Cancellation keeps canonical mutation, typed event append, and commit on the coordinator's single host-prepared transaction; semantic replays/blockers emit no event, while mutation or append errors roll back. Discount mutations preserve existing typed outcomes without gateway resolution or provider I/O. Core identity/admission tests and PostgreSQL integration scenarios cover allowed and denied admission, atomic append/mutation rollback, replay, blockers, and discount paths. The final retrospective will add the complete cross-milestone commit list and repository-wide validation evidence.
+Milestone 1 is complete: the public service now admits and executes exact cancellation, discount claim, and discount clear commands. Cancellation keeps canonical mutation, typed event append, and commit on the coordinator's single host-prepared transaction; semantic replays/blockers emit no event, while mutation or append errors roll back. Discount mutations preserve existing typed outcomes without gateway resolution or provider I/O. Core identity/admission tests and PostgreSQL integration scenarios cover allowed and denied admission, atomic append/mutation rollback, replay, blockers, and discount paths.
 
 Milestone 2 is complete: public core types now model an authorized exact billing portal query, canonical entitlement snapshot, optional masked-card display, checked payment-history page size, strict cursor, and safe payment-history facts. PostgreSQL retains the existing entitlement SQL as the authority and evaluates it with the card projection in one `REPEATABLE READ READ ONLY` snapshot. The history reader uses a narrow, explicit select list and strict descending `(created_at, id)` pagination with one extra row; it never constructs `PaymentAttempt` or selects protected provider/contact/diagnostic columns. Core and PostgreSQL tests cover value-free formatting, bounds, empty/active/trial/dunning/canceled/grant/scrubbed snapshots, saved/applied discounts, exact identity isolation, timestamp ties, zero-value method updates, host-charge exclusion, and redaction.
 
@@ -193,6 +203,26 @@ gateway cooldowns deliberately report no fabricated delay. Exhaustive service,
 cancellation, discount, resolution, readiness, and definitely-not-submitted
 mapping coverage makes every current category an intentional policy decision;
 the host integration helper uses a wildcard for future dispositions.
+
+Final completion audit (2026-08-11) confirmed the linear delivery history:
+
+- Prerequisite 0.2 API cutover: `25f4823fc90101a2adcc4f118cb61f83c8d1c44b` — Rename subscription billing service error.
+- Milestone 1: `b2d7608a710f0125614d421b7dc70b20a9c23c84` — Add subscriber cancellation and discount facade.
+- Milestone 2: `a53f916d55933eedfb84e0498d4bdb3949839321` — Add typed billing portal reads.
+- Milestone 3: `d024bf2a3891929e9f06316ab1477feee17fd486` — Add stable renewal dispatch pagination.
+- Milestone 4: `3814be09181d0eb1415c903bed788c28f4c8a7dc` — Add runtime schema v2 compatibility assertion.
+- Milestone 5: `2c11a33f5560874aa38fce527363adfdfa9dc305` — Add service error dispositions.
+
+Before the documentation-only completion correction, every required final gate
+exited 0: `cargo fmt --all -- --check`; `cargo check --workspace --all-targets
+--locked`; `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked`;
+`scripts/jig check contract --no-receipt`; `scripts/jig check sqlx
+--no-receipt`; `scripts/jig check test-locked --no-receipt`; and `scripts/jig
+check test --no-receipt`. `git diff --check` was clean. The final correction
+restores the sole changed v1 README to its pre-work content; v1 install SQL was
+never changed, and `git diff 005a9ad..HEAD --
+crates/syrup-rail-postgres/schema/v1` is empty after the completion commit.
 
 ## Context and Orientation
 
