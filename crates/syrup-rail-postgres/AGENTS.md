@@ -192,8 +192,9 @@ and transaction orchestration.
 
 - No runtime migrator in production service construction.
 - `assert_runtime_schema_v2_compatible` must reuse the complete canonical v2
-  catalog/fingerprint check in one read-only snapshot; hosts apply versioned
-  install and forward-only upgrade artifacts through their own migrations.
+  catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
+  major other than 18, and run no DDL; hosts apply versioned install and
+  forward-only upgrade artifacts through their own migrations.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
 - The feature-gated `assert_v1_conforms` and `assert_v2_conforms` wrappers are
@@ -201,6 +202,9 @@ and transaction orchestration.
   and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;
   `billing_*` constraint and index names are reserved for canonical objects.
+  Separately named host tables, constraints, indexes, functions, and triggers
+  are supported extensions. Canonical table and view columns are closed, so
+  host-specific columns on them are unsupported regardless of prefix.
 - Host code composes transaction-local operations on its existing connection;
   shared operations never persist or receive plaintext provider credentials.
 - Hosts classify high-level service failures through
@@ -251,6 +255,10 @@ and transaction orchestration.
   exact reconciliation, and operator review apply qualifying automatic
   customer failures through `renewal_failure.rs` and append every returned
   event before commit.
+- Renewal dispatch applies subscription, provider, account, update, and cursor
+  gates before a lateral probe of the exact `(subscription_id,
+  next_renewal_at)` attempt history. Do not restore a global attempt-history
+  aggregate or broaden the period predicate.
 - A qualifying automatic-renewal failure is terminal attempt history. Late
   approved evidence is retained through processor-charge reversal review
   without rewriting that terminal attempt. Runtime v2 transitions require
@@ -264,6 +272,10 @@ and transaction orchestration.
   causal-history boundary in `renewal_failure.rs`; it owns admission of the
   first v2 automatic result and access timing for cancellation and terminal
   events.
+- `SubscriptionPaymentFailed.access` is the canonical post-failure access
+  projection. Build it only from the locked subscription's snapshotted policy
+  and causal failure history, and reuse the same projection for any matching
+  terminal event boundary.
 - Discount-code list and disable operations administer durable records without
   consulting the current offer. Only active create/update, validation, and
   claim paths lock the host offer and construct current pricing.
@@ -280,6 +292,11 @@ and transaction orchestration.
 - Protected-write admission requires the caller's SQL transaction so accepted
   paid/grant locks remain held through the host mutation; it restores the
   caller's prior transaction-local `lock_timeout` after semantic results.
+- Only provider-free subscriber mutations may promote pool acquisition
+  timeouts or PostgreSQL's explicit retry conditions (serialization, deadlock,
+  lock timeout, or statement timeout) to `StorageTemporarilyUnavailable`.
+  Generic SQL and any path that may have crossed provider I/O remain `Internal`
+  unless an owning workflow proves a stronger outcome.
 
 ## Common commands
 

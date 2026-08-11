@@ -2,6 +2,22 @@ use super::fixtures::*;
 use super::storage_fixtures::*;
 use super::*;
 
+#[test]
+fn runtime_schema_contract_accepts_only_postgresql_18() {
+    for server_version_num in [180000, 180999] {
+        assert!(require_supported_postgres_version_num(server_version_num).is_ok());
+    }
+    for server_version_num in [170006, 190000] {
+        assert!(matches!(
+            require_supported_postgres_version_num(server_version_num),
+            Err(crate::SchemaConformanceError::UnsupportedPostgresVersion {
+                required_major: 18,
+                actual_server_version_num,
+            }) if actual_server_version_num == server_version_num
+        ));
+    }
+}
+
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_accepts_a_fresh_v2_install() -> Result<(), Box<dyn Error>>
 {
@@ -55,6 +71,37 @@ async fn runtime_schema_v2_compatibility_accepts_host_prefixed_extensions()
         .await?;
         crate::assert_runtime_schema_v2_compatible(&database.pool).await?;
         Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn runtime_schema_v2_compatibility_rejects_added_columns_on_canonical_tables()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_v2_host_col").await?;
+    let result = async {
+        sqlx::query("ALTER TABLE billing_gateway_accounts ADD COLUMN example_host_note text")
+            .execute(&database.pool)
+            .await?;
+
+        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+            Err(crate::SchemaConformanceError::Contract { version, detail })
+                if version == 2 && detail.contains("canonical catalog fingerprint differs") =>
+            {
+                Ok::<_, Box<dyn Error>>(())
+            }
+            Err(error) => Err(io::Error::other(format!(
+                "expected an added canonical-column diagnostic, got {error}"
+            ))
+            .into()),
+            Ok(()) => Err(io::Error::other(
+                "runtime schema-v2 compatibility accepted a host column on a canonical table",
+            )
+            .into()),
+        }
     }
     .await;
     let cleanup = database.cleanup().await;

@@ -1,7 +1,8 @@
 # Syrup Rail PostgreSQL schema v2
 
-Schema v2 is the current canonical contract. New hosts copy `install.sql`
-byte-for-byte into an immutable host migration. Existing schema-v1 hosts copy
+Schema v2 on PostgreSQL 18 is the current canonical contract. PostgreSQL 18 is
+the only supported major. New hosts copy `install.sql` byte-for-byte into an
+immutable host migration. Existing schema-v1 hosts copy
 `upgrade_from_v1.sql` byte-for-byte into one forward-only transactional
 migration; they must not run `install.sql` over v1.
 
@@ -75,7 +76,10 @@ not embed or expose them as a runtime migrator. Hosts copy the checked-in SQL
 into their own immutable migration deployment, then may call
 `assert_runtime_schema_v2_compatible` before serving billing traffic. That
 read-only runtime assertion verifies the full v2 catalog and fingerprint; it
-does not run any install, upgrade, preflight, or audit SQL. After release, all
-four SQL files are immutable distribution artifacts. Hosts may add separately
-named host objects after installation, subject to the canonical conformance
-rules.
+first verifies PostgreSQL 18 and does not run any install, upgrade, preflight,
+or audit SQL. After release, all four SQL files are immutable distribution
+artifacts. Hosts may add separately named, host-prefixed tables, constraints,
+indexes, functions, and triggers after installation. Canonical relation and
+view columns are a closed contract: hosts must not add host-specific columns to
+them, even with a prefix, because the runtime fingerprint intentionally rejects
+that shape.

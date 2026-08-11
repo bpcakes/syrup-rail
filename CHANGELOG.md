@@ -20,7 +20,9 @@ separate release task.
   enrollment, recovery, and payment-method replacement commands.
 - Add checked `DunningRetryDelay` constructors for whole hours, whole days, and
   exact `std::time::Duration` values, plus array-friendly
-  `DunningSchedule::from_delays` construction.
+  `DunningSchedule::from_delays` construction. Both iterator-based schedule
+  constructors consume at most the supported sixteen steps plus one overflow
+  witness.
 - Add per-subscription relative dunning schedules, configurable exhausted
   behavior and past-due access, terminal `unpaid` state, and provider-neutral
   nonpayment lifecycle events.
@@ -46,9 +48,11 @@ separate release task.
   compatible fixed-first-page helper.
 - Add default-feature `assert_runtime_schema_v2_compatible` startup validation.
   It uses the exact schema-contract catalog and fingerprint checks in one
-  repeatable-read, read-only transaction, accepts host-prefixed extensions, and
-  fails closed for v1 or canonical drift without embedding or exposing a
-  production migrator.
+  repeatable-read, read-only transaction, requires PostgreSQL 18, accepts
+  separately named host-prefixed objects, and fails closed for v1, added
+  canonical columns, or other canonical drift without embedding or exposing a
+  production migrator. `SUPPORTED_POSTGRES_MAJOR_VERSION` exposes the required
+  major to host startup code.
 - Add non-exhaustive `SubscriptionBillingServiceError` dispositions for
   conflict, rejected, temporarily unavailable, misconfigured, and internal
   failures. Hosts can use the conservative retry helpers without exposing
@@ -105,8 +109,17 @@ separate release task.
   `SubscriptionBillingServiceError`. The service error covers enrollment,
   recovery, renewal, payment-method replacement, reconciliation, and optional
   host-charge orchestration. Its generic storage and application messages now
-  use billing/payment terminology; variant-specific behavior and error sources
-  are unchanged.
+  use billing/payment terminology while retaining typed error sources.
+- Provider-free cancellation and discount transactions now surface pool
+  acquisition timeouts and PostgreSQL serialization, deadlock, lock-timeout,
+  and statement-timeout failures as `StorageTemporarilyUnavailable`. Its
+  disposition is retryable without an invented delay. Other storage failures,
+  including ambiguous provider-facing paths, remain internal.
+- Renewal dispatch selection now applies non-attempt eligibility first and
+  probes the indexed attempt history only for each candidate's exact current
+  billing period. Eligibility, ordering, page size, and cursor semantics are
+  unchanged; unrelated historical attempts are no longer globally aggregated
+  for every page.
 - Replace `next_monthly_billing_period` and `MonthlyBillingPeriodError` with
   `next_billing_period(start_at, rule)` and `BillingPeriodPolicyError`. Pass
   `SubscriptionPeriodRule::calendar_months(1)` for the former monthly behavior.
@@ -148,14 +161,22 @@ separate release task.
   with `DunningSchedule::from_delays`; the second-based APIs remain available
   for persistence adapters.
 - Update event consumers for `SubscriptionStarted.phase`, the closed
-  `SubscriptionPaymentFailureDisposition`, and the new `SubscriptionEnded`
-  event. `Subscription` now exposes phase, recurring-period, failure-policy,
-  and scheduler facts. `Entitlement::PastDue` no longer inherently means that
-  product access is suspended: use `Entitlement::permits_product_access()` for
-  the canonical subscription decision. Inspect `PastDueAccess` separately only
-  when the host needs to present the dunning reason. With
-  `ContinueUntilDunningExhausted` plus `RemainPastDue`, `DunningExhausted` is
-  the access-revocation signal and no `SubscriptionEnded` event follows it.
+  `SubscriptionPaymentFailureDisposition`, the accompanying
+  `SubscriptionPaymentFailureAccess`, and the new `SubscriptionEnded` event.
+  The failure event's `access` field is the canonical post-failure access fact;
+  do not infer access from its disposition or current offer. `Subscription`
+  now exposes phase, recurring-period, failure-policy, and scheduler facts.
+  `Entitlement::PastDue` no longer inherently means that product access is
+  suspended: use `Entitlement::permits_product_access()` for the canonical
+  subscription decision. Inspect `PastDueAccess` separately only when the host
+  needs to present the dunning reason. With
+  `ContinueUntilDunningExhausted` plus `RemainPastDue`, the final failure's
+  `access: Ended { .. }` is the revocation signal and no `SubscriptionEnded`
+  event follows it.
+- Treat `SchemaConformanceError` as non-exhaustive and handle
+  `UnsupportedPostgresVersion` during startup. PostgreSQL 18 is the sole
+  supported major; `SUPPORTED_POSTGRES_MAJOR_VERSION` is the machine-readable
+  requirement.
 
 ## [0.1.1] - 2026-08-09
 

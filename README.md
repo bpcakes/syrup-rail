@@ -52,16 +52,25 @@ persist those provider-neutral events in its own transactional outbox and run
 product-specific cleanup asynchronously; Syrup Rail does not call host
 fulfillment integrations.
 
+Every `SubscriptionPaymentFailed` carries a
+`SubscriptionPaymentFailureAccess` outcome. Consume that field as the
+canonical product-access fact immediately after the failure; it already
+accounts for the subscription's snapshotted access policy and causal failure
+history. In particular, an immediate-suspension retry carries the original
+access boundary even though automatic dunning remains open. Hosts must not
+reconstruct this decision from the failure disposition or current offer.
+
 `RemainPastDue` instead keeps the financial lifecycle open with no further
 automatic payment scheduled. It does not emit `SubscriptionEnded`. When the
 access policy is `ContinueUntilDunningExhausted`, the final
 `SubscriptionPaymentFailed { disposition: DunningExhausted { exhausted_at } }`
-is the host's access-revocation signal: the subscription entitlement changes
-from `AllowedDuringDunning` to `Suspended` at `exhausted_at`. Hosts that mirror
-access outside Syrup Rail must consume that disposition from their
-transactional outbox.
+also carries `access: Ended { access_ended_at: exhausted_at }`: the
+subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
+at that boundary. Hosts that mirror access outside Syrup Rail must consume the
+event's `access` outcome from their transactional outbox.
 
-PostgreSQL schema v2 is the current contract. New hosts install
+PostgreSQL 18 is the only supported database major, and schema v2 is the
+current contract. New hosts install
 [`schema/v2/install.sql`](crates/syrup-rail-postgres/schema/v2/install.sql),
 while v1 hosts follow the checked-in
 [`v1` to `v2` cutover guide](crates/syrup-rail-postgres/schema/v2/README.md).
@@ -79,12 +88,16 @@ After the host has applied its immutable v2 install or forward-only v1-to-v2
 upgrade migration, call
 `assert_runtime_schema_v2_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v2 catalog and fingerprint inside one repeatable-read, read-only transaction;
-it permits explicit host-prefixed extensions but fails closed for v1 or
-canonical drift. It never executes install, upgrade, preflight, or audit SQL.
-Hosts remain responsible for applying and coordinating their own migrations.
-The compiled host integration example includes a default-feature helper for
-this startup check.
+v2 catalog and fingerprint inside one repeatable-read, read-only transaction.
+It first rejects every PostgreSQL major other than 18. Separately named
+host-prefixed tables, constraints, indexes, functions, and triggers are valid
+extension points, but canonical table and view columns are closed: adding even
+a host-prefixed column to a canonical relation is unsupported and fails the
+fingerprint check. The assertion also fails closed for v1 or other canonical
+drift. It never executes install, upgrade, preflight, or audit SQL. Hosts remain
+responsible for applying and coordinating their own migrations. The compiled
+host integration example includes a default-feature helper for this startup
+check.
 
 After the host has authenticated and authorized an exact billing scope,
 subscriber, and plan, the same service also exposes `cancel`, `claim_discount`,
@@ -104,6 +117,12 @@ success. `retry_after()` returns an exact delay only for admission denial.
 Gateway and account cooldowns are temporarily unavailable but deliberately do
 not receive a fabricated delay. Conflicts are not retryable as-is: reload and
 rebuild against current authority, or reconcile the existing idempotency key.
+Provider-free cancellation and discount transactions also preserve pool
+acquisition timeouts and PostgreSQL's serialization, deadlock, lock-timeout,
+and statement-timeout conditions as `StorageTemporarilyUnavailable`; replaying
+those idempotent operations is safe. Generic storage faults and failures on
+paths that may have crossed provider I/O remain `Internal` because their
+outcome is ambiguous.
 
 For customer billing pages, construct a `SubscriptionBillingPortalQuery` from
 that same authorized exact identity and call `subscription_billing_portal`. It
@@ -127,7 +146,9 @@ reconstruct cursors only in trusted host code from a prior page—never accept a
 cursor from an end user. This is not a lease or queue writer: the host writes
 its own outbox/queue record and each eventual renewal still rechecks current
 canonical state. `due_renewals` remains the compatible fixed-100 first-page
-helper.
+helper. Each scan first applies subscription/account/provider gates, then
+probes only each eligible subscription's exact current-period attempt history;
+unrelated historical attempts are not globally aggregated on every page.
 
 Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
 compile the integration boundary without contacting a database or provider.

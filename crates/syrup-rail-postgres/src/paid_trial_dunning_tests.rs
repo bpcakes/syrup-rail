@@ -28,8 +28,9 @@ use syrup_rail::{
     SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
     SubscriptionDiscountSnapshot, SubscriptionEndReason, SubscriptionEnrollmentExpectedTerms,
     SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentReservation,
-    SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentFailureDisposition,
-    SubscriptionPeriodRule, SubscriptionPhase, SubscriptionRenewalOutcome, SubscriptionStatus,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentFailureAccess,
+    SubscriptionPaymentFailureDisposition, SubscriptionPeriodRule, SubscriptionPhase,
+    SubscriptionRenewalOutcome, SubscriptionStatus,
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;

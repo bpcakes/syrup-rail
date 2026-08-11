@@ -152,9 +152,73 @@ fn first_failure_decision_projects_retry_and_event_without_persistence() {
         transition.events[0],
         BillingEvent::SubscriptionPaymentFailed {
             disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
             ..
-        } if retry_at == timestamp(260)
+        } if retry_at == timestamp(260) && access_ended_at == timestamp(200)
     ));
+}
+
+#[test]
+fn failure_event_projection_carries_the_complete_access_consequence() {
+    let history = causal_history(AutomaticRenewalFailureHistory::Repeated {
+        count: 2,
+        first: failure(1, 200),
+        previous: failure(1, 200),
+        latest: failure(2, 300),
+    });
+    let schedule = DunningSchedule::from_seconds([60]).expect("valid dunning schedule");
+
+    let suspend = RenewalFailurePolicy::new(
+        schedule.clone(),
+        DunningExhaustion::RemainPastDue,
+        PastDueAccessPolicy::SuspendImmediately,
+    );
+    assert_eq!(
+        failure_event_projection(
+            &suspend,
+            history,
+            RenewalFailureDisposition::RetryScheduled {
+                retry_at: timestamp(360),
+            },
+        )
+        .expect("immediate suspension has a causal boundary")
+        .access,
+        SubscriptionPaymentFailureAccess::Ended {
+            access_ended_at: timestamp(200),
+        }
+    );
+
+    let continue_access = RenewalFailurePolicy::new(
+        schedule,
+        DunningExhaustion::RemainPastDue,
+        PastDueAccessPolicy::ContinueUntilDunningExhausted,
+    );
+    assert_eq!(
+        failure_event_projection(
+            &continue_access,
+            history,
+            RenewalFailureDisposition::RetryScheduled {
+                retry_at: timestamp(360),
+            },
+        )
+        .expect("scheduled dunning retains access")
+        .access,
+        SubscriptionPaymentFailureAccess::ContinuesDuringDunning
+    );
+    assert_eq!(
+        failure_event_projection(
+            &continue_access,
+            history,
+            RenewalFailureDisposition::RemainPastDue {
+                exhausted_at: timestamp(300),
+            },
+        )
+        .expect("exhausted dunning has a causal boundary")
+        .access,
+        SubscriptionPaymentFailureAccess::Ended {
+            access_ended_at: timestamp(300),
+        }
+    );
 }
 
 #[test]
@@ -195,9 +259,14 @@ fn first_automatic_failure_after_legacy_recovery_preserves_suspension_boundary()
     assert!(matches!(
         transition.events.as_slice(),
         [
-            BillingEvent::SubscriptionPaymentFailed { .. },
+            BillingEvent::SubscriptionPaymentFailed {
+                access: SubscriptionPaymentFailureAccess::Ended {
+                    access_ended_at: failure_access_ended_at,
+                },
+                ..
+            },
             BillingEvent::SubscriptionEnded { access_ends_at, .. }
-        ] if *access_ends_at == timestamp(50)
+        ] if *failure_access_ended_at == timestamp(50) && *access_ends_at == timestamp(50)
     ));
 }
 
@@ -325,9 +394,15 @@ fn terminal_event_access_boundary_follows_the_snapshotted_policy() {
         assert!(matches!(
             transition.events.as_slice(),
             [
-                BillingEvent::SubscriptionPaymentFailed { .. },
+                BillingEvent::SubscriptionPaymentFailed {
+                    access: SubscriptionPaymentFailureAccess::Ended {
+                        access_ended_at: failure_access_ended_at,
+                    },
+                    ..
+                },
                 BillingEvent::SubscriptionEnded { access_ends_at, .. }
-            ] if *access_ends_at == expected_access_end
+            ] if *failure_access_ended_at == expected_access_end
+                && *access_ends_at == expected_access_end
         ));
     }
 }

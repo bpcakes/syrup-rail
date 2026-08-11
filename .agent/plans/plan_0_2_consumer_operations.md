@@ -6,7 +6,7 @@ This ExecPlan is a living document. The sections `Progress`, `Surprises & Discov
 
 After this work, a host can use the high-level PostgreSQL billing service for every subscriber-owned billing mutation instead of rebuilding cancellation and discount admission around low-level functions. A host can also render a billing portal from typed, redacted Rust read models, drain every renewal that was due in one stable scan even when more than one hundred subscriptions are ready, verify schema-v2 compatibility at process startup without running a migrator, and classify service failures without exhaustively coupling itself to every internal variant.
 
-The behavior is observable through public API tests and PostgreSQL integration scenarios. Cancellation must append its typed event in the same host-prepared transaction as the subscription mutation. Billing reads must not expose payment tokens, provider payment-method references, transaction identifiers, billing contacts, or raw gateway diagnostics. Renewal pagination must return more than one hundred unchanged due subscriptions exactly once across one scan while every later `renew` call retains its existing current-state revalidation. The runtime schema check must accept both a fresh v2 catalog and a valid v1-to-v2 upgraded catalog, reject v1, permit host-prefixed extensions, and never execute DDL. Error classifications must be closed values with documented conservative retry semantics.
+The behavior is observable through public API tests and PostgreSQL integration scenarios. Cancellation must append its typed event in the same host-prepared transaction as the subscription mutation. Billing reads must not expose payment tokens, provider payment-method references, transaction identifiers, billing contacts, or raw gateway diagnostics. Renewal pagination must return more than one hundred unchanged due subscriptions exactly once across one scan while every later `renew` call retains its existing current-state revalidation. The runtime schema check must accept both a fresh v2 catalog and a valid v1-to-v2 upgraded catalog, reject v1, require PostgreSQL 18, permit separately named host objects without permitting extra columns on canonical relations, and never execute DDL. Error classifications must be closed values with documented conservative retry semantics.
 
 ## Progress
 
@@ -18,6 +18,7 @@ The behavior is observable through public API tests and PostgreSQL integration s
 - [x] (2026-08-11) Add and commit the production runtime schema-v2 compatibility check.
 - [x] (2026-08-11) Add and commit structured service-error dispositions and non-exhaustive operational-error hardening.
 - [x] (2026-08-11) Run all repository gates, audit every requirement and milestone commit against current evidence, restore the schema-v1 documentation baseline, and record the final outcome.
+- [x] (2026-08-11) Complete post-review hardening: make payment-failure access explicit, preserve retry-safe provider-free storage failures, bound persisted schedule iterators, localize renewal history aggregation, enforce PostgreSQL 18 and closed canonical columns, then rerun all repository gates.
 
 ## Surprises & Discoveries
 
@@ -82,6 +83,32 @@ The behavior is observable through public API tests and PostgreSQL integration s
   Resolution: the final documentation-only completion commit restores the README
   exactly to its pre-work content. After that forward correction, the complete
   v1 directory matches the pre-work baseline.
+
+- Observation: a payment-failure disposition described scheduler/lifecycle
+  state but did not completely describe product access. Immediate suspension
+  can coexist with a scheduled retry, and a legacy recovery can own an access
+  boundary earlier than the current automatic failure.
+  Resolution: `SubscriptionPaymentFailed` now carries one typed access
+  projection derived beside its disposition from snapshotted policy and causal
+  history; terminal events reuse the same projected boundary.
+
+- Observation: cancellation and discount operations intentionally install
+  short PostgreSQL timeouts, but the service facade collapsed those known,
+  rollback-safe failures into `Internal` together with ambiguous storage and
+  provider-facing failures.
+  Resolution: the provider-free transaction boundary now promotes only pool
+  acquisition timeout and an explicit transient SQLSTATE allowlist to
+  `StorageTemporarilyUnavailable`; every unrecognized storage fault remains
+  internal.
+
+- Observation: due-renewal paging globally aggregated renewal/recovery attempt
+  history before filtering to due candidates, and the runtime schema language
+  did not distinguish supported host objects from unsupported columns added to
+  canonical relations.
+  Resolution: paging now applies non-attempt gates first and probes the indexed
+  exact-period history laterally. Runtime conformance now checks PostgreSQL 18,
+  accepts separately named host objects, and has regression coverage that
+  rejects added canonical columns.
 
 ## Decision Log
 
@@ -158,6 +185,23 @@ The behavior is observable through public API tests and PostgreSQL integration s
   explicitly so new cases require a policy choice.
   Date/Author: 2026-08-11 / Codex.
 
+- Decision: Keep payment failure as one closed `BillingEvent` variant and add
+  an orthogonal `SubscriptionPaymentFailureAccess` outcome rather than adding
+  policy-specific event variants or asking hosts to re-run offer policy.
+  Rationale: disposition and access are independent consumer questions. One
+  projection point prevents every outbox consumer from duplicating causal
+  history and snapshot semantics.
+  Date/Author: 2026-08-11 / Codex.
+
+- Decision: PostgreSQL 18 is the sole supported major, and canonical relation
+  columns are closed. Host customization uses separately named, host-prefixed
+  tables, constraints, indexes, functions, or triggers instead.
+  Rationale: one enforced major keeps catalog fingerprints meaningful, while a
+  closed row shape protects fixed-column codecs and queries from silent host
+  coupling. Maintaining per-major fingerprints or allowing arbitrary columns
+  would multiply the compatibility surface without a supported use case.
+  Date/Author: 2026-08-11 / Codex.
+
 ## Outcomes & Retrospective
 
 Milestone 1 is complete: the public service now admits and executes exact cancellation, discount claim, and discount clear commands. Cancellation keeps canonical mutation, typed event append, and commit on the coordinator's single host-prepared transaction; semantic replays/blockers emit no event, while mutation or append errors roll back. Discount mutations preserve existing typed outcomes without gateway resolution or provider I/O. Core identity/admission tests and PostgreSQL integration scenarios cover allowed and denied admission, atomic append/mutation rollback, replay, blockers, and discount paths.
@@ -203,6 +247,29 @@ gateway cooldowns deliberately report no fabricated delay. Exhaustive service,
 cancellation, discount, resolution, readiness, and definitely-not-submitted
 mapping coverage makes every current category an intentional policy decision;
 the host integration helper uses a wildcard for future dispositions.
+
+Post-review hardening is complete. `SubscriptionPaymentFailed` now carries one
+canonical access outcome, and terminal failure events reuse the same causal
+boundary. Provider-free subscriber mutations retain only explicitly retry-safe
+storage conditions. Persisted dunning construction is bounded before
+allocation, renewal paging probes only exact candidate-period history, and the
+runtime schema assertion enforces PostgreSQL 18 plus the closed canonical
+column shape. No schema SQL, schema-v1 artifact, or SQLx metadata changed.
+
+The post-review gate set exited 0 for `cargo fmt --all -- --check`; `cargo check
+--workspace --all-targets --locked`; `cargo clippy --workspace --all-targets
+--locked -- -D warnings`; `RUSTDOCFLAGS="-D warnings" cargo doc --workspace
+--no-deps --locked`; `scripts/jig check contract --no-receipt`; `scripts/jig
+check sqlx --no-receipt`; and `scripts/jig check test-locked --no-receipt`.
+The first default-parallel `scripts/jig check test --no-receipt` invocation ran
+109 of 143 PostgreSQL tests successfully and reported only 34 shared-host
+`WaitContainer(StartupTimeout)` failures while two unrelated worktrees were
+running long Cargo test processes. The same unlocked all-features gate then
+exited 0 with `RUST_TEST_THREADS=1`; test selection and code under test were
+unchanged. Focused coverage separately passed the renewal-failure projection,
+paid-trial access policy, service error matrix, real cancellation/discount
+lock timeouts with replay, all seven renewal pagination scenarios, and all
+eight schema-v2 scenarios.
 
 Final completion audit (2026-08-11) confirmed the linear delivery history:
 

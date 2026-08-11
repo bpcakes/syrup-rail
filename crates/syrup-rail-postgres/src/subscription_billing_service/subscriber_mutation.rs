@@ -66,7 +66,11 @@ impl SubscriptionBillingService {
         )
         .await?;
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(provider_free_transaction_error)?;
         let outcome = match crate::discounts::claim_subscription_discount_on_connection(
             &mut transaction,
             self.offers.as_ref(),
@@ -80,7 +84,10 @@ impl SubscriptionBillingService {
                 return Err(error.into());
             }
         };
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(provider_free_transaction_error)?;
         Ok(outcome)
     }
 
@@ -100,7 +107,11 @@ impl SubscriptionBillingService {
         )
         .await?;
 
-        let mut transaction = self.pool.begin().await?;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(provider_free_transaction_error)?;
         let outcome = match crate::discounts::clear_subscription_discount_on_connection(
             &mut transaction,
             command.billing_scope_id(),
@@ -115,7 +126,10 @@ impl SubscriptionBillingService {
                 return Err(error.into());
             }
         };
-        transaction.commit().await?;
+        transaction
+            .commit()
+            .await
+            .map_err(provider_free_transaction_error)?;
         Ok(outcome)
     }
 }

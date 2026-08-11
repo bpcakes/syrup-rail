@@ -93,6 +93,35 @@ pub enum SubscriptionPaymentFailureDisposition {
     SubscriptionEnded { ended_at: DateTime<Utc> },
 }
 
+/// The canonical product-access fact immediately after a subscription payment
+/// failure is applied.
+///
+/// This is an outcome derived from the subscription's snapshotted access
+/// policy and durable failure history. Event consumers must use this value
+/// rather than reinterpret current offer configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SubscriptionPaymentFailureAccess {
+    /// Product access remains available while automatic dunning is scheduled.
+    ContinuesDuringDunning,
+    /// Product access ended at the durable causal boundary.
+    Ended { access_ended_at: DateTime<Utc> },
+}
+
+impl SubscriptionPaymentFailureAccess {
+    /// Returns whether this failure leaves product access available.
+    pub const fn permits_product_access(self) -> bool {
+        matches!(self, Self::ContinuesDuringDunning)
+    }
+
+    /// Returns the durable access boundary when product access has ended.
+    pub const fn access_ended_at(self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::ContinuesDuringDunning => None,
+            Self::Ended { access_ended_at } => Some(access_ended_at),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SubscriptionEndReason {
     NonPayment,
@@ -120,6 +149,7 @@ pub enum BillingEvent {
         subscription_id: SubscriptionId,
         plan_key: PlanKey,
         disposition: SubscriptionPaymentFailureDisposition,
+        access: SubscriptionPaymentFailureAccess,
     },
     SubscriptionEnded {
         attempt_id: PaymentAttemptId,
@@ -227,6 +257,7 @@ mod tests {
                     disposition: SubscriptionPaymentFailureDisposition::RetryScheduled {
                         retry_at: end,
                     },
+                    access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
                 },
                 BillingEventKey::SubscriptionPaymentFailed(attempt(4)),
             ),
@@ -283,5 +314,22 @@ mod tests {
         assert!(!debug.contains("visa_sentinel"));
         assert!(!debug.contains("1234"));
         assert_eq!(card.to_string(), "[redacted]");
+    }
+
+    #[test]
+    fn payment_failure_access_is_a_self_contained_projection_fact() {
+        let ended = Utc.with_ymd_and_hms(2026, 8, 2, 0, 0, 0).unwrap();
+
+        assert!(SubscriptionPaymentFailureAccess::ContinuesDuringDunning.permits_product_access());
+        assert_eq!(
+            SubscriptionPaymentFailureAccess::ContinuesDuringDunning.access_ended_at(),
+            None
+        );
+
+        let access = SubscriptionPaymentFailureAccess::Ended {
+            access_ended_at: ended,
+        };
+        assert!(!access.permits_product_access());
+        assert_eq!(access.access_ended_at(), Some(ended));
     }
 }

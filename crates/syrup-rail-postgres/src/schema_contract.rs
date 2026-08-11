@@ -5,6 +5,10 @@ use std::collections::BTreeSet;
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 
+/// The only PostgreSQL major version supported by this crate and schema
+/// contract.
+pub const SUPPORTED_POSTGRES_MAJOR_VERSION: u16 = 18;
+
 // These artifacts are intentionally unavailable to ordinary production
 // dependencies. Hosts materialize them through their own migration system;
 // the explicit feature is for contract fixtures and migration tests only.
@@ -142,10 +146,18 @@ const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
 /// [`crate::assert_runtime_schema_v2_compatible`] reports version `2` in its
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
 /// or commit the read-only catalog snapshot.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum SchemaConformanceError {
     #[error("schema conformance query failed: {0}")]
     Database(#[from] sqlx::Error),
+    #[error(
+        "PostgreSQL major version {required_major} is required; connected server reported server_version_num={actual_server_version_num}"
+    )]
+    UnsupportedPostgresVersion {
+        required_major: u16,
+        actual_server_version_num: i32,
+    },
     #[error("schema version {version} does not conform: {detail}")]
     Contract { version: u16, detail: String },
 }
@@ -158,7 +170,8 @@ pub enum SchemaConformanceError {
 /// This function does not install, upgrade, preflight, audit, or otherwise
 /// mutate the schema. It runs the same full canonical v2 catalog conformance
 /// and fingerprint check used by the schema-contract tests in one
-/// `REPEATABLE READ READ ONLY` PostgreSQL transaction.
+/// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
+/// 18 is required; other majors are rejected before catalog comparison.
 pub async fn assert_runtime_schema_v2_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -204,12 +217,20 @@ async fn assert_schema_conforms_in_read_only_snapshot(
     let mut transaction = pool
         .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .await?;
-    let result = assert_schema_conforms(
-        &mut transaction,
-        version,
-        current_subscription_columns,
-        expected_fingerprint,
-    )
+    let result = async {
+        let server_version_num =
+            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::integer")
+                .fetch_one(&mut *transaction)
+                .await?;
+        require_supported_postgres_version_num(server_version_num)?;
+        assert_schema_conforms(
+            &mut transaction,
+            version,
+            current_subscription_columns,
+            expected_fingerprint,
+        )
+        .await
+    }
     .await;
     match result {
         Ok(()) => transaction.commit().await?,
@@ -219,6 +240,19 @@ async fn assert_schema_conforms_in_read_only_snapshot(
         }
     }
     Ok(())
+}
+
+fn require_supported_postgres_version_num(
+    actual_server_version_num: i32,
+) -> Result<(), SchemaConformanceError> {
+    if actual_server_version_num / 10_000 == i32::from(SUPPORTED_POSTGRES_MAJOR_VERSION) {
+        Ok(())
+    } else {
+        Err(SchemaConformanceError::UnsupportedPostgresVersion {
+            required_major: SUPPORTED_POSTGRES_MAJOR_VERSION,
+            actual_server_version_num,
+        })
+    }
 }
 
 async fn assert_schema_conforms(

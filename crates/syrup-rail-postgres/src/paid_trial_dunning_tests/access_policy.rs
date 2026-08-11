@@ -78,6 +78,15 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         "suspend_terminal_failure_1",
     )
     .await?;
+    assert!(events.lock().await.iter().any(|event| matches!(
+        event,
+        BillingEvent::SubscriptionPaymentFailed {
+            subscription_id,
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+            ..
+        } if *subscription_id == suspended_id && *access_ended_at == first_suspended_at
+    )));
     assert!(matches!(
         entitlement(&database.pool, &query(account, suspended_subscriber)).await?,
         Entitlement::PastDue {
@@ -115,6 +124,17 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
     let emitted = events.lock().await.clone();
     assert!(emitted.iter().any(|event| matches!(
         event,
+        BillingEvent::SubscriptionPaymentFailed {
+            subscription_id,
+            disposition: SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+            ..
+        } if *subscription_id == suspended_id
+            && *ended_at == final_suspended_at
+            && *access_ended_at == first_suspended_at
+    )));
+    assert!(emitted.iter().any(|event| matches!(
+        event,
         BillingEvent::SubscriptionEnded {
             subscription_id,
             reason: SubscriptionEndReason::NonPayment,
@@ -150,6 +170,15 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         "remain_failure_1",
     )
     .await?;
+    assert!(events.lock().await.iter().any(|event| matches!(
+        event,
+        BillingEvent::SubscriptionPaymentFailed {
+            subscription_id,
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
+            access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
+            ..
+        } if *subscription_id == remain_id
+    )));
     assert!(matches!(
         entitlement(&database.pool, &query(account, remain_subscriber)).await?,
         Entitlement::PastDue {
@@ -189,8 +218,11 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
             disposition: SubscriptionPaymentFailureDisposition::DunningExhausted {
                 exhausted_at,
             },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
             ..
-        } if *subscription_id == remain_id && *exhausted_at == remain_exhausted_at
+        } if *subscription_id == remain_id
+            && *exhausted_at == remain_exhausted_at
+            && *access_ended_at == remain_exhausted_at
     )));
     let remain_cancel =
         CancelSubscription::new(scope, remain_subscriber, PlanKey::new("identity_pro")?);

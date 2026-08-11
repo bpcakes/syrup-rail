@@ -473,6 +473,109 @@ async fn denied_cancellation_performs_no_database_or_provider_work() -> Result<(
 }
 
 #[tokio::test]
+async fn provider_free_lock_timeouts_are_retryable_without_reclassifying_unknown_storage_errors()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("srv_mut_retry").await?;
+    let result = async {
+        install_host_boundary(&database.pool).await?;
+        let account = create_gateway_account(&database.pool, "test_gateway").await?;
+        let scope = BillingScopeId::new(account.billing_scope_id);
+        let subscriber = SubscriberId::new(Uuid::now_v7());
+        insert_host_subject(&database.pool, scope, subscriber).await?;
+        let cancel_plan = PlanKey::new("retry_cancel")?;
+        insert_active_subscription(&database.pool, account, subscriber, &cancel_plan).await?;
+
+        let discount_plan = PlanKey::new("retry_discount")?;
+        let offers = Arc::new(CountingOfferStore::new(immediate_offer(
+            discount_plan.clone(),
+            ChargeAmount::new(5_900, CurrencyCode::new("USD")?)?,
+        )));
+        let code = SubscriptionDiscountCode::new("RETRY10")?;
+        create_subscription_discount_code(
+            &database.pool,
+            offers.as_ref(),
+            &SubscriptionDiscountCodeCreation::new(
+                DiscountCodeId::new(Uuid::now_v7()),
+                scope,
+                discount_plan.clone(),
+                code.clone(),
+                None,
+                SubscriptionDiscountKind::AmountOffCents(PositiveDiscountCents::new(500)?),
+                CurrencyCode::new("USD")?,
+                SubscriptionDiscountDuration::Indefinite,
+            )?,
+        )
+        .await?;
+        let resolver = Arc::new(CountingResolver {
+            calls: AtomicUsize::new(0),
+        });
+        let service = SubscriptionBillingService::new(
+            database.pool.clone(),
+            offers,
+            resolver.clone(),
+            Arc::new(RecordingAdmission::allowed()),
+            Arc::new(TestCoordinator::new(database.pool.clone(), false)),
+        );
+
+        let cancel_blocker =
+            hold_subscription_aggregate_lock(&database.pool, subscriber, &cancel_plan).await?;
+        let cancel_error = service
+            .cancel(CancelSubscription::new(
+                scope,
+                subscriber,
+                cancel_plan.clone(),
+            ))
+            .await
+            .expect_err("held aggregate lock must time out");
+        assert!(matches!(
+            cancel_error,
+            SubscriptionBillingServiceError::StorageTemporarilyUnavailable(_)
+        ));
+        assert!(cancel_error.is_retryable());
+        assert_eq!(cancel_error.retry_after(), None);
+        cancel_blocker.rollback().await?;
+        assert!(matches!(
+            service
+                .cancel(CancelSubscription::new(scope, subscriber, cancel_plan))
+                .await?,
+            CancelSubscriptionOutcome::Canceled { .. }
+        ));
+
+        let claim = SubscriptionDiscountClaim::new(
+            DiscountClaimId::new(Uuid::now_v7()),
+            scope,
+            subscriber,
+            discount_plan.clone(),
+            code,
+        );
+        let discount_blocker =
+            hold_subscription_aggregate_lock(&database.pool, subscriber, &discount_plan).await?;
+        let discount_error = service
+            .claim_discount(claim.clone())
+            .await
+            .expect_err("held aggregate lock must time out");
+        assert!(matches!(
+            discount_error,
+            SubscriptionBillingServiceError::StorageTemporarilyUnavailable(_)
+        ));
+        assert!(discount_error.is_retryable());
+        assert_eq!(discount_error.retry_after(), None);
+        discount_blocker.rollback().await?;
+        assert!(matches!(
+            service.claim_discount(claim).await?,
+            SubscriptionDiscountClaimOutcome::Saved(_)
+        ));
+
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn discount_service_facade_admits_claim_and_clear_without_provider_or_host_events()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("srv_mut_discount").await?;
@@ -735,6 +838,20 @@ async fn install_host_boundary(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn hold_subscription_aggregate_lock(
+    pool: &PgPool,
+    subscriber: SubscriberId,
+    plan: &PlanKey,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(subscriber.as_uuid())
+        .bind(plan.as_str())
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
 }
 
 async fn insert_host_subject(

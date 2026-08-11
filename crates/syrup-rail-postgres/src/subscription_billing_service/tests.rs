@@ -7,6 +7,18 @@ fn billing_service_error_name_and_generic_messages_cover_the_whole_facade() {
     assert_eq!(sql.to_string(), "subscription billing storage failed");
     assert_eq!(format!("{sql:?}"), "SubscriptionBillingServiceError::Sql");
 
+    let transient =
+        SubscriptionBillingServiceError::StorageTemporarilyUnavailable(sqlx::Error::PoolTimedOut);
+    assert_eq!(
+        transient.to_string(),
+        "subscription billing storage is temporarily unavailable"
+    );
+    assert_eq!(
+        format!("{transient:?}"),
+        "SubscriptionBillingServiceError::StorageTemporarilyUnavailable"
+    );
+    assert!(transient.source().is_some());
+
     let attempt = SubscriptionBillingServiceError::Attempt(PaymentAttemptStoreError::InvalidState(
         "test payment attempt state",
     ));
@@ -98,6 +110,7 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
     // matrix receives an explicit policy decision.
     assert_disposition_matrix!(
         SubscriptionBillingServiceError::Sql(sqlx::Error::RowNotFound) => Internal,
+        SubscriptionBillingServiceError::StorageTemporarilyUnavailable(sqlx::Error::PoolTimedOut) => TemporarilyUnavailable,
         SubscriptionBillingServiceError::Attempt(PaymentAttemptStoreError::InvalidState("test")) => Internal,
         SubscriptionBillingServiceError::Application(SubscriptionEnrollmentApplicationError::InvalidState("test")) => Internal,
         SubscriptionBillingServiceError::HostChargeApplication(HostChargeApplicationError::InvalidState("test")) => Internal,
@@ -172,6 +185,52 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::RateLimited(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
         SubscriptionBillingServiceError::InvalidState("test") => Internal,
     );
+}
+
+#[test]
+fn provider_free_transaction_retry_policy_is_explicit_and_conservative() {
+    assert!(is_retryable_provider_free_transaction_error(
+        &sqlx::Error::PoolTimedOut
+    ));
+    assert!(!is_retryable_provider_free_transaction_error(
+        &sqlx::Error::RowNotFound
+    ));
+    for sqlstate in ["40001", "40P01", "55P03", "57014"] {
+        assert!(
+            is_retryable_provider_free_transaction_sqlstate(sqlstate),
+            "expected {sqlstate} to be retryable"
+        );
+    }
+    for sqlstate in ["00000", "23505", "23514", "42P01", "XX000"] {
+        assert!(
+            !is_retryable_provider_free_transaction_sqlstate(sqlstate),
+            "expected {sqlstate} to remain internal"
+        );
+    }
+}
+
+#[test]
+fn provider_free_transaction_mapping_keeps_unrecognized_storage_faults_internal() {
+    assert!(matches!(
+        provider_free_transaction_error(sqlx::Error::RowNotFound),
+        SubscriptionBillingServiceError::Sql(sqlx::Error::RowNotFound)
+    ));
+    assert!(matches!(
+        SubscriptionBillingServiceError::from(crate::SubscriptionCancellationError::Sql(
+            sqlx::Error::RowNotFound,
+        )),
+        SubscriptionBillingServiceError::Cancellation(crate::SubscriptionCancellationError::Sql(
+            sqlx::Error::RowNotFound
+        ))
+    ));
+    assert!(matches!(
+        SubscriptionBillingServiceError::from(crate::SubscriptionDiscountOperationError::Sql(
+            sqlx::Error::RowNotFound
+        ),),
+        SubscriptionBillingServiceError::Discount(crate::SubscriptionDiscountOperationError::Sql(
+            sqlx::Error::RowNotFound
+        ))
+    ));
 }
 
 #[test]

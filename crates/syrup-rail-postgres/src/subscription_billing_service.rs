@@ -123,6 +123,11 @@ pub enum SubscriptionBillingServiceErrorDisposition {
 pub enum SubscriptionBillingServiceError {
     #[error("subscription billing storage failed")]
     Sql(#[from] sqlx::Error),
+    /// A provider-free local transaction could not acquire capacity or failed
+    /// with an explicitly recognized transient SQLSTATE. Replaying the same
+    /// idempotent operation after the failed transaction is discarded is safe.
+    #[error("subscription billing storage is temporarily unavailable")]
+    StorageTemporarilyUnavailable(#[source] sqlx::Error),
     #[error("payment attempt storage failed")]
     Attempt(#[from] PaymentAttemptStoreError),
     #[error("subscription payment application failed")]
@@ -132,9 +137,9 @@ pub enum SubscriptionBillingServiceError {
     #[error("host charge storage failed")]
     HostChargeStore(#[from] HostChargeStoreError),
     #[error("subscription cancellation failed")]
-    Cancellation(#[from] crate::SubscriptionCancellationError),
+    Cancellation(#[source] crate::SubscriptionCancellationError),
     #[error("subscription discount operation failed")]
-    Discount(#[from] crate::SubscriptionDiscountOperationError),
+    Discount(#[source] crate::SubscriptionDiscountOperationError),
     #[error("host billing transaction failed")]
     BillingTransaction(#[from] crate::BillingTransactionError),
     #[error("host billing event append failed")]
@@ -189,6 +194,8 @@ impl fmt::Debug for SubscriptionBillingServiceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sql(_) => formatter.write_str("SubscriptionBillingServiceError::Sql"),
+            Self::StorageTemporarilyUnavailable(_) => formatter
+                .write_str("SubscriptionBillingServiceError::StorageTemporarilyUnavailable"),
             Self::Attempt(_) => formatter.write_str("SubscriptionBillingServiceError::Attempt"),
             Self::Application(_) => {
                 formatter.write_str("SubscriptionBillingServiceError::Application")
@@ -301,6 +308,9 @@ impl SubscriptionBillingServiceError {
     /// payment values, or durable identifiers.
     pub const fn disposition(&self) -> SubscriptionBillingServiceErrorDisposition {
         match self {
+            Self::StorageTemporarilyUnavailable(_) => {
+                SubscriptionBillingServiceErrorDisposition::TemporarilyUnavailable
+            }
             Self::Sql(_)
             | Self::Attempt(_)
             | Self::Application(_)
@@ -392,6 +402,7 @@ impl SubscriptionBillingServiceError {
         match self {
             Self::AdmissionDenied { retry_after } => Some(*retry_after),
             Self::Sql(_)
+            | Self::StorageTemporarilyUnavailable(_)
             | Self::Attempt(_)
             | Self::Application(_)
             | Self::HostChargeApplication(_)
@@ -422,6 +433,56 @@ impl SubscriptionBillingServiceError {
             | Self::InvalidState(_) => None,
         }
     }
+}
+
+impl From<crate::SubscriptionCancellationError> for SubscriptionBillingServiceError {
+    fn from(error: crate::SubscriptionCancellationError) -> Self {
+        match error {
+            crate::SubscriptionCancellationError::Sql(source)
+                if is_retryable_provider_free_transaction_error(&source) =>
+            {
+                Self::StorageTemporarilyUnavailable(source)
+            }
+            error => Self::Cancellation(error),
+        }
+    }
+}
+
+impl From<crate::SubscriptionDiscountOperationError> for SubscriptionBillingServiceError {
+    fn from(error: crate::SubscriptionDiscountOperationError) -> Self {
+        match error {
+            crate::SubscriptionDiscountOperationError::Sql(source)
+                if is_retryable_provider_free_transaction_error(&source) =>
+            {
+                Self::StorageTemporarilyUnavailable(source)
+            }
+            error => Self::Discount(error),
+        }
+    }
+}
+
+fn provider_free_transaction_error(error: sqlx::Error) -> SubscriptionBillingServiceError {
+    if is_retryable_provider_free_transaction_error(&error) {
+        SubscriptionBillingServiceError::StorageTemporarilyUnavailable(error)
+    } else {
+        SubscriptionBillingServiceError::Sql(error)
+    }
+}
+
+fn is_retryable_provider_free_transaction_error(error: &sqlx::Error) -> bool {
+    if matches!(error, sqlx::Error::PoolTimedOut) {
+        return true;
+    }
+    let sqlx::Error::Database(error) = error else {
+        return false;
+    };
+    error
+        .code()
+        .is_some_and(|code| is_retryable_provider_free_transaction_sqlstate(code.as_ref()))
+}
+
+fn is_retryable_provider_free_transaction_sqlstate(code: &str) -> bool {
+    matches!(code, "40001" | "40P01" | "55P03" | "57014")
 }
 
 const fn cancellation_error_disposition(

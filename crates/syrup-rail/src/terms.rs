@@ -239,12 +239,18 @@ impl DunningSchedule {
         Self::new(retry_delays)
     }
 
+    /// Constructs a schedule from persisted whole-second values.
+    ///
+    /// At most one item beyond the supported limit is consumed so an
+    /// unbounded or unexpectedly large persistence iterator cannot cause
+    /// unbounded allocation.
     pub fn from_seconds<I>(seconds: I) -> Result<Self, SubscriptionTermsError>
     where
         I: IntoIterator<Item = u32>,
     {
         let retry_delays = seconds
             .into_iter()
+            .take(MAX_DUNNING_RETRY_STEPS + 1)
             .map(DunningRetryDelay::new)
             .collect::<Result<Vec<_>, _>>()?;
         Self::new(retry_delays)
@@ -415,7 +421,7 @@ impl SubscriptionOffer {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{cell::Cell, time::Duration};
 
     use super::*;
     use crate::CurrencyCode;
@@ -507,6 +513,26 @@ mod tests {
             DunningSchedule::from_delays([delay; MAX_DUNNING_RETRY_STEPS + 1]),
             Err(SubscriptionTermsError::TooManyDunningRetrySteps)
         );
+    }
+
+    #[test]
+    fn persisted_schedule_stops_after_observing_one_value_beyond_the_cap() {
+        let requested = Cell::new(0);
+        let seconds = std::iter::from_fn(|| {
+            let next = requested.get() + 1;
+            assert!(
+                next <= MAX_DUNNING_RETRY_STEPS + 1,
+                "from_seconds requested an unnecessary value"
+            );
+            requested.set(next);
+            Some(1)
+        });
+
+        assert_eq!(
+            DunningSchedule::from_seconds(seconds),
+            Err(SubscriptionTermsError::TooManyDunningRetrySteps)
+        );
+        assert_eq!(requested.get(), MAX_DUNNING_RETRY_STEPS + 1);
     }
 
     #[test]

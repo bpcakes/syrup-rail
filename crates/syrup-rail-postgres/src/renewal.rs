@@ -70,23 +70,66 @@ pub async fn due_renewals_page(
         resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES);
     let rows = sqlx::query(
         r#"
-        WITH renewal_attempts AS (
+        WITH eligible_subscriptions AS MATERIALIZED (
             SELECT
-                attempts.subscription_id,
-                attempts.billing_period_start_at,
+                subscriptions.billing_scope_id,
+                subscriptions.id,
+                subscriptions.next_renewal_at,
+                subscriptions.next_payment_attempt_at,
+                accounts.gateway_configuration_id
+            FROM billing_subscriptions AS subscriptions
+            JOIN billing_gateway_accounts AS accounts
+                ON accounts.billing_scope_id = subscriptions.billing_scope_id
+                AND accounts.id = subscriptions.gateway_account_id
+            JOIN billing_gateway_provider_rate_limits AS provider_limits
+                ON provider_limits.provider_key = accounts.provider_key
+            WHERE subscriptions.status IN ('active', 'past_due')
+                AND subscriptions.next_payment_attempt_at <= $10::timestamptz
+                AND provider_limits.rate_limited_until <= $10::timestamptz
+                AND (
+                    accounts.mutation_rate_limited_until IS NULL
+                    OR accounts.mutation_rate_limited_until <= $10::timestamptz
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM billing_payment_attempts AS update_attempts
+                    WHERE update_attempts.subscription_id = subscriptions.id
+                        AND update_attempts.attempt_kind = 'subscription_payment_method_update'
+                        AND update_attempts.status IN ('pending', 'unknown', 'review_required')
+                        AND NOT (
+                            update_attempts.status = 'pending'
+                            AND update_attempts.submitted_at IS NULL
+                            AND update_attempts.created_at <= $10::timestamptz
+                                - ($4::bigint * interval '1 second')
+                        )
+                )
+                AND (
+                    $11::timestamptz IS NULL
+                    OR (subscriptions.next_payment_attempt_at, subscriptions.id)
+                        > ($11::timestamptz, $12::uuid)
+                )
+        )
+        SELECT subscriptions.billing_scope_id, subscriptions.id,
+            subscriptions.next_renewal_at,
+            subscriptions.next_payment_attempt_at,
+            COALESCE(renewal_attempts.attempt_sequence_count, 0)::bigint
+                AS attempt_sequence_count
+        FROM eligible_subscriptions AS subscriptions
+        LEFT JOIN LATERAL (
+            SELECT
                 COUNT(*) FILTER (
                     WHERE attempts.attempt_kind = 'subscription_renewal'
                         AND attempts.status = 'failed'
                         AND attempts.resolution_code = ANY($1::text[])
                         AND attempts.gateway_configuration_id IS NOT DISTINCT FROM
-                            current_accounts.gateway_configuration_id
+                            subscriptions.gateway_configuration_id
                 ) AS automatic_infrastructure_attempt_count,
                 MAX(attempts.resolved_at) FILTER (
                     WHERE attempts.attempt_kind = 'subscription_renewal'
                         AND attempts.status = 'failed'
                         AND attempts.resolution_code = ANY($2::text[])
                         AND attempts.gateway_configuration_id IS NOT DISTINCT FROM
-                            current_accounts.gateway_configuration_id
+                            subscriptions.gateway_configuration_id
                 ) AS last_automatic_infrastructure_failure_at,
                 COUNT(*) FILTER (
                     WHERE attempts.attempt_kind = 'subscription_renewal'
@@ -102,50 +145,11 @@ pub async fn due_renewals_page(
                 BOOL_OR(attempts.status IN ('pending', 'unknown', 'review_required', 'approved'))
                     AS has_blocking_attempt
             FROM billing_payment_attempts AS attempts
-            JOIN billing_subscriptions AS attempt_subscriptions
-                ON attempt_subscriptions.id = attempts.subscription_id
-            LEFT JOIN billing_gateway_accounts AS current_accounts
-                ON current_accounts.id = attempt_subscriptions.gateway_account_id
-                AND current_accounts.billing_scope_id = attempt_subscriptions.billing_scope_id
-            WHERE attempts.attempt_kind IN ('subscription_renewal', 'subscription_recovery')
-                AND attempts.billing_period_start_at IS NOT NULL
-            GROUP BY attempts.subscription_id, attempts.billing_period_start_at
-        )
-        SELECT subscriptions.billing_scope_id, subscriptions.id,
-            subscriptions.next_renewal_at,
-            subscriptions.next_payment_attempt_at,
-            COALESCE(renewal_attempts.attempt_sequence_count, 0)::bigint
-                AS attempt_sequence_count
-        FROM billing_subscriptions AS subscriptions
-        JOIN billing_gateway_accounts AS accounts
-            ON accounts.billing_scope_id = subscriptions.billing_scope_id
-            AND accounts.id = subscriptions.gateway_account_id
-        JOIN billing_gateway_provider_rate_limits AS provider_limits
-            ON provider_limits.provider_key = accounts.provider_key
-        LEFT JOIN renewal_attempts
-            ON renewal_attempts.subscription_id = subscriptions.id
-            AND renewal_attempts.billing_period_start_at = subscriptions.next_renewal_at
-        WHERE subscriptions.status IN ('active', 'past_due')
-            AND subscriptions.next_payment_attempt_at <= $10::timestamptz
-            AND provider_limits.rate_limited_until <= $10::timestamptz
-            AND (
-                accounts.mutation_rate_limited_until IS NULL
-                OR accounts.mutation_rate_limited_until <= $10::timestamptz
-            )
-            AND COALESCE(renewal_attempts.has_blocking_attempt, false) = false
-            AND NOT EXISTS (
-                SELECT 1
-                FROM billing_payment_attempts AS update_attempts
-                WHERE update_attempts.subscription_id = subscriptions.id
-                    AND update_attempts.attempt_kind = 'subscription_payment_method_update'
-                    AND update_attempts.status IN ('pending', 'unknown', 'review_required')
-                    AND NOT (
-                        update_attempts.status = 'pending'
-                        AND update_attempts.submitted_at IS NULL
-                        AND update_attempts.created_at <= $10::timestamptz
-                            - ($4::bigint * interval '1 second')
-                    )
-            )
+            WHERE attempts.subscription_id = subscriptions.id
+                AND attempts.billing_period_start_at = subscriptions.next_renewal_at
+                AND attempts.attempt_kind IN ('subscription_renewal', 'subscription_recovery')
+        ) AS renewal_attempts ON true
+        WHERE COALESCE(renewal_attempts.has_blocking_attempt, false) = false
             AND COALESCE(renewal_attempts.automatic_infrastructure_attempt_count, 0)
                 < $5
             AND (
@@ -163,11 +167,6 @@ pub async fn due_renewals_page(
                         ) >= $7 THEN $8::bigint ELSE $9::bigint END
                         * interval '1 second'
                     )
-            )
-            AND (
-                $11::timestamptz IS NULL
-                OR (subscriptions.next_payment_attempt_at, subscriptions.id)
-                    > ($11::timestamptz, $12::uuid)
             )
         ORDER BY subscriptions.next_payment_attempt_at ASC, subscriptions.id ASC
         LIMIT $13
@@ -756,6 +755,28 @@ mod tests {
             due_at,
         )
         .await?;
+        insert_renewal_attempt(
+            &database.pool,
+            account,
+            &included,
+            due_at - Duration::days(32),
+            "subscription_renewal",
+            "failed",
+            None,
+            Some(due_at - Duration::days(31)),
+        )
+        .await?;
+        insert_renewal_attempt(
+            &database.pool,
+            account,
+            &included,
+            due_at,
+            "subscription_renewal",
+            "failed",
+            None,
+            Some(due_at - Duration::minutes(5)),
+        )
+        .await?;
         let stale_update = insert_due_subscription_at(
             &database.pool,
             account,
@@ -956,6 +977,12 @@ mod tests {
         .await?;
 
         let page = due_renewals_page(&database.pool, None).await?;
+        let included_dispatch = page
+            .dispatches()
+            .iter()
+            .find(|dispatch| dispatch.subscription_id().into_uuid() == included.subscription_id)
+            .expect("eligible subscription is dispatched");
+        assert_eq!(included_dispatch.attempt_sequence_count(), 1);
         let actual = dispatch_ids(&page).into_iter().collect::<HashSet<_>>();
         let expected = [
             included.subscription_id,
