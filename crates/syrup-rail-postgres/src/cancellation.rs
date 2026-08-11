@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{Postgres, Row, Transaction};
+use sqlx::{PgConnection, Postgres, Row, Transaction};
 use syrup_rail::{
     BillingEvent, CancelSubscription, CancelSubscriptionOutcome, PastDueAccessPolicy, PlanKey,
     Subscription, SubscriptionId, SubscriptionStatus,
@@ -71,15 +71,28 @@ pub async fn cancel_subscription_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: &CancelSubscription,
 ) -> Result<CancelSubscriptionOutcome, SubscriptionCancellationError> {
-    set_lock_timeout(transaction).await?;
+    cancel_subscription_on_connection(transaction, command).await
+}
+
+/// Executes cancellation on a connection that is already inside the caller's
+/// transaction.
+///
+/// This is crate-visible for the host-prepared billing transaction facade.
+/// The caller owns transaction completion and must append a returned event
+/// before committing.
+pub(crate) async fn cancel_subscription_on_connection(
+    connection: &mut PgConnection,
+    command: &CancelSubscription,
+) -> Result<CancelSubscriptionOutcome, SubscriptionCancellationError> {
+    set_lock_timeout(connection).await?;
     lock_subscription_aggregate(
-        transaction,
+        connection,
         command.subscriber_id().as_uuid(),
         command.plan_key(),
     )
     .await?;
 
-    let Some(subscription) = current_subscription(transaction, command).await? else {
+    let Some(subscription) = current_subscription(connection, command).await? else {
         return Ok(CancelSubscriptionOutcome::NotFound);
     };
     match subscription.status() {
@@ -87,11 +100,11 @@ pub async fn cancel_subscription_in_transaction(
             Ok(CancelSubscriptionOutcome::AlreadyCanceled(subscription))
         }
         SubscriptionStatus::Active | SubscriptionStatus::PastDue => {
-            if has_blocking_renewal(transaction, &subscription).await? {
+            if has_blocking_renewal(connection, &subscription).await? {
                 return Ok(CancelSubscriptionOutcome::BlockedByRenewal);
             }
-            expire_stale_payment_method_updates(transaction, subscription.id()).await?;
-            if has_blocking_payment_method_update(transaction, subscription.id()).await? {
+            expire_stale_payment_method_updates(connection, subscription.id()).await?;
+            if has_blocking_payment_method_update(connection, subscription.id()).await? {
                 return Ok(CancelSubscriptionOutcome::BlockedByPaymentMethodUpdate);
             }
 
@@ -107,7 +120,7 @@ pub async fn cancel_subscription_in_transaction(
                 }
                 SubscriptionStatus::PastDue => {
                     let history = past_due_causal_history(
-                        transaction,
+                        connection,
                         subscription.id(),
                         *subscription.next_renewal_at(),
                     )
@@ -127,7 +140,7 @@ pub async fn cancel_subscription_in_transaction(
                 }
             };
             let (subscription, canceled_at) =
-                cancel_current_subscription(transaction, command, subscription.id(), prior_status)
+                cancel_current_subscription(connection, command, subscription.id(), prior_status)
                     .await?
                     .ok_or(SubscriptionCancellationError::InvalidState(
                         INVALID_SUBSCRIPTION_STATE,
@@ -147,33 +160,33 @@ pub async fn cancel_subscription_in_transaction(
     }
 }
 
-async fn set_lock_timeout(transaction: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+async fn set_lock_timeout(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('lock_timeout', $1, true)")
         .bind(BILLING_ROW_LOCK_TIMEOUT)
-        .execute(&mut **transaction)
+        .execute(connection)
         .await?;
     Ok(())
 }
 
 async fn lock_subscription_aggregate(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     subscriber_id: &Uuid,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
         .bind(subscriber_id)
         .bind(plan_key.as_str())
-        .execute(&mut **transaction)
+        .execute(connection)
         .await?;
     Ok(())
 }
 
 async fn current_subscription(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     command: &CancelSubscription,
 ) -> Result<Option<Subscription>, SubscriptionCancellationError> {
     for attempt in 0..CURRENT_SUBSCRIPTION_LOCK_MAX_ATTEMPTS {
-        let Some(candidate_id) = selected_subscription_id(transaction, command).await? else {
+        let Some(candidate_id) = selected_subscription_id(connection, command).await? else {
             return Ok(None);
         };
         let row = sqlx::query(
@@ -195,13 +208,13 @@ async fn current_subscription(
         .bind(command.billing_scope_id().as_uuid())
         .bind(command.subscriber_id().as_uuid())
         .bind(command.plan_key().as_str())
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *connection)
         .await?;
         let Some(row) = row else {
             require_stabilization_retry(attempt)?;
             continue;
         };
-        match selected_subscription_id(transaction, command).await? {
+        match selected_subscription_id(connection, command).await? {
             Some(current_id) if current_id == candidate_id => {
                 return decode_subscription_row(&row)
                     .map_err(map_subscription_persistence_error)
@@ -227,7 +240,7 @@ fn require_stabilization_retry(attempt: usize) -> Result<(), SubscriptionCancell
 }
 
 async fn current_subscription_id(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     command: &CancelSubscription,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
@@ -244,15 +257,15 @@ async fn current_subscription_id(
     .bind(command.billing_scope_id().as_uuid())
     .bind(command.subscriber_id().as_uuid())
     .bind(command.plan_key().as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await
 }
 
 async fn selected_subscription_id(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     command: &CancelSubscription,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    if let Some(current) = current_subscription_id(transaction, command).await? {
+    if let Some(current) = current_subscription_id(connection, command).await? {
         return Ok(Some(current));
     }
     sqlx::query_scalar(
@@ -269,12 +282,12 @@ async fn selected_subscription_id(
     .bind(command.billing_scope_id().as_uuid())
     .bind(command.subscriber_id().as_uuid())
     .bind(command.plan_key().as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await
 }
 
 async fn has_blocking_renewal(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     subscription: &Subscription,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
@@ -291,12 +304,12 @@ async fn has_blocking_renewal(
     )
     .bind(subscription.id().as_uuid())
     .bind(subscription.next_renewal_at())
-    .fetch_one(&mut **transaction)
+    .fetch_one(&mut *connection)
     .await
 }
 
 async fn expire_stale_payment_method_updates(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     subscription_id: SubscriptionId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -324,13 +337,13 @@ async fn expire_stale_payment_method_updates(
     .bind(subscription_id.as_uuid())
     .bind(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS)
     .bind(UNSUBMITTED_PAYMENT_METHOD_UPDATE_FAILED_RESPONSE_TEXT)
-    .execute(&mut **transaction)
+    .execute(connection)
     .await?;
     Ok(())
 }
 
 async fn has_blocking_payment_method_update(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     subscription_id: SubscriptionId,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
@@ -345,12 +358,12 @@ async fn has_blocking_payment_method_update(
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .fetch_one(&mut **transaction)
+    .fetch_one(&mut *connection)
     .await
 }
 
 async fn cancel_current_subscription(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     command: &CancelSubscription,
     subscription_id: SubscriptionId,
     expected_status: SubscriptionStatus,
@@ -379,7 +392,7 @@ async fn cancel_current_subscription(
     .bind(command.subscriber_id().as_uuid())
     .bind(command.plan_key().as_str())
     .bind(expected_status.as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await?;
     row.as_ref()
         .map(|row| {

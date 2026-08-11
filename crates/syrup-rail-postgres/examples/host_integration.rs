@@ -1,4 +1,4 @@
-//! Compile-tested host wiring for subscription enrollment.
+//! Compile-tested host wiring for subscriber-owned subscription billing.
 //!
 //! The host authenticates and authorizes the subscriber before constructing a
 //! command. Its implementations of the four ports below retain ownership of
@@ -11,9 +11,11 @@ use std::{sync::Arc, time::Duration};
 use async_trait::async_trait;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use syrup_rail::{
-    BillingEvent, BillingEventSubject, EndUserMutationAdmission, EnrollSubscription,
-    GatewayResolver, PaymentAttemptId, PaymentAttemptStatus, SubscriptionEnrollmentExpectedTerms,
-    SubscriptionId, SubscriptionPaymentContext,
+    BillingEvent, BillingEventSubject, CancelSubscription, CancelSubscriptionOutcome,
+    ClearSubscriptionDiscount, EndUserMutationAdmission, EnrollSubscription, GatewayResolver,
+    PaymentAttemptId, PaymentAttemptStatus, SubscriptionDiscountClaim,
+    SubscriptionDiscountClaimOutcome, SubscriptionDiscountClearOutcome,
+    SubscriptionEnrollmentExpectedTerms, SubscriptionId, SubscriptionPaymentContext,
 };
 use syrup_rail_postgres::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
@@ -233,6 +235,40 @@ pub async fn enroll_authorized_subscriber(
         attempt_id,
         status: result.status(),
     })
+}
+
+/// Cancels an exact subscription that the host has already authorized for its
+/// scope, subscriber, and plan.
+///
+/// A changed cancellation writes its typed event through `HostBillingBoundary`
+/// in the same host-prepared transaction as the canonical mutation. The
+/// service never resolves a gateway for this operation.
+pub async fn cancel_authorized_subscription(
+    service: &SubscriptionBillingService,
+    command: CancelSubscription,
+) -> Result<CancelSubscriptionOutcome, SubscriptionBillingServiceError> {
+    service.cancel(command).await
+}
+
+/// Claims an authorized subscriber's exact-plan discount code.
+///
+/// This uses the host offer lock supplied through `SubscriptionOfferStore` but
+/// does not resolve a gateway or emit a billing event.
+pub async fn claim_authorized_subscription_discount(
+    service: &SubscriptionBillingService,
+    command: SubscriptionDiscountClaim,
+) -> Result<SubscriptionDiscountClaimOutcome, SubscriptionBillingServiceError> {
+    service.claim_discount(command).await
+}
+
+/// Clears the authorized subscriber's saved exact-plan discount claim.
+///
+/// This performs no gateway resolution or provider I/O.
+pub async fn clear_authorized_subscription_discount(
+    service: &SubscriptionBillingService,
+    command: ClearSubscriptionDiscount,
+) -> Result<SubscriptionDiscountClearOutcome, SubscriptionBillingServiceError> {
+    service.clear_discount(command).await
 }
 
 fn main() {}

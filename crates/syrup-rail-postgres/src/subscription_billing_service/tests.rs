@@ -1,4 +1,5 @@
 use super::*;
+use std::{error::Error as _, io};
 
 #[test]
 fn billing_service_error_name_and_generic_messages_cover_the_whole_facade() {
@@ -26,6 +27,49 @@ fn billing_service_error_name_and_generic_messages_cover_the_whole_facade() {
         format!("{application:?}"),
         "SubscriptionBillingServiceError::Application"
     );
+
+    let cancellation = SubscriptionBillingServiceError::Cancellation(
+        crate::SubscriptionCancellationError::InvalidState("test cancellation state"),
+    );
+    assert_eq!(cancellation.to_string(), "subscription cancellation failed");
+    assert_eq!(
+        format!("{cancellation:?}"),
+        "SubscriptionBillingServiceError::Cancellation"
+    );
+    assert!(cancellation.source().is_some());
+
+    let discount = SubscriptionBillingServiceError::Discount(
+        crate::SubscriptionDiscountOperationError::InvalidState("test discount state"),
+    );
+    assert_eq!(
+        discount.to_string(),
+        "subscription discount operation failed"
+    );
+    assert_eq!(
+        format!("{discount:?}"),
+        "SubscriptionBillingServiceError::Discount"
+    );
+    assert!(discount.source().is_some());
+
+    let transaction = SubscriptionBillingServiceError::BillingTransaction(
+        crate::BillingTransactionError::new(io::Error::other("test transaction failure")),
+    );
+    assert_eq!(transaction.to_string(), "host billing transaction failed");
+    assert_eq!(
+        format!("{transaction:?}"),
+        "SubscriptionBillingServiceError::BillingTransaction"
+    );
+    assert!(transaction.source().is_some());
+
+    let event = SubscriptionBillingServiceError::BillingEvent(crate::BillingEventWriteError::new(
+        io::Error::other("test event failure"),
+    ));
+    assert_eq!(event.to_string(), "host billing event append failed");
+    assert_eq!(
+        format!("{event:?}"),
+        "SubscriptionBillingServiceError::BillingEvent"
+    );
+    assert!(event.source().is_some());
 }
 
 #[test]

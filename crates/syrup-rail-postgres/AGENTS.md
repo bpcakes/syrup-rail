@@ -43,8 +43,10 @@ and transaction orchestration.
 - `src/subscription_billing_service.rs` — stable service type, shared closed
   readiness facts, and facade. Its `subscription_billing_service/{enrollment,
   recovery,renewal,payment_method_replacement,host_charge,reconciliation,
-  subscriber}.rs` modules own the corresponding orchestration and shared
-  subscriber-admission boundary.
+  subscriber,subscriber_mutation}.rs` modules own the corresponding
+  orchestration and shared subscriber-admission boundary. The
+  `subscriber_mutation.rs` owner runs cancellation through the host-prepared
+  event transaction and keeps discount claim/clear gateway-free.
 - `src/host_charge_application.rs` — host-charge final admission, one-shot
   provider submission, atomic host target/attempt/charge/event application,
   exact reconciliation, and approved-failure compensation.
@@ -110,6 +112,11 @@ and transaction orchestration.
   admission, resolver identity, cooldown, and readiness behavior in
   `subscriber.rs`; keep the root as the stable service/fact facade and do not
   introduce another subscription payment path in a host adapter.
+- Change high-level cancellation or subscriber discount orchestration in
+  `src/subscription_billing_service/subscriber_mutation.rs`. Admission must
+  precede database work; a changed cancellation, its host event, and commit
+  share the coordinator transaction, while discount claim/clear do not resolve
+  a gateway or perform provider I/O.
 - Change the host transaction/event boundary in `src/transactions.rs`; do not
   add arbitrary SQL callbacks or a production no-op event implementation.
 - Change reusable subscription access projection or protected-write admission
@@ -122,8 +129,8 @@ and transaction orchestration.
   `src/discounts/persistence.rs`; keep host acquisition metadata in the host
   transaction and host plan pricing behind `SubscriptionOfferStore`.
 - Change exact-plan cancellation in `src/cancellation.rs`; the host must lock
-  the live event recipient first, append the returned event in the same
-  transaction, and leave stored payment methods unchanged.
+  the live or retained event recipient first, append the returned event in the
+  same transaction, and leave stored payment methods unchanged.
 - Change canonical deletion admission or billing attempt/payment-method scrub
   policy in `src/deletion.rs`; keep host identity, order, fulfillment, and
   retained-subject work in the host transaction.

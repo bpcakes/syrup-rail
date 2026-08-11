@@ -22,7 +22,8 @@ use persistence::{
     code_from_row, current_subscription_exists, discount_value, duration_months,
     expire_saved_claims_for_code, find_active_code, lock_initial_attempt_rows,
     lock_initial_attempts, lock_offer, lock_subscription_aggregate, quote_for_offer,
-    quote_from_row, set_lock_timeout, validate_discount_cadence,
+    quote_from_row, saved_subscription_discount_claim_on_connection, set_lock_timeout,
+    validate_discount_cadence,
 };
 
 mod persistence;
@@ -491,20 +492,33 @@ pub async fn claim_subscription_discount_in_transaction(
     offers: &dyn SubscriptionOfferStore,
     claim: &SubscriptionDiscountClaim,
 ) -> Result<SubscriptionDiscountClaimOutcome, SubscriptionDiscountOperationError> {
-    set_lock_timeout(transaction).await?;
-    lock_subscription_aggregate(transaction, claim.subscriber_id(), claim.plan_key()).await?;
+    claim_subscription_discount_on_connection(transaction, offers, claim).await
+}
+
+/// Executes a claim on a connection that is already inside the caller's
+/// transaction.
+///
+/// This is crate-visible for subscriber-owned orchestration that must share a
+/// host-prepared transaction. The caller owns transaction completion.
+pub(crate) async fn claim_subscription_discount_on_connection(
+    connection: &mut PgConnection,
+    offers: &dyn SubscriptionOfferStore,
+    claim: &SubscriptionDiscountClaim,
+) -> Result<SubscriptionDiscountClaimOutcome, SubscriptionDiscountOperationError> {
+    set_lock_timeout(connection).await?;
+    lock_subscription_aggregate(connection, claim.subscriber_id(), claim.plan_key()).await?;
     let offer = lock_offer(
-        transaction,
+        connection,
         offers,
         claim.billing_scope_id(),
         claim.plan_key(),
     )
     .await?;
-    if current_subscription_exists(transaction, claim).await? {
+    if current_subscription_exists(connection, claim).await? {
         return Ok(SubscriptionDiscountClaimOutcome::BlockedBySubscription);
     }
     let Some(code_row) = find_active_code(
-        transaction,
+        connection,
         claim.billing_scope_id(),
         claim.plan_key(),
         claim.code(),
@@ -516,8 +530,8 @@ pub async fn claim_subscription_discount_in_transaction(
     };
     let code = code_from_row(&code_row)?;
     let quote = quote_for_offer(code, &offer)?;
-    let existing = saved_subscription_discount_claim_in_transaction(
-        transaction,
+    let existing = saved_subscription_discount_claim_on_connection(
+        connection,
         claim.billing_scope_id(),
         claim.subscriber_id(),
         claim.plan_key(),
@@ -530,8 +544,8 @@ pub async fn claim_subscription_discount_in_transaction(
             existing.clone(),
         )));
     }
-    lock_initial_attempts(transaction, claim).await?;
-    if blocking_initial_attempt_exists(transaction, claim).await? {
+    lock_initial_attempts(connection, claim).await?;
+    if blocking_initial_attempt_exists(connection, claim).await? {
         return Ok(SubscriptionDiscountClaimOutcome::BlockedByInitialAttempt);
     }
     if let Some(existing) = existing {
@@ -539,7 +553,7 @@ pub async fn claim_subscription_discount_in_transaction(
             "UPDATE billing_subscription_discount_claims SET status = 'superseded', superseded_at = now() WHERE id = $1 AND status = 'saved'",
         )
         .bind(existing.id().as_uuid())
-        .execute(&mut **transaction)
+        .execute(&mut *connection)
         .await?;
         if result.rows_affected() != 1 {
             return Err(SubscriptionDiscountOperationError::InvalidState(
@@ -581,7 +595,7 @@ pub async fn claim_subscription_discount_in_transaction(
     .bind(duration_months(quoted_code.duration()))
     .bind(quote.base_charge().cents())
     .bind(quote.discounted_charge().cents())
-    .fetch_one(&mut **transaction)
+    .fetch_one(&mut *connection)
     .await?;
     Ok(SubscriptionDiscountClaimOutcome::Saved(Box::new(
         claim_from_row(&row)?,
@@ -612,17 +626,34 @@ pub async fn clear_subscription_discount_in_transaction(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<SubscriptionDiscountClearOutcome, SubscriptionDiscountOperationError> {
-    set_lock_timeout(transaction).await?;
-    lock_subscription_aggregate(transaction, subscriber_id, plan_key).await?;
-    let existing = saved_subscription_discount_claim_in_transaction(
+    clear_subscription_discount_on_connection(
         transaction,
         billing_scope_id,
         subscriber_id,
         plan_key,
     )
+    .await
+}
+
+/// Executes a saved-discount clear on a connection that is already inside the
+/// caller's transaction. The caller owns transaction completion.
+pub(crate) async fn clear_subscription_discount_on_connection(
+    connection: &mut PgConnection,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<SubscriptionDiscountClearOutcome, SubscriptionDiscountOperationError> {
+    set_lock_timeout(connection).await?;
+    lock_subscription_aggregate(connection, subscriber_id, plan_key).await?;
+    let existing = saved_subscription_discount_claim_on_connection(
+        connection,
+        billing_scope_id,
+        subscriber_id,
+        plan_key,
+    )
     .await?;
-    lock_initial_attempt_rows(transaction, billing_scope_id, subscriber_id, plan_key).await?;
-    if blocking_initial_attempt(transaction, billing_scope_id, subscriber_id, plan_key).await? {
+    lock_initial_attempt_rows(connection, billing_scope_id, subscriber_id, plan_key).await?;
+    if blocking_initial_attempt(connection, billing_scope_id, subscriber_id, plan_key).await? {
         return Ok(SubscriptionDiscountClearOutcome::BlockedByInitialAttempt);
     }
     let Some(existing) = existing else {
@@ -646,7 +677,7 @@ pub async fn clear_subscription_discount_in_transaction(
     .bind(billing_scope_id.as_uuid())
     .bind(subscriber_id.as_uuid())
     .bind(plan_key.as_str())
-    .fetch_one(&mut **transaction)
+    .fetch_one(&mut *connection)
     .await?;
     Ok(SubscriptionDiscountClearOutcome::Cleared(Box::new(
         claim_from_row(&row)?,

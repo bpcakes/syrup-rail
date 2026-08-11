@@ -75,6 +75,15 @@ outbox boundary, service construction, authorized command construction, and
 durable enrollment-result handling. It is intentionally provider-neutral and
 does not install or run a database migrator.
 
+After the host has authenticated and authorized an exact billing scope,
+subscriber, and plan, the same service also exposes `cancel`, `claim_discount`,
+and `clear_discount`. Cancellation changes canonical state and appends its
+typed event through the host transaction/outbox boundary before committing;
+replays and semantic blockers append nothing. Discount claim and clear retain
+their typed outcomes, use no gateway or provider I/O, and do not emit billing
+events. The host integration example includes compiled helpers for all three
+operations.
+
 Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
 compile the integration boundary without contacting a database or provider.
 

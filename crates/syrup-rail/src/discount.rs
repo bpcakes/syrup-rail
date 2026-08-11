@@ -366,6 +366,44 @@ impl SubscriptionDiscountClaim {
     }
 }
 
+/// An exact subscriber-owned saved-discount removal request.
+///
+/// Hosts authenticate and authorize the scope, subscriber, and plan before
+/// submitting this command. The command deliberately carries no discount-code
+/// identity: it clears only the current saved claim for this exact aggregate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClearSubscriptionDiscount {
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: PlanKey,
+}
+
+impl ClearSubscriptionDiscount {
+    pub const fn new(
+        billing_scope_id: BillingScopeId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+    ) -> Self {
+        Self {
+            billing_scope_id,
+            subscriber_id,
+            plan_key,
+        }
+    }
+
+    pub const fn billing_scope_id(&self) -> BillingScopeId {
+        self.billing_scope_id
+    }
+
+    pub const fn subscriber_id(&self) -> SubscriberId {
+        self.subscriber_id
+    }
+
+    pub const fn plan_key(&self) -> &PlanKey {
+        &self.plan_key
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionDiscountClaimRecord {
     id: DiscountClaimId,
@@ -628,6 +666,19 @@ mod tests {
         let duration =
             SubscriptionDiscountDuration::LimitedMonths(LimitedDiscountMonths::new(3).unwrap());
         assert_eq!(duration.as_str(), "limited_months");
+    }
+
+    #[test]
+    fn clear_command_preserves_the_exact_subscriber_aggregate() {
+        let scope = BillingScopeId::new(Uuid::from_u128(11));
+        let subscriber = SubscriberId::new(Uuid::from_u128(12));
+        let plan = PlanKey::new("basic").unwrap();
+
+        let command = ClearSubscriptionDiscount::new(scope, subscriber, plan.clone());
+
+        assert_eq!(command.billing_scope_id(), scope);
+        assert_eq!(command.subscriber_id(), subscriber);
+        assert_eq!(command.plan_key(), &plan);
     }
 
     #[test]

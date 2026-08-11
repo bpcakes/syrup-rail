@@ -12,6 +12,7 @@ pub enum EndUserMutationOperation {
     SubscriptionRecovery,
     SubscriptionPaymentMethodUpdate,
     SubscriptionCancel,
+    SubscriptionDiscountClaim,
     SubscriptionDiscountClear,
 }
 
@@ -103,6 +104,14 @@ mod tests {
         assert_eq!(
             command.operation(),
             EndUserMutationOperation::SubscriptionRecovery
+        );
+    }
+
+    #[test]
+    fn discount_operations_remain_distinct_admission_facts() {
+        assert_ne!(
+            EndUserMutationOperation::SubscriptionDiscountClaim,
+            EndUserMutationOperation::SubscriptionDiscountClear
         );
     }
 

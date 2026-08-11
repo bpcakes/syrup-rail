@@ -2,14 +2,16 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use sqlx::PgPool;
 use syrup_rail::{
-    BillingScopeId, ChargeHostTarget, ChargeRenewal, EndUserMutationAdmission,
+    BillingEventSubject, BillingScopeId, CancelSubscription, CancelSubscriptionOutcome,
+    ChargeHostTarget, ChargeRenewal, ClearSubscriptionDiscount, EndUserMutationAdmission,
     EndUserMutationAdmissionResult, EndUserMutationCommand, EndUserMutationOperation,
     EnrollSubscription, GatewayAccountId, GatewayAccountMode, GatewayDiagnostic, GatewayError,
     GatewayNotSubmittedError, GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayProviderKey,
     GatewayResolutionError, GatewayResolver, HostChargePaymentResult, HostChargeReservation,
     HostChargeTargetRejection, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
     PaymentAttemptStatus, PaymentResolutionCode, ProcessorEvidence, RecoverSubscriptionPayment,
-    ReplaceSubscriptionPaymentMethod, SubscriptionEnrollmentPaymentResult,
+    ReplaceSubscriptionPaymentMethod, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
+    SubscriptionDiscountClearOutcome, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentPreflightOutcome, SubscriptionEnrollmentReservation,
     SubscriptionEnrollmentReservationBuildError, SubscriptionEnrollmentReservationOutcome,
     SubscriptionEnrollmentReservationRejection, SubscriptionEnrollmentSubmissionRejection,
@@ -68,6 +70,7 @@ mod reconciliation;
 mod recovery;
 mod renewal;
 mod subscriber;
+mod subscriber_mutation;
 
 const INVALID_SERVICE_STATE: &str = "canonical subscription billing service state is invalid";
 const LIVE_READINESS_FAILED_TEXT: &str =
@@ -81,8 +84,9 @@ pub enum GatewayMutationCooldownScope {
 
 /// Failure returned by the high-level subscription billing facade.
 ///
-/// This covers enrollment, recovery, renewal, payment-method replacement,
-/// reconciliation, and the optional host-charge capability.
+/// This covers subscriber-owned enrollment, recovery, renewal, payment-method
+/// replacement, cancellation, discount mutations, reconciliation, and the
+/// optional host-charge capability.
 #[derive(Error)]
 pub enum SubscriptionBillingServiceError {
     #[error("subscription billing storage failed")]
@@ -95,6 +99,14 @@ pub enum SubscriptionBillingServiceError {
     HostChargeApplication(#[from] HostChargeApplicationError),
     #[error("host charge storage failed")]
     HostChargeStore(#[from] HostChargeStoreError),
+    #[error("subscription cancellation failed")]
+    Cancellation(#[from] crate::SubscriptionCancellationError),
+    #[error("subscription discount operation failed")]
+    Discount(#[from] crate::SubscriptionDiscountOperationError),
+    #[error("host billing transaction failed")]
+    BillingTransaction(#[from] crate::BillingTransactionError),
+    #[error("host billing event append failed")]
+    BillingEvent(#[from] crate::BillingEventWriteError),
     #[error("host charge capability is not configured")]
     HostChargeUnavailable,
     #[error("the idempotency key belongs to a different payment request")]
@@ -154,6 +166,16 @@ impl fmt::Debug for SubscriptionBillingServiceError {
             }
             Self::HostChargeStore(_) => {
                 formatter.write_str("SubscriptionBillingServiceError::HostChargeStore")
+            }
+            Self::Cancellation(_) => {
+                formatter.write_str("SubscriptionBillingServiceError::Cancellation")
+            }
+            Self::Discount(_) => formatter.write_str("SubscriptionBillingServiceError::Discount"),
+            Self::BillingTransaction(_) => {
+                formatter.write_str("SubscriptionBillingServiceError::BillingTransaction")
+            }
+            Self::BillingEvent(_) => {
+                formatter.write_str("SubscriptionBillingServiceError::BillingEvent")
             }
             Self::HostChargeUnavailable => {
                 formatter.write_str("SubscriptionBillingServiceError::HostChargeUnavailable")

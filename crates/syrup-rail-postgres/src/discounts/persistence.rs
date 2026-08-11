@@ -1,13 +1,13 @@
 use super::*;
 
 pub(super) async fn lock_offer(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     offers: &dyn SubscriptionOfferStore,
     billing_scope_id: BillingScopeId,
     plan_key: &PlanKey,
 ) -> Result<SubscriptionOffer, SubscriptionDiscountOperationError> {
     let offer = offers
-        .lock_current_offer(transaction, billing_scope_id, plan_key)
+        .lock_current_offer(connection, billing_scope_id, plan_key)
         .await?
         .ok_or(SubscriptionDiscountOperationError::OfferUnavailable)?;
     if offer.plan_key() != plan_key {
@@ -28,38 +28,36 @@ pub(super) fn validate_discount_cadence(
     Ok(())
 }
 
-pub(super) async fn set_lock_timeout(
-    transaction: &mut Transaction<'_, Postgres>,
-) -> Result<(), sqlx::Error> {
+pub(super) async fn set_lock_timeout(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query(
         "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
     )
     .bind(BILLING_ROW_LOCK_TIMEOUT)
     .bind(BILLING_OPERATION_TIMEOUT)
-    .execute(&mut **transaction)
+    .execute(connection)
     .await?;
     Ok(())
 }
 
 pub(super) async fn lock_subscription_aggregate(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
         .bind(subscriber_id.as_uuid())
         .bind(plan_key.as_str())
-        .execute(&mut **transaction)
+        .execute(connection)
         .await?;
     Ok(())
 }
 
 pub(super) async fn current_subscription_exists(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     claim: &SubscriptionDiscountClaim,
 ) -> Result<bool, SubscriptionDiscountOperationError> {
     for _ in 0..2 {
-        let candidate = current_subscription_id(transaction, claim).await?;
+        let candidate = current_subscription_id(connection, claim).await?;
         let Some(candidate) = candidate else {
             return Ok(false);
         };
@@ -67,9 +65,9 @@ pub(super) async fn current_subscription_exists(
             "SELECT id FROM billing_subscriptions WHERE id = $1 FOR NO KEY UPDATE",
         )
         .bind(candidate)
-        .fetch_optional(&mut **transaction)
+        .fetch_optional(&mut *connection)
         .await?;
-        if locked.is_some() && current_subscription_id(transaction, claim).await? == Some(candidate)
+        if locked.is_some() && current_subscription_id(connection, claim).await? == Some(candidate)
         {
             return Ok(true);
         }
@@ -80,7 +78,7 @@ pub(super) async fn current_subscription_exists(
 }
 
 pub(super) async fn current_subscription_id(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     claim: &SubscriptionDiscountClaim,
 ) -> Result<Option<Uuid>, sqlx::Error> {
     sqlx::query_scalar(
@@ -93,12 +91,12 @@ pub(super) async fn current_subscription_id(
     .bind(claim.billing_scope_id().as_uuid())
     .bind(claim.subscriber_id().as_uuid())
     .bind(claim.plan_key().as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await
 }
 
 pub(super) async fn find_active_code(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     plan_key: &PlanKey,
     code: &SubscriptionDiscountCode,
@@ -119,12 +117,12 @@ pub(super) async fn find_active_code(
     .bind(billing_scope_id.as_uuid())
     .bind(plan_key.as_str())
     .bind(code.as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await
 }
 
 pub(super) async fn code_by_id(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     plan_key: &PlanKey,
     id: DiscountCodeId,
@@ -141,12 +139,12 @@ pub(super) async fn code_by_id(
     .bind(id.as_uuid())
     .bind(billing_scope_id.as_uuid())
     .bind(plan_key.as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await
 }
 
 pub(super) async fn expire_saved_claims_for_code(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     plan_key: &PlanKey,
     discount_code_id: DiscountCodeId,
@@ -161,13 +159,28 @@ pub(super) async fn expire_saved_claims_for_code(
     .bind(billing_scope_id.as_uuid())
     .bind(plan_key.as_str())
     .bind(discount_code_id.as_uuid())
-    .execute(&mut **transaction)
+    .execute(connection)
     .await?;
     Ok(())
 }
 
 pub async fn saved_subscription_discount_claim_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<Option<SubscriptionDiscountClaimRecord>, SubscriptionDiscountOperationError> {
+    saved_subscription_discount_claim_on_connection(
+        transaction,
+        billing_scope_id,
+        subscriber_id,
+        plan_key,
+    )
+    .await
+}
+
+pub(super) async fn saved_subscription_discount_claim_on_connection(
+    connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
@@ -189,17 +202,17 @@ pub async fn saved_subscription_discount_claim_in_transaction(
     .bind(billing_scope_id.as_uuid())
     .bind(subscriber_id.as_uuid())
     .bind(plan_key.as_str())
-    .fetch_optional(&mut **transaction)
+    .fetch_optional(&mut *connection)
     .await?;
     row.as_ref().map(claim_from_row).transpose()
 }
 
 pub(super) async fn lock_initial_attempts(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     claim: &SubscriptionDiscountClaim,
 ) -> Result<(), sqlx::Error> {
     lock_initial_attempt_rows(
-        transaction,
+        connection,
         claim.billing_scope_id(),
         claim.subscriber_id(),
         claim.plan_key(),
@@ -208,7 +221,7 @@ pub(super) async fn lock_initial_attempts(
 }
 
 pub(super) async fn lock_initial_attempt_rows(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
@@ -224,17 +237,17 @@ pub(super) async fn lock_initial_attempt_rows(
     .bind(billing_scope_id.as_uuid())
     .bind(subscriber_id.as_uuid())
     .bind(plan_key.as_str())
-    .fetch_all(&mut **transaction)
+    .fetch_all(&mut *connection)
     .await?;
     Ok(())
 }
 
 pub(super) async fn blocking_initial_attempt_exists(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     claim: &SubscriptionDiscountClaim,
 ) -> Result<bool, sqlx::Error> {
     blocking_initial_attempt(
-        transaction,
+        connection,
         claim.billing_scope_id(),
         claim.subscriber_id(),
         claim.plan_key(),
@@ -243,7 +256,7 @@ pub(super) async fn blocking_initial_attempt_exists(
 }
 
 pub(super) async fn blocking_initial_attempt(
-    transaction: &mut Transaction<'_, Postgres>,
+    connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
@@ -277,7 +290,7 @@ pub(super) async fn blocking_initial_attempt(
     .bind(billing_scope_id.as_uuid())
     .bind(subscriber_id.as_uuid())
     .bind(plan_key.as_str())
-    .fetch_one(&mut **transaction)
+    .fetch_one(&mut *connection)
     .await
 }
 

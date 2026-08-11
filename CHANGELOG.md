@@ -27,6 +27,11 @@ separate release task.
 - Add PostgreSQL schema v2 fresh-install, read-only v1 preflight and retry-
   reclassification audit, and transactional forward-only v1-to-v2 upgrade
   artifacts with fresh/upgrade catalog-parity coverage.
+- Add high-level subscriber cancellation and discount claim/clear operations.
+  They run exact end-user mutation admission; cancellation commits its
+  canonical mutation and typed outbox event through one host-prepared
+  transaction, while discount operations preserve their typed semantic
+  outcomes without gateway or provider I/O.
 
 ### Changed
 
