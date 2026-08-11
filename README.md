@@ -84,6 +84,16 @@ their typed outcomes, use no gateway or provider I/O, and do not emit billing
 events. The host integration example includes compiled helpers for all three
 operations.
 
+For customer billing pages, construct a `SubscriptionBillingPortalQuery` from
+that same authorized exact identity and call `subscription_billing_portal`. It
+returns the canonical `Entitlement`, including current terms and saved or
+applied discounts, plus an optional masked-card display.
+`subscription_payment_history_page` supplies bounded, cursor-paginated
+exact-plan attempt history. These reads deliberately exclude provider
+payment-method references, transaction identifiers, contacts, gateway
+responses, and raw diagnostics; hosts still own presentation and
+authorization.
+
 Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
 compile the integration boundary without contacting a database or provider.
 

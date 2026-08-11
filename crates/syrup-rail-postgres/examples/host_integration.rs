@@ -13,14 +13,17 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use syrup_rail::{
     BillingEvent, BillingEventSubject, CancelSubscription, CancelSubscriptionOutcome,
     ClearSubscriptionDiscount, EndUserMutationAdmission, EnrollSubscription, GatewayResolver,
-    PaymentAttemptId, PaymentAttemptStatus, SubscriptionDiscountClaim,
-    SubscriptionDiscountClaimOutcome, SubscriptionDiscountClearOutcome,
-    SubscriptionEnrollmentExpectedTerms, SubscriptionId, SubscriptionPaymentContext,
+    PaymentAttemptId, PaymentAttemptStatus, SubscriptionBillingPortalQuery,
+    SubscriptionBillingPortalSnapshot, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
+    SubscriptionDiscountClearOutcome, SubscriptionEnrollmentExpectedTerms, SubscriptionId,
+    SubscriptionPaymentContext, SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
+    SubscriptionPaymentHistoryPageLimit,
 };
 use syrup_rail_postgres::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
-    BillingTransactionError, BillingTransactionSubjectState, SubscriptionBillingService,
-    SubscriptionBillingServiceError, SubscriptionOfferStore,
+    BillingTransactionError, BillingTransactionSubjectState, SubscriptionBillingPortalQueryError,
+    SubscriptionBillingService, SubscriptionBillingServiceError, SubscriptionOfferStore,
+    subscription_billing_portal, subscription_payment_history_page,
 };
 
 /// Host-owned implementations required by [`SubscriptionBillingService`].
@@ -269,6 +272,31 @@ pub async fn clear_authorized_subscription_discount(
     command: ClearSubscriptionDiscount,
 ) -> Result<SubscriptionDiscountClearOutcome, SubscriptionBillingServiceError> {
     service.clear_discount(command).await
+}
+
+/// Reads the current billing portal for a subject the host has already
+/// authenticated and authorized for this exact query identity.
+///
+/// The result is intentionally provider-neutral: it includes canonical
+/// entitlement state and an optional masked-card display, but no provider
+/// payment-method reference, transaction identifier, billing contact, or raw
+/// provider diagnostic.
+pub async fn read_authorized_subscription_billing_portal(
+    pool: &PgPool,
+    query: &SubscriptionBillingPortalQuery,
+) -> Result<SubscriptionBillingPortalSnapshot, SubscriptionBillingPortalQueryError> {
+    subscription_billing_portal(pool, query).await
+}
+
+/// Reads one bounded, exact-plan subscription payment-history page for an
+/// already authorized portal identity.
+pub async fn read_authorized_subscription_payment_history(
+    pool: &PgPool,
+    query: &SubscriptionBillingPortalQuery,
+    cursor: Option<&SubscriptionPaymentHistoryCursor>,
+    limit: SubscriptionPaymentHistoryPageLimit,
+) -> Result<SubscriptionPaymentHistoryPage, SubscriptionBillingPortalQueryError> {
+    subscription_payment_history_page(pool, query, cursor, limit).await
 }
 
 fn main() {}

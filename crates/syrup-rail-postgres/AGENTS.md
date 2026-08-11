@@ -54,6 +54,10 @@ and transaction orchestration.
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
   caller-transaction protected-write guard.
+- `src/billing_portal.rs` — read-only, provider-neutral customer billing
+  portal and exact-plan payment-history projections. It reuses entitlement
+  semantics inside one repeatable-read snapshot and selects only masked card
+  display and safe attempt facts.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
   revocation.
 - `src/discounts.rs` — exact-plan durable discount operations and the host
@@ -122,6 +126,10 @@ and transaction orchestration.
 - Change reusable subscription access projection or protected-write admission
   in `src/entitlement.rs`; keep host authentication and gateway availability
   outside the query/guard.
+- Change customer billing portal or history SQL in `src/billing_portal.rs`.
+  Preserve the exact entitlement projection and one-snapshot transaction;
+  never use broad payment-attempt loaders or select provider references,
+  transaction IDs, contacts, response text, or diagnostics for this surface.
 - Change grant mutation policy in `src/grants.rs`; keep host user existence,
   actor authorization, and actor presentation in the host transaction.
 - Change reusable discount operations or the offer-store port in

@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod attempts;
+mod billing_portal;
 mod cancellation;
 mod deletion;
 mod discounts;
@@ -44,6 +45,10 @@ pub use attempts::{
     preflight_subscription_recovery_in_transaction, reserve_subscription_enrollment_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
     reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
+};
+pub use billing_portal::{
+    SubscriptionBillingPortalQueryError, subscription_billing_portal,
+    subscription_payment_history_page,
 };
 pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
 pub use deletion::{billing_deletion_blockers, scrub_subscriber_billing_data};

@@ -13,7 +13,7 @@ The behavior is observable through public API tests and PostgreSQL integration s
 - [x] (2026-08-11) Read `AGENTS.md`, `agent-map.md`, both affected crate guides, `.agent/PLANS.md`, and `docs/security/threat-model.md`; inspected the current service, cancellation, discount, entitlement, renewal, schema-conformance, and error APIs.
 - [x] (2026-08-11) Commit the already-verified consumer API cutover that was present in the worktree before this plan (`25f4823fc90101a2adcc4f118cb61f83c8d1c44b`).
 - [x] (2026-08-11) Add and commit the high-level cancellation and discount subscriber facade, including atomic host-event cancellation, typed exact clear commands, admission coverage, and gateway-free discount paths.
-- [ ] Add and commit typed billing-portal and payment-history reads.
+- [x] (2026-08-11) Add and commit typed billing-portal and payment-history reads, preserving the canonical entitlement projection inside one read-only repeatable-read snapshot and keeping customer-facing payment facts redacted.
 - [ ] Add and commit stable renewal-dispatch pagination.
 - [ ] Add and commit the production runtime schema-v2 compatibility check.
 - [ ] Add and commit structured service-error dispositions and non-exhaustive operational-error hardening.
@@ -36,6 +36,9 @@ The behavior is observable through public API tests and PostgreSQL integration s
 - Observation: schema v2 supplies host-readable current-subscription, payment-fact, and active-discount views, while the Rust API exposes a typed entitlement only. There is no typed, redacted customer payment-method snapshot or cursor-paginated customer payment history.
   Evidence: `crates/syrup-rail-postgres/schema/v2/install.sql` and `crates/syrup-rail-postgres/src/entitlement.rs`.
 
+- Observation: `billing_payment_facts` is safe for ordinary host reporting but omits billing-period and submitted-at facts needed by a customer payment history.
+  Evidence: `crates/syrup-rail-postgres/schema/v2/install.sql` defines the view without those columns, while `billing_payment_attempts` carries them beside protected fields.
+
 - Observation: the coordinator deliberately exposes a `PgConnection` from its host-prepared transaction, while the preexisting public cancellation primitive accepted only `Transaction<Postgres>`.
   Evidence: `crates/syrup-rail-postgres/src/transactions.rs` and the former signature of `cancel_subscription_in_transaction` in `crates/syrup-rail-postgres/src/cancellation.rs`.
   Resolution: retain the public transaction-local primitive as a wrapper and use a crate-visible connection-local implementation from the high-level facade, so no second transaction can break cancellation/event atomicity.
@@ -54,6 +57,10 @@ The behavior is observable through public API tests and PostgreSQL integration s
   Rationale: Those values are unnecessary for an ordinary billing portal and are protected data under `docs/security/threat-model.md`.
   Date/Author: 2026-08-11 / Codex.
 
+- Decision: The masked payment-method display is card-only: brand, last four, and expiration fields. It deliberately excludes `payment_type`, which is arbitrary provider text rather than a normalized cross-provider customer contract.
+  Rationale: A card-only display provides the ordinary portal need without widening the public surface to a provider-originated free-form value. The selected card fields are validated and ordinary formatting reports only their presence.
+  Date/Author: 2026-08-11 / Codex.
+
 - Decision: Classify service errors conservatively. Only explicitly temporary conditions are retryable; storage/application and invalid-state failures remain internal rather than encouraging an unbounded retry loop. An indeterminate provider mutation is already represented by a durable payment result and reconciliation, not by a retryable service error.
   Rationale: The gateway contract guarantees at-most-once mutation and forbids blind retry of indeterminate outcomes.
   Date/Author: 2026-08-11 / Codex.
@@ -69,6 +76,8 @@ The behavior is observable through public API tests and PostgreSQL integration s
 ## Outcomes & Retrospective
 
 Milestone 1 is complete: the public service now admits and executes exact cancellation, discount claim, and discount clear commands. Cancellation keeps canonical mutation, typed event append, and commit on the coordinator's single host-prepared transaction; semantic replays/blockers emit no event, while mutation or append errors roll back. Discount mutations preserve existing typed outcomes without gateway resolution or provider I/O. Core identity/admission tests and PostgreSQL integration scenarios cover allowed and denied admission, atomic append/mutation rollback, replay, blockers, and discount paths. The final retrospective will add the complete cross-milestone commit list and repository-wide validation evidence.
+
+Milestone 2 is complete: public core types now model an authorized exact billing portal query, canonical entitlement snapshot, optional masked-card display, checked payment-history page size, strict cursor, and safe payment-history facts. PostgreSQL retains the existing entitlement SQL as the authority and evaluates it with the card projection in one `REPEATABLE READ READ ONLY` snapshot. The history reader uses a narrow, explicit select list and strict descending `(created_at, id)` pagination with one extra row; it never constructs `PaymentAttempt` or selects protected provider/contact/diagnostic columns. Core and PostgreSQL tests cover value-free formatting, bounds, empty/active/trial/dunning/canceled/grant/scrubbed snapshots, saved/applied discounts, exact identity isolation, timestamp ties, zero-value method updates, host-charge exclusion, and redaction.
 
 ## Context and Orientation
 

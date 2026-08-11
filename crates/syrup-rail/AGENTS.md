@@ -29,6 +29,8 @@ command/outcome types for application-independent subscription billing.
   and diagnostic boundary.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure
   payment/calendar policy.
+- `src/billing_portal.rs` owns the provider-neutral customer billing portal,
+  masked-card display, and bounded exact-plan payment-history read types.
 
 ## Edit here for X
 
@@ -46,6 +48,9 @@ command/outcome types for application-independent subscription billing.
 - Change grant, discount, or access/deletion facts in the matching
   `src/subscription/{grant,discount,access}.rs` owner rather than growing the
   subscription lifecycle facade.
+- Change reusable customer billing-read values in `src/billing_portal.rs`.
+  Keep fields private, payment-method formatting value-free, and provider
+  identifiers, contacts, and diagnostics outside these types.
 
 ## Invariants
 

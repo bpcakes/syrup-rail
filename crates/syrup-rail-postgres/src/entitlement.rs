@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     ActorId, AppliedSubscriptionDiscount, BillingPeriod, ChargeAmount, CurrencyCode,
     DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, LimitedDiscountMonths,
@@ -204,6 +204,27 @@ pub async fn entitlement(
     pool: &PgPool,
     query: &EntitlementQuery,
 ) -> Result<Entitlement, EntitlementQueryError> {
+    entitlement_on_executor(pool, query).await
+}
+
+/// Runs the canonical entitlement projection on a caller-owned connection.
+///
+/// This is crate-visible so a composite read can retain the exact entitlement
+/// semantics while sharing one PostgreSQL snapshot with its other projections.
+pub(crate) async fn entitlement_on_connection(
+    connection: &mut PgConnection,
+    query: &EntitlementQuery,
+) -> Result<Entitlement, EntitlementQueryError> {
+    entitlement_on_executor(connection, query).await
+}
+
+async fn entitlement_on_executor<'e, E>(
+    executor: E,
+    query: &EntitlementQuery,
+) -> Result<Entitlement, EntitlementQueryError>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     let row = sqlx::query(
         r#"
         WITH clock AS MATERIALIZED (
@@ -361,7 +382,7 @@ pub async fn entitlement(
     .bind(query.billing_scope_id().as_uuid())
     .bind(query.subscriber_id().as_uuid())
     .bind(query.plan_key().as_str())
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     entitlement_from_row(&row)

@@ -7,6 +7,7 @@
 
 mod admission;
 mod attempt;
+mod billing_portal;
 mod card_data;
 mod discount;
 mod enrollment;
@@ -30,6 +31,7 @@ mod terms;
 
 pub use admission::*;
 pub use attempt::*;
+pub use billing_portal::*;
 pub use card_data::{raw_card_data_ranges, string_contains_raw_card_data};
 pub use discount::*;
 pub use enrollment::*;

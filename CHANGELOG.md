@@ -32,6 +32,11 @@ separate release task.
   canonical mutation and typed outbox event through one host-prepared
   transaction, while discount operations preserve their typed semantic
   outcomes without gateway or provider I/O.
+- Add provider-neutral customer billing portal and exact-plan payment-history
+  reads. Portal snapshots preserve canonical entitlement semantics and expose
+  only a value-redacted masked-card display; history uses a checked cursor page
+  size and excludes provider references, transaction IDs, contacts, responses,
+  and raw diagnostics.
 
 ### Changed
 
