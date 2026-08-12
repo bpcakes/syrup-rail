@@ -56,6 +56,10 @@ provider strings do not cross that projection boundary. Its aliases include
 the documented NMI `diners` label for `DinersClub`; provider adapters retain
 exact evidence and test their own documented scheme vocabulary.
 
+`SubscriptionPaymentMethodDisplay` cannot represent an all-empty display.
+Its persisted/provider-parts conversion normalizes first and returns `None`
+when no renderable field remains.
+
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
 define a transport wire format for billing events. Those remain host
 responsibilities. See the workspace `subscription_terms`, `entitlement_access`,

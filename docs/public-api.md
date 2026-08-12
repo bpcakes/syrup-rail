@@ -27,9 +27,11 @@ the error and disposition enums are non-exhaustive.
 ## Read and scheduler surface
 
 Use `subscription_billing_portal` and `subscription_payment_history_page` for
-authorized customer billing pages. Use `due_renewals_page` for a bounded,
-trusted-host renewal scan. Its cursor is not end-user input, a queue lease, or a
-cross-page database snapshot.
+authorized customer billing pages. A present payment-method display always has
+at least one renderable, normalized field; normalized absence is represented by
+`None`, not an empty inner value. Use `due_renewals_page` for a bounded,
+trusted-host renewal scan. Its cursor is not end-user input, a queue lease, or
+a cross-page database snapshot.
 
 Use `assert_runtime_schema_v2_compatible` after host migrations and before
 serving billing traffic. Version 0.2 supports PostgreSQL 18 and schema v2 only;

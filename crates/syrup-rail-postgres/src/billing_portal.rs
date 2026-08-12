@@ -177,21 +177,12 @@ async fn payment_method_display(
         .try_get::<Option<i16>, _>("card_exp_year")?
         .map(|value| u16::try_from(value).map_err(|_| invalid_state()))
         .transpose()?;
-    if card_brand.is_none()
-        && card_last_four.is_none()
-        && card_expiration_month.is_none()
-        && card_expiration_year.is_none()
-    {
-        return Ok(None);
-    }
-
     SubscriptionPaymentMethodDisplay::from_provider_parts(
         card_brand.as_deref(),
         card_last_four,
         card_expiration_month,
         card_expiration_year,
     )
-    .map(Some)
     .map_err(|_| invalid_state())
 }
 

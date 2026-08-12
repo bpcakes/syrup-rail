@@ -249,6 +249,28 @@ async fn billing_portal_is_exact_and_hides_scrubbed_or_sensitive_method_data()
             }
         }
 
+        sqlx::query(
+            r#"
+            UPDATE billing_payment_methods
+            SET card_brand = '   ',
+                card_last4 = NULL,
+                card_exp_month = NULL,
+                card_exp_year = NULL
+            WHERE id = $1
+            "#,
+        )
+        .bind(fixture.payment_method_id)
+        .execute(&database.pool)
+        .await?;
+        let normalized_empty_snapshot =
+            subscription_billing_portal(&database.pool, &fixture.query()).await?;
+        if normalized_empty_snapshot.payment_method_display().is_some() {
+            return Err(io::Error::other(
+                "normalized empty card metadata produced a portal display",
+            )
+            .into());
+        }
+
         for wrong_query in [
             portal_query(Uuid::now_v7(), fixture.subscriber_id, "private_plan")?,
             portal_query(

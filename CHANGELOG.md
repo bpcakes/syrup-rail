@@ -36,9 +36,10 @@ No unreleased changes.
   outcomes without gateway or provider I/O.
 - Add provider-neutral customer billing portal and exact-plan payment-history
   reads. Portal snapshots preserve canonical entitlement semantics and expose
-  only a value-redacted masked-card display; history uses a checked cursor page
-  size and excludes provider references, transaction IDs, contacts, responses,
-  and raw diagnostics.
+  only a value-redacted, nonempty masked-card display; normalized absence is
+  represented only by `None`. History uses a checked cursor page size and
+  excludes provider references, transaction IDs, contacts, responses, and raw
+  diagnostics.
 - Add stable `due_renewals_page` dispatch pagination. Its cursor carries the
   first PostgreSQL-observed scan timestamp and strict scheduling key so hosts
   can drain more than one hundred unchanged due subscriptions without

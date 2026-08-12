@@ -50,6 +50,8 @@ tokens, billing contacts, raw gateway diagnostics, or raw idempotency keys.
 - [x] (2026-08-12) Characterized the complete core card-brand alias table and
   the documented NMI scheme vocabulary; NMI's `diners` spelling now projects
   to `DinersClub` without changing exact persisted provider evidence.
+- [x] (2026-08-12) Made empty payment-method displays unrepresentable and moved
+  normalization plus absence classification into the core conversion boundary.
 
 ## Surprises & Discoveries
 
@@ -170,6 +172,11 @@ tokens, billing contacts, raw gateway diagnostics, or raw idempotency keys.
   its provider's documented labels.
   Rationale: presentation remains provider-neutral and centralized while a
   provider vocabulary change becomes an explicit adapter test failure.
+- Decision: represent a missing masked payment display only as `None`; a
+  constructed `SubscriptionPaymentMethodDisplay` always contains at least one
+  normalized renderable field.
+  Rationale: raw SQL presence cannot decide whether normalization leaves a
+  customer-visible value, so the core conversion owns both operations.
 - Decision: terminate standard error-source traversal at wrappers around
   arbitrary host callback errors and expose the original only through the
   consuming `into_source()` method.

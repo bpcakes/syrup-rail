@@ -68,6 +68,13 @@ impl SubscriptionPaymentMethodDisplay {
         card_expiration_month: Option<u8>,
         card_expiration_year: Option<u16>,
     ) -> Result<Self, SubscriptionPaymentMethodDisplayError> {
+        if card_brand.is_none()
+            && card_last_four.is_none()
+            && card_expiration_month.is_none()
+            && card_expiration_year.is_none()
+        {
+            return Err(SubscriptionPaymentMethodDisplayError::Empty);
+        }
         if card_last_four.as_deref().is_some_and(|value| {
             value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_digit())
         }) {
@@ -87,26 +94,31 @@ impl SubscriptionPaymentMethodDisplay {
         })
     }
 
-    /// Constructs a masked display from an untrusted persisted brand label.
+    /// Constructs an optional masked display from untrusted persisted parts.
     ///
     /// Recognized brands are canonicalized, unknown text becomes
     /// [`PaymentCardBrand::Other`], and the original provider text is not
-    /// retained.
+    /// retained. When normalization leaves no renderable field, this returns
+    /// `Ok(None)` rather than constructing an empty display.
     pub fn from_provider_parts(
         card_brand: Option<&str>,
         card_last_four: Option<String>,
         card_expiration_month: Option<u8>,
         card_expiration_year: Option<u16>,
-    ) -> Result<Self, SubscriptionPaymentMethodDisplayError> {
+    ) -> Result<Option<Self>, SubscriptionPaymentMethodDisplayError> {
         if card_brand.is_some_and(string_contains_raw_card_data) {
             return Err(SubscriptionPaymentMethodDisplayError::CardBrandContainsRawCardData);
         }
-        Self::new(
+        match Self::new(
             card_brand.and_then(PaymentCardBrand::from_provider),
             card_last_four,
             card_expiration_month,
             card_expiration_year,
-        )
+        ) {
+            Ok(display) => Ok(Some(display)),
+            Err(SubscriptionPaymentMethodDisplayError::Empty) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Returns the provider-neutral card brand.
@@ -148,6 +160,9 @@ impl fmt::Debug for SubscriptionPaymentMethodDisplay {
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum SubscriptionPaymentMethodDisplayError {
+    /// No normalized display field was present.
+    #[error("subscription payment-method display has no renderable fields")]
+    Empty,
     #[error("subscription payment-method card brand cannot contain raw card data")]
     CardBrandContainsRawCardData,
     #[error("subscription payment-method card last four must contain exactly four ASCII digits")]
@@ -390,9 +405,18 @@ mod tests {
             None,
             None,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(unknown.card_brand(), Some(PaymentCardBrand::Other));
         assert!(!format!("{unknown:?}").contains("private-provider-sentinel"));
+        assert_eq!(
+            SubscriptionPaymentMethodDisplay::new(None, None, None, None),
+            Err(SubscriptionPaymentMethodDisplayError::Empty)
+        );
+        assert_eq!(
+            SubscriptionPaymentMethodDisplay::from_provider_parts(Some(" \t "), None, None, None,),
+            Ok(None)
+        );
         assert_eq!(
             SubscriptionPaymentMethodDisplay::new(None, Some("42".to_owned()), None, None),
             Err(SubscriptionPaymentMethodDisplayError::InvalidCardLastFour)

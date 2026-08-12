@@ -50,7 +50,9 @@ command/outcome types for application-independent subscription billing.
   subscription lifecycle facade.
 - Change reusable customer billing-read values in `src/billing_portal.rs`.
   Keep fields private, payment-method formatting value-free, and provider
-  identifiers, contacts, and diagnostics outside these types.
+  identifiers, contacts, and diagnostics outside these types. A present
+  payment-method display must contain at least one normalized renderable field;
+  provider/persistence conversion alone owns the `None` result for absence.
 - Change provider-neutral renewal dispatch facts in `src/renewal.rs`. Keep
   cursor fields private and preserve the database-observed scan timestamp with
   its strict scheduling continuation key; queue/outbox ownership stays with

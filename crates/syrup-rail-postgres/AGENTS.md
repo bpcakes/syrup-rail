@@ -140,6 +140,8 @@ and transaction orchestration.
   Preserve the exact entitlement projection and one-snapshot transaction;
   never use broad payment-attempt loaders or select provider references,
   transaction IDs, contacts, response text, or diagnostics for this surface.
+  Pass selected presentation fields to the core conversion before deciding
+  presence; normalized absence must remain `None`.
 - Change due-renewal pagination in `src/renewal.rs`. Preserve every current
   eligibility gate, bind the first page's database-observed timestamp into all
   time-dependent gates on every continuation, retain strict ascending
