@@ -1,8 +1,7 @@
 # Syrup Rail PostgreSQL schema v2
 
-Schema v2 on PostgreSQL 18 is the current canonical contract. PostgreSQL 18 is
-the only supported major. New hosts copy `install.sql` byte-for-byte into an
-immutable host migration. Existing schema-v1 hosts copy
+Schema v2 is the current canonical contract. New hosts copy `install.sql`
+byte-for-byte into an immutable host migration. Existing schema-v1 hosts copy
 `upgrade_from_v1.sql` byte-for-byte into one forward-only transactional
 migration; they must not run `install.sql` over v1.
 
@@ -68,18 +67,8 @@ offer terms for the affected plan and idempotency key; changing those terms is
 an intentional replay conflict. Already-submitted initial attempts reconcile
 from their durable snapshot and do not require a live offer lookup.
 
-The checked-in artifacts are exported as `V2_INSTALL_SQL`,
+The Rust package exports the exact artifacts as `V2_INSTALL_SQL`,
 `V1_TO_V2_PREFLIGHT_SQL`, `V1_TO_V2_RETRY_RECLASSIFICATION_AUDIT_SQL`, and
-`V1_TO_V2_UPGRADE_SQL` only for crate tests or the explicit
-`schema-contract-test-support` feature. Ordinary production dependencies do
-not embed or expose them as a runtime migrator. Hosts copy the checked-in SQL
-into their own immutable migration deployment, then may call
-`assert_runtime_schema_v2_compatible` before serving billing traffic. That
-read-only runtime assertion verifies the full v2 catalog and fingerprint; it
-first verifies PostgreSQL 18 and does not run any install, upgrade, preflight,
-or audit SQL. After release, all four SQL files are immutable distribution
-artifacts. Hosts may add separately named, host-prefixed tables, constraints,
-indexes, functions, and triggers after installation. Canonical relation and
-view columns are a closed contract: hosts must not add host-specific columns to
-them, even with a prefix, because the runtime fingerprint intentionally rejects
-that shape.
+`V1_TO_V2_UPGRADE_SQL`. After release, all four SQL files are immutable
+distribution artifacts. Hosts may add separately named host objects after
+installation, subject to the canonical conformance rules.
