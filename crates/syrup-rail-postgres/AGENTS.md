@@ -62,7 +62,7 @@ and transaction orchestration.
 - `src/transactions.rs` — host-prepared billing transaction and typed event
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
-  caller-transaction protected-write guard.
+  top-level, phase-typed protected-write guard.
 - `src/billing_portal.rs` — read-only, provider-neutral customer billing
   portal and exact-plan payment-history projections. It reuses entitlement
   semantics inside one repeatable-read snapshot and selects only masked card
@@ -141,12 +141,24 @@ and transaction orchestration.
   never use broad payment-attempt loaders or select provider references,
   transaction IDs, contacts, response text, or diagnostics for this surface.
   Pass selected presentation fields to the core conversion before deciding
-  presence; normalized absence must remain `None`.
+  presence; normalized absence must remain `None`. Keep the exact-plan
+  identity prefix plus descending `(created_at, id)` keyset aligned with
+  `billing_payment_attempts_subscription_history_idx` in both schema-v2
+  artifacts and the runtime schema contract. Keep first-page and continuation
+  SQL as separate physical statements, with the continuation keyset as an
+  unconditional index condition; the PostgreSQL generic-plan regression must
+  explain the exact production statements.
 - Change due-renewal pagination in `src/renewal.rs`. Preserve every current
   eligibility gate, bind the first page's database-observed timestamp into all
   time-dependent gates on every continuation, retain strict ascending
   `(next_payment_attempt_at, subscription_id)` keyset order, and keep
-  `due_renewals` as the fixed-limit first-page compatibility wrapper. Do not
+  `due_renewals` as the fixed-limit first-page compatibility wrapper. Keep the
+  first-page and continuation SQL phases separate, force the candidate CTE to
+  fold so it is not unconditionally materialized before the outer page limit,
+  and keep that keyset aligned with `billing_subscriptions_due_idx` in both
+  schema-v2 artifacts and the complete runtime index contract. Folding and an
+  aligned index make early stopping available; PostgreSQL still chooses plans
+  by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
   remain host-owned. This freezes eligibility time rather than holding a
   cross-page MVCC snapshot, so concurrent candidates behind a cursor can wait
@@ -293,9 +305,14 @@ and transaction orchestration.
   deterministic, account-scoped durable requery claim. Negative observations
   re-lock and revalidate the immutable shared request before changing status;
   provider I/O never occurs inside that transaction.
-- Protected-write admission requires the caller's SQL transaction so accepted
-  paid/grant locks remain held through the host mutation; it restores the
-  caller's prior transaction-local `lock_timeout` after semantic results.
+- Protected-write admission accepts only a pool-created top-level
+  `EntitlementWriteTransaction`; its pending phase has no commit operation.
+  Return an `AdmittedEntitlementWriteTransaction` only on success, with
+  accepted paid/grant locks held through the host mutation. Await rollback for
+  every completed denial or SQL error. A canceled future must retain ownership
+  so dropping it queues a full rollback and cannot expose an unguarded
+  continuation. Restore the temporary `lock_timeout` before returning the
+  admitted value.
 - Only provider-free subscriber mutations may promote pool acquisition
   timeouts or PostgreSQL's explicit retry conditions (serialization, deadlock,
   lock timeout, or statement timeout) to `StorageTemporarilyUnavailable`.

@@ -14,7 +14,9 @@ New hosts install `schema/v2/install.sql` through their normal migration
 system. Hosts upgrading from 0.1 must stop every 0.1 billing writer, run the
 checked-in v1 preflight and retry-reclassification audit, apply
 `schema/v2/upgrade_from_v1.sql` transactionally, and roll forward with 0.2.
-Schema v1 is immutable.
+Schema v1 is immutable. Budget the stopped-writer maintenance window for a
+full payment-attempt heap scan and transactional partial-index construction;
+the detailed cutover guide explains the lock and rehearsal requirements.
 
 After the host applies its migration and before it serves billing traffic,
 verify the runtime catalog:
@@ -47,10 +49,23 @@ error only by classifying the outer service error, destructuring an owned
 callback-error variant, and consuming that wrapper with `into_source()` in a
 protected diagnostic path.
 
-Customer billing portal/history queries, stable due-renewal pagination, and the
-lower-level transaction-local operations remain available for hosts that need
-to compose them into a larger application transaction. Authentication,
-authorization, migrations, job queues, and event transport remain host-owned.
+Customer billing portal/history queries, stable due-renewal pagination, and
+other lower-level transaction-local operations remain available for hosts that
+need to compose them into a larger application transaction. The protected-write
+guard described below deliberately owns its top-level transaction instead.
+Authentication, authorization, migrations, job queues, and event transport
+remain host-owned.
+
+Protected product writes use two ownership-enforced phases. Start an
+`EntitlementWriteTransaction` from the pool and use its connection for any
+preparatory host writes; that pending value has no commit operation.
+`require_entitlement_for_update` returns an
+`AdmittedEntitlementWriteTransaction` only when current paid or granted access
+is admitted and keeps the relevant locks held for the host mutation. Completed
+denials and SQL failures await rollback, while cancellation queues rollback of
+the owned transaction, including any earlier host writes. Perform and commit
+the host-owned protected mutation only through the admitted value, and finish
+any nested savepoint before consuming that value with `commit` or `rollback`.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.

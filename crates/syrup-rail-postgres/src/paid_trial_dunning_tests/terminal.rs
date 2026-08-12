@@ -341,9 +341,8 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
         .await?,
         Entitlement::Missing { .. }
     ));
-    let mut transaction = database.pool.begin().await?;
     let protected = require_entitlement_for_update(
-        &mut transaction,
+        EntitlementWriteTransaction::begin(&database.pool).await?,
         &EntitlementGuard::new(
             BillingScopeId::new(account.billing_scope_id),
             subscriber_id,
@@ -351,7 +350,6 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
         ),
     )
     .await;
-    transaction.rollback().await?;
     assert!(matches!(
         protected,
         Err(crate::EntitlementGuardError::Required)

@@ -1,15 +1,16 @@
-use std::{error::Error, io};
+use std::{error::Error, io, time::Duration};
 
 use chrono::{DateTime, TimeZone, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use syrup_rail::{
     BillingScopeId, Entitlement, EntitlementGuard, EntitlementQuery, PlanKey, SubscriberId,
 };
 use uuid::Uuid;
 
 use super::{
-    EntitlementGuardError, EntitlementQueryError, GuardAccess, classify_guard_access, entitlement,
-    require_entitlement_for_update,
+    EntitlementGuardError, EntitlementQueryError, EntitlementWriteTransaction, GuardAccess,
+    classify_guard_access, entitlement, require_entitlement_for_update,
+    require_entitlement_for_update_with_lock_timeout,
 };
 use crate::test_support::{TestDatabase, create_gateway_account};
 
@@ -94,25 +95,42 @@ async fn protected_write_guard_uses_database_state_and_restores_the_host_timeout
             let subscriber = Uuid::now_v7();
             let entitlement_guard = guard(scope, subscriber)?;
 
-            let mut transaction = database.pool.begin().await?;
-            sqlx::query("SELECT set_config('lock_timeout', '3s', true)")
-                .execute(&mut *transaction)
+            create_host_guard_probe_table(&database.pool).await?;
+            let probe_id = Uuid::now_v7();
+            let mut transaction = EntitlementWriteTransaction::begin(&database.pool).await?;
+            let transaction_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(transaction.connection())
                 .await?;
+            sqlx::query("INSERT INTO host_entitlement_guard_probes (id) VALUES ($1)")
+                .bind(probe_id)
+                .execute(transaction.connection())
+                .await?;
+            let mut observer = database.pool.acquire().await?;
             if !matches!(
-                require_entitlement_for_update(&mut transaction, &entitlement_guard).await,
+                require_entitlement_for_update(transaction, &entitlement_guard).await,
                 Err(EntitlementGuardError::Required)
             ) {
                 return Err(io::Error::other("missing entitlement was not rejected").into());
             }
+            assert_backend_transaction_ended(&mut observer, transaction_pid).await?;
+            assert_host_guard_probe_absent(&database.pool, probe_id).await?;
+            drop(observer);
+
+            let first_grant = insert_grant(&database.pool, scope, subscriber).await?;
+            let mut transaction = EntitlementWriteTransaction::begin(&database.pool).await?;
+            sqlx::query("SELECT set_config('lock_timeout', '3s', true)")
+                .execute(transaction.connection())
+                .await?;
+            let mut transaction =
+                require_entitlement_for_update(transaction, &entitlement_guard).await?;
             let restored: String = sqlx::query_scalar("SELECT current_setting('lock_timeout')")
-                .fetch_one(&mut *transaction)
+                .fetch_one(transaction.connection())
                 .await?;
             if restored != "3s" {
                 return Err(io::Error::other("guard did not restore the host lock timeout").into());
             }
             transaction.rollback().await?;
 
-            let first_grant = insert_grant(&database.pool, scope, subscriber).await?;
             require_guard(&database.pool, &entitlement_guard).await?;
             let second_grant = insert_grant(&database.pool, scope, subscriber).await?;
             if !matches!(
@@ -176,6 +194,253 @@ async fn protected_write_guard_uses_database_state_and_restores_the_host_timeout
 }
 
 #[tokio::test]
+async fn admitted_protected_write_commits_preparatory_and_protected_host_mutations()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_guard_commit").await?;
+    let result = async {
+        let scope = Uuid::now_v7();
+        let subscriber = Uuid::now_v7();
+        let entitlement_guard = guard(scope, subscriber)?;
+        insert_grant(&database.pool, scope, subscriber).await?;
+        create_host_guard_probe_table(&database.pool).await?;
+        let preparatory_probe_id = Uuid::now_v7();
+        let protected_probe_id = Uuid::now_v7();
+
+        let mut transaction = EntitlementWriteTransaction::begin(&database.pool).await?;
+        sqlx::query("INSERT INTO host_entitlement_guard_probes (id) VALUES ($1)")
+            .bind(preparatory_probe_id)
+            .execute(transaction.connection())
+            .await?;
+        let mut transaction =
+            require_entitlement_for_update(transaction, &entitlement_guard).await?;
+        sqlx::query("INSERT INTO host_entitlement_guard_probes (id) VALUES ($1)")
+            .bind(protected_probe_id)
+            .execute(transaction.connection())
+            .await?;
+
+        assert_host_guard_probe_count(
+            &database.pool,
+            &[preparatory_probe_id, protected_probe_id],
+            0,
+        )
+        .await?;
+        transaction.commit().await?;
+        assert_host_guard_probe_count(
+            &database.pool,
+            &[preparatory_probe_id, protected_probe_id],
+            2,
+        )
+        .await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Result<(), Box<dyn Error>>
+{
+    let database = TestDatabase::start("sr_guard_decode").await?;
+    let result = async {
+        let scope = Uuid::now_v7();
+        let subscriber = Uuid::now_v7();
+        let entitlement_guard = guard(scope, subscriber)?;
+        create_host_guard_probe_table(&database.pool).await?;
+        let probe_id = Uuid::now_v7();
+        let mut transaction = EntitlementWriteTransaction::begin(&database.pool).await?;
+        let transaction_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(transaction.connection())
+            .await?;
+        let mut observer = database.pool.acquire().await?;
+
+        sqlx::query("INSERT INTO host_entitlement_guard_probes (id) VALUES ($1)")
+            .bind(probe_id)
+            .execute(transaction.connection())
+            .await?;
+        sqlx::query(
+            r#"
+            CREATE TEMPORARY TABLE billing_subscriptions (
+                id uuid NOT NULL,
+                billing_scope_id uuid NOT NULL,
+                subscriber_id uuid NOT NULL,
+                plan_key text NOT NULL,
+                status text NOT NULL,
+                current_period_end_at text NOT NULL,
+                past_due_access text NOT NULL,
+                next_payment_attempt_at timestamptz
+            ) ON COMMIT DROP
+            "#,
+        )
+        .execute(transaction.connection())
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO billing_subscriptions (
+                id, billing_scope_id, subscriber_id, plan_key, status,
+                current_period_end_at, past_due_access, next_payment_attempt_at
+            ) VALUES ($1, $2, $3, 'base_subscription', 'active',
+                'not-a-timestamp', 'suspend_immediately', NULL)
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(scope)
+        .bind(subscriber)
+        .execute(transaction.connection())
+        .await?;
+
+        let error = require_entitlement_for_update(transaction, &entitlement_guard)
+            .await
+            .expect_err("the incompatible temporary row must fail client-side decoding");
+        if !matches!(
+            error,
+            EntitlementGuardError::Sql(sqlx::Error::ColumnDecode { .. })
+        ) {
+            return Err(io::Error::other(format!(
+                "expected a client-side column decode error, got {error}"
+            ))
+            .into());
+        }
+        assert_backend_transaction_ended(&mut observer, transaction_pid).await?;
+        assert_host_guard_probe_absent(&database.pool, probe_id).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn protected_write_guard_rolls_back_after_a_database_lock_timeout()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_guard_timeout").await?;
+    let result = async {
+        let scope = Uuid::now_v7();
+        let subscriber = Uuid::now_v7();
+        let entitlement_guard = guard(scope, subscriber)?;
+        create_host_guard_probe_table(&database.pool).await?;
+        let probe_id = Uuid::now_v7();
+
+        let mut holder = database.pool.begin().await?;
+        lock_entitlement_aggregate(&mut holder, subscriber).await?;
+
+        let mut caller = EntitlementWriteTransaction::begin(&database.pool).await?;
+        let caller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(caller.connection())
+            .await?;
+        let mut observer = database.pool.acquire().await?;
+        sqlx::query("INSERT INTO host_entitlement_guard_probes (id) VALUES ($1)")
+            .bind(probe_id)
+            .execute(caller.connection())
+            .await?;
+        let error = require_entitlement_for_update(caller, &entitlement_guard)
+            .await
+            .expect_err("the held aggregate lock must trigger the guard timeout");
+        let EntitlementGuardError::Sql(error) = error else {
+            return Err(io::Error::other(format!(
+                "expected a SQL lock timeout from the guard, got {error}"
+            ))
+            .into());
+        };
+        assert_lock_timeout(&error)?;
+        assert_backend_transaction_ended(&mut observer, caller_pid).await?;
+        holder.rollback().await?;
+        assert_host_guard_probe_absent(&database.pool, probe_id).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn canceling_a_blocked_protected_write_guard_rolls_back_the_transaction()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_guard_cancel").await?;
+    let result = async {
+        let scope = Uuid::now_v7();
+        let subscriber = Uuid::now_v7();
+        let entitlement_guard = guard(scope, subscriber)?;
+        create_host_guard_probe_table(&database.pool).await?;
+        let probe_id = Uuid::now_v7();
+
+        let mut holder = database.pool.begin().await?;
+        lock_entitlement_aggregate(&mut holder, subscriber).await?;
+
+        let mut caller = EntitlementWriteTransaction::begin(&database.pool).await?;
+        sqlx::query("INSERT INTO host_entitlement_guard_probes (id) VALUES ($1)")
+            .bind(probe_id)
+            .execute(caller.connection())
+            .await?;
+        let caller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(caller.connection())
+            .await?;
+        let mut observer = database.pool.acquire().await?;
+
+        let wait_until_blocked = async {
+            loop {
+                let waiting_on_lock: Option<bool> = sqlx::query_scalar(
+                    r#"
+                    SELECT wait_event_type = 'Lock'
+                    FROM pg_catalog.pg_stat_activity
+                    WHERE pid = $1
+                    "#,
+                )
+                .bind(caller_pid)
+                .fetch_one(&mut *observer)
+                .await?;
+                if waiting_on_lock.unwrap_or(false) {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        };
+        let mut guard_future = Box::pin(require_entitlement_for_update_with_lock_timeout(
+            caller,
+            &entitlement_guard,
+            "30s",
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                guard_result = &mut guard_future => Err(io::Error::other(format!(
+                    "guard completed instead of blocking before cancellation: {guard_result:?}"
+                ))),
+                observation = wait_until_blocked => observation.map_err(io::Error::other),
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("guard did not reach its advisory-lock wait"))??;
+        drop(guard_future);
+        holder.rollback().await?;
+        assert_backend_transaction_ended(&mut observer, caller_pid).await?;
+
+        let mut contender = database.pool.begin().await?;
+        let aggregate_unlocked: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        )
+        .bind(subscriber)
+        .bind("base_subscription")
+        .fetch_one(&mut *contender)
+        .await?;
+        if !aggregate_unlocked {
+            return Err(
+                io::Error::other("canceled guard retained its aggregate advisory lock").into(),
+            );
+        }
+        contender.rollback().await?;
+        assert_host_guard_probe_absent(&database.pool, probe_id).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn protected_write_guard_holds_the_aggregate_and_entitlement_rows_until_caller_end()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_guard_locks").await?;
@@ -184,8 +449,8 @@ async fn protected_write_guard_holds_the_aggregate_and_entitlement_rows_until_ca
         let subscriber = Uuid::now_v7();
         let grant_id = insert_grant(&database.pool, scope, subscriber).await?;
         let guard = guard(scope, subscriber)?;
-        let mut holder = database.pool.begin().await?;
-        require_entitlement_for_update(&mut holder, &guard).await?;
+        let holder = EntitlementWriteTransaction::begin(&database.pool).await?;
+        let holder = require_entitlement_for_update(holder, &guard).await?;
 
         let mut aggregate_contender = database.pool.begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '100ms'")
@@ -473,10 +738,14 @@ async fn guard_result(
     pool: &PgPool,
     guard: &EntitlementGuard,
 ) -> Result<Result<(), EntitlementGuardError>, sqlx::Error> {
-    let mut transaction = pool.begin().await?;
-    let result = require_entitlement_for_update(&mut transaction, guard).await;
-    transaction.rollback().await?;
-    Ok(result)
+    let transaction = EntitlementWriteTransaction::begin(pool).await?;
+    match require_entitlement_for_update(transaction, guard).await {
+        Ok(transaction) => {
+            transaction.rollback().await?;
+            Ok(Ok(()))
+        }
+        Err(error) => Ok(Err(error)),
+    }
 }
 
 async fn require_guard(pool: &PgPool, guard: &EntitlementGuard) -> Result<(), Box<dyn Error>> {
@@ -562,6 +831,99 @@ async fn insert_paid_subscription(
     .execute(pool)
     .await?;
     Ok((account.billing_scope_id, subscriber, subscription))
+}
+
+async fn create_host_guard_probe_table(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE TABLE host_entitlement_guard_probes (
+            id uuid PRIMARY KEY
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn assert_host_guard_probe_absent(pool: &PgPool, probe_id: Uuid) -> Result<(), io::Error> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM host_entitlement_guard_probes WHERE id = $1)",
+    )
+    .bind(probe_id)
+    .fetch_one(pool)
+    .await
+    .map_err(io::Error::other)?;
+    if exists {
+        Err(io::Error::other(
+            "failed protected-write admission committed an earlier host mutation",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+async fn assert_host_guard_probe_count(
+    pool: &PgPool,
+    probe_ids: &[Uuid],
+    expected: i64,
+) -> Result<(), io::Error> {
+    let actual: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM host_entitlement_guard_probes WHERE id = ANY($1::uuid[])",
+    )
+    .bind(probe_ids)
+    .fetch_one(pool)
+    .await
+    .map_err(io::Error::other)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "expected {expected} committed host guard probes, found {actual}"
+        )))
+    }
+}
+
+async fn assert_backend_transaction_ended(
+    observer: &mut sqlx::pool::PoolConnection<Postgres>,
+    backend_pid: i32,
+) -> Result<(), io::Error> {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let state = sqlx::query_as::<_, (String, bool)>(
+                r#"
+                SELECT state, xact_start IS NULL
+                FROM pg_catalog.pg_stat_activity
+                WHERE pid = $1
+                "#,
+            )
+            .bind(backend_pid)
+            .fetch_optional(&mut **observer)
+            .await
+            .map_err(io::Error::other)?;
+            if match state {
+                None => true,
+                Some((state, transaction_ended)) => state == "idle" && transaction_ended,
+            } {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::other("protected-write backend did not finish rolling back"))?
+}
+
+async fn lock_entitlement_aggregate(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscriber: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(subscriber)
+        .bind("base_subscription")
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
 }
 
 fn assert_lock_timeout(error: &sqlx::Error) -> Result<(), io::Error> {

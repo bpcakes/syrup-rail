@@ -1,10 +1,13 @@
-use std::{collections::HashSet, error::Error, time::Duration as StdDuration};
+use std::{collections::HashSet, error::Error, io, time::Duration as StdDuration};
 
 use chrono::Duration;
 use uuid::Uuid;
 
 use super::*;
-use crate::test_support::{TestDatabase, create_gateway_account};
+use crate::test_support::{
+    TestDatabase, create_gateway_account, explain_plan_root, find_plan_index_node,
+    plan_has_node_type,
+};
 
 use self::support::*;
 
@@ -29,6 +32,86 @@ async fn due_selection_is_provider_keyed_and_has_a_fixed_shared_bound() -> Resul
     assert_eq!(due[0].subscription_id().into_uuid(), other_subscription);
     assert_ne!(due[0].subscription_id().into_uuid(), nmi_subscription);
     assert_eq!(syrup_rail::RENEWAL_DISPATCH_LIMIT, 100);
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn representative_first_and_continuation_plans_are_limit_driven_and_index_ordered()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("renew_plan_v18").await?;
+    let account = create_gateway_account(&database.pool, "nmi").await?;
+    let due_at = Utc::now() - Duration::minutes(5);
+    insert_due_subscription_population(&database.pool, account, due_at, 4_096).await?;
+    sqlx::raw_sql(
+        r#"
+        ANALYZE billing_subscriptions;
+        ANALYZE billing_gateway_accounts;
+        ANALYZE billing_gateway_provider_rate_limits;
+        ANALYZE billing_payment_attempts;
+        "#,
+    )
+    .execute(&database.pool)
+    .await?;
+
+    let mut transaction = database.pool.begin().await?;
+    let continuation_cursor = RenewalDispatchPageCursor::new(
+        due_at,
+        due_at - Duration::minutes(8),
+        SubscriptionId::new(Uuid::from_u128(u128::MAX / 2)),
+    );
+
+    for (page_kind, page_query) in [
+        ("first", DueRenewalPageQuery::First(due_at)),
+        (
+            "continuation",
+            DueRenewalPageQuery::Continuation(continuation_cursor),
+        ),
+    ] {
+        let explain_sql = format!(
+            "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
+            page_query.sql()
+        );
+        let plan_row = sqlx::raw_sql(&explain_sql)
+            .fetch_one(&mut *transaction)
+            .await?;
+        let plan: serde_json::Value = plan_row.try_get(0)?;
+        let root = explain_plan_root(&plan)?;
+        let rendered = serde_json::to_string_pretty(root)?;
+        if root.get("Node Type").and_then(serde_json::Value::as_str) != Some("Limit") {
+            return Err(io::Error::other(format!(
+                "{page_kind} representative renewal plan lost its top-level Limit:\n{rendered}"
+            ))
+            .into());
+        }
+        if plan_has_node_type(root, "CTE Scan")
+            || plan_has_node_type(root, "Sort")
+            || plan_has_node_type(root, "Incremental Sort")
+        {
+            return Err(io::Error::other(format!(
+                "{page_kind} representative renewal plan materialized or sorted its due candidates:\n{rendered}"
+            ))
+            .into());
+        }
+        let index_node = find_plan_index_node(root, "billing_subscriptions_due_idx").ok_or_else(|| {
+            io::Error::other(format!(
+                "{page_kind} renewal dispatch plan did not use its ordered due index:\n{rendered}"
+            ))
+        })?;
+        if matches!(page_query, DueRenewalPageQuery::Continuation(_)) {
+            let index_condition = index_node
+                .get("Index Cond")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !index_condition.contains("$11") || !index_condition.contains("$12") {
+                return Err(io::Error::other(format!(
+                    "continuation keyset was not pushed into the due-index condition:\n{rendered}"
+                ))
+                .into());
+            }
+        }
+    }
+    transaction.rollback().await?;
 
     database.cleanup().await
 }

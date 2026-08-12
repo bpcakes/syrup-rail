@@ -61,6 +61,17 @@ decision after the host has authenticated and authorized its subject.
 example](crates/syrup-rail/examples/entitlement_access.rs) shows the host
 security boundary and canonical method call.
 
+For a protected write, start an `EntitlementWriteTransaction` from the pool,
+make any preparatory host writes through its connection, and pass it by value
+to `require_entitlement_for_update`. The pending transaction cannot commit.
+Only successful admission returns an `AdmittedEntitlementWriteTransaction`
+with its entitlement locks held. Completed denial and database failure await a
+full rollback; cancellation queues the owned transaction's rollback. Perform
+and commit the host-owned protected mutation only with the admitted value, and
+finish any nested savepoint before consuming that value. The compiled
+[`host_integration` example](crates/syrup-rail-postgres/examples/host_integration.rs)
+shows this fail-closed ownership boundary.
+
 `MarkUnpaid` makes the subscription terminal after the schedule is exhausted:
 it removes renewal and recovery authority and grants no subscription
 entitlement. The final transaction appends `SubscriptionPaymentFailed`

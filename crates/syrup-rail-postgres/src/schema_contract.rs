@@ -33,7 +33,7 @@ pub const V1_TO_V2_UPGRADE_SQL: &str = include_str!("../schema/v2/upgrade_from_v
 // Host objects use host-prefixed names and are deliberately excluded.
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
-const V2_CATALOG_FINGERPRINT: u64 = 0x0da8_83df_aab0_1e30;
+const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
 
 const REQUIRED_TABLES: &[&str] = &[
     "billing_external_reversal_attestations",
@@ -72,6 +72,121 @@ const REQUIRED_TRIGGERS: &[&str] = &[
     "billing_processor_charge_attempt_dimensions",
     "billing_processor_charge_evidence_immutable",
 ];
+
+// Reader-facing indexes are semantic schema contracts, not incidental planner
+// hints. Keep these complete shapes aligned with the owning Rust queries.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IndexKeyOrdering {
+    AscNullsLast,
+    DescNullsFirst,
+}
+
+impl IndexKeyOrdering {
+    const fn catalog_label(self) -> &'static str {
+        match self {
+            Self::AscNullsLast => "ASC NULLS LAST",
+            Self::DescNullsFirst => "DESC NULLS FIRST",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IndexKeyContract {
+    expression: &'static str,
+    ordering: IndexKeyOrdering,
+    opclass: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IndexContract {
+    purpose: &'static str,
+    name: &'static str,
+    table: &'static str,
+    unique: bool,
+    keys: &'static [IndexKeyContract],
+    included_expressions: &'static [&'static str],
+    predicate: Option<&'static str>,
+}
+
+const GATEWAY_ORDER_INDEX_CONTRACT: IndexContract = IndexContract {
+    purpose: "gateway-order uniqueness",
+    name: "billing_payment_attempts_gateway_order_idx",
+    table: "billing_payment_attempts",
+    unique: true,
+    keys: &[
+        IndexKeyContract {
+            expression: "gateway_account_id",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.uuid_ops",
+        },
+        IndexKeyContract {
+            expression: "gateway_order_id",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.text_ops",
+        },
+    ],
+    included_expressions: &[],
+    predicate: None,
+};
+
+const RENEWAL_DISPATCH_INDEX_CONTRACT: IndexContract = IndexContract {
+    purpose: "renewal-dispatch keyset",
+    name: "billing_subscriptions_due_idx",
+    table: "billing_subscriptions",
+    unique: false,
+    keys: &[
+        IndexKeyContract {
+            expression: "next_payment_attempt_at",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.timestamptz_ops",
+        },
+        IndexKeyContract {
+            expression: "id",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.uuid_ops",
+        },
+    ],
+    included_expressions: &["billing_scope_id", "gateway_account_id", "next_renewal_at"],
+    predicate: Some(
+        "(status = ANY (ARRAY['active'::text, 'past_due'::text])) AND next_payment_attempt_at IS NOT NULL",
+    ),
+};
+
+const SUBSCRIPTION_HISTORY_INDEX_CONTRACT: IndexContract = IndexContract {
+    purpose: "subscription-history keyset",
+    name: "billing_payment_attempts_subscription_history_idx",
+    table: "billing_payment_attempts",
+    unique: false,
+    keys: &[
+        IndexKeyContract {
+            expression: "billing_scope_id",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.uuid_ops",
+        },
+        IndexKeyContract {
+            expression: "subscriber_id",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.uuid_ops",
+        },
+        IndexKeyContract {
+            expression: "plan_key",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.text_ops",
+        },
+        IndexKeyContract {
+            expression: "created_at",
+            ordering: IndexKeyOrdering::DescNullsFirst,
+            opclass: "pg_catalog.timestamptz_ops",
+        },
+        IndexKeyContract {
+            expression: "id",
+            ordering: IndexKeyOrdering::DescNullsFirst,
+            opclass: "pg_catalog.uuid_ops",
+        },
+    ],
+    included_expressions: &[],
+    predicate: Some("attempt_kind <> 'host_charge'::text"),
+};
 
 const PAYMENT_FACT_COLUMNS: &[&str] = &[
     "attempt_id",
@@ -281,7 +396,12 @@ async fn assert_schema_conforms(
     .await?;
     reject_legacy_columns(connection, version).await?;
     require_validated_constraints(connection, version).await?;
-    require_account_scoped_order_index(connection, version).await?;
+    require_ready_canonical_indexes(connection, version).await?;
+    require_index_contract(connection, version, GATEWAY_ORDER_INDEX_CONTRACT).await?;
+    if version == 2 {
+        require_index_contract(connection, version, RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
+        require_index_contract(connection, version, SUBSCRIPTION_HISTORY_INDEX_CONTRACT).await?;
+    }
     require_catalog_fingerprint(connection, version, expected_fingerprint).await?;
     Ok(())
 }
@@ -483,34 +603,304 @@ async fn require_validated_constraints(
     }
 }
 
-async fn require_account_scoped_order_index(
+async fn require_ready_canonical_indexes(
     connection: &mut PgConnection,
     version: u16,
 ) -> Result<(), SchemaConformanceError> {
-    let definition = sqlx::query_scalar::<_, String>(
+    let tables = REQUIRED_TABLES
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect::<Vec<_>>();
+    let unavailable = sqlx::query_as::<_, (String, String, bool, bool, bool)>(
         r#"
-        SELECT pg_catalog.pg_get_indexdef(index_relation.oid)
-        FROM pg_catalog.pg_class AS index_relation
+        SELECT
+            table_relation.relname,
+            index_relation.relname,
+            catalog_index.indisvalid,
+            catalog_index.indisready,
+            catalog_index.indislive
+        FROM pg_catalog.pg_index AS catalog_index
+        INNER JOIN pg_catalog.pg_class AS table_relation
+            ON table_relation.oid = catalog_index.indrelid
+        INNER JOIN pg_catalog.pg_class AS index_relation
+            ON index_relation.oid = catalog_index.indexrelid
         INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = index_relation.relnamespace
+            ON namespace.oid = table_relation.relnamespace
         WHERE namespace.nspname = 'public'
-            AND index_relation.relname =
-                'billing_payment_attempts_gateway_order_idx'
+            AND table_relation.relname = ANY($1)
+            AND index_relation.relname LIKE 'billing\_%' ESCAPE '\'
+            AND NOT (
+                catalog_index.indisvalid
+                AND catalog_index.indisready
+                AND catalog_index.indislive
+            )
+        ORDER BY table_relation.relname, index_relation.relname
         "#,
     )
-    .fetch_optional(&mut *connection)
+    .bind(&tables)
+    .fetch_all(&mut *connection)
     .await?;
-    match definition {
-        Some(definition) if definition.contains("(gateway_account_id, gateway_order_id)") => Ok(()),
-        Some(definition) => Err(contract_error(
+    if unavailable.is_empty() {
+        Ok(())
+    } else {
+        Err(contract_error(
             version,
-            format!("gateway-order uniqueness is not account-scoped: {definition}"),
-        )),
-        None => Err(contract_error(
-            version,
-            "billing_payment_attempts_gateway_order_idx is missing",
-        )),
+            format!(
+                "canonical indexes are not planner/write ready (table, index, valid, ready, live): {unavailable:?}"
+            ),
+        ))
     }
+}
+
+async fn require_index_contract(
+    connection: &mut PgConnection,
+    version: u16,
+    contract: IndexContract,
+) -> Result<(), SchemaConformanceError> {
+    let actual = catalog_index_shape(connection, contract.name).await?;
+    validate_index_contract(version, contract, actual.as_ref())
+}
+
+fn validate_index_contract(
+    version: u16,
+    contract: IndexContract,
+    actual: Option<&CatalogIndexShape>,
+) -> Result<(), SchemaConformanceError> {
+    let Some(actual) = actual else {
+        return Err(index_contract_error(version, contract, "is missing"));
+    };
+    let expected_key_expressions = contract
+        .keys
+        .iter()
+        .map(|key| key.expression.to_owned())
+        .collect::<Vec<_>>();
+    let expected_key_orderings = contract
+        .keys
+        .iter()
+        .map(|key| key.ordering.catalog_label().to_owned())
+        .collect::<Vec<_>>();
+    let expected_key_opclasses = contract
+        .keys
+        .iter()
+        .map(|key| key.opclass.to_owned())
+        .collect::<Vec<_>>();
+    let expected_included_expressions = contract
+        .included_expressions
+        .iter()
+        .map(|expression| (*expression).to_owned())
+        .collect::<Vec<_>>();
+
+    if actual.table_name != contract.table {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "belongs to table {:?}; expected {:?}",
+                actual.table_name, contract.table
+            ),
+        ));
+    }
+    if actual.access_method != "btree" {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "uses access method {:?}; expected \"btree\"",
+                actual.access_method
+            ),
+        ));
+    }
+    if actual.is_unique != contract.unique {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "has unique={}; expected unique={}",
+                actual.is_unique, contract.unique
+            ),
+        ));
+    }
+    if actual.key_expressions != expected_key_expressions {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "has key expressions {:?}; expected {expected_key_expressions:?}",
+                actual.key_expressions
+            ),
+        ));
+    }
+    if actual.key_orderings != expected_key_orderings {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "has key ordering {:?}; expected {expected_key_orderings:?}",
+                actual.key_orderings
+            ),
+        ));
+    }
+    if actual.key_opclasses != expected_key_opclasses {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "has key operator classes {:?}; expected {expected_key_opclasses:?}",
+                actual.key_opclasses
+            ),
+        ));
+    }
+    if actual.included_expressions != expected_included_expressions {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "has included expressions {:?}; expected {expected_included_expressions:?}",
+                actual.included_expressions
+            ),
+        ));
+    }
+    if actual.predicate.as_deref() != contract.predicate {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "has predicate {:?}; expected {:?}",
+                actual.predicate, contract.predicate
+            ),
+        ));
+    }
+    if !actual.is_valid || !actual.is_ready || !actual.is_live {
+        return Err(index_contract_error(
+            version,
+            contract,
+            format!(
+                "is not planner/write ready (valid={}, ready={}, live={})",
+                actual.is_valid, actual.is_ready, actual.is_live
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn index_contract_error(
+    version: u16,
+    contract: IndexContract,
+    detail: impl std::fmt::Display,
+) -> SchemaConformanceError {
+    contract_error(
+        version,
+        format!("{} index {} {detail}", contract.purpose, contract.name),
+    )
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+struct CatalogIndexShape {
+    table_name: String,
+    access_method: String,
+    key_expressions: Vec<String>,
+    key_orderings: Vec<String>,
+    key_opclasses: Vec<String>,
+    included_expressions: Vec<String>,
+    predicate: Option<String>,
+    is_unique: bool,
+    is_valid: bool,
+    is_ready: bool,
+    is_live: bool,
+}
+
+async fn catalog_index_shape(
+    connection: &mut PgConnection,
+    index_name: &str,
+) -> Result<Option<CatalogIndexShape>, sqlx::Error> {
+    sqlx::query_as::<_, CatalogIndexShape>(
+        r#"
+        SELECT
+        table_relation.relname AS table_name,
+        access_method.amname AS access_method,
+        ARRAY(
+            SELECT pg_catalog.pg_get_indexdef(
+                catalog_index.indexrelid,
+                key_position.position,
+                true
+            )
+            FROM generate_series(
+                1,
+                catalog_index.indnkeyatts
+            ) AS key_position(position)
+            ORDER BY key_position.position
+        ) AS key_expressions,
+        ARRAY(
+            SELECT concat(
+                CASE WHEN pg_catalog.pg_index_column_has_property(
+                    catalog_index.indexrelid,
+                    key_position.position,
+                    'desc'
+                ) THEN 'DESC' ELSE 'ASC' END,
+                CASE WHEN pg_catalog.pg_index_column_has_property(
+                    catalog_index.indexrelid,
+                    key_position.position,
+                    'nulls_first'
+                ) THEN ' NULLS FIRST' ELSE ' NULLS LAST' END
+            )
+            FROM generate_series(
+                1,
+                catalog_index.indnkeyatts
+            ) AS key_position(position)
+            ORDER BY key_position.position
+        ) AS key_orderings,
+        ARRAY(
+            SELECT concat(operator_class_namespace.nspname, '.', operator_class.opcname)
+            FROM unnest(catalog_index.indclass::oid[]) WITH ORDINALITY
+                AS key_operator_class(operator_class_oid, position)
+            INNER JOIN pg_catalog.pg_opclass AS operator_class
+                ON operator_class.oid = key_operator_class.operator_class_oid
+            INNER JOIN pg_catalog.pg_namespace AS operator_class_namespace
+                ON operator_class_namespace.oid = operator_class.opcnamespace
+            WHERE key_operator_class.position <= catalog_index.indnkeyatts
+            ORDER BY key_operator_class.position
+        ) AS key_opclasses,
+        ARRAY(
+            SELECT pg_catalog.pg_get_indexdef(
+                catalog_index.indexrelid,
+                included_position.position,
+                true
+            )
+            FROM generate_series(
+                catalog_index.indnkeyatts::integer + 1,
+                catalog_index.indnatts::integer
+            ) AS included_position(position)
+            ORDER BY included_position.position
+        ) AS included_expressions,
+        pg_catalog.pg_get_expr(
+            catalog_index.indpred,
+            catalog_index.indrelid,
+            true
+        ) AS predicate,
+        catalog_index.indisunique AS is_unique,
+        catalog_index.indisvalid AS is_valid,
+        catalog_index.indisready AS is_ready,
+        catalog_index.indislive AS is_live
+        FROM pg_catalog.pg_class AS index_relation
+        INNER JOIN pg_catalog.pg_index AS catalog_index
+            ON catalog_index.indexrelid = index_relation.oid
+        INNER JOIN pg_catalog.pg_class AS table_relation
+            ON table_relation.oid = catalog_index.indrelid
+        INNER JOIN pg_catalog.pg_namespace AS index_namespace
+            ON index_namespace.oid = index_relation.relnamespace
+        INNER JOIN pg_catalog.pg_namespace AS table_namespace
+            ON table_namespace.oid = table_relation.relnamespace
+        INNER JOIN pg_catalog.pg_am AS access_method
+            ON access_method.oid = index_relation.relam
+        WHERE index_namespace.nspname = 'public'
+            AND table_namespace.nspname = 'public'
+            AND index_relation.relkind = 'i'
+            AND index_relation.relname = $1
+        "#,
+    )
+    .bind(index_name)
+    .fetch_optional(&mut *connection)
+    .await
 }
 
 async fn require_catalog_fingerprint(

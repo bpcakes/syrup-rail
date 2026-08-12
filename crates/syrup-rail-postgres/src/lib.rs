@@ -95,7 +95,8 @@ pub use enrollment_application::{
     submit_admitted_subscription_renewal,
 };
 pub use entitlement::{
-    EntitlementGuardError, EntitlementQueryError, entitlement, require_entitlement_for_update,
+    AdmittedEntitlementWriteTransaction, EntitlementGuardError, EntitlementQueryError,
+    EntitlementWriteTransaction, entitlement, require_entitlement_for_update,
 };
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
 pub use grants::{

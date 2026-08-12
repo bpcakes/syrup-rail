@@ -92,6 +92,130 @@ pub(super) async fn insert_due_subscription_at(
     })
 }
 
+pub(super) async fn insert_due_subscription_population(
+    pool: &PgPool,
+    account: GatewayAccountFixture,
+    due_at: DateTime<Utc>,
+    population: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO billing_payment_methods (
+            id, billing_scope_id, subscriber_id, gateway_account_id,
+            gateway_payment_method_reference, status
+        )
+        SELECT
+            md5('renewal-plan-method-' || value)::uuid,
+            $1,
+            md5('renewal-plan-subscriber-' || value)::uuid,
+            $2,
+            'vault_renewal_plan_' || value,
+            'active'
+        FROM generate_series(1, $3::integer) AS fixture(value)
+        "#,
+    )
+    .bind(account.billing_scope_id)
+    .bind(account.gateway_account_id)
+    .bind(population)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO billing_subscriptions (
+            id, billing_scope_id, subscriber_id, plan_key, status,
+            gateway_account_id, payment_method_id, amount_cents, currency,
+            current_period_start_at, current_period_end_at, next_renewal_at,
+            initial_transaction_id, phase, recurring_period_kind,
+            recurring_period_count, dunning_retry_delays_seconds,
+            dunning_exhaustion, past_due_access, next_payment_attempt_at
+        )
+        SELECT
+            md5('renewal-plan-subscription-' || value)::uuid,
+            $1,
+            md5('renewal-plan-subscriber-' || value)::uuid,
+            'plan-shape',
+            'active',
+            $2,
+            md5('renewal-plan-method-' || value)::uuid,
+            1900,
+            'USD',
+            scheduled_at - interval '32 days',
+            scheduled_at,
+            scheduled_at,
+            'renewal-plan-transaction-' || value,
+            'recurring',
+            'calendar_months',
+            1,
+            ARRAY[]::bigint[],
+            'remain_past_due',
+            'suspend_immediately',
+            scheduled_at
+        FROM generate_series(1, $4::integer) AS fixture(value)
+        CROSS JOIN LATERAL (
+            SELECT $3::timestamptz
+                - ((value - 1) / 4) * interval '1 second' AS scheduled_at
+        ) AS schedule
+        "#,
+    )
+    .bind(account.billing_scope_id)
+    .bind(account.gateway_account_id)
+    .bind(due_at)
+    .bind(population)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO billing_payment_attempts (
+            id, billing_scope_id, subscriber_id, plan_key, subscription_id,
+            payment_method_id, attempt_kind, status, idempotency_key,
+            request_fingerprint, amount_cents, currency,
+            billing_period_start_at, billing_period_end_at,
+            gateway_account_id, gateway_configuration_id, gateway_order_id,
+            subscription_expected_payment_method_id,
+            subscription_expected_initial_transaction_id,
+            subscription_expected_status, resolved_at, created_at, updated_at
+        )
+        SELECT
+            md5('renewal-plan-attempt-' || value)::uuid,
+            $1,
+            md5('renewal-plan-subscriber-' || value)::uuid,
+            'plan-shape',
+            md5('renewal-plan-subscription-' || value)::uuid,
+            md5('renewal-plan-method-' || value)::uuid,
+            'subscription_recovery',
+            'failed',
+            'renewal-plan-idempotency-' || value,
+            'renewal-plan-fingerprint-' || value,
+            1900,
+            'USD',
+            scheduled_at,
+            scheduled_at + interval '1 month',
+            $2,
+            $3,
+            'renewal-plan-order-' || value,
+            md5('renewal-plan-method-' || value)::uuid,
+            'renewal-plan-transaction-' || value,
+            'active',
+            scheduled_at - interval '1 second',
+            scheduled_at - interval '2 seconds',
+            scheduled_at - interval '1 second'
+        FROM generate_series(1, $5::integer) AS fixture(value)
+        CROSS JOIN LATERAL (
+            SELECT $4::timestamptz
+                - ((value - 1) / 4) * interval '1 second' AS scheduled_at
+        ) AS schedule
+        "#,
+    )
+    .bind(account.billing_scope_id)
+    .bind(account.gateway_account_id)
+    .bind(account.gateway_configuration_id)
+    .bind(due_at)
+    .bind(population)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn update_due_at(
     pool: &PgPool,
     subscription_id: Uuid,

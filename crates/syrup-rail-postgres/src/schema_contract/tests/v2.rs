@@ -120,6 +120,164 @@ async fn runtime_schema_v2_compatibility_accepts_a_checked_in_v1_upgrade()
 }
 
 #[tokio::test]
+async fn schema_v2_keyset_indexes_match_their_reader_identity_and_order()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_v2_keysets").await?;
+    let result = async {
+        let mut connection = database.pool.acquire().await?;
+        require_index_contract(&mut connection, 2, RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
+        require_index_contract(&mut connection, 2, SUBSCRIPTION_HISTORY_INDEX_CONTRACT).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[test]
+fn index_contract_validation_rejects_every_planner_relevant_shape_drift() {
+    let contract = SUBSCRIPTION_HISTORY_INDEX_CONTRACT;
+    let canonical = catalog_shape_for_contract(contract);
+    validate_index_contract(2, contract, Some(&canonical))
+        .expect("the canonical fixture must satisfy its contract");
+
+    let mut cases = Vec::new();
+    let mut shape = canonical.clone();
+    shape.table_name = "billing_subscriptions".to_owned();
+    cases.push(("belongs to table", shape));
+    let mut shape = canonical.clone();
+    shape.access_method = "hash".to_owned();
+    cases.push(("uses access method", shape));
+    let mut shape = canonical.clone();
+    shape.is_unique = true;
+    cases.push(("has unique=", shape));
+    let mut shape = canonical.clone();
+    shape.key_expressions[3] = "resolved_at".to_owned();
+    cases.push(("has key expressions", shape));
+    let mut shape = canonical.clone();
+    shape.key_orderings[3] = "ASC NULLS LAST".to_owned();
+    cases.push(("has key ordering", shape));
+    let mut shape = canonical.clone();
+    shape.key_opclasses[2] = "text_pattern_ops".to_owned();
+    cases.push(("has key operator classes", shape));
+    let mut shape = canonical.clone();
+    shape
+        .included_expressions
+        .push("resolution_code".to_owned());
+    cases.push(("has included expressions", shape));
+    let mut shape = canonical.clone();
+    shape.predicate = None;
+    cases.push(("has predicate", shape));
+    let mut shape = canonical.clone();
+    shape.is_valid = false;
+    cases.push(("planner/write ready", shape));
+    let mut shape = canonical.clone();
+    shape.is_ready = false;
+    cases.push(("planner/write ready", shape));
+    let mut shape = canonical;
+    shape.is_live = false;
+    cases.push(("planner/write ready", shape));
+
+    for (expected_detail, shape) in cases {
+        let error = validate_index_contract(2, contract, Some(&shape))
+            .expect_err("index drift must fail its complete contract");
+        let crate::SchemaConformanceError::Contract { version, detail } = error else {
+            panic!("expected a contract error for index drift");
+        };
+        assert_eq!(version, 2);
+        assert!(
+            detail.contains(expected_detail),
+            "expected {expected_detail:?} in diagnostic {detail:?}"
+        );
+    }
+
+    let missing = validate_index_contract(2, contract, None)
+        .expect_err("a missing index must fail its contract");
+    assert!(missing.to_string().contains("is missing"));
+}
+
+fn catalog_shape_for_contract(contract: IndexContract) -> CatalogIndexShape {
+    CatalogIndexShape {
+        table_name: contract.table.to_owned(),
+        access_method: "btree".to_owned(),
+        key_expressions: contract
+            .keys
+            .iter()
+            .map(|key| key.expression.to_owned())
+            .collect(),
+        key_orderings: contract
+            .keys
+            .iter()
+            .map(|key| key.ordering.catalog_label().to_owned())
+            .collect(),
+        key_opclasses: contract
+            .keys
+            .iter()
+            .map(|key| key.opclass.to_owned())
+            .collect(),
+        included_expressions: contract
+            .included_expressions
+            .iter()
+            .map(|expression| (*expression).to_owned())
+            .collect(),
+        predicate: contract.predicate.map(str::to_owned),
+        is_unique: contract.unique,
+        is_valid: true,
+        is_ready: true,
+        is_live: true,
+    }
+}
+
+#[tokio::test]
+async fn runtime_schema_v2_compatibility_rejects_wrong_keyset_index_shape()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_v2_bad_idx").await?;
+    let result = async {
+        sqlx::raw_sql(
+            r#"
+            DROP INDEX billing_subscriptions_due_idx;
+
+            CREATE INDEX billing_subscriptions_due_idx
+            ON billing_subscriptions (
+                next_payment_attempt_at,
+                gateway_account_id,
+                id
+            )
+            INCLUDE (billing_scope_id, next_renewal_at)
+            WHERE status IN ('active', 'past_due')
+                AND next_payment_attempt_at IS NOT NULL;
+            "#,
+        )
+        .execute(&database.pool)
+        .await?;
+
+        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+            Err(crate::SchemaConformanceError::Contract { version, detail })
+                if version == 2
+                    && detail.contains(
+                        "renewal-dispatch keyset index billing_subscriptions_due_idx has key expressions",
+                    ) =>
+            {
+                Ok::<_, Box<dyn Error>>(())
+            }
+            Err(error) => Err(io::Error::other(format!(
+                "expected a targeted renewal keyset-index diagnostic, got {error}"
+            ))
+            .into()),
+            Ok(()) => Err(io::Error::other(
+                "runtime schema-v2 compatibility accepted a wrong renewal keyset index",
+            )
+            .into()),
+        }
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn runtime_schema_v2_compatibility_rejects_an_unchanged_v1_catalog()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start_v1("sr_rt_v1").await?;

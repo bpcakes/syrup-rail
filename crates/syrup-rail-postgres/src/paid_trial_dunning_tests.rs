@@ -37,8 +37,8 @@ use uuid::Uuid;
 
 use crate::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
-    BillingTransactionError, BillingTransactionSubjectState, SubscriptionBillingService,
-    SubscriptionEnrollmentAdmissionOutcome, SubscriptionOfferStore,
+    BillingTransactionError, BillingTransactionSubjectState, EntitlementWriteTransaction,
+    SubscriptionBillingService, SubscriptionEnrollmentAdmissionOutcome, SubscriptionOfferStore,
     SubscriptionRecoveryAdmissionOutcome, SubscriptionRenewalAdmissionOutcome,
     admit_subscription_enrollment_submission, admit_subscription_recovery_submission,
     admit_subscription_renewal_submission,

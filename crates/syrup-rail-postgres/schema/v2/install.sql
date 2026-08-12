@@ -274,7 +274,8 @@ CREATE UNIQUE INDEX billing_subscriptions_initial_transaction_idx
 ON public.billing_subscriptions (gateway_account_id, initial_transaction_id);
 
 CREATE INDEX billing_subscriptions_due_idx
-ON public.billing_subscriptions (next_payment_attempt_at, gateway_account_id, id)
+ON public.billing_subscriptions (next_payment_attempt_at, id)
+INCLUDE (billing_scope_id, gateway_account_id, next_renewal_at)
 WHERE status IN ('active', 'past_due')
     AND next_payment_attempt_at IS NOT NULL;
 
@@ -927,6 +928,16 @@ WHERE attempt_kind = 'subscription_payment_method_update'
 CREATE INDEX billing_payment_attempts_subscription_period_idx
 ON public.billing_payment_attempts (subscription_id, billing_period_start_at)
 WHERE subscription_id IS NOT NULL;
+
+CREATE INDEX billing_payment_attempts_subscription_history_idx
+ON public.billing_payment_attempts (
+    billing_scope_id,
+    subscriber_id,
+    plan_key,
+    created_at DESC,
+    id DESC
+)
+WHERE attempt_kind <> 'host_charge';
 
 CREATE INDEX billing_payment_attempts_payment_method_idx
 ON public.billing_payment_attempts (payment_method_id)

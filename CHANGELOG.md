@@ -4,10 +4,6 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
-No unreleased changes.
-
-## [0.2.0] - 2026-08-11
-
 ### Added
 
 - Add explicit immediate-recurring and positive paid-trial offer terms with
@@ -66,6 +62,20 @@ No unreleased changes.
   `next_payment_attempt_at` scheduler clock. Only submitted determinate
   automatic-renewal failures consume dunning; operational and provider pacing
   remain independent.
+- Remove renewal dispatch's forced full-candidate CTE materialization and make
+  its ordered outer limit eligible for an early-stopping index plan. PostgreSQL
+  plan choice remains cost-based, so hosts must rehearse representative data.
+  Align both renewal and exact-plan payment-history keysets with explicit
+  schema-v2 indexes. The runtime contract validates each complete index shape,
+  including its table, access method, uniqueness, key ordering and null
+  behavior, operator classes, included columns, predicate, and planner/write
+  readiness.
+- Replace raw protected-write transactions with a pool-created top-level
+  `EntitlementWriteTransaction` that cannot commit before admission and an
+  `AdmittedEntitlementWriteTransaction` returned only on success. Completed
+  denials and SQL failures await a full rollback; cancellation remains
+  fail-closed through ownership. Successful guards restore the caller's
+  timeout and retain their locks through the host write.
 - Make renewal, recovery, reconciliation, operator review, entitlement,
   cancellation, grants, deletion, and payment-method cleanup exhaustive over
   paid trials, scheduled dunning, and terminal unpaid history.
@@ -126,6 +136,12 @@ No unreleased changes.
   `schema/v2/upgrade_from_v1.sql` transactionally, and roll forward with 0.2.
   Schema v1 remains byte-immutable and 0.1 writers must not restart after the
   v2 migration commits.
+- Budget that maintenance window for the upgrade's transactional replacement
+  of the renewal-dispatch index and construction of the exact-plan
+  payment-history index. PostgreSQL scans the full payment-attempt heap while
+  building that partial index and stores only non-host-charge entries, so the
+  build can dominate large upgrades; rehearse against representative data
+  rather than changing the atomic artifact to `CREATE INDEX CONCURRENTLY`.
 - The upgrade intentionally reclassifies dunning history. Version 1's global
   five-attempt ceiling combined automatic-renewal and subscriber-recovery
   failures; version 2 counts only submitted determinate automatic renewals.
@@ -245,7 +261,6 @@ No unreleased changes.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...HEAD
 [0.1.1]: https://github.com/bpcakes/syrup-rail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bpcakes/syrup-rail/tree/v0.1.0

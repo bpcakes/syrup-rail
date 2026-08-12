@@ -94,16 +94,14 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
             ..
         }
     ));
-    let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         require_entitlement_for_update(
-            &mut transaction,
+            EntitlementWriteTransaction::begin(&database.pool).await?,
             &EntitlementGuard::new(scope, suspended_subscriber, PlanKey::new("identity_pro")?,),
         )
         .await,
         Err(crate::EntitlementGuardError::PastDue)
     ));
-    transaction.rollback().await?;
     make_retry_due(&database.pool, suspended_id).await?;
     let (_, final_suspended_at) = decline_due_renewal(
         &database.pool,

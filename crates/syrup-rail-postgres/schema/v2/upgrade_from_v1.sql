@@ -245,9 +245,20 @@ ALTER TABLE public.billing_subscriptions
 DROP INDEX public.billing_subscriptions_due_idx;
 
 CREATE INDEX billing_subscriptions_due_idx
-ON public.billing_subscriptions (next_payment_attempt_at, gateway_account_id, id)
+ON public.billing_subscriptions (next_payment_attempt_at, id)
+INCLUDE (billing_scope_id, gateway_account_id, next_renewal_at)
 WHERE status IN ('active', 'past_due')
     AND next_payment_attempt_at IS NOT NULL;
+
+CREATE INDEX billing_payment_attempts_subscription_history_idx
+ON public.billing_payment_attempts (
+    billing_scope_id,
+    subscriber_id,
+    plan_key,
+    created_at DESC,
+    id DESC
+)
+WHERE attempt_kind <> 'host_charge';
 
 ALTER TABLE public.billing_payment_attempts
     ADD CONSTRAINT billing_payment_attempts_initial_terms_check

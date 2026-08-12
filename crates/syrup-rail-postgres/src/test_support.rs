@@ -1,4 +1,4 @@
-use std::error::Error;
+use std::{error::Error, io};
 
 use postgres_test_harness::{DatabaseLease, HarnessConfig, PostgresHarness};
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -124,4 +124,39 @@ pub(crate) async fn create_gateway_account(
     .execute(pool)
     .await?;
     Ok(fixture)
+}
+
+pub(crate) fn explain_plan_root(plan: &serde_json::Value) -> Result<&serde_json::Value, io::Error> {
+    plan.as_array()
+        .and_then(|documents| documents.first())
+        .and_then(|document| document.get("Plan"))
+        .ok_or_else(|| io::Error::other(format!("unexpected EXPLAIN JSON shape: {plan}")))
+}
+
+pub(crate) fn plan_has_node_type(plan: &serde_json::Value, expected: &str) -> bool {
+    plan.get("Node Type").and_then(serde_json::Value::as_str) == Some(expected)
+        || plan
+            .get("Plans")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|children| {
+                children
+                    .iter()
+                    .any(|child| plan_has_node_type(child, expected))
+            })
+}
+
+pub(crate) fn find_plan_index_node<'a>(
+    plan: &'a serde_json::Value,
+    expected: &str,
+) -> Option<&'a serde_json::Value> {
+    if plan.get("Index Name").and_then(serde_json::Value::as_str) == Some(expected) {
+        return Some(plan);
+    }
+    plan.get("Plans")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|children| {
+            children
+                .iter()
+                .find_map(|child| find_plan_index_node(child, expected))
+        })
 }

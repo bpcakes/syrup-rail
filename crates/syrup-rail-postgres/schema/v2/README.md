@@ -5,6 +5,18 @@ byte-for-byte into an immutable host migration. Existing schema-v1 hosts copy
 `upgrade_from_v1.sql` byte-for-byte into one forward-only transactional
 migration; they must not run `install.sql` over v1.
 
+Both installation paths include reader-facing keyset indexes whose complete
+shapes are part of the runtime schema contract: table and access method,
+uniqueness, ordered keys and null behavior, operator classes, included
+columns, predicates, and planner/write readiness. Renewal dispatch forces its
+candidate CTE to fold and uses `(next_payment_attempt_at, id)`, making an
+early-stopping ordered index plan available without the old unconditional
+full-candidate materialization. PostgreSQL plan choice remains cost-based;
+rehearse it against representative host data. Exact-plan payment history uses
+`(billing_scope_id, subscriber_id, plan_key, created_at, id)`. Change either a
+reader order or its index shape in the same pre-release schema version; after
+release, add a forward migration instead of rewriting these artifacts.
+
 Before an existing host enters maintenance, run the checked-in read-only
 `preflight_from_v1.sql`. Every returned subscription is a blocker whose
 `past_due` state lacks both forms of causal history supported by v1: a
@@ -51,6 +63,17 @@ rolls back to v1 and permits 0.1 to resume. After commit, keep writers stopped
 until 0.2 is restored and roll forward; never restart 0.1 against v2. Durable
 pending, unknown, and review-required attempts are preserved and reconciled by
 0.2 rather than drained or resubmitted.
+
+Size the maintenance window for both the data rewrite and index construction.
+The upgrade replaces the renewal-dispatch index and builds the exact-plan
+payment-history index inside the same transaction. PostgreSQL scans the full
+`billing_payment_attempts` heap to build that partial index, then stores only
+non-host-charge entries. On a large ledger it can be the dominant step, and
+`CREATE INDEX` holds a lock that conflicts with billing writes until the
+transaction commits. Measure the production table and rehearse the artifact
+against a representative copy. Do not edit the packaged migration to use
+`CONCURRENTLY`: PostgreSQL cannot run that form inside this atomic upgrade, and
+the documented cutover already requires all billing writers to be stopped.
 
 Current policy governs creation of new authority; the durable attempt snapshot
 governs completion of authority granted before the cutover. In particular, 0.2

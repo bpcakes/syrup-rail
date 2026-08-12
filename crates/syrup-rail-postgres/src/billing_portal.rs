@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, postgres::PgArguments, query::Query};
 use syrup_rail::{
     BillingPeriod, Entitlement, EntitlementQuery, Money, PaymentAttemptId, PaymentAttemptKind,
     PaymentAttemptStatus, SubscriptionBillingPortalQuery, SubscriptionBillingPortalSnapshot,
@@ -12,6 +12,57 @@ use thiserror::Error;
 use crate::entitlement::{EntitlementQueryError, entitlement_on_connection};
 
 const INVALID_BILLING_PORTAL_STATE: &str = "canonical subscription billing portal state is invalid";
+const SUBSCRIPTION_PAYMENT_HISTORY_FIRST_PAGE_SQL: &str = concat!(
+    include_str!("billing_portal/subscription_payment_history_page_head.sql"),
+    include_str!("billing_portal/subscription_payment_history_page_body.sql"),
+    "LIMIT $4\n"
+);
+const SUBSCRIPTION_PAYMENT_HISTORY_CONTINUATION_SQL: &str = concat!(
+    include_str!("billing_portal/subscription_payment_history_page_head.sql"),
+    "    AND (created_at, id) < ($4::timestamptz, $5::uuid)\n",
+    include_str!("billing_portal/subscription_payment_history_page_body.sql"),
+    "LIMIT $6\n"
+);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SubscriptionPaymentHistoryPageQuery {
+    First,
+    Continuation(SubscriptionPaymentHistoryCursor),
+}
+
+impl SubscriptionPaymentHistoryPageQuery {
+    fn from_cursor(cursor: Option<&SubscriptionPaymentHistoryCursor>) -> Self {
+        match cursor {
+            Some(cursor) => Self::Continuation(*cursor),
+            None => Self::First,
+        }
+    }
+
+    const fn sql(self) -> &'static str {
+        match self {
+            Self::First => SUBSCRIPTION_PAYMENT_HISTORY_FIRST_PAGE_SQL,
+            Self::Continuation(_) => SUBSCRIPTION_PAYMENT_HISTORY_CONTINUATION_SQL,
+        }
+    }
+
+    fn bind<'args>(
+        self,
+        identity: &'args SubscriptionBillingPortalQuery,
+        limit: SubscriptionPaymentHistoryPageLimit,
+    ) -> Query<'args, Postgres, PgArguments> {
+        let query = sqlx::query(self.sql())
+            .bind(identity.billing_scope_id().into_uuid())
+            .bind(identity.subscriber_id().into_uuid())
+            .bind(identity.plan_key().as_str());
+        match self {
+            Self::First => query.bind(limit.get() + 1),
+            Self::Continuation(cursor) => query
+                .bind(cursor.created_at())
+                .bind(cursor.payment_attempt_id().into_uuid())
+                .bind(limit.get() + 1),
+        }
+    }
+}
 
 /// Error returned while loading a customer-facing billing portal projection.
 #[derive(Debug, Error)]
@@ -72,40 +123,10 @@ pub async fn subscription_payment_history_page(
     cursor: Option<&SubscriptionPaymentHistoryCursor>,
     limit: SubscriptionPaymentHistoryPageLimit,
 ) -> Result<SubscriptionPaymentHistoryPage, SubscriptionBillingPortalQueryError> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-            id,
-            attempt_kind,
-            status,
-            amount_cents,
-            currency,
-            billing_period_start_at,
-            billing_period_end_at,
-            submitted_at,
-            resolved_at,
-            created_at
-        FROM billing_payment_attempts
-        WHERE billing_scope_id = $1
-            AND subscriber_id = $2
-            AND plan_key = $3
-            AND attempt_kind <> 'host_charge'
-            AND (
-                $4::timestamptz IS NULL
-                OR (created_at, id) < ($4::timestamptz, $5::uuid)
-            )
-        ORDER BY created_at DESC, id DESC
-        LIMIT $6
-        "#,
-    )
-    .bind(query.billing_scope_id().as_uuid())
-    .bind(query.subscriber_id().as_uuid())
-    .bind(query.plan_key().as_str())
-    .bind(cursor.map(|value| value.created_at()))
-    .bind(cursor.map(|value| value.payment_attempt_id().into_uuid()))
-    .bind(limit.get() + 1)
-    .fetch_all(pool)
-    .await?;
+    let rows = SubscriptionPaymentHistoryPageQuery::from_cursor(cursor)
+        .bind(query, limit)
+        .fetch_all(pool)
+        .await?;
 
     let mut items = rows
         .iter()

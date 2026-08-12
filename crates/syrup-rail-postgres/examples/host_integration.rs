@@ -20,21 +20,22 @@ use async_trait::async_trait;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use syrup_rail::{
     BillingEvent, BillingEventSubject, CancelSubscription, CancelSubscriptionOutcome,
-    ClearSubscriptionDiscount, EndUserMutationAdmission, EnrollSubscription, GatewayResolver,
-    PaymentAttemptId, PaymentAttemptStatus, RenewalDispatchPage, RenewalDispatchPageCursor,
-    SubscriptionBillingPortalQuery, SubscriptionBillingPortalSnapshot, SubscriptionDiscountClaim,
-    SubscriptionDiscountClaimOutcome, SubscriptionDiscountClearOutcome,
+    ClearSubscriptionDiscount, EndUserMutationAdmission, EnrollSubscription, EntitlementGuard,
+    GatewayResolver, PaymentAttemptId, PaymentAttemptStatus, RenewalDispatchPage,
+    RenewalDispatchPageCursor, SubscriptionBillingPortalQuery, SubscriptionBillingPortalSnapshot,
+    SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome, SubscriptionDiscountClearOutcome,
     SubscriptionEnrollmentExpectedTerms, SubscriptionId, SubscriptionPaymentContext,
     SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
     SubscriptionPaymentHistoryPageLimit,
 };
 use syrup_rail_postgres::{
-    BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
-    BillingTransactionError, BillingTransactionSubjectState, RenewalStoreError,
-    SchemaConformanceError, SubscriptionBillingPortalQueryError, SubscriptionBillingService,
+    AdmittedEntitlementWriteTransaction, BillingEventWriteError, BillingTransaction,
+    BillingTransactionCoordinator, BillingTransactionError, BillingTransactionSubjectState,
+    EntitlementGuardError, EntitlementWriteTransaction, RenewalStoreError, SchemaConformanceError,
+    SubscriptionBillingPortalQueryError, SubscriptionBillingService,
     SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
     SubscriptionOfferStore, assert_runtime_schema_v2_compatible, due_renewals_page,
-    subscription_billing_portal, subscription_payment_history_page,
+    require_entitlement_for_update, subscription_billing_portal, subscription_payment_history_page,
 };
 
 /// Host-owned implementations required by [`SubscriptionBillingService`].
@@ -106,6 +107,23 @@ pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
     assert_runtime_schema_v2_compatible(pool).await
+}
+
+/// Admits a host-authorized protected write and returns its only valid transaction.
+///
+/// The host starts [`EntitlementWriteTransaction::begin`] and may make
+/// preparatory writes through its connection before this call. The pending
+/// value cannot commit. It must perform and commit the protected mutation only
+/// with the admitted transaction returned here. Completed denial and database
+/// failure await rollback; cancellation queues rollback of the owned
+/// transaction, so no unguarded continuation is possible. Finish any nested
+/// savepoint opened through its connection before consuming the admitted value
+/// with `commit` or `rollback`.
+pub async fn admit_authorized_protected_write(
+    transaction: EntitlementWriteTransaction,
+    guard: &EntitlementGuard,
+) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
+    require_entitlement_for_update(transaction, guard).await
 }
 
 /// The host-specific half of Syrup Rail's transaction boundary.

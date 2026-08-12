@@ -1,18 +1,25 @@
 use std::{error::Error, io};
 
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use syrup_rail::{
-    BillingScopeId, Entitlement, PastDueAccess, PaymentCardBrand, PlanKey,
+    BillingScopeId, Entitlement, PastDueAccess, PaymentAttemptId, PaymentCardBrand, PlanKey,
     ScrubSubscriberBillingData, SubscriberId, SubscriptionBillingPortalQuery,
-    SubscriptionPaymentHistoryPageLimit, SubscriptionPhase, SubscriptionStatus,
+    SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPageLimit, SubscriptionPhase,
+    SubscriptionStatus,
 };
 use uuid::Uuid;
 
-use super::{subscription_billing_portal, subscription_payment_history_page};
+use super::{
+    SubscriptionPaymentHistoryPageQuery, subscription_billing_portal,
+    subscription_payment_history_page,
+};
 use crate::{
     scrub_subscriber_billing_data,
-    test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account},
+    test_support::{
+        GatewayAccountFixture, TestDatabase, create_gateway_account, explain_plan_root,
+        find_plan_index_node, plan_has_node_type,
+    },
 };
 
 struct PortalFixture {
@@ -317,6 +324,90 @@ async fn billing_portal_is_exact_and_hides_scrubbed_or_sensitive_method_data()
             );
         }
 
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn payment_history_first_and_continuation_plans_use_the_exact_ordered_index()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_hist_plan_v18").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "portal_history_plan_gateway").await?;
+        let fixture = insert_subscription(
+            &database.pool,
+            account,
+            Uuid::now_v7(),
+            "history_plan_shape",
+            SubscriptionStatus::Active,
+            SubscriptionPhase::Recurring,
+        )
+        .await?;
+        let newest_at = Utc.with_ymd_and_hms(2026, 8, 12, 12, 0, 0).unwrap();
+        insert_payment_history_population(&database.pool, &fixture, newest_at, 4_096).await?;
+        sqlx::query("ANALYZE billing_payment_attempts")
+            .execute(&database.pool)
+            .await?;
+
+        let cursor = SubscriptionPaymentHistoryCursor::new(
+            newest_at - Duration::minutes(8),
+            PaymentAttemptId::new(Uuid::from_u128(u128::MAX / 2)),
+        );
+        for (page_kind, page_query) in [
+            ("first", SubscriptionPaymentHistoryPageQuery::First),
+            (
+                "continuation",
+                SubscriptionPaymentHistoryPageQuery::Continuation(cursor),
+            ),
+        ] {
+            let explain_sql = format!(
+                "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
+                page_query.sql()
+            );
+            let plan_row = sqlx::raw_sql(&explain_sql)
+                .fetch_one(&database.pool)
+                .await?;
+            let plan: serde_json::Value = plan_row.try_get(0)?;
+            let root = explain_plan_root(&plan)?;
+            let rendered = serde_json::to_string_pretty(root)?;
+            if root.get("Node Type").and_then(serde_json::Value::as_str) != Some("Limit")
+                || plan_has_node_type(root, "Sort")
+                || plan_has_node_type(root, "Incremental Sort")
+            {
+                return Err(io::Error::other(format!(
+                    "{page_kind} payment-history plan lost its limit-driven index order:\n{rendered}"
+                ))
+                .into());
+            }
+            let index_node = find_plan_index_node(
+                root,
+                "billing_payment_attempts_subscription_history_idx",
+            )
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "{page_kind} payment-history plan did not use its ordered index:\n{rendered}"
+                ))
+            })?;
+            if matches!(
+                page_query,
+                SubscriptionPaymentHistoryPageQuery::Continuation(_)
+            ) {
+                let index_condition = index_node
+                    .get("Index Cond")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if !index_condition.contains("$4") || !index_condition.contains("$5") {
+                    return Err(io::Error::other(format!(
+                        "payment-history continuation keyset was not pushed into the index condition:\n{rendered}"
+                    ))
+                    .into());
+                }
+            }
+        }
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
@@ -702,6 +793,66 @@ async fn insert_payment_method_update_attempt(
     .bind(format!("history_order_{attempt_id}"))
     .bind(&fixture.initial_transaction_id)
     .bind(created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn insert_payment_history_population(
+    pool: &PgPool,
+    fixture: &PortalFixture,
+    newest_at: DateTime<Utc>,
+    population: i32,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO billing_payment_attempts (
+            id, billing_scope_id, subscriber_id, plan_key, subscription_id,
+            payment_method_id, attempt_kind, status, idempotency_key,
+            request_fingerprint, amount_cents, currency, gateway_account_id,
+            gateway_configuration_id, gateway_order_id,
+            payment_method_update_expected_payment_method_id,
+            payment_method_update_expected_initial_transaction_id,
+            resolved_at, created_at, updated_at
+        )
+        SELECT
+            md5('payment-history-plan-attempt-' || value)::uuid,
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            'subscription_payment_method_update',
+            'failed',
+            'payment-history-plan-idempotency-' || value,
+            'payment-history-plan-fingerprint-' || value,
+            0,
+            'USD',
+            $6,
+            $7,
+            'payment-history-plan-order-' || value,
+            $5,
+            $8,
+            observed_at,
+            observed_at,
+            observed_at
+        FROM generate_series(1, $10::integer) AS fixture(value)
+        CROSS JOIN LATERAL (
+            SELECT $9::timestamptz
+                - ((value - 1) / 4) * interval '1 second' AS observed_at
+        ) AS clock
+        "#,
+    )
+    .bind(fixture.account.billing_scope_id)
+    .bind(fixture.subscriber_id)
+    .bind(fixture.plan_key.as_str())
+    .bind(fixture.subscription_id)
+    .bind(fixture.payment_method_id)
+    .bind(fixture.account.gateway_account_id)
+    .bind(fixture.account.gateway_configuration_id)
+    .bind(&fixture.initial_transaction_id)
+    .bind(newest_at)
+    .bind(population)
     .execute(pool)
     .await?;
     Ok(())
