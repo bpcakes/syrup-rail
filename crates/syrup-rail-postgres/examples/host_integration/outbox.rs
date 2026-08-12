@@ -440,18 +440,9 @@ pub async fn append_host_billing_event_v1(
     .fetch_one(&mut *connection)
     .await
     .map_err(BillingEventWriteError::new)?;
-    let existing = HostBillingEventEnvelopeV1::from_persisted_parts(
-        existing.event_id,
-        existing.occurred_at,
-        existing.event_version,
-        existing.billing_scope_id,
-        existing.subscriber_id,
-        &existing.event_kind,
-        &existing.semantic_kind,
-        existing.semantic_id,
-        existing.payload,
-    )
-    .map_err(BillingEventWriteError::new)?;
+    let existing = existing
+        .into_envelope()
+        .map_err(BillingEventWriteError::new)?;
 
     if !candidate.replay_matches(existing.replay_contract()) {
         return Err(BillingEventWriteError::new(
@@ -479,6 +470,24 @@ struct HostBillingEventPersistedV1 {
     semantic_kind: String,
     semantic_id: Uuid,
     payload: serde_json::Value,
+}
+
+impl HostBillingEventPersistedV1 {
+    fn into_envelope(
+        self,
+    ) -> Result<HostBillingEventEnvelopeV1, HostBillingEventReplayDecodeErrorV1> {
+        HostBillingEventEnvelopeV1::from_persisted_parts(
+            self.event_id,
+            self.occurred_at,
+            self.event_version,
+            self.billing_scope_id,
+            self.subscriber_id,
+            &self.event_kind,
+            &self.semantic_kind,
+            self.semantic_id,
+            self.payload,
+        )
+    }
 }
 
 #[derive(Debug)]
