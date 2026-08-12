@@ -77,7 +77,9 @@ Explicit `expose` methods are boundary operations and must not be used for
 ambient logging. Provider card-brand evidence is reduced to the closed
 `PaymentCardBrand` vocabulary before it enters a customer display or host
 event; unknown nonempty values become `Other`, and the original provider text
-is not retained by those projections.
+is not retained by those projections. Provider adapters retain exact evidence
+and conformance-test their documented labels; the NMI adapter includes the
+provider's `diners` spelling for `DinersClub`.
 
 Host callback failures can contain arbitrary application data. The public
 host-error wrappers therefore keep ordinary `Display` and `Debug` value-free

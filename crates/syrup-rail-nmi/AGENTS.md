@@ -29,6 +29,8 @@ Adapt the raw NMI client to Syrup Rail gateway and lifecycle-evidence contracts.
   packages.
 - No SQLx or application crate dependencies.
 - Never move NMI action parsing into `syrup-rail` or `syrup-rail-postgres`.
+- Preserve exact NMI card-brand evidence while conformance-testing every
+  documented NMI scheme label against the core presentation vocabulary.
 
 ## Common commands
 

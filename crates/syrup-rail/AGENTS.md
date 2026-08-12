@@ -60,7 +60,9 @@ command/outcome types for application-independent subscription billing.
 ## Invariants
 
 - No SQLx, Axum, Runledger, or application-specific crate dependencies.
-- No provider wire vocabulary in this crate.
+- No provider request, response, or lifecycle protocol vocabulary in this
+  crate. `PaymentCardBrand` may recognize common card-scheme presentation
+  aliases; each provider adapter must conformance-test its documented labels.
 - Subscription offers explicitly choose immediate recurring or a positive paid
   trial; accepted cadence, recurring economics, dunning, and access terms are
   immutable authority for replay and reconciliation.

@@ -52,7 +52,9 @@ For `BillingEvent::SubscriptionPaymentFailed`, consume the event's typed
 Use `PaymentCardBrand` for customer-facing or host-event card presentation.
 `PaymentCardBrand::from_provider` maps recognized provider values into a
 stable vocabulary and reduces unknown nonempty text to `Other`, so arbitrary
-provider strings do not cross that projection boundary.
+provider strings do not cross that projection boundary. Its aliases include
+the documented NMI `diners` label for `DinersClub`; provider adapters retain
+exact evidence and test their own documented scheme vocabulary.
 
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
 define a transport wire format for billing events. Those remain host

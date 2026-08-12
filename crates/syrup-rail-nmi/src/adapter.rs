@@ -418,7 +418,10 @@ fn map_query_error(error: QueryError) -> GatewayError {
 
 #[cfg(test)]
 mod tests {
-    use syrup_rail::{ChargeAmount, CurrencyCode, GatewayLifecycleQuarantineReason, PaymentToken};
+    use syrup_rail::{
+        ChargeAmount, CurrencyCode, GatewayLifecycleQuarantineReason, PaymentCardBrand,
+        PaymentToken,
+    };
     use syrup_rail_nmi_client::{PaymentDescriptor, PaymentOutcomeParts, TransactionReportParts};
 
     use super::*;
@@ -506,6 +509,35 @@ mod tests {
         assert!(invalid.card_last_four().is_none());
         assert_eq!(invalid.card_exp_month(), None);
         assert_eq!(invalid.card_exp_year(), None);
+    }
+
+    #[test]
+    fn documented_nmi_card_schemes_have_canonical_projections() {
+        let schemes = [
+            ("visa", PaymentCardBrand::Visa),
+            ("mastercard", PaymentCardBrand::Mastercard),
+            ("amex", PaymentCardBrand::AmericanExpress),
+            ("discover", PaymentCardBrand::Discover),
+            ("diners", PaymentCardBrand::DinersClub),
+            ("Diners", PaymentCardBrand::DinersClub),
+            ("jcb", PaymentCardBrand::Jcb),
+            ("maestro", PaymentCardBrand::Maestro),
+        ];
+
+        for (provider_value, expected) in schemes {
+            let descriptor = map_payment_descriptor_parts(PaymentDescriptorParts {
+                payment_type: Some(text("creditcard")),
+                card_brand: Some(text(provider_value)),
+                card_last4: None,
+                card_exp_month: None,
+                card_exp_year: None,
+            });
+            assert_eq!(
+                descriptor.card_brand().map(GatewayDiagnostic::expose),
+                Some(provider_value)
+            );
+            assert_eq!(descriptor.canonical_card_brand(), Some(expected));
+        }
     }
 
     #[test]

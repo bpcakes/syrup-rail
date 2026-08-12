@@ -296,6 +296,22 @@ pub enum PaymentCardBrand {
     Other,
 }
 
+const PAYMENT_CARD_BRAND_ALIASES: &[(&str, PaymentCardBrand)] = &[
+    ("visa", PaymentCardBrand::Visa),
+    ("mastercard", PaymentCardBrand::Mastercard),
+    ("master card", PaymentCardBrand::Mastercard),
+    ("american express", PaymentCardBrand::AmericanExpress),
+    ("amex", PaymentCardBrand::AmericanExpress),
+    ("discover", PaymentCardBrand::Discover),
+    ("jcb", PaymentCardBrand::Jcb),
+    ("diners", PaymentCardBrand::DinersClub),
+    ("diners club", PaymentCardBrand::DinersClub),
+    ("dinersclub", PaymentCardBrand::DinersClub),
+    ("unionpay", PaymentCardBrand::UnionPay),
+    ("union pay", PaymentCardBrand::UnionPay),
+    ("maestro", PaymentCardBrand::Maestro),
+];
+
 impl PaymentCardBrand {
     /// Canonicalizes an untrusted provider value without retaining unknown
     /// text.
@@ -304,32 +320,10 @@ impl PaymentCardBrand {
         if value.is_empty() {
             return None;
         }
-        let brand = if value.eq_ignore_ascii_case("visa") {
-            Self::Visa
-        } else if value.eq_ignore_ascii_case("mastercard")
-            || value.eq_ignore_ascii_case("master card")
-        {
-            Self::Mastercard
-        } else if value.eq_ignore_ascii_case("american express")
-            || value.eq_ignore_ascii_case("amex")
-        {
-            Self::AmericanExpress
-        } else if value.eq_ignore_ascii_case("discover") {
-            Self::Discover
-        } else if value.eq_ignore_ascii_case("jcb") {
-            Self::Jcb
-        } else if value.eq_ignore_ascii_case("diners club")
-            || value.eq_ignore_ascii_case("dinersclub")
-        {
-            Self::DinersClub
-        } else if value.eq_ignore_ascii_case("unionpay") || value.eq_ignore_ascii_case("union pay")
-        {
-            Self::UnionPay
-        } else if value.eq_ignore_ascii_case("maestro") {
-            Self::Maestro
-        } else {
-            Self::Other
-        };
+        let brand = PAYMENT_CARD_BRAND_ALIASES
+            .iter()
+            .find_map(|(alias, brand)| value.eq_ignore_ascii_case(alias).then_some(*brand))
+            .unwrap_or(Self::Other);
         Some(brand)
     }
 
@@ -1086,14 +1080,28 @@ mod tests {
 
     #[test]
     fn card_brand_canonicalization_never_retains_unknown_provider_text() {
-        assert_eq!(
-            PaymentCardBrand::from_provider(" VISA "),
-            Some(PaymentCardBrand::Visa)
-        );
-        assert_eq!(
-            PaymentCardBrand::from_provider("American Express"),
-            Some(PaymentCardBrand::AmericanExpress)
-        );
+        let aliases = [
+            ("visa", PaymentCardBrand::Visa),
+            (" VISA ", PaymentCardBrand::Visa),
+            ("mastercard", PaymentCardBrand::Mastercard),
+            ("master card", PaymentCardBrand::Mastercard),
+            ("american express", PaymentCardBrand::AmericanExpress),
+            ("amex", PaymentCardBrand::AmericanExpress),
+            ("discover", PaymentCardBrand::Discover),
+            ("jcb", PaymentCardBrand::Jcb),
+            ("diners", PaymentCardBrand::DinersClub),
+            ("diners club", PaymentCardBrand::DinersClub),
+            ("dinersclub", PaymentCardBrand::DinersClub),
+            ("unionpay", PaymentCardBrand::UnionPay),
+            ("union pay", PaymentCardBrand::UnionPay),
+            ("maestro", PaymentCardBrand::Maestro),
+        ];
+        for (provider_value, expected) in aliases {
+            assert_eq!(
+                PaymentCardBrand::from_provider(provider_value),
+                Some(expected)
+            );
+        }
         assert_eq!(PaymentCardBrand::from_provider("   "), None);
 
         let unknown = PaymentCardBrand::from_provider("private-provider-sentinel").unwrap();

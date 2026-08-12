@@ -85,7 +85,8 @@ No unreleased changes.
 - Reduce provider card-brand text to the closed `PaymentCardBrand` vocabulary
   before customer display or host event projection. Unknown nonempty values
   become `Other`; exact provider evidence remains available only at its
-  explicit persistence and reconciliation boundary.
+  explicit persistence and reconciliation boundary. Recognize NMI's documented
+  `diners` label as `DinersClub` and conformance-test its card-scheme vocabulary.
 - Keep arbitrary host callback errors out of ordinary formatting and the
   standard error-source chain. Hosts that intentionally need the original
   value consume the wrapper with `into_source()`.

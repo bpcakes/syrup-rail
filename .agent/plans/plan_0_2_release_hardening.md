@@ -47,6 +47,9 @@ tokens, billing contacts, raw gateway diagnostics, or raw idempotency keys.
   proposed outbox table executable through an atomic insert/read/reconstruct/
   compare helper and PostgreSQL scenario, moved every nested enum label into
   the V1 DTO, and documented the intentional 0.1 error-source-chain cutover.
+- [x] (2026-08-12) Characterized the complete core card-brand alias table and
+  the documented NMI scheme vocabulary; NMI's `diners` spelling now projects
+  to `DinersClub` without changing exact persisted provider evidence.
 
 ## Surprises & Discoveries
 
@@ -162,6 +165,11 @@ tokens, billing contacts, raw gateway diagnostics, or raw idempotency keys.
   Rationale: canonicalizing persisted evidence would make legacy values such as
   `Visa` and `visa` compare differently after upgrade; projecting later drops
   arbitrary provider text without changing durable identity.
+- Decision: keep common card-scheme presentation aliases in the core
+  `PaymentCardBrand` conversion and require each adapter to conformance-test
+  its provider's documented labels.
+  Rationale: presentation remains provider-neutral and centralized while a
+  provider vocabulary change becomes an explicit adapter test failure.
 - Decision: terminate standard error-source traversal at wrappers around
   arbitrary host callback errors and expose the original only through the
   consuming `into_source()` method.
