@@ -307,8 +307,9 @@ and transaction orchestration.
   host event. Never copy unknown provider brand text into those projections.
 - Treat each host outbox wire version as its own closed vocabulary. Do not
   delegate durable enum labels to core `as_str()` methods. On semantic-key
-  conflict, reconstruct the row selected from every split durable column and
-  compare the complete replay contract on the same transaction connection.
+  conflict, compare every untouched split durable column and the structural
+  JSONB payload on the same transaction connection before typed decoding.
+  Decoding must reject any payload that cannot round-trip exactly.
 - Keep `src/lib.rs` exports explicit. The high-level service and host
   transaction/event boundary enable the missing-rustdoc warning, and
   `scripts/check-public-api.sh` elevates that warning to an error and enforces

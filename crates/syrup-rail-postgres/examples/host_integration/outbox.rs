@@ -24,8 +24,8 @@
 //! PostgreSQL 18 can allocate `uuidv7()` and observe `clock_timestamp()` in
 //! the insert. [`append_host_billing_event_v1`] demonstrates the complete
 //! same-transaction write: insert with `ON CONFLICT DO NOTHING`, read the
-//! conflicting row through the same connection, reconstruct its typed replay
-//! contract, and accept it only when every replay-stable field matches.
+//! conflicting row through the same connection, compare every untouched
+//! scalar and JSONB field, and only then reconstruct its typed replay contract.
 //! `event_id` and `occurred_at` are facts of the first successful write and are
 //! deliberately excluded from replay equality. Outbox rows are append-only;
 //! changing a durable row would invalidate that comparison.
@@ -82,7 +82,7 @@ pub struct HostBillingEventReplayV1 {
 pub enum HostBillingEventAppendOutcomeV1 {
     /// This call created the durable row.
     Inserted(HostBillingEventEnvelopeV1),
-    /// A byte-equivalent replay contract was already durable.
+    /// A structurally equal replay contract was already durable.
     Replayed(HostBillingEventEnvelopeV1),
 }
 
@@ -264,7 +264,8 @@ impl HostBillingEventReplayV1 {
     /// A successfully decoded value is not necessarily a valid replay of a
     /// new candidate: known-but-different kinds, subjects, semantic keys, or
     /// payload variants remain representable so [`Self::replay_matches`] can
-    /// reject the conflict.
+    /// reject the conflict. JSON must also round-trip through the V1 DTO
+    /// without losing or normalizing any field.
     #[allow(clippy::too_many_arguments)]
     pub fn from_persisted_parts(
         event_version: i16,
@@ -283,8 +284,14 @@ impl HostBillingEventReplayV1 {
             .ok_or(HostBillingEventReplayDecodeErrorV1::UnknownEventKind)?;
         let semantic_kind = HostBillingEventKindV1::parse(semantic_kind)
             .ok_or(HostBillingEventReplayDecodeErrorV1::UnknownSemanticKind)?;
-        let payload = serde_json::from_value(payload)
+        let persisted_payload = payload;
+        let payload = serde_json::from_value(persisted_payload.clone())
             .map_err(|_| HostBillingEventReplayDecodeErrorV1::InvalidPayload)?;
+        let reconstructed_payload = serde_json::to_value(&payload)
+            .map_err(|_| HostBillingEventReplayDecodeErrorV1::InvalidPayload)?;
+        if reconstructed_payload != persisted_payload {
+            return Err(HostBillingEventReplayDecodeErrorV1::InvalidPayload);
+        }
 
         Ok(Self {
             schema_version: HOST_BILLING_EVENT_SCHEMA_VERSION,
@@ -349,9 +356,10 @@ impl HostBillingEventReplayV1 {
 ///
 /// The insert owns first-write `event_id` and `occurred_at` generation. When
 /// the semantic key already exists, this function selects that exact row on
-/// the same connection, reconstructs its typed envelope, and returns
-/// [`HostBillingEventAppendOutcomeV1::Replayed`] only after exact replay
-/// equality. A mismatch is returned as a value-redacted
+/// the same connection and compares its untouched scalar columns and JSONB
+/// payload before typed decoding. It returns
+/// [`HostBillingEventAppendOutcomeV1::Replayed`] only after exact structural
+/// replay equality. A mismatch is returned as a value-redacted
 /// [`BillingEventWriteError`], so the host transaction must roll back.
 ///
 /// This concrete function targets the example table shown in the module docs.
@@ -401,7 +409,7 @@ pub async fn append_host_billing_event_v1(
     .bind(candidate.event_version())
     .bind(candidate.semantic_kind())
     .bind(candidate.semantic_id())
-    .bind(payload)
+    .bind(&payload)
     .fetch_optional(&mut *connection)
     .await
     .map_err(BillingEventWriteError::new)?;
@@ -440,15 +448,14 @@ pub async fn append_host_billing_event_v1(
     .fetch_one(&mut *connection)
     .await
     .map_err(BillingEventWriteError::new)?;
-    let existing = existing
-        .into_envelope()
-        .map_err(BillingEventWriteError::new)?;
-
-    if !candidate.replay_matches(existing.replay_contract()) {
+    if !existing.replay_matches(&candidate, &payload) {
         return Err(BillingEventWriteError::new(
             HostBillingEventReplayConflictV1,
         ));
     }
+    let existing = existing
+        .into_envelope()
+        .map_err(BillingEventWriteError::new)?;
 
     Ok(HostBillingEventAppendOutcomeV1::Replayed(existing))
 }
@@ -473,6 +480,20 @@ struct HostBillingEventPersistedV1 {
 }
 
 impl HostBillingEventPersistedV1 {
+    fn replay_matches(
+        &self,
+        candidate: &HostBillingEventReplayV1,
+        candidate_payload: &serde_json::Value,
+    ) -> bool {
+        self.event_version == candidate.event_version()
+            && self.billing_scope_id == candidate.billing_scope_id()
+            && self.subscriber_id == candidate.subscriber_id()
+            && self.event_kind == candidate.kind()
+            && self.semantic_kind == candidate.semantic_kind()
+            && self.semantic_id == candidate.semantic_id()
+            && &self.payload == candidate_payload
+    }
+
     fn into_envelope(
         self,
     ) -> Result<HostBillingEventEnvelopeV1, HostBillingEventReplayDecodeErrorV1> {
@@ -908,7 +929,7 @@ struct HostPaymentCardDisplayV1 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{collections::BTreeSet, time::Duration};
 
     use chrono::TimeZone;
     use postgres_test_harness::{HarnessConfig, PostgresHarness};
@@ -1259,6 +1280,61 @@ mod tests {
             HostBillingEventReplayDecodeErrorV1::InvalidPayload
         );
 
+        let mut payload_with_extra_field = original.persisted_payload().unwrap();
+        payload_with_extra_field
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_owned(), serde_json::json!(true));
+        assert_eq!(
+            decode_parts(
+                original.event_version(),
+                original.kind(),
+                original.semantic_kind(),
+                payload_with_extra_field,
+            )
+            .unwrap_err(),
+            HostBillingEventReplayDecodeErrorV1::InvalidPayload
+        );
+
+        let mut payload_with_extra_nested_field = original.persisted_payload().unwrap();
+        payload_with_extra_nested_field
+            .pointer_mut("/data/card")
+            .and_then(serde_json::Value::as_object_mut)
+            .unwrap()
+            .insert("provider_hint".to_owned(), serde_json::json!("private"));
+        assert_eq!(
+            decode_parts(
+                original.event_version(),
+                original.kind(),
+                original.semantic_kind(),
+                payload_with_extra_nested_field,
+            )
+            .unwrap_err(),
+            HostBillingEventReplayDecodeErrorV1::InvalidPayload
+        );
+
+        let normalized_timestamp_payload = serde_json::json!({
+            "type": "subscription_canceled",
+            "data": {
+                "subscription_id": id(20),
+                "plan_key": "base_subscription",
+                "access_ends_at": "2026-08-11T12:00:00+00:00",
+            }
+        });
+        assert_eq!(
+            HostBillingEventReplayV1::from_persisted_parts(
+                original.event_version(),
+                original.billing_scope_id(),
+                original.subscriber_id(),
+                "subscription_canceled",
+                "subscription_canceled",
+                original.semantic_id(),
+                normalized_timestamp_payload,
+            )
+            .unwrap_err(),
+            HostBillingEventReplayDecodeErrorV1::InvalidPayload
+        );
+
         let mut changed = original.clone();
         changed.replay.schema_version += 1;
         assert!(!original.replay_matches(&changed));
@@ -1340,7 +1416,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_outbox_insert_replay_and_conflict_are_atomic() -> Result<(), Box<dyn Error>> {
+    async fn durable_outbox_concurrent_insert_replay_and_conflicts_are_atomic()
+    -> Result<(), Box<dyn Error>> {
         let harness =
             PostgresHarness::start(HarnessConfig::new("sr_obx_v1")?.with_connection_budget(2)?)
                 .await?;
@@ -1363,19 +1440,51 @@ mod tests {
             )),
         };
 
-        let mut transaction = pool.begin().await?;
-        let inserted = append_host_billing_event_v1(&mut transaction, subject, &event).await?;
+        let mut first_transaction = pool.begin().await?;
+        let inserted =
+            append_host_billing_event_v1(&mut first_transaction, subject, &event).await?;
         assert!(inserted.was_inserted());
         let first_write = inserted.envelope().clone();
-        transaction.commit().await?;
 
-        let mut transaction = pool.begin().await?;
-        let replayed = append_host_billing_event_v1(&mut transaction, subject, &event).await?;
+        let mut concurrent_transaction = pool.begin().await?;
+        let mut concurrent_append = Box::pin(append_host_billing_event_v1(
+            &mut concurrent_transaction,
+            subject,
+            &event,
+        ));
+        tokio::select! {
+            result = &mut concurrent_append => {
+                panic!("concurrent same-key append completed before the first write committed: {result:?}");
+            }
+            () = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        first_transaction.commit().await?;
+        let replayed = concurrent_append.await?;
         assert!(!replayed.was_inserted());
         assert_eq!(replayed.envelope().event_id(), first_write.event_id());
         assert_eq!(replayed.envelope().occurred_at(), first_write.occurred_at());
         assert!(first_write.replay_matches(replayed.envelope()));
-        transaction.commit().await?;
+        concurrent_transaction.commit().await?;
+
+        sqlx::query(
+            "UPDATE host_billing_outbox SET payload = payload || jsonb_build_object('unexpected', true)",
+        )
+        .execute(&pool)
+        .await?;
+        let mut transaction = pool.begin().await?;
+        let conflict = append_host_billing_event_v1(&mut transaction, subject, &event)
+            .await
+            .unwrap_err();
+        assert!(
+            conflict
+                .into_source()
+                .downcast::<HostBillingEventReplayConflictV1>()
+                .is_ok()
+        );
+        transaction.rollback().await?;
+        sqlx::query("UPDATE host_billing_outbox SET payload = payload - 'unexpected'")
+            .execute(&pool)
+            .await?;
 
         let conflicting_event = BillingEvent::PaymentMethodChanged {
             attempt_id: attempt(13),

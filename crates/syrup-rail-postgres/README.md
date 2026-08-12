@@ -33,11 +33,12 @@ typed `BillingEvent` to the host outbox on the same connection. The packaged
 `host_integration` example includes concrete service wiring and a versioned,
 redacted host-owned event-envelope mapping. It separates first-write metadata
 from the replay-stable value and demonstrates the complete atomic
-insert/conflict-read/typed-reconstruction comparison on the same transaction.
-Version 1 owns its nested enum labels instead of delegating them to core
-display methods. The example keeps subject identifiers and payload values out
-of `Debug` output; its card payload uses the core canonical brand vocabulary
-and never copies an unknown provider string into the host event.
+insert/conflict-read/raw-structural-comparison/typed-reconstruction path on the
+same transaction. Version 1 owns its nested enum labels instead of delegating
+them to core display methods. The example keeps subject identifiers and
+payload values out of `Debug` output; its card payload uses the core canonical
+brand vocabulary and never copies an unknown provider string into the host
+event.
 
 Errors returned by host transaction, event, charge-target, and operator-review
 callbacks remain opaque through ordinary formatting and the standard

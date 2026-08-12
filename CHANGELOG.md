@@ -103,12 +103,13 @@ No unreleased changes.
   It retains the admitted event subject, maps every closed event variant,
   separates host kind/version and semantic-key columns from a minimized
   payload, and keeps Rust domain types out of the wire-format contract. Its
-  typed replay value compares every stable field while excluding first-write
-  identifiers/timestamps. A concrete same-transaction helper now proves the
-  insert/conflict-select/reconstruct/compare path against the proposed table,
-  and V1 owns every nested enum label instead of inheriting future core display
-  changes. Its `Debug` output exposes only schema version and event kind, never
-  subject identifiers or payload values.
+  replay value compares every stable field while excluding first-write
+  identifiers/timestamps. A concrete same-transaction helper compares the
+  untouched split columns and structural JSONB payload before exact typed
+  reconstruction, so unknown or normalized fields cannot become an accepted
+  replay. V1 owns every nested enum label instead of inheriting future core
+  display changes. Its `Debug` output exposes only schema version and event
+  kind, never subject identifiers or payload values.
 - Package a focused README and explicit proprietary notice with every crate.
   Release preflight now rejects a package that omits either file.
 - Verify all workspace targets on the declared Rust 1.88 minimum in CI and the

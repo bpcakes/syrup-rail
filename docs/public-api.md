@@ -57,11 +57,13 @@ and minimized payload. The host integration example provides an exhaustive
 version-1 mapping. Its envelope separates first-write facts (`event_id` and
 `occurred_at`) from a typed replay contract. On a semantic-key conflict, every
 replay-contract field must match: schema version, billing subject, event kind,
-semantic key, and payload. The first-write facts need not match. The example's
-`append_host_billing_event_v1` helper demonstrates the complete atomic path:
-insert with `ON CONFLICT DO NOTHING`, select the conflicting row on the same
-transaction connection, reconstruct the private typed payload through checked
-persisted-parts constructors, and reject any stable-field mismatch. The V1 DTO
+semantic key, and payload. The first-write facts need not match. JSONB equality
+is structural rather than byte-for-byte because PostgreSQL normalizes JSONB.
+The example's `append_host_billing_event_v1` helper demonstrates the complete
+atomic path: insert with `ON CONFLICT DO NOTHING`, select the conflicting row
+on the same transaction connection, compare its untouched split columns and
+payload, and only then reconstruct the private typed payload. Reconstruction
+must round-trip exactly, so unknown or normalized fields fail closed. The V1 DTO
 also owns its phase, end-reason, and card-brand enums; future changes to core
 display labels cannot silently rewrite this durable wire version. Its `Debug`
 implementations expose only schema version and event kind so subject

@@ -102,15 +102,15 @@ durable enrollment-result handling. It is intentionally provider-neutral and
 does not install or run a database migrator. Its versioned event envelope
 separates database-assigned first-write facts from the complete replay-stable
 contract. Semantic-key conflicts are accepted only when schema version,
-billing subject, event kind, semantic key, and payload all match; its `Debug`
-output exposes only schema version and event kind, never subject identifiers or
-payload values. The example's concrete append helper performs the insert,
-conflict read, typed reconstruction, and comparison on the caller's existing
-transaction connection. Its V1 phase and card labels are host-owned, so later
-core display changes cannot alter already-versioned wire data. Card brands in
-customer and event projections use a closed provider-neutral vocabulary;
-unknown provider text becomes `other` rather than being copied into the host
-payload.
+billing subject, event kind, semantic key, and payload all match; JSONB payload
+equality is structural because PostgreSQL does not retain source bytes. The
+example compares untouched persisted values before typed decoding, whose exact
+round trip rejects unknown or normalized fields. Its `Debug` output exposes
+only schema version and event kind, never subject identifiers or payload
+values. The V1 phase and card labels are host-owned, so later core display
+changes cannot alter already-versioned wire data. Card brands in customer and
+event projections use a closed provider-neutral vocabulary; unknown provider
+text becomes `other` rather than being copied into the host payload.
 
 After the host has applied its immutable v2 install or forward-only v1-to-v2
 upgrade migration, call

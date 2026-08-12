@@ -121,10 +121,10 @@ tokens, billing contacts, raw gateway diagnostics, or raw idempotency keys.
   separates the first successful write's identifier/time from a replay value
   whose equality covers version, subject, event kind, semantic key, and
   payload. The example's concrete helper inserts on the supplied transaction,
-  selects a semantic-key conflict through that same connection, reconstructs
-  all split columns through checked V1 decoders, and accepts only exact replay
-  equality. V1 owns its nested enum labels; a future core label change cannot
-  silently alter this durable version.
+  selects a semantic-key conflict through that same connection, compares every
+  untouched split scalar and structural JSONB field before decoding, and
+  accepts only an exact V1 round trip. V1 owns its nested enum labels; a future
+  core label change cannot silently alter this durable version.
   Rationale: identifier/time are first-write transport facts; accepting a
   semantic-key conflict requires every other durable fact to agree.
 - Decision: record a single advisory exception only for unreachable
@@ -240,6 +240,8 @@ The durable-boundary follow-up passed all four host example tests, including a
 real PostgreSQL 18 insert/replay/conflict-and-rollback scenario; every event
 payload reconstructed from the proposed split columns, every V1 phase and card
 label was characterized, and invalid versions/kinds/payloads failed closed.
+The subsequent exactness correction compares raw persisted replay fields before
+typed decoding and rejects any payload whose V1 round trip loses information.
 Focused Clippy, the public API/rustdoc/doctest gate, the Rust 1.88 example
 check, and `scripts/jig check test --no-receipt` all passed. The final index was
 rebuilt from the verified working tree so the staged release snapshot contains
@@ -273,7 +275,8 @@ an exhaustive conversion from every `BillingEvent` variant. Retain the
 outbox writer. Add tests for kind/version/key, sensitive-field exclusion,
 exhaustive mapping, and the host-specific PostgreSQL insert/replay/conflict
 path. Keep the table host-owned while demonstrating the required unique key,
-typed reconstruction, and same-transaction write.
+raw structural comparison before typed reconstruction, and same-transaction
+write.
 
 Then bump all workspace versions and internal dependency requirements together,
 update `Cargo.lock`, date the 0.2 changelog entry, add the 0.2 comparison link,
