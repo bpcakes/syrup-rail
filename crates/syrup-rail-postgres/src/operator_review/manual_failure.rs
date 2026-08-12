@@ -1,19 +1,23 @@
 use super::*;
 
+/// Value-redacted failure returned by the host's manual-failure store.
 #[derive(Debug)]
 pub struct ManualAttemptFailureHostStoreError {
-    source: BoxError,
+    source: RedactedHostErrorSource,
 }
 
 impl ManualAttemptFailureHostStoreError {
+    /// Wraps a host error without exposing its value through ordinary error
+    /// formatting or the standard error-source chain.
     pub fn new(source: impl Error + Send + Sync + 'static) -> Self {
         Self {
-            source: Box::new(source),
+            source: RedactedHostErrorSource::new(source),
         }
     }
 
+    /// Returns the host error for explicit application-level inspection.
     pub fn into_source(self) -> BoxError {
-        self.source
+        self.source.into_inner()
     }
 }
 
@@ -23,11 +27,7 @@ impl fmt::Display for ManualAttemptFailureHostStoreError {
     }
 }
 
-impl Error for ManualAttemptFailureHostStoreError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
+impl Error for ManualAttemptFailureHostStoreError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ManualAttemptFailureHostTransitionOutcome {

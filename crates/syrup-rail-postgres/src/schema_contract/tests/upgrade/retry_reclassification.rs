@@ -215,7 +215,7 @@ async fn insert_v1_recovery_failures(
             "declined",
             &format!(
                 "retry-audit-{expected_status}-recovery-{sequence}-{}",
-                subscription.1.simple()
+                opaque_fixture_uuid(subscription.1)
             ),
             Some(&format!("2026-02-{day:02} 00:00:00+00")),
             &format!("2026-02-{day:02} 00:01:00+00"),

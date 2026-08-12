@@ -5,6 +5,7 @@
 //! reconciliation policy, subscription scheduling, and validating exposed
 //! provider text before persistence.
 
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 mod client;

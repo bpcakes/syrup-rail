@@ -76,8 +76,10 @@ for crate in "${publishable_crates[@]}"; do
 
   manifest="crates/$crate/Cargo.toml"
   if ! grep -Fq 'version.workspace = true' "$manifest" ||
+    ! grep -Fq 'license-file.workspace = true' "$manifest" ||
+    ! grep -Fq 'readme = "README.md"' "$manifest" ||
     ! grep -Fq 'publish = true' "$manifest"; then
-    echo "$manifest must inherit the workspace version and remain publishable." >&2
+    echo "$manifest must inherit the workspace version and license file, declare its README, and remain publishable." >&2
     exit 1
   fi
 done
@@ -105,7 +107,13 @@ if [[ "$allow_dirty" == true ]]; then
 fi
 
 for crate in "${publishable_crates[@]}"; do
-  cargo package --locked --list "${package_dirty_args[@]}" -p "$crate" >/dev/null
+  package_files="$(cargo package --locked --list "${package_dirty_args[@]}" -p "$crate")"
+  for required_file in LICENSE README.md; do
+    if ! grep -Fqx "$required_file" <<<"$package_files"; then
+      echo "$crate package does not contain $required_file." >&2
+      exit 1
+    fi
+  done
 done
 
 echo "Release metadata and package file sets are ready for v$version."

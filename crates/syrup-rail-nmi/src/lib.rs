@@ -1,5 +1,6 @@
 //! NMI gateway and lifecycle-evidence adapter for Syrup Rail.
 
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 mod adapter;

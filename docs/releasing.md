@@ -15,16 +15,33 @@ core release and must not claim compatibility with an older core package.
 ## Preflight
 
 Update the workspace version, internal dependency requirements, `Cargo.lock`,
-and `CHANGELOG.md`. Then run:
+and `CHANGELOG.md`. Install the exact additional release tools when they are
+not already available:
 
 ```console
-scripts/check-release.sh 0.1.1 --allow-dirty
+rustup toolchain install 1.88.0 --profile minimal
+cargo install cargo-audit --version 0.22.2 --locked
+```
+
+Then run:
+
+```console
+scripts/check-release.sh VERSION --allow-dirty
+scripts/check-advisories.sh
+scripts/check-public-api.sh
+cargo +1.88.0 check --workspace --all-targets --locked
 scripts/jig check contract
 scripts/jig check fmt
 scripts/jig check clippy
 scripts/jig check test-locked
 scripts/jig check sqlx
 ```
+
+Replace `VERSION` with the exact stable semantic version recorded in the
+workspace, such as `0.2.0`. The advisory check permits only the documented,
+unreachable SQLx-MySQL advisory described in
+[`security/dependency-advisories.md`](security/dependency-advisories.md), and
+fails if that dependency becomes reachable from a workspace build.
 
 Commit the release preparation, push `main`, wait for required CI to pass, and
 rerun `scripts/check-release.sh VERSION` from the clean release commit.

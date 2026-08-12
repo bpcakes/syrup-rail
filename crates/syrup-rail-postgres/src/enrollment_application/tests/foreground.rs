@@ -423,10 +423,14 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
 
     let events = fixture.coordinator.events.lock().await;
     assert_eq!(events.len(), 2);
-    assert!(matches!(
-        events[1],
-        BillingEvent::PaymentMethodChanged { .. }
-    ));
+    let BillingEvent::PaymentMethodChanged {
+        card: Some(card), ..
+    } = &events[1]
+    else {
+        panic!("approved replacement must emit its canonical masked-card display")
+    };
+    assert_eq!(card.brand(), &PaymentCardBrand::Visa);
+    assert_eq!(card.last_four().expose(), "4242");
     drop(events);
     fixture.cleanup().await
 }

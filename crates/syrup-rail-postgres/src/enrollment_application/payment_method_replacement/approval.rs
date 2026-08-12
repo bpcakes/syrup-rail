@@ -266,8 +266,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
     ))?;
     let descriptor = evidence.descriptor();
     let card = descriptor
-        .card_brand()
-        .cloned()
+        .canonical_card_brand()
         .zip(descriptor.card_last_four().cloned())
         .map(|(brand, last_four)| PaymentCardDisplay::new(brand, last_four));
     let event = BillingEvent::PaymentMethodChanged {

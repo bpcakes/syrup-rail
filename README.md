@@ -11,6 +11,23 @@ Reusable subscription billing crates for Banana Pancakes applications.
 | `syrup-rail-nmi` | NMI gateway and lifecycle-evidence adapter |
 | `syrup-rail-nmi-client` | Bounded, retry-free raw NMI HTTP client |
 
+## Installation
+
+All four crates are released together and must use the same version. Add only
+the layers a host needs:
+
+```toml
+[dependencies]
+syrup-rail = "0.2.0"
+syrup-rail-postgres = "0.2.0"
+syrup-rail-nmi = "0.2.0" # only for NMI-backed hosts
+```
+
+`syrup-rail-nmi` re-exports its matching raw client as
+`syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.2.0"`
+directly.
+
 ## Subscription terms
 
 Hosts select an explicit recurring start or a positive paid introductory
@@ -82,7 +99,18 @@ example](crates/syrup-rail-postgres/examples/host_integration.rs) shows the
 host-owned offer lock, gateway resolution, end-user admission, transaction and
 outbox boundary, service construction, authorized command construction, and
 durable enrollment-result handling. It is intentionally provider-neutral and
-does not install or run a database migrator.
+does not install or run a database migrator. Its versioned event envelope
+separates database-assigned first-write facts from the complete replay-stable
+contract. Semantic-key conflicts are accepted only when schema version,
+billing subject, event kind, semantic key, and payload all match; its `Debug`
+output exposes only schema version and event kind, never subject identifiers or
+payload values. The example's concrete append helper performs the insert,
+conflict read, typed reconstruction, and comparison on the caller's existing
+transaction connection. Its V1 phase and card labels are host-owned, so later
+core display changes cannot alter already-versioned wire data. Card brands in
+customer and event projections use a closed provider-neutral vocabulary;
+unknown provider text becomes `other` rather than being copied into the host
+payload.
 
 After the host has applied its immutable v2 install or forward-only v1-to-v2
 upgrade migration, call
@@ -124,6 +152,12 @@ those idempotent operations is safe. Generic storage faults and failures on
 paths that may have crossed provider I/O remain `Internal` because their
 outcome is ambiguous.
 
+Host callback error wrappers also stop the ordinary `Error::source()` chain
+before the arbitrary application error. Classify the outer service error
+first; use `into_source()` only after destructuring an owned callback wrapper
+in a protected path that deliberately inspects that potentially sensitive
+value.
+
 For customer billing pages, construct a `SubscriptionBillingPortalQuery` from
 that same authorized exact identity and call `subscription_billing_portal`. It
 returns the canonical `Entitlement`, including current terms and saved or
@@ -157,7 +191,11 @@ compile the integration boundary without contacting a database or provider.
 
 - `scripts/jig doctor`
 - `scripts/jig check test`
+- `scripts/check-public-api.sh`
 - `cargo test -p syrup-rail-nmi-client`
+
+See [the 0.2 public API guide](docs/public-api.md) for the supported facade,
+advanced transaction-local composition points, and event compatibility policy.
 
 ## Releasing
 

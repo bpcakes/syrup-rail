@@ -21,12 +21,12 @@ pub(super) async fn create_v2_subscription_fixture(
     .bind(gateway.billing_scope_id)
     .bind(subscriber_id)
     .bind(gateway.gateway_account_id)
-    .bind(format!("vault_{}", payment_method_id.simple()))
+    .bind(format!("vault_{}", opaque_fixture_uuid(payment_method_id)))
     .execute(pool)
     .await?;
 
     let subscription_id = Uuid::now_v7();
-    let initial_transaction_id = format!("txn_{}", subscription_id.simple());
+    let initial_transaction_id = format!("txn_{}", opaque_fixture_uuid(subscription_id));
     sqlx::query(
         r#"
         INSERT INTO billing_subscriptions (
@@ -91,11 +91,14 @@ pub(super) async fn insert_v2_initial_attempt(
     .bind(attempt_id)
     .bind(gateway.billing_scope_id)
     .bind(subscriber_id)
-    .bind(format!("{identity}-{}", attempt_id.simple()))
+    .bind(format!("{identity}-{}", opaque_fixture_uuid(attempt_id)))
     .bind(format!("{identity}:base_subscription:100:USD"))
     .bind(gateway.gateway_account_id)
     .bind(gateway.gateway_configuration_id)
-    .bind(format!("{identity}-order-{}", attempt_id.simple()))
+    .bind(format!(
+        "{identity}-order-{}",
+        opaque_fixture_uuid(attempt_id)
+    ))
     .execute(pool)
     .await?;
     Ok(attempt_id)
@@ -232,13 +235,19 @@ pub(super) async fn apply_v1_manual_active_recovery_failure(
     .bind(subscriber_id)
     .bind(subscription_id)
     .bind(payment_method_id)
-    .bind(format!("legacy-active-recovery-{}", attempt_id.simple()))
-    .bind(format!("legacy-active-recovery:{}", attempt_id.simple()))
+    .bind(format!(
+        "legacy-active-recovery-{}",
+        opaque_fixture_uuid(attempt_id)
+    ))
+    .bind(format!(
+        "legacy-active-recovery:{}",
+        opaque_fixture_uuid(attempt_id)
+    ))
     .bind(gateway.gateway_account_id)
     .bind(gateway.gateway_configuration_id)
     .bind(format!(
         "legacy-active-recovery-order-{}",
-        attempt_id.simple()
+        opaque_fixture_uuid(attempt_id)
     ))
     .bind(initial_transaction_id)
     .execute(&mut *transaction)
@@ -349,7 +358,7 @@ pub(super) async fn insert_mixed_v1_failure_history(
         initial_transaction_id,
         "subscription_renewal",
         "declined",
-        &format!("mixed-customer-{}", subscription_id.simple()),
+        &format!("mixed-customer-{}", opaque_fixture_uuid(subscription_id)),
         Some("2026-02-02 00:30:00+00"),
         "2026-02-02 00:31:00+00",
         None,
@@ -364,7 +373,10 @@ pub(super) async fn insert_mixed_v1_failure_history(
         initial_transaction_id,
         "subscription_renewal",
         "failed",
-        &format!("mixed-infrastructure-{}", subscription_id.simple()),
+        &format!(
+            "mixed-infrastructure-{}",
+            opaque_fixture_uuid(subscription_id)
+        ),
         None,
         "2026-02-03 00:31:00+00",
         Some("gateway_unavailable_before_submission"),
@@ -379,7 +391,7 @@ pub(super) async fn insert_mixed_v1_failure_history(
         initial_transaction_id,
         "subscription_renewal",
         "failed",
-        &format!("mixed-throttle-{}", subscription_id.simple()),
+        &format!("mixed-throttle-{}", opaque_fixture_uuid(subscription_id)),
         None,
         "2026-02-04 00:31:00+00",
         Some("gateway_provider_rate_limited_before_submission"),
@@ -394,7 +406,7 @@ pub(super) async fn insert_mixed_v1_failure_history(
         initial_transaction_id,
         "subscription_recovery",
         "declined",
-        &format!("mixed-recovery-{}", subscription_id.simple()),
+        &format!("mixed-recovery-{}", opaque_fixture_uuid(subscription_id)),
         Some("2026-02-05 00:30:00+00"),
         "2026-02-05 00:31:00+00",
         None,
@@ -415,7 +427,7 @@ pub(super) async fn insert_v1_reclassified_exhausted_history(
         let day = sequence + 2;
         let identity = format!(
             "reclassified-renewal-{sequence}-{}",
-            subscription_id.simple()
+            opaque_fixture_uuid(subscription_id)
         );
         let submitted_at = format!("2026-02-{day:02} 00:00:00+00");
         let resolved_at = format!("2026-02-{day:02} 00:01:00+00");
@@ -439,7 +451,7 @@ pub(super) async fn insert_v1_reclassified_exhausted_history(
         let day = sequence + 5;
         let identity = format!(
             "reclassified-recovery-{sequence}-{}",
-            subscription_id.simple()
+            opaque_fixture_uuid(subscription_id)
         );
         let submitted_at = format!("2026-02-{day:02} 00:00:00+00");
         let resolved_at = format!("2026-02-{day:02} 00:01:00+00");
@@ -488,12 +500,18 @@ pub(super) async fn insert_v1_initial_attempt(
     .bind(gateway.billing_scope_id)
     .bind(subscriber_id)
     .bind(status)
-    .bind(format!("legacy-initial-{}", attempt_id.simple()))
+    .bind(format!(
+        "legacy-initial-{}",
+        opaque_fixture_uuid(attempt_id)
+    ))
     .bind(request_fingerprint)
     .bind(amount_cents)
     .bind(gateway.gateway_account_id)
     .bind(gateway.gateway_configuration_id)
-    .bind(format!("legacy-initial-order-{}", attempt_id.simple()))
+    .bind(format!(
+        "legacy-initial-order-{}",
+        opaque_fixture_uuid(attempt_id)
+    ))
     .execute(pool)
     .await?;
     Ok(attempt_id)
@@ -506,7 +524,7 @@ pub(super) async fn insert_v1_discounted_initial_attempt(
     request_fingerprint: &str,
 ) -> Result<Uuid, sqlx::Error> {
     let discount_code_id = Uuid::now_v7();
-    let code = format!("SAVE{}", discount_code_id.simple());
+    let code = format!("SAVE{}", opaque_fixture_uuid(discount_code_id));
     sqlx::query(
         r#"
         INSERT INTO billing_subscription_discount_codes (
@@ -573,11 +591,17 @@ pub(super) async fn insert_v1_discounted_initial_attempt(
     .bind(attempt_id)
     .bind(gateway.billing_scope_id)
     .bind(subscriber_id)
-    .bind(format!("legacy-discounted-{}", attempt_id.simple()))
+    .bind(format!(
+        "legacy-discounted-{}",
+        opaque_fixture_uuid(attempt_id)
+    ))
     .bind(request_fingerprint)
     .bind(gateway.gateway_account_id)
     .bind(gateway.gateway_configuration_id)
-    .bind(format!("legacy-discounted-order-{}", attempt_id.simple()))
+    .bind(format!(
+        "legacy-discounted-order-{}",
+        opaque_fixture_uuid(attempt_id)
+    ))
     .bind(discount_claim_id)
     .bind(discount_code_id)
     .bind(code)

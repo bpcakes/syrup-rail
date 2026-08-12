@@ -20,7 +20,12 @@ on:
       - ".agent/jig-contract.json"
       - "scripts/jig"
       - "scripts/install-jig.sh"
+      - "scripts/check-advisories.sh"
+      - "scripts/check-public-api.sh"
+      - "docs/public-api.md"
+      - "docs/security/dependency-advisories.md"
       - ".cargo/**"
+      - ".github/workflows/dependency-advisories.yml"
       - ".github/workflows/rust-tests.yml"
   push:
     branches:
@@ -43,7 +48,12 @@ on:
       - ".agent/jig-contract.json"
       - "scripts/jig"
       - "scripts/install-jig.sh"
+      - "scripts/check-advisories.sh"
+      - "scripts/check-public-api.sh"
+      - "docs/public-api.md"
+      - "docs/security/dependency-advisories.md"
       - ".cargo/**"
+      - ".github/workflows/dependency-advisories.yml"
       - ".github/workflows/rust-tests.yml"
   merge_group:
     types:
@@ -58,6 +68,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  msrv:
+    name: Rust 1.88 workspace check
+    runs-on: "ubuntu-latest"
+    defaults:
+      run:
+        shell: bash
+    env:
+      SQLX_OFFLINE: "true"
+      SQLX_OFFLINE_DIR: "${{ github.workspace }}/crates/syrup-rail-postgres/.sqlx"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Rust 1.88
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
+          toolchain: 1.88.0
+      - name: Check every workspace target at the MSRV
+        run: cargo check --workspace --all-targets --locked
+
+  advisories:
+    name: Dependency advisory policy
+    runs-on: "ubuntu-latest"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Check dependency advisories
+        run: scripts/check-advisories.sh
+
+  public-api:
+    name: Public API documentation
+    runs-on: "ubuntu-latest"
+    defaults:
+      run:
+        shell: bash
+    env:
+      SQLX_OFFLINE: "true"
+      SQLX_OFFLINE_DIR: "${{ github.workspace }}/crates/syrup-rail-postgres/.sqlx"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
+      - name: Check explicit facades and documentation
+        run: scripts/check-public-api.sh
+
   fmt:
     name: scripts/jig check fmt
     runs-on: "ubuntu-latest"
@@ -66,9 +138,9 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache: false
           rustflags: ""
@@ -89,15 +161,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache: false
           rustflags: ""
           components: clippy
       - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Run clippy
         run: scripts/jig check clippy
 
@@ -114,13 +186,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
           cache: false
           rustflags: ""
       - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Run locked Rust tests
         run: scripts/jig check test-locked

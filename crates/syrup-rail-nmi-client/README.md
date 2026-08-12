@@ -5,6 +5,11 @@ supports account-mode lookup, sales, Customer Vault payment method storage,
 individual transaction lookup, and paginated transaction reports. It does not
 manage NMI plans or subscription schedules.
 
+```toml
+[dependencies]
+syrup-rail-nmi-client = "0.2.0"
+```
+
 The client never retries mutations. `MutationError::Indeterminate` and
 `MutationError::RateLimitedIndeterminate` mean the request may have reached NMI,
 so callers must reconcile before attempting a replacement charge. The latter
@@ -90,3 +95,6 @@ after explicit exposure. In particular, v5 request construction copies payment
 tokens and Customer Vault identifiers into `serde_json` and request-body
 buffers that cannot be reliably zeroized. The controls do not protect against
 a compromised process or memory forensics.
+
+This package is proprietary software distributed under the terms in the
+packaged `LICENSE` file.

@@ -484,6 +484,14 @@ mod tests {
             card_exp_month: Some(12),
             card_exp_year: Some(2100),
         });
+        assert_eq!(
+            descriptor.card_brand().map(GatewayDiagnostic::expose),
+            Some("visa")
+        );
+        assert_eq!(
+            descriptor.canonical_card_brand(),
+            Some(syrup_rail::PaymentCardBrand::Visa)
+        );
         assert_eq!(descriptor.card_last_four().unwrap().expose(), "1234");
         assert_eq!(descriptor.card_exp_month(), Some(12));
         assert_eq!(descriptor.card_exp_year(), Some(2100));

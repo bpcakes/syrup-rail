@@ -1,10 +1,16 @@
+#![warn(missing_docs)]
+
 use chrono::{DateTime, Utc};
 
 use crate::{
-    BillingPeriod, BillingScopeId, CardLastFour, ChargeAmount, GatewayDiagnostic,
-    HostChargeTargetId, PaymentAttemptId, PlanKey, SubscriberId, SubscriptionId, SubscriptionPhase,
+    BillingPeriod, BillingScopeId, CardLastFour, ChargeAmount, HostChargeTargetId,
+    PaymentAttemptId, PaymentCardBrand, PlanKey, SubscriberId, SubscriptionId, SubscriptionPhase,
 };
 
+/// Host authorization identity associated with a billing event transaction.
+///
+/// The host supplies this exact scope/subscriber pair when it begins the
+/// transaction and should retain it in the durable outbox envelope.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct BillingEventSubject {
     billing_scope_id: BillingScopeId,
@@ -12,6 +18,7 @@ pub struct BillingEventSubject {
 }
 
 impl BillingEventSubject {
+    /// Creates the exact host subject for an event-producing transaction.
     pub const fn new(billing_scope_id: BillingScopeId, subscriber_id: SubscriberId) -> Self {
         Self {
             billing_scope_id,
@@ -19,30 +26,39 @@ impl BillingEventSubject {
         }
     }
 
+    /// Returns the host billing scope.
     pub const fn billing_scope_id(self) -> BillingScopeId {
         self.billing_scope_id
     }
 
+    /// Returns the subscriber within the billing scope.
     pub const fn subscriber_id(self) -> SubscriberId {
         self.subscriber_id
     }
 }
 
+/// A value-redacted payment-card label safe for ordinary billing UI display.
+///
+/// The contained brand and last four digits are still explicit data and are
+/// exposed only through accessors. `Debug` and `Display` never print them.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PaymentCardDisplay {
-    brand: GatewayDiagnostic,
+    brand: PaymentCardBrand,
     last_four: CardLastFour,
 }
 
 impl PaymentCardDisplay {
-    pub const fn new(brand: GatewayDiagnostic, last_four: CardLastFour) -> Self {
+    /// Creates a display value from sanitized provider card metadata.
+    pub const fn new(brand: PaymentCardBrand, last_four: CardLastFour) -> Self {
         Self { brand, last_four }
     }
 
-    pub const fn brand(&self) -> &GatewayDiagnostic {
+    /// Explicitly exposes the sanitized card brand.
+    pub const fn brand(&self) -> &PaymentCardBrand {
         &self.brand
     }
 
+    /// Explicitly exposes the validated last four digits.
     pub const fn last_four(&self) -> &CardLastFour {
         &self.last_four
     }
@@ -64,14 +80,25 @@ impl std::fmt::Display for PaymentCardDisplay {
     }
 }
 
+/// Engine-owned idempotency identity for one semantic billing event.
+///
+/// Hosts should preserve both the variant and contained identifier when
+/// constructing a unique outbox key. Debug output is not a wire format.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum BillingEventKey {
+    /// The unique start event for a subscription lifecycle.
     SubscriptionStarted(SubscriptionId),
+    /// The successful renewal event produced by a payment attempt.
     SubscriptionRenewed(PaymentAttemptId),
+    /// The failure event produced by a payment attempt.
     SubscriptionPaymentFailed(PaymentAttemptId),
+    /// The terminal nonpayment event for a subscription lifecycle.
     SubscriptionEnded(SubscriptionId),
+    /// The voluntary cancellation event for a subscription lifecycle.
     SubscriptionCanceled(SubscriptionId),
+    /// The stored-payment-method change event produced by an attempt.
     PaymentMethodChanged(PaymentAttemptId),
+    /// The successful host-target charge event.
     HostChargePaid(HostChargeTargetId),
 }
 
@@ -80,17 +107,26 @@ pub enum BillingEventKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SubscriptionPaymentFailureDisposition {
     /// Automatic dunning remains open and will retry at `retry_at`.
-    RetryScheduled { retry_at: DateTime<Utc> },
+    RetryScheduled {
+        /// Exact durable time at which automatic collection becomes eligible.
+        retry_at: DateTime<Utc>,
+    },
     /// Automatic dunning ended at `exhausted_at`, but the subscription remains
     /// past due rather than ending.
     ///
     /// Under [`crate::PastDueAccessPolicy::ContinueUntilDunningExhausted`],
     /// hosts that mirror product access must treat this as the access-revocation
     /// signal. No [`BillingEvent::SubscriptionEnded`] event follows it.
-    DunningExhausted { exhausted_at: DateTime<Utc> },
+    DunningExhausted {
+        /// Time at which the configured dunning schedule was exhausted.
+        exhausted_at: DateTime<Utc>,
+    },
     /// Nonpayment ended the subscription at `ended_at`; a matching
     /// [`BillingEvent::SubscriptionEnded`] follows in the same transaction.
-    SubscriptionEnded { ended_at: DateTime<Utc> },
+    SubscriptionEnded {
+        /// Time at which nonpayment made the subscription terminal.
+        ended_at: DateTime<Utc>,
+    },
 }
 
 /// The canonical product-access fact immediately after a subscription payment
@@ -104,7 +140,10 @@ pub enum SubscriptionPaymentFailureAccess {
     /// Product access remains available while automatic dunning is scheduled.
     ContinuesDuringDunning,
     /// Product access ended at the durable causal boundary.
-    Ended { access_ended_at: DateTime<Utc> },
+    Ended {
+        /// Durable causal boundary at which product access ended.
+        access_ended_at: DateTime<Utc>,
+    },
 }
 
 impl SubscriptionPaymentFailureAccess {
@@ -122,62 +161,109 @@ impl SubscriptionPaymentFailureAccess {
     }
 }
 
+/// Provider-neutral reason that a subscription lifecycle ended.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SubscriptionEndReason {
+    /// The configured automatic-collection policy ended the lifecycle.
     NonPayment,
 }
 
+/// Typed provider-neutral event emitted at an atomic billing boundary.
+///
+/// This is a closed domain enum rather than a serialized wire schema. Hosts
+/// should map it exhaustively into a versioned host-owned outbox DTO; adding a
+/// future variant will then force every mapper to make an explicit decision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BillingEvent {
+    /// A newly activated subscription lifecycle.
     SubscriptionStarted {
+        /// Payment attempt that established activation authority.
         attempt_id: PaymentAttemptId,
+        /// Newly activated subscription.
         subscription_id: SubscriptionId,
+        /// Host plan selected by the authorized request.
         plan_key: PlanKey,
+        /// Provider-approved initial charge.
         charge: ChargeAmount,
+        /// Initial paid or trial billing period.
         period: BillingPeriod,
+        /// Activated introductory or recurring phase.
         phase: SubscriptionPhase,
     },
+    /// An existing subscription advanced after an approved payment.
     SubscriptionRenewed {
+        /// Payment attempt that approved the renewal or recovery.
         attempt_id: PaymentAttemptId,
+        /// Renewed subscription.
         subscription_id: SubscriptionId,
+        /// Exact plan owned by the subscription.
         plan_key: PlanKey,
+        /// Provider-approved recurring charge.
         charge: ChargeAmount,
+        /// Newly opened billing period.
         period: BillingPeriod,
     },
+    /// A determinate automatic-renewal failure changed dunning state.
     SubscriptionPaymentFailed {
+        /// Failed automatic-renewal attempt.
         attempt_id: PaymentAttemptId,
+        /// Subscription whose collection failed.
         subscription_id: SubscriptionId,
+        /// Exact plan owned by the subscription.
         plan_key: PlanKey,
+        /// Durable scheduler or lifecycle consequence.
         disposition: SubscriptionPaymentFailureDisposition,
+        /// Canonical product-access fact immediately after the failure.
         access: SubscriptionPaymentFailureAccess,
     },
+    /// Nonpayment made a subscription lifecycle terminal.
     SubscriptionEnded {
+        /// Attempt whose failure exhausted collection authority.
         attempt_id: PaymentAttemptId,
+        /// Terminal subscription lifecycle.
         subscription_id: SubscriptionId,
+        /// Exact plan owned by the subscription.
         plan_key: PlanKey,
+        /// Provider-neutral terminal reason.
         reason: SubscriptionEndReason,
+        /// Time the financial lifecycle became terminal.
         ended_at: DateTime<Utc>,
+        /// Causal boundary at which product access ends.
         access_ends_at: DateTime<Utc>,
     },
+    /// A subscriber voluntarily canceled a subscription lifecycle.
     SubscriptionCanceled {
+        /// Canceled subscription.
         subscription_id: SubscriptionId,
+        /// Exact plan owned by the subscription.
         plan_key: PlanKey,
+        /// Paid-through or immediate access boundary after cancellation.
         access_ends_at: DateTime<Utc>,
     },
+    /// A subscription stored a newly approved payment method.
     PaymentMethodChanged {
+        /// Payment-method replacement attempt.
         attempt_id: PaymentAttemptId,
+        /// Subscription whose method changed.
         subscription_id: SubscriptionId,
+        /// Exact plan owned by the subscription.
         plan_key: PlanKey,
+        /// Optional value-redacted display metadata for the new card.
         card: Option<PaymentCardDisplay>,
     },
+    /// A host-defined target was charged successfully.
     HostChargePaid {
+        /// Canonical host-charge payment attempt.
         attempt_id: PaymentAttemptId,
+        /// Host-owned target that received the charge.
         target_id: HostChargeTargetId,
+        /// Provider-approved charge.
         charge: ChargeAmount,
     },
 }
 
 impl BillingEvent {
+    /// Returns the engine-owned semantic idempotency key for this event.
     pub const fn semantic_key(&self) -> BillingEventKey {
         match self {
             Self::SubscriptionStarted {
@@ -307,11 +393,11 @@ mod tests {
     #[test]
     fn card_display_formatting_never_reveals_provider_values() {
         let card = PaymentCardDisplay::new(
-            GatewayDiagnostic::new("visa_sentinel"),
+            PaymentCardBrand::Visa,
             CardLastFour::from_provider("1234").unwrap(),
         );
         let debug = format!("{card:?}");
-        assert!(!debug.contains("visa_sentinel"));
+        assert!(!debug.contains("Visa"));
         assert!(!debug.contains("1234"));
         assert_eq!(card.to_string(), "[redacted]");
     }

@@ -3,9 +3,10 @@ name = "syrup-rail"
 version.workspace = true
 edition.workspace = true
 rust-version = "1.88"
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "Validated domain types and lifecycle policy for Syrup Rail billing"
+readme = "README.md"
 publish = true
 
 [dependencies]

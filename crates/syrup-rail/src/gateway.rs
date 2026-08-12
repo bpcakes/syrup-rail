@@ -268,6 +268,99 @@ impl fmt::Display for CardLastFour {
     }
 }
 
+/// Canonical provider-neutral card brand retained for masked presentation.
+///
+/// Provider text is mapped into this closed vocabulary before it can enter a
+/// consumer-facing projection or host event. Unrecognized nonempty values
+/// become [`Self::Other`]; their original text is not retained by this value.
+#[non_exhaustive]
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+pub enum PaymentCardBrand {
+    /// Visa.
+    Visa,
+    /// Mastercard.
+    Mastercard,
+    /// American Express.
+    AmericanExpress,
+    /// Discover.
+    Discover,
+    /// Japan Credit Bureau.
+    Jcb,
+    /// Diners Club.
+    DinersClub,
+    /// UnionPay.
+    UnionPay,
+    /// Maestro.
+    Maestro,
+    /// A nonempty provider value outside the recognized vocabulary.
+    Other,
+}
+
+impl PaymentCardBrand {
+    /// Canonicalizes an untrusted provider value without retaining unknown
+    /// text.
+    pub fn from_provider(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.is_empty() {
+            return None;
+        }
+        let brand = if value.eq_ignore_ascii_case("visa") {
+            Self::Visa
+        } else if value.eq_ignore_ascii_case("mastercard")
+            || value.eq_ignore_ascii_case("master card")
+        {
+            Self::Mastercard
+        } else if value.eq_ignore_ascii_case("american express")
+            || value.eq_ignore_ascii_case("amex")
+        {
+            Self::AmericanExpress
+        } else if value.eq_ignore_ascii_case("discover") {
+            Self::Discover
+        } else if value.eq_ignore_ascii_case("jcb") {
+            Self::Jcb
+        } else if value.eq_ignore_ascii_case("diners club")
+            || value.eq_ignore_ascii_case("dinersclub")
+        {
+            Self::DinersClub
+        } else if value.eq_ignore_ascii_case("unionpay") || value.eq_ignore_ascii_case("union pay")
+        {
+            Self::UnionPay
+        } else if value.eq_ignore_ascii_case("maestro") {
+            Self::Maestro
+        } else {
+            Self::Other
+        };
+        Some(brand)
+    }
+
+    /// Explicitly exposes the stable provider-neutral wire label.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Visa => "visa",
+            Self::Mastercard => "mastercard",
+            Self::AmericanExpress => "american_express",
+            Self::Discover => "discover",
+            Self::Jcb => "jcb",
+            Self::DinersClub => "diners_club",
+            Self::UnionPay => "union_pay",
+            Self::Maestro => "maestro",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl fmt::Debug for PaymentCardBrand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PaymentCardBrand([redacted])")
+    }
+}
+
+impl fmt::Display for PaymentCardBrand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[redacted]")
+    }
+}
+
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct GatewayPaymentDescriptor {
     payment_type: Option<GatewayDiagnostic>,
@@ -294,22 +387,40 @@ impl GatewayPaymentDescriptor {
         }
     }
 
+    /// Returns provider payment-type evidence for explicit boundary use.
     pub const fn payment_type(&self) -> Option<&GatewayDiagnostic> {
         self.payment_type.as_ref()
     }
 
+    /// Returns provider card-brand evidence for explicit persistence or
+    /// reconciliation use.
     pub const fn card_brand(&self) -> Option<&GatewayDiagnostic> {
         self.card_brand.as_ref()
     }
 
+    /// Reduces provider card-brand evidence to the presentation vocabulary.
+    ///
+    /// Unknown provider text becomes [`PaymentCardBrand::Other`] and is not
+    /// retained in the returned value. Use this method for customer displays
+    /// and host events; use [`Self::card_brand`] only where exact provider
+    /// evidence is required.
+    pub fn canonical_card_brand(&self) -> Option<PaymentCardBrand> {
+        self.card_brand
+            .as_ref()
+            .and_then(|brand| PaymentCardBrand::from_provider(brand.expose()))
+    }
+
+    /// Returns the validated masked last four digits.
     pub const fn card_last_four(&self) -> Option<&CardLastFour> {
         self.card_last_four.as_ref()
     }
 
+    /// Returns the validated card expiration month.
     pub const fn card_exp_month(&self) -> Option<i16> {
         self.card_exp_month
     }
 
+    /// Returns the validated card expiration year.
     pub const fn card_exp_year(&self) -> Option<i16> {
         self.card_exp_year
     }
@@ -974,6 +1085,25 @@ mod tests {
     }
 
     #[test]
+    fn card_brand_canonicalization_never_retains_unknown_provider_text() {
+        assert_eq!(
+            PaymentCardBrand::from_provider(" VISA "),
+            Some(PaymentCardBrand::Visa)
+        );
+        assert_eq!(
+            PaymentCardBrand::from_provider("American Express"),
+            Some(PaymentCardBrand::AmericanExpress)
+        );
+        assert_eq!(PaymentCardBrand::from_provider("   "), None);
+
+        let unknown = PaymentCardBrand::from_provider("private-provider-sentinel").unwrap();
+        assert_eq!(unknown, PaymentCardBrand::Other);
+        assert_eq!(unknown.as_str(), "other");
+        assert!(!format!("{unknown:?}").contains("private-provider-sentinel"));
+        assert_eq!(unknown.to_string(), "[redacted]");
+    }
+
+    #[test]
     fn descriptor_drops_invalid_display_fields() {
         let descriptor = GatewayPaymentDescriptor::from_provider_parts(
             Some(GatewayDiagnostic::new("visa")),
@@ -981,6 +1111,14 @@ mod tests {
             Some("12x4"),
             Some(13),
             Some(2101),
+        );
+        assert_eq!(
+            descriptor.canonical_card_brand(),
+            Some(PaymentCardBrand::Other)
+        );
+        assert_eq!(
+            descriptor.card_brand().map(GatewayDiagnostic::expose),
+            Some("brand")
         );
         assert!(descriptor.card_last_four().is_none());
         assert_eq!(descriptor.card_exp_month(), None);

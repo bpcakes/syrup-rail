@@ -51,6 +51,29 @@ jobs:
         with:
           tool: sqlx-cli@0.8.6
 
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: Install Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal
+
+      - name: Check every workspace target at the MSRV
+        env:
+          SQLX_OFFLINE: "true"
+          SQLX_OFFLINE_DIR: ${{ github.workspace }}/crates/syrup-rail-postgres/.sqlx
+        run: cargo +1.88.0 check --workspace --all-targets --locked
+
+      - name: Check dependency advisories
+        run: scripts/check-advisories.sh
+
+      - name: Check public API documentation
+        env:
+          SQLX_OFFLINE: "true"
+          SQLX_OFFLINE_DIR: ${{ github.workspace }}/crates/syrup-rail-postgres/.sqlx
+        run: scripts/check-public-api.sh
+
       - name: Check release metadata and packages
         env:
           RELEASE_VERSION: ${{ inputs.version }}

@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     BillingPeriod, BillingScopeId, Entitlement, Money, PaymentAttemptId, PaymentAttemptKind,
-    PaymentAttemptStatus, PlanKey, SubscriberId, string_contains_raw_card_data,
+    PaymentAttemptStatus, PaymentCardBrand, PlanKey, SubscriberId, string_contains_raw_card_data,
 };
 
 /// Exact subscriber and plan identity for a customer-facing billing read.
@@ -54,25 +54,20 @@ impl SubscriptionBillingPortalQuery {
 /// remains value-free.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionPaymentMethodDisplay {
-    card_brand: Option<String>,
+    card_brand: Option<PaymentCardBrand>,
     card_last_four: Option<String>,
     card_expiration_month: Option<u8>,
     card_expiration_year: Option<u16>,
 }
 
 impl SubscriptionPaymentMethodDisplay {
+    /// Constructs a masked display from provider-neutral validated values.
     pub fn new(
-        card_brand: Option<String>,
+        card_brand: Option<PaymentCardBrand>,
         card_last_four: Option<String>,
         card_expiration_month: Option<u8>,
         card_expiration_year: Option<u16>,
     ) -> Result<Self, SubscriptionPaymentMethodDisplayError> {
-        if card_brand
-            .as_deref()
-            .is_some_and(string_contains_raw_card_data)
-        {
-            return Err(SubscriptionPaymentMethodDisplayError::CardBrandContainsRawCardData);
-        }
         if card_last_four.as_deref().is_some_and(|value| {
             value.len() != 4 || !value.bytes().all(|byte| byte.is_ascii_digit())
         }) {
@@ -92,10 +87,34 @@ impl SubscriptionPaymentMethodDisplay {
         })
     }
 
-    pub fn card_brand(&self) -> Option<&str> {
-        self.card_brand.as_deref()
+    /// Constructs a masked display from an untrusted persisted brand label.
+    ///
+    /// Recognized brands are canonicalized, unknown text becomes
+    /// [`PaymentCardBrand::Other`], and the original provider text is not
+    /// retained.
+    pub fn from_provider_parts(
+        card_brand: Option<&str>,
+        card_last_four: Option<String>,
+        card_expiration_month: Option<u8>,
+        card_expiration_year: Option<u16>,
+    ) -> Result<Self, SubscriptionPaymentMethodDisplayError> {
+        if card_brand.is_some_and(string_contains_raw_card_data) {
+            return Err(SubscriptionPaymentMethodDisplayError::CardBrandContainsRawCardData);
+        }
+        Self::new(
+            card_brand.and_then(PaymentCardBrand::from_provider),
+            card_last_four,
+            card_expiration_month,
+            card_expiration_year,
+        )
     }
 
+    /// Returns the provider-neutral card brand.
+    pub const fn card_brand(&self) -> Option<PaymentCardBrand> {
+        self.card_brand
+    }
+
+    /// Returns the deliberately exposed masked last four digits.
     pub fn card_last_four(&self) -> Option<&str> {
         self.card_last_four.as_deref()
     }
@@ -331,14 +350,14 @@ mod tests {
     #[test]
     fn payment_method_display_exposes_values_only_through_accessors_and_redacts_debug() {
         let display = SubscriptionPaymentMethodDisplay::new(
-            Some("Visa".to_owned()),
+            Some(PaymentCardBrand::Visa),
             Some("4242".to_owned()),
             Some(12),
             Some(2031),
         )
         .expect("valid masked card display");
 
-        assert_eq!(display.card_brand(), Some("Visa"));
+        assert_eq!(display.card_brand(), Some(PaymentCardBrand::Visa));
         assert_eq!(display.card_last_four(), Some("4242"));
         assert_eq!(display.card_expiration_month(), Some(12));
         assert_eq!(display.card_expiration_year(), Some(2031));
@@ -357,14 +376,23 @@ mod tests {
     #[test]
     fn payment_method_display_rejects_raw_or_invalid_card_presentation() {
         assert_eq!(
-            SubscriptionPaymentMethodDisplay::new(
-                Some("4111111111111111".to_owned()),
+            SubscriptionPaymentMethodDisplay::from_provider_parts(
+                Some("4111111111111111"),
                 Some("4242".to_owned()),
                 None,
                 None,
             ),
             Err(SubscriptionPaymentMethodDisplayError::CardBrandContainsRawCardData)
         );
+        let unknown = SubscriptionPaymentMethodDisplay::from_provider_parts(
+            Some("private-provider-sentinel"),
+            Some("4242".to_owned()),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(unknown.card_brand(), Some(PaymentCardBrand::Other));
+        assert!(!format!("{unknown:?}").contains("private-provider-sentinel"));
         assert_eq!(
             SubscriptionPaymentMethodDisplay::new(None, Some("42".to_owned()), None, None),
             Err(SubscriptionPaymentMethodDisplayError::InvalidCardLastFour)

@@ -50,9 +50,10 @@ and transaction orchestration.
 - `src/subscription_billing_service.rs` — stable service type, shared closed
   readiness facts, conservative non-exhaustive service-error dispositions, and
   facade. Its `subscription_billing_service/{enrollment,
-  recovery,renewal,payment_method_replacement,host_charge,reconciliation,
-  subscriber,subscriber_mutation}.rs` modules own the corresponding
-  orchestration and shared subscriber-admission boundary. The
+  error_disposition,recovery,renewal,payment_method_replacement,host_charge,
+  reconciliation,subscriber,subscriber_mutation}.rs` modules own the
+  corresponding classification, orchestration, and shared
+  subscriber-admission boundary. The
   `subscriber_mutation.rs` owner runs cancellation through the host-prepared
   event transaction and keeps discount claim/clear gateway-free.
 - `src/host_charge_application.rs` — host-charge final admission, one-shot
@@ -122,8 +123,9 @@ and transaction orchestration.
 - Change one foreground workflow in its matching
   `src/subscription_billing_service/*.rs` owner. Put shared subscriber
   admission, resolver identity, cooldown, and readiness behavior in
-  `subscriber.rs`; keep the root as the stable service/fact facade and do not
-  introduce another subscription payment path in a host adapter.
+  `subscriber.rs`, and exhaustive operational error classification in
+  `error_disposition.rs`; keep the root as the stable service/fact facade and
+  do not introduce another subscription payment path in a host adapter.
 - Change high-level cancellation or subscriber discount orchestration in
   `src/subscription_billing_service/subscriber_mutation.rs`. Admission must
   precede database work; a changed cancellation, its host event, and commit
@@ -297,6 +299,20 @@ and transaction orchestration.
   lock timeout, or statement timeout) to `StorageTemporarilyUnavailable`.
   Generic SQL and any path that may have crossed provider I/O remain `Internal`
   unless an owning workflow proves a stronger outcome.
+- Host callback error wrappers keep arbitrary source values out of ordinary
+  formatting and terminate `Error::source()` at the wrapper. Recover the
+  original value only through the explicit consuming `into_source()` boundary.
+- Preserve exact provider card-brand evidence for replay and reconciliation,
+  but project it through `PaymentCardBrand` before a billing portal display or
+  host event. Never copy unknown provider brand text into those projections.
+- Treat each host outbox wire version as its own closed vocabulary. Do not
+  delegate durable enum labels to core `as_str()` methods. On semantic-key
+  conflict, reconstruct the row selected from every split durable column and
+  compare the complete replay contract on the same transaction connection.
+- Keep `src/lib.rs` exports explicit. The high-level service and host
+  transaction/event boundary enable the missing-rustdoc warning, and
+  `scripts/check-public-api.sh` elevates that warning to an error and enforces
+  the facade and all-feature workspace documentation gates.
 
 ## Common commands
 

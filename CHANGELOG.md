@@ -4,9 +4,9 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
-The eventual release for these breaking API and schema changes is **0.2.0**.
-Version manifests, dependency requirements, publication, and tagging remain a
-separate release task.
+No unreleased changes.
+
+## [0.2.0] - 2026-08-11
 
 ### Added
 
@@ -82,6 +82,39 @@ separate release task.
   a wildcard when matching its disposition, use `retry_after()` only as an
   exact delay when it is present, and rebuild/reconcile rather than retry a
   conflict as-is.
+- Reduce provider card-brand text to the closed `PaymentCardBrand` vocabulary
+  before customer display or host event projection. Unknown nonempty values
+  become `Other`; exact provider evidence remains available only at its
+  explicit persistence and reconciliation boundary.
+- Keep arbitrary host callback errors out of ordinary formatting and the
+  standard error-source chain. Hosts that intentionally need the original
+  value consume the wrapper with `into_source()`.
+
+### Developer experience
+
+- Replace wildcard crate-facade exports with explicit reviewed export lists
+  while preserving the pre-release core and PostgreSQL root API inventories.
+  Add a layered public-API guide and enforce rustdoc on the closed
+  billing-event, high-level service, and host transaction boundaries. The
+  small-project CI gate deliberately avoids a custom compiler-diagnostic debt
+  baseline: it checks readable facades, rejects wildcard exports, builds
+  warning-free docs, and runs doctests.
+- Add a compile-tested host-owned version-1 billing-event envelope example.
+  It retains the admitted event subject, maps every closed event variant,
+  separates host kind/version and semantic-key columns from a minimized
+  payload, and keeps Rust domain types out of the wire-format contract. Its
+  typed replay value compares every stable field while excluding first-write
+  identifiers/timestamps. A concrete same-transaction helper now proves the
+  insert/conflict-select/reconstruct/compare path against the proposed table,
+  and V1 owns every nested enum label instead of inheriting future core display
+  changes. Its `Debug` output exposes only schema version and event kind, never
+  subject identifiers or payload values.
+- Package a focused README and explicit proprietary notice with every crate.
+  Release preflight now rejects a package that omits either file.
+- Verify all workspace targets on the declared Rust 1.88 minimum in CI and the
+  release workflow. Add a RustSec gate whose sole exception is the unreachable
+  RSA implementation locked behind SQLx's unused MySQL feature; the gate fails
+  if that implementation ever enters a workspace build graph.
 
 ### Migration
 
@@ -110,6 +143,12 @@ separate release task.
   recovery, renewal, payment-method replacement, reconciliation, and optional
   host-charge orchestration. Its generic storage and application messages now
   use billing/payment terminology while retaining typed error sources.
+- Standard error-chain traversal no longer reaches arbitrary application
+  errors supplied by host transaction, event, charge-target, or operator-review
+  callbacks. Classify a `SubscriptionBillingServiceError` first; only in an
+  explicitly protected diagnostic path, destructure its owned callback-error
+  variant and consume that wrapper with `into_source()`. Generic error
+  reporters should retain the intentionally terminated source chain.
 - Provider-free cancellation and discount transactions now surface pool
   acquisition timeouts and PostgreSQL serialization, deadlock, lock-timeout,
   and statement-timeout failures as `StorageTemporarilyUnavailable`. Its
@@ -203,6 +242,7 @@ separate release task.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/bpcakes/syrup-rail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bpcakes/syrup-rail/tree/v0.1.0

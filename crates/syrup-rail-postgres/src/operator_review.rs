@@ -25,6 +25,7 @@ use crate::attempts::{
     lock_payment_attempt_by_id_on_connection, lock_subscription_aggregate,
     payment_attempt_from_row, set_enrollment_timeouts,
 };
+use crate::host_error::{BoxError, RedactedHostErrorSource};
 use crate::processor_charge_persistence::{
     attestation_by_charge, attestation_matches_source, expected_final_resolution_code,
     expected_prior_resolution_code, parse_charge_state_code, parse_kind, parse_progression,
@@ -55,7 +56,6 @@ pub use pages::{attempt_review_page, processor_charge_review_page};
 use external_reversal::{charge_locator, lock_processor_charge};
 
 pub(crate) const INVALID_OPERATOR_STATE: &str = "canonical operator review state is invalid";
-type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
 #[derive(Debug, Error)]
 pub enum OperatorReviewError {

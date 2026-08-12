@@ -10,22 +10,26 @@ use syrup_rail::{
 };
 use thiserror::Error;
 
-type BoxError = Box<dyn Error + Send + Sync + 'static>;
+use crate::host_error::{BoxError, RedactedHostErrorSource};
 
+/// Value-redacted failure returned by the host charge-target store.
 #[derive(Debug)]
 pub struct HostChargeTargetError {
-    source: BoxError,
+    source: RedactedHostErrorSource,
 }
 
 impl HostChargeTargetError {
+    /// Wraps a host error without exposing its value through ordinary error
+    /// formatting or the standard error-source chain.
     pub fn new(source: impl Error + Send + Sync + 'static) -> Self {
         Self {
-            source: Box::new(source),
+            source: RedactedHostErrorSource::new(source),
         }
     }
 
+    /// Returns the host error for explicit application-level inspection.
     pub fn into_source(self) -> BoxError {
-        self.source
+        self.source.into_inner()
     }
 }
 
@@ -35,11 +39,7 @@ impl fmt::Display for HostChargeTargetError {
     }
 }
 
-impl Error for HostChargeTargetError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        Some(self.source.as_ref())
-    }
-}
+impl Error for HostChargeTargetError {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostChargeTargetReservation {

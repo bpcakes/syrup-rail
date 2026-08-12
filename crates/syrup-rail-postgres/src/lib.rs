@@ -3,6 +3,7 @@
 //! Production service construction must not expose or invoke a migrator; host
 //! applications materialize versioned install artifacts as immutable migrations.
 
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
 mod attempts;
@@ -16,6 +17,7 @@ mod gateway_accounts;
 mod grants;
 mod host_charge_application;
 mod host_charges;
+mod host_error;
 mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
 mod operator_review;
@@ -58,7 +60,19 @@ pub use billing_portal::{
 };
 pub use cancellation::{SubscriptionCancellationError, cancel_subscription_in_transaction};
 pub use deletion::{billing_deletion_blockers, scrub_subscriber_billing_data};
-pub use discounts::*;
+pub use discounts::{
+    SubscriptionDiscountOperationError, SubscriptionEnrollmentOfferContext,
+    SubscriptionEnrollmentOfferStage, SubscriptionOfferStore, claim_subscription_discount,
+    claim_subscription_discount_in_transaction, clear_subscription_discount,
+    clear_subscription_discount_in_transaction, create_subscription_discount_code,
+    create_subscription_discount_code_in_transaction, disable_subscription_discount_code,
+    disable_subscription_discount_code_in_transaction, list_subscription_discount_codes,
+    list_subscription_discount_codes_in_transaction,
+    mark_subscription_discount_claim_applied_in_transaction, saved_subscription_discount_claim,
+    saved_subscription_discount_claim_in_transaction, update_subscription_discount_code,
+    update_subscription_discount_code_in_transaction, validate_subscription_discount_code,
+    validate_subscription_discount_code_in_transaction,
+};
 pub use enrollment_application::{
     AdmittedSubscriptionEnrollment, AdmittedSubscriptionPaymentMethodReplacement,
     AdmittedSubscriptionRecovery, AdmittedSubscriptionRenewal,

@@ -21,10 +21,10 @@ use syrup_rail::{
     GatewayTransactionReport, GatewayTransactionReportRequest, IdempotencyKey, Money,
     PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
     PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptTarget,
-    PaymentAttemptTimestamps, PaymentGateway, PaymentToken, PercentOffBasisPoints,
-    RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod, ResolvedGateway,
-    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
-    SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
+    PaymentAttemptTimestamps, PaymentCardBrand, PaymentGateway, PaymentToken,
+    PercentOffBasisPoints, RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod,
+    ResolvedGateway, SubscriptionDiscountCode, SubscriptionDiscountDuration,
+    SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
     SubscriptionEnrollmentReservationOutcome, SubscriptionRenewalOutcome, SubscriptionStatus,
 };
 use tokio::sync::Mutex;

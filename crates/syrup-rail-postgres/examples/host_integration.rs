@@ -6,6 +6,14 @@
 //! and transactional outbox encoding. `main` performs no database or provider
 //! I/O; this example is intended to be copied into a host application.
 
+#[path = "host_integration/outbox.rs"]
+mod outbox;
+
+pub use outbox::{
+    HostBillingEventAppendOutcomeV1, HostBillingEventEnvelopeV1,
+    HostBillingEventReplayDecodeErrorV1, HostBillingEventReplayV1, append_host_billing_event_v1,
+};
+
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -104,9 +112,13 @@ pub async fn assert_host_runtime_schema_compatibility(
 ///
 /// `lock_billing_subject` must find the durable event recipient, acquire its
 /// host row lock, and classify it as live or retained before it returns.
-/// `append_outbox_event` maps the typed event to the host's durable outbox.
-/// Both methods receive the same transaction connection; implementations must
-/// not acquire another one.
+/// `append_outbox_event` maps the typed event to the host's durable outbox;
+/// [`HostBillingEventEnvelopeV1`] demonstrates an exhaustive, versioned,
+/// redacted mapping, while [`append_host_billing_event_v1`] demonstrates the
+/// atomic insert/read/compare replay algorithm for the example table. The
+/// coordinator retains and supplies the exact subject admitted at transaction
+/// start so the writer never has to rediscover it. Both methods receive the
+/// same transaction connection; implementations must not acquire another one.
 #[async_trait]
 pub trait HostBillingBoundary: Send + Sync {
     async fn lock_billing_subject(
@@ -118,6 +130,7 @@ pub trait HostBillingBoundary: Send + Sync {
     async fn append_outbox_event(
         &self,
         connection: &mut PgConnection,
+        subject: BillingEventSubject,
         event: &BillingEvent,
     ) -> Result<(), BillingEventWriteError>;
 }
@@ -163,6 +176,7 @@ impl BillingTransactionCoordinator for HostTransactionCoordinator {
 
         Ok(Box::new(HostTransaction {
             transaction,
+            subject,
             subject_state,
             boundary: Arc::clone(&self.boundary),
         }))
@@ -171,6 +185,7 @@ impl BillingTransactionCoordinator for HostTransactionCoordinator {
 
 struct HostTransaction {
     transaction: Transaction<'static, Postgres>,
+    subject: BillingEventSubject,
     subject_state: BillingTransactionSubjectState,
     boundary: Arc<dyn HostBillingBoundary>,
 }
@@ -187,7 +202,7 @@ impl BillingTransaction for HostTransaction {
 
     async fn append_event(&mut self, event: &BillingEvent) -> Result<(), BillingEventWriteError> {
         self.boundary
-            .append_outbox_event(&mut self.transaction, event)
+            .append_outbox_event(&mut self.transaction, self.subject, event)
             .await
     }
 

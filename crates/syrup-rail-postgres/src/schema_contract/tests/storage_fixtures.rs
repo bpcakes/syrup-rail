@@ -18,12 +18,12 @@ pub(super) async fn create_subscription_fixture(
     .bind(gateway.billing_scope_id)
     .bind(subscriber_id)
     .bind(gateway.gateway_account_id)
-    .bind(format!("vault_{}", payment_method_id.simple()))
+    .bind(format!("vault_{}", opaque_fixture_uuid(payment_method_id)))
     .execute(pool)
     .await?;
 
     let subscription_id = Uuid::now_v7();
-    let initial_transaction_id = format!("txn_{}", subscription_id.simple());
+    let initial_transaction_id = format!("txn_{}", opaque_fixture_uuid(subscription_id));
     sqlx::query(
         r#"
         INSERT INTO billing_subscriptions (
@@ -76,7 +76,7 @@ pub(super) async fn insert_payment_method_gateway_text(
         .bind(gateway.billing_scope_id)
         .bind(subscriber_id)
         .bind(gateway.gateway_account_id)
-        .bind(format!("vault_{}", payment_method_id.simple()))
+        .bind(format!("vault_{}", opaque_fixture_uuid(payment_method_id)))
         .bind(value)
         .execute(pool)
         .await
@@ -131,11 +131,14 @@ pub(super) async fn insert_attempt_gateway_text(
         .bind(gateway.billing_scope_id)
         .bind(subscriber_id)
         .bind(target_id)
-        .bind(format!("diagnostic-{}", attempt_id.simple()))
+        .bind(format!("diagnostic-{}", opaque_fixture_uuid(attempt_id)))
         .bind(format!("host_charge:{target_id}:100:USD"))
         .bind(gateway.gateway_account_id)
         .bind(gateway.gateway_configuration_id)
-        .bind(format!("diagnostic-order-{}", attempt_id.simple()))
+        .bind(format!(
+            "diagnostic-order-{}",
+            opaque_fixture_uuid(attempt_id)
+        ))
         .bind(value)
         .execute(pool)
         .await
@@ -160,14 +163,14 @@ pub(super) async fn insert_charge_gateway_text(
         .contains(&field)
     );
     let target_id = Uuid::now_v7();
-    let order_id = format!("charge-text-order-{}", Uuid::now_v7().simple());
+    let order_id = format!("charge-text-order-{}", opaque_fixture_uuid(Uuid::now_v7()));
     let attempt_id = insert_host_charge_attempt_record(
         pool,
         gateway,
         subscriber_id,
         target_id,
         &order_id,
-        &format!("charge-text-{}", Uuid::now_v7().simple()),
+        &format!("charge-text-{}", opaque_fixture_uuid(Uuid::now_v7())),
     )
     .await?;
     let query = format!(
@@ -213,15 +216,15 @@ pub(super) async fn insert_attestation_gateway_text(
         .contains(&field)
     );
     let target_id = Uuid::now_v7();
-    let order_id = format!("attestation-order-{}", Uuid::now_v7().simple());
-    let transaction_id = format!("txn_{}", Uuid::now_v7().simple());
+    let order_id = format!("attestation-order-{}", opaque_fixture_uuid(Uuid::now_v7()));
+    let transaction_id = format!("txn_{}", opaque_fixture_uuid(Uuid::now_v7()));
     let attempt_id = insert_host_charge_attempt_record(
         pool,
         gateway,
         subscriber_id,
         target_id,
         &order_id,
-        &format!("attestation-{}", Uuid::now_v7().simple()),
+        &format!("attestation-{}", opaque_fixture_uuid(Uuid::now_v7())),
     )
     .await?;
     let charge_id = Uuid::now_v7();
@@ -309,7 +312,10 @@ pub(super) async fn insert_lifecycle_gateway_text(
     sqlx::query(&query)
         .bind(gateway.billing_scope_id)
         .bind(gateway.gateway_account_id)
-        .bind(format!("lifecycle-text-{}", Uuid::now_v7().simple()))
+        .bind(format!(
+            "lifecycle-text-{}",
+            opaque_fixture_uuid(Uuid::now_v7())
+        ))
         .bind(value)
         .execute(pool)
         .await

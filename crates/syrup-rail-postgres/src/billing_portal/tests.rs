@@ -3,9 +3,9 @@ use std::{error::Error, io};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use sqlx::PgPool;
 use syrup_rail::{
-    BillingScopeId, Entitlement, PastDueAccess, PlanKey, ScrubSubscriberBillingData, SubscriberId,
-    SubscriptionBillingPortalQuery, SubscriptionPaymentHistoryPageLimit, SubscriptionPhase,
-    SubscriptionStatus,
+    BillingScopeId, Entitlement, PastDueAccess, PaymentCardBrand, PlanKey,
+    ScrubSubscriberBillingData, SubscriberId, SubscriptionBillingPortalQuery,
+    SubscriptionPaymentHistoryPageLimit, SubscriptionPhase, SubscriptionStatus,
 };
 use uuid::Uuid;
 
@@ -93,7 +93,7 @@ async fn billing_portal_projects_empty_active_trial_dunning_cancellation_and_gra
         let active_display = active_snapshot
             .payment_method_display()
             .ok_or_else(|| io::Error::other("active portal projection lost card display"))?;
-        if active_display.card_brand() != Some("Visa")
+        if active_display.card_brand() != Some(PaymentCardBrand::Visa)
             || active_display.card_last_four() != Some("4242")
             || active_display.card_expiration_month() != Some(12)
             || active_display.card_expiration_year() != Some(2032)

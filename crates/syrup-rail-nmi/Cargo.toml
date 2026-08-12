@@ -3,9 +3,10 @@ name = "syrup-rail-nmi"
 version.workspace = true
 edition.workspace = true
 rust-version = "1.88"
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "NMI gateway and lifecycle-evidence adapter for Syrup Rail"
+readme = "README.md"
 publish = true
 
 [dependencies]

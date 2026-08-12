@@ -185,8 +185,8 @@ async fn payment_method_display(
         return Ok(None);
     }
 
-    SubscriptionPaymentMethodDisplay::new(
-        card_brand,
+    SubscriptionPaymentMethodDisplay::from_provider_parts(
+        card_brand.as_deref(),
         card_last_four,
         card_expiration_month,
         card_expiration_year,

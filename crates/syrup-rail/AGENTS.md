@@ -76,6 +76,15 @@ command/outcome types for application-independent subscription billing.
   is terminal collection history with no payment-state authority.
 - Provider identifiers, tokens, contacts, and diagnostics have value-free
   ordinary formatting; expose their values only at adapter/persistence edges.
+- Preserve exact provider card-brand evidence where reconciliation requires
+  it, but derive `PaymentCardBrand` before customer display or host-event
+  projection. Unknown provider text must become `Other`, not durable host
+  payload.
+- Keep `src/lib.rs` exports explicit. The event/outbox boundary enables the
+  missing-rustdoc warning so new event fields or variants cannot enter the
+  supported facade without consumer guidance; `scripts/check-public-api.sh`
+  elevates that warning to an error and enforces the facade and all-feature
+  workspace documentation gates.
 
 ## Common commands
 
