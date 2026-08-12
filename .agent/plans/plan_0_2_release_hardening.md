@@ -52,6 +52,13 @@ tokens, billing contacts, raw gateway diagnostics, or raw idempotency keys.
   to `DinersClub` without changing exact persisted provider evidence.
 - [x] (2026-08-12) Made empty payment-method displays unrepresentable and moved
   normalization plus absence classification into the core conversion boundary.
+- [x] (2026-08-12) Removed the final CI-policy regressions with behavior-neutral
+  module extraction for outbox, renewal, subscriber-mutation, and gateway
+  sources; restored the immutable schema-v2 README byte-for-byte to its
+  baseline instead of weakening migration policy.
+- [x] (2026-08-12) Re-ran every local and GitHub-CI-equivalent gate, including
+  both complete serial test gates, SQLx, release packaging, advisory audit,
+  exact MSRV, repository policy, rustdoc, and public API validation.
 
 ## Surprises & Discoveries
 
@@ -208,8 +215,8 @@ Acceptance evidence completed successfully:
   workspace doctests;
 - the explicit-facade, warning-free documentation and doctest gate, plus the
   advisory/reachability gate;
-- the exhaustive host event-envelope tests (2 passed), core tests (96 passed),
-  NMI client tests (163 passed), NMI adapter tests (13 passed), and both full
+- the exhaustive host event-envelope tests (4 passed), core tests (97 passed),
+  NMI client tests (163 passed), NMI adapter tests (14 passed), and both full
   `scripts/jig check test-locked --no-receipt` and
   `scripts/jig check test --no-receipt` gates;
 - SQLx and schema-contract no-receipt gates;
@@ -233,6 +240,21 @@ both `scripts/jig check test --no-receipt` and
 listing now contains
 `every_domain_variant_has_an_explicit_redacted_host_mapping`; the test no
 longer depends on an explicitly targeted example command.
+
+The final Fowler-guided correction reduced the remaining bug surface rather
+than adding branch-specific patches. One persisted-row object now owns host
+outbox reconstruction, replay equality is checked against untouched scalars
+and structural JSONB before typed decoding, provider vocabulary is
+characterized at the NMI adapter boundary, and a present payment-method display
+cannot be empty. Repository LOC enforcement then exposed four oversized
+changed files; production, persistence, fixture, and test responsibilities are
+now split into private modules while public paths and runtime behavior remain
+unchanged. The final current-tree run passed exact Rust 1.88 and current
+all-target checks, formatting, Clippy with warnings denied, warning-free
+rustdoc, public API/doctests, advisory policy, package preflight, agent-map,
+no-`mod.rs`, changed-file LOC, migration immutability, contract, SQLx, and both
+complete Jig test gates. Schema v1, schema v2, and committed SQLx metadata are
+all unchanged from `origin/main`.
 
 The deeper-pattern correction additionally passed eight exhaustive
 service-error classification/retry tests, exact V1 JSON-key characterization,
