@@ -56,6 +56,19 @@ All notable changes to the Syrup Rail crates are documented in this file.
   gateway diagnostics; retryability permits only resubmitting the same
   idempotent command and does not guarantee success.
 
+### Fixed
+
+- Keep runtime schema-v2 validation available during PostgreSQL concurrent
+  reindexing by excluding only invalid `_ccnew` and `_ccold` shadow indexes
+  whose locks and visible PostgreSQL progress both identify a non-initializing
+  `REINDEX CONCURRENTLY`. Recheck that live evidence before commit and retry a
+  transition once from a fresh snapshot; stale, cross-role-hidden, or
+  independently created suffix-bearing indexes remain fail-closed.
+- Make the dependency-advisory wrapper run without an empty-array expansion
+  when no RustSec exception is needed, including on Bash versions before 4.4.
+- Narrow the internal offer comparison helper to ignore only the recurring
+  amount; currency and paid-trial pricing remain accepted terms.
+
 ### Changed
 
 - Separate the economic `next_renewal_at` period anchor from the mutable

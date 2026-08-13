@@ -28,6 +28,15 @@ syrup_rail_postgres::assert_runtime_schema_v2_compatible(pool).await?;
 # }
 ```
 
+During `REINDEX CONCURRENTLY`, PostgreSQL exposes the command, phase, and
+target details only to the maintenance role and statistics-privileged roles.
+The runtime assertion tolerates `_ccnew` and `_ccold` shadows only when those
+visible progress details and the backend's relation locks agree, then rechecks
+the evidence before committing. Run maintenance and startup validation as the
+same database role when startup must remain available during a reindex; a
+cross-role observer fails closed. Drop stale invalid shadows left by failed
+maintenance before serving billing traffic.
+
 `SubscriptionBillingService` is the primary mutation facade. Hosts supply
 offer locking, gateway resolution, abuse admission, and a transaction
 coordinator that locks the authorized billing subject first and appends every

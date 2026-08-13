@@ -411,8 +411,13 @@ impl SubscriptionOffer {
         self.recurring.charge().currency()
     }
 
-    pub fn has_same_non_price_terms(&self, other: &Self) -> bool {
+    /// Compares every offer term except the recurring charge amount.
+    ///
+    /// A paid-trial charge remains part of the comparison because it is an
+    /// independently accepted initial-payment term.
+    pub(crate) fn has_same_terms_except_recurring_amount(&self, other: &Self) -> bool {
         self.plan_key == other.plan_key
+            && self.currency() == other.currency()
             && self.recurring.period() == other.recurring.period()
             && self.start == other.start
             && self.renewal_failure == other.renewal_failure
@@ -559,6 +564,54 @@ mod tests {
                 ),
             ),
             Err(SubscriptionTermsError::CurrencyMismatch)
+        );
+    }
+
+    #[test]
+    fn offer_comparison_ignores_only_the_recurring_amount() {
+        fn offer(recurring_cents: i32, trial_cents: i32) -> SubscriptionOffer {
+            let usd = CurrencyCode::new("USD").unwrap();
+            SubscriptionOffer::new(
+                PlanKey::new("basic").unwrap(),
+                RecurringSubscriptionTerms::new(
+                    ChargeAmount::new(recurring_cents, usd).unwrap(),
+                    SubscriptionPeriodRule::calendar_months(1).unwrap(),
+                ),
+                SubscriptionStart::PaidTrial(PaidTrialTerms::new(
+                    ChargeAmount::new(trial_cents, usd).unwrap(),
+                    SubscriptionPeriodRule::fixed_days(7).unwrap(),
+                )),
+                RenewalFailurePolicy::new(
+                    DunningSchedule::default(),
+                    DunningExhaustion::MarkUnpaid,
+                    PastDueAccessPolicy::ContinueUntilDunningExhausted,
+                ),
+            )
+            .unwrap()
+        }
+
+        fn immediate_offer(currency: &str) -> SubscriptionOffer {
+            SubscriptionOffer::new(
+                PlanKey::new("basic").unwrap(),
+                RecurringSubscriptionTerms::new(
+                    ChargeAmount::new(1_000, CurrencyCode::new(currency).unwrap()).unwrap(),
+                    SubscriptionPeriodRule::calendar_months(1).unwrap(),
+                ),
+                SubscriptionStart::RecurringImmediately,
+                RenewalFailurePolicy::new(
+                    DunningSchedule::default(),
+                    DunningExhaustion::MarkUnpaid,
+                    PastDueAccessPolicy::ContinueUntilDunningExhausted,
+                ),
+            )
+            .unwrap()
+        }
+
+        let accepted = offer(1_000, 100);
+        assert!(accepted.has_same_terms_except_recurring_amount(&offer(1_200, 100)));
+        assert!(!accepted.has_same_terms_except_recurring_amount(&offer(1_000, 200)));
+        assert!(
+            !immediate_offer("USD").has_same_terms_except_recurring_amount(&immediate_offer("EUR"))
         );
     }
 

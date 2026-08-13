@@ -21,6 +21,7 @@ on:
       - "scripts/jig"
       - "scripts/install-jig.sh"
       - "scripts/check-advisories.sh"
+      - "scripts/tests/check-advisories.sh"
       - "scripts/check-public-api.sh"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
@@ -49,6 +50,7 @@ on:
       - "scripts/jig"
       - "scripts/install-jig.sh"
       - "scripts/check-advisories.sh"
+      - "scripts/tests/check-advisories.sh"
       - "scripts/check-public-api.sh"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
@@ -98,6 +100,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Test dependency advisory wrapper
+        run: scripts/tests/check-advisories.sh
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:

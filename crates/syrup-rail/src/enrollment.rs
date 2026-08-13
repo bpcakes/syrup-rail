@@ -282,7 +282,8 @@ impl SubscriptionEnrollmentExpectedTerms {
         match (&self.discount_snapshot, saved_discount) {
             (None, None) => &self.offer == current_offer,
             (Some(expected_snapshot), Some(saved_snapshot)) => {
-                self.offer.has_same_non_price_terms(current_offer)
+                self.offer
+                    .has_same_terms_except_recurring_amount(current_offer)
                     && current_offer.currency() == *expected_snapshot.currency()
                     && expected_snapshot.has_same_charge_terms(saved_snapshot)
             }

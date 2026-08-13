@@ -1,0 +1,1 @@
+Exclude PostgreSQL concurrent-reindex shadow indexes from runtime schema validation, rename the misleading offer comparison API, make the advisory gate work with empty exceptions on pre-4.4 Bash, add regressions, and run required gates.

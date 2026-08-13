@@ -1,0 +1,1 @@
+Retry the snapshot-before-live-observation reindex completion race without masking genuine stale-shadow diagnostics, bind progress to the exact transient index where valid, document deterministic PostgreSQL ordering assumptions, add regressions, and run required gates.

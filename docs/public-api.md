@@ -35,7 +35,10 @@ a cross-page database snapshot.
 
 Use `assert_runtime_schema_v2_compatible` after host migrations and before
 serving billing traffic. Version 0.2 supports PostgreSQL 18 and schema v2 only;
-the assertion is read-only and does not install or upgrade a schema.
+the assertion is read-only and does not install or upgrade a schema. It
+tolerates concurrent-reindex shadows only when the validating role can observe
+the matching `pg_stat_progress_create_index` details; cross-role maintenance is
+fail-closed unless the observer has PostgreSQL statistics privileges.
 
 ## Typed domain and advanced transaction-local surface
 

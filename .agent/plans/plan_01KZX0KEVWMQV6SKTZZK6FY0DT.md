@@ -1,0 +1,1 @@
+Clean up cluster-scoped test roles, make stale-shadow coverage exercise the complete classifier, cover active table reindex and transition retry behavior, verify advisory failure propagation, and run required gates.

@@ -138,6 +138,17 @@ responsible for applying and coordinating their own migrations. The compiled
 host integration example includes a default-feature helper for this startup
 check.
 
+An active `REINDEX CONCURRENTLY` may temporarily create invalid `_ccnew` or
+`_ccold` indexes. The assertion tolerates only shadows whose lock owner is also
+visible to the validating database role in `pg_stat_progress_create_index` as
+a non-initializing concurrent reindex, and it rechecks that evidence before
+committing. PostgreSQL hides those progress details across roles unless the
+observer has statistics privileges, so use the same database role for startup
+validation and maintenance when uninterrupted startup during reindexing is
+required. Otherwise validation deliberately fails closed. A failed reindex can
+leave a stale invalid shadow; drop that shadow according to PostgreSQL's
+`REINDEX` recovery guidance before accepting billing traffic.
+
 After the host has authenticated and authorized an exact billing scope,
 subscriber, and plan, the same service also exposes `cancel`, `claim_discount`,
 and `clear_discount`. Cancellation changes canonical state and appends its

@@ -7,7 +7,7 @@ cd "$repo_root"
 readonly unreachable_rsa_advisory="RUSTSEC-2023-0071"
 readonly unreachable_rsa_package="rsa"
 
-audit_exception_args=()
+ignore_unreachable_rsa_advisory=false
 
 reachable_package_lines() {
   local package_name="$1"
@@ -35,10 +35,15 @@ if grep -Fqx 'name = "rsa"' Cargo.lock; then
     echo "$rsa_tree" >&2
     exit 1
   fi
-  audit_exception_args+=(--ignore "$unreachable_rsa_advisory")
+  ignore_unreachable_rsa_advisory=true
 fi
 
 # See docs/security/dependency-advisories.md. This exception is safe only while
 # every locked rsa version is absent from the complete workspace build graph.
-# If rsa leaves Cargo.lock, no exception is passed to cargo-audit.
-cargo audit --deny warnings "${audit_exception_args[@]}"
+# Build cargo-audit's arguments through the shell positional parameters so the
+# empty-argument case remains safe under `set -u` on Bash 3.2 through 4.3.
+set -- --deny warnings
+if [[ "$ignore_unreachable_rsa_advisory" == true ]]; then
+  set -- "$@" --ignore "$unreachable_rsa_advisory"
+fi
+cargo audit "$@"

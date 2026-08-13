@@ -34,6 +34,9 @@ pub const V1_TO_V2_UPGRADE_SQL: &str = include_str!("../schema/v2/upgrade_from_v
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
 const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
+const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
+const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
+const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 const REQUIRED_TABLES: &[&str] = &[
     "billing_external_reversal_attestations",
@@ -277,6 +280,24 @@ pub enum SchemaConformanceError {
     Contract { version: u16, detail: String },
 }
 
+#[derive(Debug)]
+enum SchemaConformanceAttemptError {
+    Final(SchemaConformanceError),
+    RetryableReindexTransition { fallback: SchemaConformanceError },
+}
+
+impl From<SchemaConformanceError> for SchemaConformanceAttemptError {
+    fn from(error: SchemaConformanceError) -> Self {
+        Self::Final(error)
+    }
+}
+
+impl From<sqlx::Error> for SchemaConformanceAttemptError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Final(error.into())
+    }
+}
+
 /// Asserts that a host database is compatible with the canonical schema-v2
 /// contract before the host accepts billing work.
 ///
@@ -287,6 +308,16 @@ pub enum SchemaConformanceError {
 /// and fingerprint check used by the schema-contract tests in one
 /// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
 /// 18 is required; other majors are rejected before catalog comparison.
+/// A concurrent-reindex transition mismatch is retried once in a fresh
+/// transaction so a reindex that commits between catalog and live-operation
+/// observations cannot cause a stale result. Other contract failures are not
+/// retried.
+///
+/// Invalid `_ccnew` and `_ccold` shadows are tolerated only when the validating
+/// role can see matching non-initializing `REINDEX CONCURRENTLY` details in
+/// `pg_stat_progress_create_index` and the backend retains the expected table
+/// and index locks. PostgreSQL hides those details from unrelated roles without
+/// statistics privileges, for which this check deliberately fails closed.
 pub async fn assert_runtime_schema_v2_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -329,6 +360,45 @@ async fn assert_schema_conforms_in_read_only_snapshot(
     current_subscription_columns: &[&str],
     expected_fingerprint: u64,
 ) -> Result<(), SchemaConformanceError> {
+    retry_reindex_transition_once(|| {
+        assert_schema_conforms_in_one_read_only_snapshot(
+            pool,
+            version,
+            current_subscription_columns,
+            expected_fingerprint,
+        )
+    })
+    .await
+}
+
+async fn retry_reindex_transition_once<F, Fut>(
+    mut validate: F,
+) -> Result<(), SchemaConformanceError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), SchemaConformanceAttemptError>>,
+{
+    match validate().await {
+        Ok(()) => return Ok(()),
+        Err(SchemaConformanceAttemptError::Final(error)) => return Err(error),
+        Err(SchemaConformanceAttemptError::RetryableReindexTransition { .. }) => {}
+    }
+    tokio::time::sleep(REINDEX_TRANSITION_RETRY_DELAY).await;
+    match validate().await {
+        Ok(()) => Ok(()),
+        Err(SchemaConformanceAttemptError::Final(error)) => Err(error),
+        Err(SchemaConformanceAttemptError::RetryableReindexTransition { fallback }) => {
+            Err(fallback)
+        }
+    }
+}
+
+async fn assert_schema_conforms_in_one_read_only_snapshot(
+    pool: &PgPool,
+    version: u16,
+    current_subscription_columns: &[&str],
+    expected_fingerprint: u64,
+) -> Result<(), SchemaConformanceAttemptError> {
     let mut transaction = pool
         .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .await?;
@@ -375,7 +445,8 @@ async fn assert_schema_conforms(
     version: u16,
     current_subscription_columns: &[&str],
     expected_fingerprint: u64,
-) -> Result<(), SchemaConformanceError> {
+) -> Result<(), SchemaConformanceAttemptError> {
+    let billing_indexes = load_billing_index_catalog(connection).await?;
     require_relations(connection, version, 'r', REQUIRED_TABLES).await?;
     require_relations(connection, version, 'v', REQUIRED_VIEWS).await?;
     require_functions(connection, version).await?;
@@ -396,14 +467,34 @@ async fn assert_schema_conforms(
     .await?;
     reject_legacy_columns(connection, version).await?;
     require_validated_constraints(connection, version).await?;
-    require_ready_canonical_indexes(connection, version).await?;
+    require_ready_canonical_indexes(version, &billing_indexes)?;
     require_index_contract(connection, version, GATEWAY_ORDER_INDEX_CONTRACT).await?;
     if version == 2 {
         require_index_contract(connection, version, RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
         require_index_contract(connection, version, SUBSCRIPTION_HISTORY_INDEX_CONTRACT).await?;
     }
-    require_catalog_fingerprint(connection, version, expected_fingerprint).await?;
-    Ok(())
+    require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
+        .await?;
+    require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await
+}
+
+async fn require_unchanged_active_reindex_shadows(
+    connection: &mut PgConnection,
+    version: u16,
+    initial_indexes: &[BillingIndexCatalogEntry],
+) -> Result<(), SchemaConformanceAttemptError> {
+    let initial_active_reindex_shadows = active_reindex_shadows(initial_indexes);
+    if initial_active_reindex_shadows.is_empty() {
+        return Ok(());
+    }
+    let rechecked_indexes = load_billing_index_catalog(connection).await?;
+    if initial_active_reindex_shadows == active_reindex_shadows(&rechecked_indexes) {
+        Ok(())
+    } else {
+        Err(SchemaConformanceAttemptError::RetryableReindexTransition {
+            fallback: contract_error(version, REINDEX_TRANSITION_DETAIL),
+        })
+    }
 }
 
 async fn require_relations(
@@ -603,22 +694,184 @@ async fn require_validated_constraints(
     }
 }
 
-async fn require_ready_canonical_indexes(
-    connection: &mut PgConnection,
+fn require_ready_canonical_indexes(
     version: u16,
-) -> Result<(), SchemaConformanceError> {
+    billing_indexes: &[BillingIndexCatalogEntry],
+) -> Result<(), SchemaConformanceAttemptError> {
+    let unavailable = billing_indexes
+        .iter()
+        .filter(|index| {
+            index.active_concurrent_reindex_pid.is_none()
+                && !(index.is_valid && index.is_ready && index.is_live)
+        })
+        .collect::<Vec<_>>();
+    if unavailable.is_empty() {
+        return Ok(());
+    }
+    let retryable_reindex_transition = unavailable
+        .iter()
+        .all(|index| !index.is_valid && has_concurrent_reindex_shadow_suffix(&index.index_name));
+    let unavailable_detail = unavailable
+        .iter()
+        .map(|index| {
+            (
+                index.table_name.clone(),
+                index.index_name.clone(),
+                index.is_valid,
+                index.is_ready,
+                index.is_live,
+            )
+        })
+        .collect::<Vec<_>>();
+    let fallback = contract_error(
+        version,
+        format!(
+            "canonical indexes are not planner/write ready (table, index, valid, ready, live): {unavailable_detail:?}; invalid _ccnew/_ccold indexes are tolerated only while matching REINDEX CONCURRENTLY progress is visible to the validating role, and stale shadows left by failed maintenance must be dropped"
+        ),
+    );
+    if retryable_reindex_transition {
+        Err(SchemaConformanceAttemptError::RetryableReindexTransition { fallback })
+    } else {
+        Err(fallback.into())
+    }
+}
+
+fn has_concurrent_reindex_shadow_suffix(index_name: &str) -> bool {
+    ["_ccnew", "_ccold"].iter().any(|marker| {
+        index_name
+            .rsplit_once(marker)
+            .is_some_and(|(base, counter)| {
+                !base.is_empty() && counter.bytes().all(|byte| byte.is_ascii_digit())
+            })
+    })
+}
+
+#[derive(Clone, Debug, sqlx::FromRow)]
+struct BillingIndexCatalogEntry {
+    table_name: String,
+    index_name: String,
+    definition: String,
+    is_valid: bool,
+    is_ready: bool,
+    is_live: bool,
+    active_concurrent_reindex_pid: Option<i32>,
+}
+
+fn active_reindex_shadows(indexes: &[BillingIndexCatalogEntry]) -> Vec<(&str, &str, i32)> {
+    indexes
+        .iter()
+        .filter_map(|index| {
+            index
+                .active_concurrent_reindex_pid
+                .map(|pid| (index.table_name.as_str(), index.index_name.as_str(), pid))
+        })
+        .collect()
+}
+
+async fn load_billing_index_catalog(
+    connection: &mut PgConnection,
+) -> Result<Vec<BillingIndexCatalogEntry>, sqlx::Error> {
     let tables = REQUIRED_TABLES
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    let unavailable = sqlx::query_as::<_, (String, String, bool, bool, bool)>(
+    sqlx::query_as::<_, BillingIndexCatalogEntry>(
         r#"
         SELECT
-            table_relation.relname,
-            index_relation.relname,
-            catalog_index.indisvalid,
-            catalog_index.indisready,
-            catalog_index.indislive
+            table_relation.relname AS table_name,
+            index_relation.relname AS index_name,
+            concat_ws(
+                '|',
+                table_relation.relname,
+                index_relation.relname,
+                pg_catalog.pg_get_indexdef(index_relation.oid)
+            ) AS definition,
+            catalog_index.indisvalid AS is_valid,
+            catalog_index.indisready AS is_ready,
+            catalog_index.indislive AS is_live,
+            CASE
+                WHEN NOT catalog_index.indisvalid
+                    AND index_relation.relname ~ $2
+                THEN (
+                    SELECT shadow_lock.pid
+                    FROM pg_catalog.pg_class AS canonical_index_relation
+                    INNER JOIN pg_catalog.pg_index AS canonical_index
+                        ON canonical_index.indexrelid = canonical_index_relation.oid
+                    INNER JOIN pg_catalog.pg_locks AS shadow_lock
+                        ON shadow_lock.locktype = 'relation'
+                        AND shadow_lock.relation = index_relation.oid
+                        AND shadow_lock.database = (
+                            SELECT database.oid
+                            FROM pg_catalog.pg_database AS database
+                            WHERE database.datname = current_database()
+                        )
+                        AND shadow_lock.mode = 'ShareUpdateExclusiveLock'
+                        AND shadow_lock.granted
+                    INNER JOIN pg_catalog.pg_stat_progress_create_index AS progress
+                        ON progress.pid = shadow_lock.pid
+                        AND progress.datid = shadow_lock.database
+                        AND progress.relid = table_relation.oid
+                        AND (
+                            -- PostgreSQL 18 reports the transient index before
+                            -- the swap and the new canonical index afterward.
+                            progress.index_relid IN (
+                                index_relation.oid,
+                                canonical_index_relation.oid
+                            )
+                            -- Table-wide reindex reports only its current
+                            -- index while retaining session locks for every
+                            -- index it is rebuilding on this table.
+                            OR 1 < (
+                                SELECT count(*)
+                                FROM pg_catalog.pg_index AS scope_index
+                                INNER JOIN pg_catalog.pg_locks AS scope_lock
+                                    ON scope_lock.pid = shadow_lock.pid
+                                    AND scope_lock.locktype = 'relation'
+                                    AND scope_lock.database = shadow_lock.database
+                                    AND scope_lock.relation = scope_index.indexrelid
+                                    AND scope_lock.mode = 'ShareUpdateExclusiveLock'
+                                    AND scope_lock.granted
+                                WHERE scope_index.indrelid = table_relation.oid
+                                    AND scope_index.indisvalid
+                                    AND scope_index.indisready
+                                    AND scope_index.indislive
+                            )
+                        )
+                        AND progress.command = 'REINDEX CONCURRENTLY'
+                        -- Table-wide reindex gathering locks skipped invalid
+                        -- indexes only before progress leaves initialization.
+                        AND progress.phase <> 'initializing'
+                    INNER JOIN pg_catalog.pg_locks AS canonical_index_lock
+                        ON canonical_index_lock.pid = shadow_lock.pid
+                        AND canonical_index_lock.locktype = 'relation'
+                        AND canonical_index_lock.database = shadow_lock.database
+                        AND canonical_index_lock.relation = canonical_index_relation.oid
+                        AND canonical_index_lock.mode = 'ShareUpdateExclusiveLock'
+                        AND canonical_index_lock.granted
+                    INNER JOIN pg_catalog.pg_locks AS table_lock
+                        ON table_lock.pid = shadow_lock.pid
+                        AND table_lock.locktype = 'relation'
+                        AND table_lock.database = shadow_lock.database
+                        AND table_lock.relation = table_relation.oid
+                        AND table_lock.mode = 'ShareUpdateExclusiveLock'
+                        AND table_lock.granted
+                    WHERE canonical_index.indrelid = table_relation.oid
+                        AND canonical_index.indisvalid
+                        AND canonical_index.indisready
+                        AND canonical_index.indislive
+                        AND canonical_index_relation.relname !~ $2
+                        AND pg_catalog.starts_with(
+                            canonical_index_relation.relname,
+                            pg_catalog.regexp_replace(
+                                index_relation.relname,
+                                $2,
+                                ''
+                            )
+                        )
+                    ORDER BY canonical_index_relation.oid
+                    LIMIT 1
+                )
+            END AS active_concurrent_reindex_pid
         FROM pg_catalog.pg_index AS catalog_index
         INNER JOIN pg_catalog.pg_class AS table_relation
             ON table_relation.oid = catalog_index.indrelid
@@ -629,27 +882,13 @@ async fn require_ready_canonical_indexes(
         WHERE namespace.nspname = 'public'
             AND table_relation.relname = ANY($1)
             AND index_relation.relname LIKE 'billing\_%' ESCAPE '\'
-            AND NOT (
-                catalog_index.indisvalid
-                AND catalog_index.indisready
-                AND catalog_index.indislive
-            )
         ORDER BY table_relation.relname, index_relation.relname
         "#,
     )
     .bind(&tables)
+    .bind(CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN)
     .fetch_all(&mut *connection)
-    .await?;
-    if unavailable.is_empty() {
-        Ok(())
-    } else {
-        Err(contract_error(
-            version,
-            format!(
-                "canonical indexes are not planner/write ready (table, index, valid, ready, live): {unavailable:?}"
-            ),
-        ))
-    }
+    .await
 }
 
 async fn require_index_contract(
@@ -907,8 +1146,9 @@ async fn require_catalog_fingerprint(
     connection: &mut PgConnection,
     version: u16,
     expected: u64,
+    billing_indexes: &[BillingIndexCatalogEntry],
 ) -> Result<(), SchemaConformanceError> {
-    let actual = canonical_catalog_fingerprint(connection).await?;
+    let actual = canonical_catalog_fingerprint(connection, billing_indexes).await?;
     if actual == expected {
         Ok(())
     } else {
@@ -923,6 +1163,7 @@ async fn require_catalog_fingerprint(
 
 async fn canonical_catalog_fingerprint(
     connection: &mut PgConnection,
+    billing_indexes: &[BillingIndexCatalogEntry],
 ) -> Result<u64, SchemaConformanceError> {
     let tables = REQUIRED_TABLES
         .iter()
@@ -986,30 +1227,11 @@ async fn canonical_catalog_fingerprint(
     .bind(&tables)
     .fetch_all(&mut *connection)
     .await?;
-    let indexes = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            table_relation.relname,
-            index_relation.relname,
-            pg_catalog.pg_get_indexdef(index_relation.oid)
-        )
-        FROM pg_catalog.pg_index AS catalog_index
-        INNER JOIN pg_catalog.pg_class AS table_relation
-            ON table_relation.oid = catalog_index.indrelid
-        INNER JOIN pg_catalog.pg_class AS index_relation
-            ON index_relation.oid = catalog_index.indexrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = table_relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND table_relation.relname = ANY($1)
-            AND index_relation.relname LIKE 'billing\_%' ESCAPE '\'
-        ORDER BY table_relation.relname, index_relation.relname
-        "#,
-    )
-    .bind(&tables)
-    .fetch_all(&mut *connection)
-    .await?;
+    let indexes = billing_indexes
+        .iter()
+        .filter(|index| index.active_concurrent_reindex_pid.is_none())
+        .map(|index| index.definition.clone())
+        .collect::<Vec<_>>();
     let view_definitions = sqlx::query_scalar::<_, String>(
         r#"
         SELECT concat_ws(
@@ -1094,7 +1316,8 @@ async fn canonical_catalog_fingerprint_for_pool(
     pool: &PgPool,
 ) -> Result<u64, SchemaConformanceError> {
     let mut connection = pool.acquire().await?;
-    canonical_catalog_fingerprint(&mut connection).await
+    let billing_indexes = load_billing_index_catalog(&mut connection).await?;
+    canonical_catalog_fingerprint(&mut connection, &billing_indexes).await
 }
 
 fn catalog_fingerprint<'a>(categories: impl IntoIterator<Item = (&'a str, &'a [String])>) -> u64 {

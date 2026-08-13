@@ -1,0 +1,1 @@
+Make concurrent reindex tolerance operation-aware and fail-closed, strengthen advisory security-branch tests, clarify offer currency semantics, and run required gates.
