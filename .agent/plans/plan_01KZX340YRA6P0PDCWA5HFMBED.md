@@ -1,0 +1,1 @@
+Cut the 0.2.0 changelog, run the documented release preflight, commit and push main, wait for required CI, dispatch the trusted-publishing workflow, and verify all crates and the v0.2.0 tag.

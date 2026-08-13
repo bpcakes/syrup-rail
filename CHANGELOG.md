@@ -4,6 +4,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-13
+
 ### Added
 
 - Add explicit immediate-recurring and positive paid-trial offer terms with
@@ -274,6 +276,7 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/bpcakes/syrup-rail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bpcakes/syrup-rail/tree/v0.1.0
