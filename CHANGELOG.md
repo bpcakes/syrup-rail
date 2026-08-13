@@ -70,6 +70,9 @@ All notable changes to the Syrup Rail crates are documented in this file.
   when no RustSec exception is needed, including on Bash versions before 4.4.
 - Narrow the internal offer comparison helper to ignore only the recurring
   amount; currency and paid-trial pricing remain accepted terms.
+- Enforce complete PostgreSQL schema artifacts from their first stable release
+  tag, so shipped versions remain byte-immutable while the current unreleased
+  version can still be corrected before publication.
 
 ### Changed
 

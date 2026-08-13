@@ -27,6 +27,7 @@ Then run:
 
 ```console
 scripts/check-release.sh VERSION --allow-dirty
+scripts/check-schema-immutability.sh
 scripts/check-advisories.sh
 scripts/check-public-api.sh
 cargo +1.88.0 check --workspace --all-targets --locked
