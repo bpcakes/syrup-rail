@@ -330,10 +330,15 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     .bind(next_due_at)
     .execute(&fixture.database.pool)
     .await?;
-    assert!(matches!(
-        service.recover(command).await,
-        Err(SubscriptionBillingServiceError::IdempotencyConflict)
-    ));
+    let replay_after_period_advance = service.recover(command).await?;
+    assert_eq!(replay_after_period_advance.attempt(), result.attempt());
+    assert_eq!(
+        replay_after_period_advance
+            .subscription()
+            .expect("replay loads the current subscription")
+            .status(),
+        SubscriptionStatus::PastDue
+    );
     assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
 
     let stale_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
@@ -542,11 +547,34 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
-    let replay = service.replace_payment_method(command).await?;
+    let replay = service.replace_payment_method(command.clone()).await?;
     assert_eq!(replay, result);
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET initial_transaction_id = 'txn_external_change', updated_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+    let replay_after_state_change = service.replace_payment_method(command).await?;
+    assert_eq!(replay_after_state_change.attempt(), result.attempt());
+    assert!(replay_after_state_change.subscription().is_some());
+    assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET initial_transaction_id = 'txn_method_new', updated_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
 
     let stale_command = ReplaceSubscriptionPaymentMethod::new(
         syrup_rail::SubscriptionPaymentContext::new(
@@ -587,35 +615,20 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     .bind(stale_attempt_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
-    let stale_gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
-        approved_outcome_with_reference(
-            Some("txn_stale_method_must_not_submit"),
-            "vault_stale_method_must_not_store",
-        ),
-    )));
-    let stale_resolver = Arc::new(StaticResolver {
-        gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&stale_gateway)),
-        calls: AtomicUsize::new(0),
-    });
-    let stale_admission = Arc::new(PermitAdmission {
-        calls: AtomicUsize::new(0),
-    });
-    let stale_service = SubscriptionBillingService::new(
-        fixture.database.pool.clone(),
-        Arc::new(TestOfferStore),
-        stale_resolver.clone(),
-        stale_admission.clone(),
-        Arc::new(fixture.coordinator.clone()),
-    );
-    let stale_result = stale_service.replace_payment_method(stale_command).await?;
-    assert_eq!(
-        stale_result.attempt().status(),
-        PaymentAttemptStatus::Failed
-    );
-    assert!(stale_result.subscription().is_none());
-    assert_eq!(stale_gateway.store_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(stale_resolver.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(stale_admission.calls.load(Ordering::SeqCst), 0);
+    let mut transaction = fixture.database.pool.begin().await?;
+    let stale_result = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &stale_command,
+        &resolved_gateway,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Replay(attempt) => *attempt,
+        other => return Err(format!("unexpected stale replay reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    assert_eq!(stale_result.status(), PaymentAttemptStatus::Failed);
+    assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
 
     let additional_transaction_id = "txn_method_unexpected_additional";
     let reconciled = service

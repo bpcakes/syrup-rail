@@ -74,6 +74,24 @@ async fn recovery_attempt_matches_replay_context(
     .await
 }
 
+async fn recovery_attempt_for_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: PaymentAttempt,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical {
+        return Ok(Some(attempt));
+    }
+
+    let attempt = expire_stale_recovery_context_and_reload(transaction, &attempt).await?;
+    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical
+        || recovery_attempt_matches_replay_context(transaction, &attempt).await?
+    {
+        Ok(Some(attempt))
+    } else {
+        Ok(None)
+    }
+}
+
 fn recovery_attempt_matches_reservation(
     attempt: &PaymentAttempt,
     reservation: &SubscriptionRecoveryReservation,
@@ -291,12 +309,10 @@ pub async fn preflight_subscription_recovery_in_transaction(
     if !recovery_attempt_matches_command(&existing, command) {
         return Ok(SubscriptionRecoveryPreflightOutcome::IdempotencyConflict);
     }
-    let existing = expire_stale_recovery_context_and_reload(transaction, &existing).await?;
     Ok(
-        if recovery_attempt_matches_replay_context(transaction, &existing).await? {
-            SubscriptionRecoveryPreflightOutcome::Replay(Box::new(existing))
-        } else {
-            SubscriptionRecoveryPreflightOutcome::IdempotencyConflict
+        match recovery_attempt_for_replay(transaction, existing).await? {
+            Some(existing) => SubscriptionRecoveryPreflightOutcome::Replay(Box::new(existing)),
+            None => SubscriptionRecoveryPreflightOutcome::IdempotencyConflict,
         },
     )
 }
@@ -323,12 +339,12 @@ pub async fn reserve_subscription_recovery_in_transaction(
         if !recovery_attempt_matches_command(&existing, command) {
             return Ok(SubscriptionRecoveryReservationOutcome::IdempotencyConflict);
         }
-        let existing = expire_stale_recovery_context_and_reload(transaction, &existing).await?;
         return Ok(
-            if recovery_attempt_matches_replay_context(transaction, &existing).await? {
-                SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
-            } else {
-                SubscriptionRecoveryReservationOutcome::IdempotencyConflict
+            match recovery_attempt_for_replay(transaction, existing).await? {
+                Some(existing) => {
+                    SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
+                }
+                None => SubscriptionRecoveryReservationOutcome::IdempotencyConflict,
             },
         );
     }
@@ -428,12 +444,12 @@ pub async fn reserve_subscription_recovery_in_transaction(
         if !recovery_attempt_matches_command(&existing, command) {
             return Ok(SubscriptionRecoveryReservationOutcome::IdempotencyConflict);
         }
-        let existing = expire_stale_recovery_context_and_reload(transaction, &existing).await?;
         return Ok(
-            if recovery_attempt_matches_replay_context(transaction, &existing).await? {
-                SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
-            } else {
-                SubscriptionRecoveryReservationOutcome::IdempotencyConflict
+            match recovery_attempt_for_replay(transaction, existing).await? {
+                Some(existing) => {
+                    SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
+                }
+                None => SubscriptionRecoveryReservationOutcome::IdempotencyConflict,
             },
         );
     }

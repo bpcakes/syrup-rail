@@ -1,6 +1,6 @@
 use super::*;
 use support::{
-    active_grant_exists, attempt_identity_matches_requested_gateway, attempt_is_already_replayable,
+    active_grant_exists, attempt_identity_matches_requested_gateway,
     blocking_initial_attempt_exists, current_subscription_exists,
     enrollment_request_from_locked_terms, gateway_identity_matches_scope, initial_attempt_is_stale,
     insert_initial_attempt, map_discount_error, pending_attempt_matches_request,
@@ -75,7 +75,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
             .ok_or_else(invalid_state)?;
             return Ok(SubscriptionEnrollmentReservationOutcome::Replay(expired));
         }
-        if attempt_is_already_replayable(&existing) {
+        if attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical {
             return Ok(SubscriptionEnrollmentReservationOutcome::Replay(existing));
         }
     }
@@ -138,7 +138,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         true,
     )
     .await?
-        && attempt_is_already_replayable(&existing)
+        && attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical
     {
         return Ok(if replay_matches_reservation(&existing, reservation) {
             SubscriptionEnrollmentReservationOutcome::Replay(existing)
@@ -284,7 +284,7 @@ pub async fn preflight_subscription_enrollment_in_transaction(
     if !replay_matches_command(&existing, command) {
         return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
     }
-    if attempt_is_already_replayable(&existing)
+    if attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical
         && !(existing.status() == PaymentAttemptStatus::ReviewRequired
             && existing.state().timestamps().submitted_at().is_none())
     {
@@ -307,7 +307,7 @@ pub async fn preflight_subscription_enrollment_in_transaction(
         return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
     }
     if !initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
-        if attempt_is_already_replayable(&existing) {
+        if attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical {
             return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
                 existing,
             )));

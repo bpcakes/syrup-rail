@@ -76,6 +76,25 @@ async fn payment_method_replacement_attempt_matches_replay_context(
     .await
 }
 
+async fn payment_method_replacement_attempt_for_replay(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: PaymentAttempt,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical {
+        return Ok(Some(attempt));
+    }
+
+    let attempt =
+        expire_stale_payment_method_replacement_context_and_reload(transaction, &attempt).await?;
+    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical
+        || payment_method_replacement_attempt_matches_replay_context(transaction, &attempt).await?
+    {
+        Ok(Some(attempt))
+    } else {
+        Ok(None)
+    }
+}
+
 fn payment_method_replacement_attempt_belongs_to_reservation(
     attempt: &PaymentAttempt,
     reservation: &SubscriptionPaymentMethodReplacement,
@@ -300,14 +319,12 @@ pub async fn preflight_subscription_payment_method_replacement_in_transaction(
     if !payment_method_replacement_attempt_matches_command(&existing, command) {
         return Ok(SubscriptionPaymentMethodReplacementPreflightOutcome::IdempotencyConflict);
     }
-    let existing =
-        expire_stale_payment_method_replacement_context_and_reload(transaction, &existing).await?;
     Ok(
-        if payment_method_replacement_attempt_matches_replay_context(transaction, &existing).await?
-        {
-            SubscriptionPaymentMethodReplacementPreflightOutcome::Replay(Box::new(existing))
-        } else {
-            SubscriptionPaymentMethodReplacementPreflightOutcome::IdempotencyConflict
+        match payment_method_replacement_attempt_for_replay(transaction, existing).await? {
+            Some(existing) => {
+                SubscriptionPaymentMethodReplacementPreflightOutcome::Replay(Box::new(existing))
+            }
+            None => SubscriptionPaymentMethodReplacementPreflightOutcome::IdempotencyConflict,
         },
     )
 }
@@ -330,14 +347,15 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
     )
     .await?
     {
+        if !payment_method_replacement_attempt_matches_command(&existing, command) {
+            return Ok(SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict);
+        }
         return Ok(
-            if payment_method_replacement_attempt_matches_command(&existing, command)
-                && payment_method_replacement_attempt_matches_replay_context(transaction, &existing)
-                    .await?
-            {
-                SubscriptionPaymentMethodReplacementReservationOutcome::Replay(Box::new(existing))
-            } else {
-                SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict
+            match payment_method_replacement_attempt_for_replay(transaction, existing).await? {
+                Some(existing) => SubscriptionPaymentMethodReplacementReservationOutcome::Replay(
+                    Box::new(existing),
+                ),
+                None => SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict,
             },
         );
     }
@@ -446,14 +464,15 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
     )
     .await?
     {
+        if !payment_method_replacement_attempt_matches_command(&existing, command) {
+            return Ok(SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict);
+        }
         return Ok(
-            if payment_method_replacement_attempt_matches_command(&existing, command)
-                && payment_method_replacement_attempt_matches_replay_context(transaction, &existing)
-                    .await?
-            {
-                SubscriptionPaymentMethodReplacementReservationOutcome::Replay(Box::new(existing))
-            } else {
-                SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict
+            match payment_method_replacement_attempt_for_replay(transaction, existing).await? {
+                Some(existing) => SubscriptionPaymentMethodReplacementReservationOutcome::Replay(
+                    Box::new(existing),
+                ),
+                None => SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict,
             },
         );
     }

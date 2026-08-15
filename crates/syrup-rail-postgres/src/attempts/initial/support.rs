@@ -190,11 +190,6 @@ pub(super) async fn gateway_identity_matches_scope(
     )
 }
 
-pub(super) fn attempt_is_already_replayable(attempt: &PaymentAttempt) -> bool {
-    attempt.status() != PaymentAttemptStatus::Pending
-        || attempt.state().timestamps().submitted_at().is_some()
-}
-
 pub(super) fn replay_matches_reservation(
     attempt: &PaymentAttempt,
     reservation: &SubscriptionEnrollmentReservation,

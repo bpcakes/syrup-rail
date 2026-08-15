@@ -29,6 +29,28 @@ pub(crate) const STALE_UNSUBMITTED_RENEWAL_TEXT: &str =
 pub(crate) const STALE_UNSUBMITTED_RECOVERY_TEXT: &str =
     "Subscription recovery was abandoned before gateway submission.";
 
+/// The only two replay phases exposed by a durable payment attempt.
+///
+/// Mutable billing context is relevant only while a prepared attempt could
+/// still cause provider I/O. Once an attempt was submitted or terminalized,
+/// its immutable request and durable result are the canonical idempotency
+/// response even if the surrounding subscription later changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AttemptReplayPhase {
+    ResumePrepared,
+    ReturnCanonical,
+}
+
+pub(crate) fn attempt_replay_phase(attempt: &PaymentAttempt) -> AttemptReplayPhase {
+    if attempt.status() == PaymentAttemptStatus::Pending
+        && attempt.state().timestamps().submitted_at().is_none()
+    {
+        AttemptReplayPhase::ResumePrepared
+    } else {
+        AttemptReplayPhase::ReturnCanonical
+    }
+}
+
 /// The exact gateway identity a locked database row must still expose before
 /// an operation can reserve or submit a provider mutation.
 ///
