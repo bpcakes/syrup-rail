@@ -6,22 +6,24 @@ use syrup_rail::{
 };
 use thiserror::Error;
 
+use crate::attempts::SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS;
+
 const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
 // SQL composition contract: the head uses $4/$10 and opens
-// eligible_subscriptions; the body uses $1-$3/$5-$10 and closes it. The
-// continuation inserts only its $11/$12 keyset predicate. The final
-// placeholder is LIMIT: $11 on the first page and $13 on a continuation.
+// eligible_subscriptions; the body uses $1-$3/$5-$11 and closes it. The
+// continuation inserts only its $12/$13 keyset predicate. The final
+// placeholder is LIMIT: $12 on the first page and $14 on a continuation.
 const DUE_RENEWALS_FIRST_PAGE_SQL: &str = concat!(
     include_str!("renewal/due_renewals_page_head.sql"),
     include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $11\n"
+    "LIMIT $12\n"
 );
 const DUE_RENEWALS_CONTINUATION_SQL: &str = concat!(
     include_str!("renewal/due_renewals_page_head.sql"),
     "        AND (subscriptions.next_payment_attempt_at, subscriptions.id)\n",
-    "            > ($11::timestamptz, $12::uuid)\n",
+    "            > ($12::timestamptz, $13::uuid)\n",
     include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $13\n"
+    "LIMIT $14\n"
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,7 +75,8 @@ impl DueRenewalPageQuery {
             .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS)
             .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS)
             .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
-            .bind(self.observed_at());
+            .bind(self.observed_at())
+            .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS);
         match self {
             Self::First(_) => query.bind(syrup_rail::RENEWAL_DISPATCH_LIMIT + 1),
             Self::Continuation(cursor) => query
@@ -237,7 +240,15 @@ pub async fn renewal_attempt_state(
                     AND resolution_code = $6
             ) AS last_provider_rate_limited_at,
             COALESCE(
-                BOOL_OR(status IN ('pending', 'unknown', 'review_required', 'approved')),
+                BOOL_OR(
+                    status IN ('pending', 'unknown', 'review_required', 'approved')
+                    AND NOT (
+                        status IN ('pending', 'review_required')
+                        AND submitted_at IS NULL
+                        AND created_at <= clock_timestamp()
+                            - ($7::bigint * interval '1 second')
+                    )
+                ),
                 false
             ) AS has_blocking_attempt
         FROM billing_payment_attempts
@@ -253,6 +264,7 @@ pub async fn renewal_attempt_state(
     .bind(&infrastructure_retry_codes)
     .bind(&infrastructure_pacing_codes)
     .bind(PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission.as_str())
+    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
     .fetch_one(&mut **transaction)
     .await?;
     Ok(RenewalAttemptState {

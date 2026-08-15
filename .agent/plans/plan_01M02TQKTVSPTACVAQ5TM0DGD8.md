@@ -22,8 +22,9 @@ I/O.
 - [x] (2026-08-15) Implemented and focused-tested same-key continuation of
   prepared recovery and payment-method replacement attempts. The slice is
   ready to commit.
-- [ ] Implement and test local-attempt expiry plus provider exact-query
-  eligibility; commit the slice.
+- [x] (2026-08-15) Implemented and focused-tested local renewal/recovery
+  expiry, dispatch/cancellation self-healing, and provider exact-query phase
+  eligibility. The slice is ready to commit.
 - [ ] Implement and test workflow-specific gateway-readiness error mapping;
   commit the slice.
 - [ ] Run the repository's required gates, record evidence, review the final
@@ -51,6 +52,10 @@ I/O.
   it loaded the current subscription for every recovery/replacement result,
   independent of attempt status. Restricting that load to approved attempts
   makes prepared and failed results follow the documented contract.
+- Renewal dispatch has a generic-plan/index-shape regression test that checks
+  PostgreSQL parameter positions literally. Adding the local-stale threshold
+  therefore required shifting and updating both continuation keyset parameters
+  while preserving the ordered due-index plan.
 
 ## Decision Log
 
@@ -88,6 +93,11 @@ The first slice passes all nine focused foreground tests. Its crash-window tests
 prove the high-level retry returns the original durable attempt ID and sends the
 original durable gateway order ID for both a recovery sale and a stored-method
 mutation.
+
+The second slice passes the reconciliation, renewal-dispatch, cancellation, and
+same-key recovery regressions. It also repairs legacy unsubmitted
+`review_required` renewal/recovery rows locally and defensively refuses an
+exact-query observation if the current row has no `submitted_at` boundary.
 
 ## Context and orientation
 

@@ -1,5 +1,5 @@
 -- Composition contract: this fragment closes eligible_subscriptions and uses
--- $1-$3/$5-$10. Its caller appends $11 (first page) or $13 (continuation) as
+-- $1-$3/$5-$11. Its caller appends $12 (first page) or $14 (continuation) as
 -- the LIMIT placeholder.
 )
 SELECT subscriptions.billing_scope_id, subscriptions.id,
@@ -35,8 +35,15 @@ LEFT JOIN LATERAL (
                 AND attempts.resolution_code = $3
         ) AS last_provider_rate_limited_at,
         COUNT(*) AS attempt_sequence_count,
-        BOOL_OR(attempts.status IN ('pending', 'unknown', 'review_required', 'approved'))
-            AS has_blocking_attempt
+        BOOL_OR(
+            attempts.status IN ('pending', 'unknown', 'review_required', 'approved')
+            AND NOT (
+                attempts.status IN ('pending', 'review_required')
+                AND attempts.submitted_at IS NULL
+                AND attempts.created_at <= $10::timestamptz
+                    - ($11::bigint * interval '1 second')
+            )
+        ) AS has_blocking_attempt
     FROM billing_payment_attempts AS attempts
     WHERE attempts.subscription_id = subscriptions.id
         AND attempts.billing_period_start_at = subscriptions.next_renewal_at

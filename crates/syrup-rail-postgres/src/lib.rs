@@ -145,7 +145,8 @@ pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,
     claim_exact_reconciliation_attempts, classify_pending_processor_charges,
     fail_stale_unsubmitted_payment_method_replacements,
-    fail_stale_unsubmitted_subscription_enrollments, reconciliation_gateway_accounts,
+    fail_stale_unsubmitted_subscription_charges, fail_stale_unsubmitted_subscription_enrollments,
+    reconciliation_gateway_accounts,
 };
 pub use renewal::{RenewalStoreError, due_renewals, due_renewals_page, renewal_attempt_state};
 pub use schema_contract::{

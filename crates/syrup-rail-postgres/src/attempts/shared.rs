@@ -23,6 +23,11 @@ pub(super) const PAYMENT_METHOD_REPLACEMENT_STATE_CHANGED_TEXT: &str =
     "Payment method replacement was canceled before submission because billing state changed.";
 pub(super) const PAYMENT_METHOD_REPLACEMENT_CONFIGURATION_CHANGED_TEXT: &str = "Payment method replacement was canceled before submission because payment configuration changed.";
 pub(super) const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
+pub(crate) const SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
+pub(crate) const STALE_UNSUBMITTED_RENEWAL_TEXT: &str =
+    "Subscription renewal was abandoned before gateway submission.";
+pub(crate) const STALE_UNSUBMITTED_RECOVERY_TEXT: &str =
+    "Subscription recovery was abandoned before gateway submission.";
 
 /// The exact gateway identity a locked database row must still expose before
 /// an operation can reserve or submit a provider mutation.
@@ -293,6 +298,40 @@ pub(super) async fn fail_stale_unsubmitted_payment_method_updates(
     .execute(&mut **transaction)
     .await?;
     Ok(())
+}
+
+pub(crate) async fn fail_stale_unsubmitted_subscription_charges(
+    connection: &mut PgConnection,
+    subscription_id: SubscriptionId,
+) -> Result<u64, sqlx::Error> {
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'failed',
+            gateway_response_text = CASE attempt_kind
+                WHEN 'subscription_renewal'
+                THEN $3
+                WHEN 'subscription_recovery'
+                THEN $4
+            END,
+            gateway_condition = COALESCE(gateway_condition, 'failed'),
+            resolved_at = COALESCE(resolved_at, clock_timestamp()),
+            updated_at = clock_timestamp()
+        WHERE attempt_kind IN ('subscription_renewal', 'subscription_recovery')
+            AND subscription_id = $1
+            AND status IN ('pending', 'review_required')
+            AND submitted_at IS NULL
+            AND created_at <= clock_timestamp()
+                - ($2::bigint * interval '1 second')
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(STALE_UNSUBMITTED_RENEWAL_TEXT)
+    .bind(STALE_UNSUBMITTED_RECOVERY_TEXT)
+    .execute(connection)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 pub(super) async fn blocking_subscription_charge_attempt_exists(

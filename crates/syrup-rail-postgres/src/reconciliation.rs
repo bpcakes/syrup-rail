@@ -8,9 +8,10 @@ use uuid::Uuid;
 
 use crate::PaymentAttemptStoreError;
 use crate::attempts::{
-    expire_stale_initial_attempts, lock_initial_attempt_rows, lock_initial_charge_rows,
-    lock_payment_attempt_by_id_on_connection, payment_attempt_from_row, set_enrollment_timeouts,
-    try_lock_subscription_aggregate,
+    STALE_UNSUBMITTED_RECOVERY_TEXT, STALE_UNSUBMITTED_RENEWAL_TEXT,
+    SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS, expire_stale_initial_attempts,
+    lock_initial_attempt_rows, lock_initial_charge_rows, lock_payment_attempt_by_id_on_connection,
+    payment_attempt_from_row, set_enrollment_timeouts, try_lock_subscription_aggregate,
 };
 
 use classification::{
@@ -164,6 +165,7 @@ pub async fn claim_exact_reconciliation_attempts(
             SELECT attempts.id AS attempt_id, attempts.created_at
             FROM billing_payment_attempts AS attempts
             WHERE attempts.gateway_account_id = $1
+                AND attempts.submitted_at IS NOT NULL
                 AND (
                     (
                         attempts.status IN ('unknown', 'review_required')
@@ -172,7 +174,7 @@ pub async fn claim_exact_reconciliation_attempts(
                     )
                     OR (
                         attempts.status = 'pending'
-                        AND COALESCE(attempts.submitted_at, attempts.created_at)
+                        AND attempts.submitted_at
                             <= clock_timestamp() - ($3::bigint * interval '1 second')
                         AND attempts.updated_at <= clock_timestamp()
                             - ($2::bigint * interval '1 second')
@@ -198,10 +200,6 @@ pub async fn claim_exact_reconciliation_attempts(
                         OR attempts.resolution_code IS NOT DISTINCT FROM
                             'subscription_initial_current_grant_conflict'
                     )
-                )
-                AND NOT (
-                    attempts.attempt_kind = 'subscription_payment_method_update'
-                    AND attempts.submitted_at IS NULL
                 )
                 AND attempts.resolution_code IS DISTINCT FROM
                     'subscription_initial_externally_refunded'
@@ -267,11 +265,14 @@ pub async fn apply_exact_query_observation(
             "claimed exact-query attempt identity changed",
         ));
     }
+    let Some(submitted_at) = current.state().timestamps().submitted_at() else {
+        transaction.commit().await?;
+        return Ok(false);
+    };
     let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *transaction)
         .await?;
-    let stale = current.state().timestamps().submitted_or_created_at()
-        <= now - chrono::Duration::seconds(EXACT_STALE_AFTER_SECONDS);
+    let stale = submitted_at <= now - chrono::Duration::seconds(EXACT_STALE_AFTER_SECONDS);
     let status = current.status();
     let evidence = current.state().processor_evidence();
 
@@ -409,6 +410,58 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
     .bind(gateway_account_id.as_uuid())
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)
     .bind(STALE_PAYMENT_METHOD_REPLACEMENT_RESPONSE_TEXT)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(result.rows_affected())
+}
+
+/// Fails one bounded batch of stale local renewal and recovery attempts.
+///
+/// Both `pending` reservations and `review_required` rows parked by older
+/// exact-query behavior are eligible only when `submitted_at` proves that no
+/// provider boundary was crossed. This phase performs no gateway I/O.
+pub async fn fail_stale_unsubmitted_subscription_charges(
+    pool: &PgPool,
+    gateway_account_id: GatewayAccountId,
+) -> Result<u64, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT set_config('lock_timeout', '250ms', true)")
+        .execute(&mut *transaction)
+        .await?;
+    let result = sqlx::query(
+        r#"
+        WITH stale_attempts AS (
+            SELECT id
+            FROM billing_payment_attempts
+            WHERE attempt_kind IN ('subscription_renewal', 'subscription_recovery')
+                AND status IN ('pending', 'review_required')
+                AND submitted_at IS NULL
+                AND created_at <= clock_timestamp()
+                    - ($1::bigint * interval '1 second')
+                AND gateway_account_id = $2
+            ORDER BY created_at, id
+            LIMIT $3
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE billing_payment_attempts AS attempts
+        SET status = 'failed',
+            gateway_response_text = CASE attempts.attempt_kind
+                WHEN 'subscription_renewal' THEN $4
+                WHEN 'subscription_recovery' THEN $5
+            END,
+            gateway_condition = COALESCE(attempts.gateway_condition, 'failed'),
+            resolved_at = COALESCE(attempts.resolved_at, clock_timestamp()),
+            updated_at = clock_timestamp()
+        FROM stale_attempts
+        WHERE attempts.id = stale_attempts.id
+        "#,
+    )
+    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(gateway_account_id.as_uuid())
+    .bind(RECONCILIATION_PHASE_BATCH_SIZE)
+    .bind(STALE_UNSUBMITTED_RENEWAL_TEXT)
+    .bind(STALE_UNSUBMITTED_RECOVERY_TEXT)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;

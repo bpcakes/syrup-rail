@@ -7,7 +7,10 @@ use syrup_rail::{
 };
 
 use super::*;
-use crate::test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account};
+use crate::{
+    attempts::SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
+    test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account},
+};
 
 struct SubscriptionFixture {
     account: GatewayAccountFixture,
@@ -175,13 +178,43 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
             SubscriptionStatus::Active,
         )
         .await?;
-        insert_renewal(&database.pool, &renewal).await?;
+        insert_renewal(&database.pool, &renewal, Utc::now()).await?;
         assert_outcome(
             &database.pool,
             &renewal.command(),
             CancelSubscriptionOutcome::BlockedByRenewal,
         )
         .await?;
+
+        let stale_renewal = insert_subscription(
+            &database.pool,
+            account,
+            subscriber_id,
+            "stale_renewal",
+            SubscriptionStatus::Active,
+        )
+        .await?;
+        let stale_renewal_attempt = insert_renewal(
+            &database.pool,
+            &stale_renewal,
+            Utc::now() - Duration::seconds(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS + 1),
+        )
+        .await?;
+        let mut transaction = database.pool.begin().await?;
+        let outcome =
+            cancel_subscription_in_transaction(&mut transaction, &stale_renewal.command()).await?;
+        transaction.commit().await?;
+        if !matches!(outcome, CancelSubscriptionOutcome::Canceled { .. }) {
+            return Err(io::Error::other("stale renewal still blocked cancellation").into());
+        }
+        let stale_renewal_status: String =
+            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+                .bind(stale_renewal_attempt)
+                .fetch_one(&database.pool)
+                .await?;
+        if stale_renewal_status != "failed" {
+            return Err(io::Error::other("stale renewal was not failed atomically").into());
+        }
 
         let past_due = insert_subscription(
             &database.pool,
@@ -368,7 +401,8 @@ async fn insert_payment_method_update(
 async fn insert_renewal(
     pool: &sqlx::PgPool,
     fixture: &SubscriptionFixture,
-) -> Result<(), sqlx::Error> {
+    created_at: DateTime<Utc>,
+) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
     sqlx::query(
         r#"
@@ -378,10 +412,12 @@ async fn insert_renewal(
                 request_fingerprint, amount_cents, currency, billing_period_start_at,
                 billing_period_end_at, gateway_account_id, gateway_configuration_id,
                 gateway_order_id, subscription_expected_payment_method_id,
-                subscription_expected_initial_transaction_id, subscription_expected_status
+                subscription_expected_initial_transaction_id, subscription_expected_status,
+                created_at, updated_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'pending',
-                $7, $8, 5900, 'USD', $9, $10, $11, $12, $13, $6, $14, 'active'
+                $7, $8, 5900, 'USD', $9, $10, $11, $12, $13, $6, $14, 'active',
+                $15, $15
             )
             "#,
     )
@@ -399,9 +435,10 @@ async fn insert_renewal(
     .bind(fixture.account.gateway_configuration_id)
     .bind(format!("order_{attempt_id}"))
     .bind(&fixture.initial_transaction_id)
+    .bind(created_at)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(attempt_id)
 }
 
 async fn insert_failed_renewal(

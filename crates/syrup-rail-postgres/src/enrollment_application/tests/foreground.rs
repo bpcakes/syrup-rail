@@ -314,7 +314,8 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     sqlx::query(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_end_at = $2,
+        SET status = 'past_due',
+            current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2,
             updated_at = clock_timestamp()
@@ -330,6 +331,73 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         Err(SubscriptionBillingServiceError::IdempotencyConflict)
     ));
     assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
+
+    let stale_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+        "txn_stale_recovery_must_not_submit",
+    ))));
+    let stale_resolved_gateway =
+        scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&stale_gateway));
+    let stale_command = RecoverSubscriptionPayment::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("stale-recovery-key")?,
+            PaymentToken::new("opaque-stale-recovery-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let stale_attempt_id = match reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        &stale_command,
+        &stale_resolved_gateway,
+    )
+    .await?
+    {
+        SubscriptionRecoveryReservationOutcome::Reserved(_, attempt) => {
+            attempt.identity().attempt_id()
+        }
+        other => return Err(format!("unexpected stale recovery reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET created_at = clock_timestamp() - interval '31 minutes',
+            updated_at = clock_timestamp() - interval '31 minutes'
+        WHERE id = $1
+        "#,
+    )
+    .bind(stale_attempt_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+    let stale_resolver = Arc::new(StaticResolver {
+        gateway: stale_resolved_gateway,
+        calls: AtomicUsize::new(0),
+    });
+    let stale_admission = Arc::new(PermitAdmission {
+        calls: AtomicUsize::new(0),
+    });
+    let stale_service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        stale_resolver.clone(),
+        stale_admission.clone(),
+        Arc::new(fixture.coordinator.clone()),
+    );
+    let stale_result = stale_service.recover(stale_command).await?;
+    assert_eq!(
+        stale_result.attempt().status(),
+        PaymentAttemptStatus::Failed
+    );
+    assert!(stale_result.subscription().is_none());
+    assert_eq!(stale_gateway.sale_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(stale_resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(stale_admission.calls.load(Ordering::SeqCst), 0);
+
     let events = fixture.coordinator.events.lock().await;
     assert_eq!(events.len(), 2);
     assert!(matches!(

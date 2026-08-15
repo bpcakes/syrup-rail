@@ -263,6 +263,8 @@ pub async fn reserve_subscription_renewal_in_transaction(
     }
 
     fail_stale_unsubmitted_payment_method_updates(transaction, command.subscription_id()).await?;
+    fail_stale_unsubmitted_subscription_charges(&mut **transaction, command.subscription_id())
+        .await?;
     let gateway_account_id = GatewayAccountId::new(row.try_get("gateway_account_id")?);
     let expected_gateway = ExpectedGatewayIdentity::for_gateway(
         command.billing_scope_id(),
@@ -357,6 +359,8 @@ pub async fn admit_subscription_renewal_submission_in_transaction(
     )
     .await?;
     fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
+        .await?;
+    fail_stale_unsubmitted_subscription_charges(&mut **transaction, reservation.subscription_id())
         .await?;
     let attempt = find_payment_attempt_by_id_in_transaction(
         transaction,

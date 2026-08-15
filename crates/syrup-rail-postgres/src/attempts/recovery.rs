@@ -92,6 +92,23 @@ fn recovery_attempt_belongs_to_reservation(
         && attempt.request().gateway_order_id() == reservation.request().gateway_order_id()
 }
 
+async fn expire_stale_recovery_context_and_reload(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: &PaymentAttempt,
+) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
+    let Some(subscription_id) = attempt.request().target().subscription_id() else {
+        return Err(invalid_state());
+    };
+    fail_stale_unsubmitted_subscription_charges(&mut **transaction, subscription_id).await?;
+    find_payment_attempt_by_id_in_transaction(
+        transaction,
+        attempt.identity().billing_scope_id(),
+        attempt.identity().attempt_id(),
+    )
+    .await?
+    .ok_or_else(invalid_state)
+}
+
 fn locked_recovery_terms_from_row(
     row: &PgRow,
     subscription_id: SubscriptionId,
@@ -245,7 +262,7 @@ pub async fn preflight_subscription_recovery_in_transaction(
     command: &syrup_rail::RecoverSubscriptionPayment,
 ) -> Result<SubscriptionRecoveryPreflightOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
-    let Some(existing) = payment_attempt_by_idempotency(
+    let Some(candidate) = payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
@@ -256,10 +273,27 @@ pub async fn preflight_subscription_recovery_in_transaction(
     else {
         return Ok(SubscriptionRecoveryPreflightOutcome::Continue);
     };
+    if !recovery_attempt_matches_command(&candidate, command) {
+        return Ok(SubscriptionRecoveryPreflightOutcome::IdempotencyConflict);
+    }
+    lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
+    let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        true,
+    )
+    .await?
+    else {
+        return Err(invalid_state());
+    };
+    if !recovery_attempt_matches_command(&existing, command) {
+        return Ok(SubscriptionRecoveryPreflightOutcome::IdempotencyConflict);
+    }
+    let existing = expire_stale_recovery_context_and_reload(transaction, &existing).await?;
     Ok(
-        if recovery_attempt_matches_command(&existing, command)
-            && recovery_attempt_matches_replay_context(transaction, &existing).await?
-        {
+        if recovery_attempt_matches_replay_context(transaction, &existing).await? {
             SubscriptionRecoveryPreflightOutcome::Replay(Box::new(existing))
         } else {
             SubscriptionRecoveryPreflightOutcome::IdempotencyConflict
@@ -286,10 +320,12 @@ pub async fn reserve_subscription_recovery_in_transaction(
     )
     .await?
     {
+        if !recovery_attempt_matches_command(&existing, command) {
+            return Ok(SubscriptionRecoveryReservationOutcome::IdempotencyConflict);
+        }
+        let existing = expire_stale_recovery_context_and_reload(transaction, &existing).await?;
         return Ok(
-            if recovery_attempt_matches_command(&existing, command)
-                && recovery_attempt_matches_replay_context(transaction, &existing).await?
-            {
+            if recovery_attempt_matches_replay_context(transaction, &existing).await? {
                 SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
             } else {
                 SubscriptionRecoveryReservationOutcome::IdempotencyConflict
@@ -329,6 +365,7 @@ pub async fn reserve_subscription_recovery_in_transaction(
 
     let subscription_id = SubscriptionId::new(row.try_get("id")?);
     fail_stale_unsubmitted_payment_method_updates(transaction, subscription_id).await?;
+    fail_stale_unsubmitted_subscription_charges(&mut **transaction, subscription_id).await?;
     let gateway_account_id = GatewayAccountId::new(row.try_get("gateway_account_id")?);
     let expected_gateway = ExpectedGatewayIdentity::for_gateway(
         command.billing_scope_id(),
@@ -388,10 +425,12 @@ pub async fn reserve_subscription_recovery_in_transaction(
     )
     .await?
     {
+        if !recovery_attempt_matches_command(&existing, command) {
+            return Ok(SubscriptionRecoveryReservationOutcome::IdempotencyConflict);
+        }
+        let existing = expire_stale_recovery_context_and_reload(transaction, &existing).await?;
         return Ok(
-            if recovery_attempt_matches_command(&existing, command)
-                && recovery_attempt_matches_replay_context(transaction, &existing).await?
-            {
+            if recovery_attempt_matches_replay_context(transaction, &existing).await? {
                 SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
             } else {
                 SubscriptionRecoveryReservationOutcome::IdempotencyConflict
@@ -418,6 +457,8 @@ pub async fn admit_subscription_recovery_submission_in_transaction(
     )
     .await?;
     fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
+        .await?;
+    fail_stale_unsubmitted_subscription_charges(&mut **transaction, reservation.subscription_id())
         .await?;
     let attempt = payment_attempt_by_idempotency(
         transaction,

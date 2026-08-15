@@ -8,6 +8,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    attempts::fail_stale_unsubmitted_subscription_charges,
     renewal_failure::{RenewalFailureStoreError, past_due_causal_history},
     subscription_persistence::{
         SubscriptionPersistenceCodecError, subscription_from_row as decode_subscription_row,
@@ -100,6 +101,7 @@ pub(crate) async fn cancel_subscription_on_connection(
             Ok(CancelSubscriptionOutcome::AlreadyCanceled(subscription))
         }
         SubscriptionStatus::Active | SubscriptionStatus::PastDue => {
+            fail_stale_unsubmitted_subscription_charges(connection, subscription.id()).await?;
             if has_blocking_renewal(connection, &subscription).await? {
                 return Ok(CancelSubscriptionOutcome::BlockedByRenewal);
             }
