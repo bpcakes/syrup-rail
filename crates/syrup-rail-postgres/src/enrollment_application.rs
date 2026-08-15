@@ -1035,15 +1035,10 @@ pub(crate) async fn payment_result_for_attempt(
     connection: &mut PgConnection,
     attempt: PaymentAttempt,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let subscription = match attempt.kind() {
-        PaymentAttemptKind::SubscriptionRecovery
-        | PaymentAttemptKind::SubscriptionPaymentMethodUpdate => {
-            load_applied_subscription(connection, &attempt).await?
-        }
-        _ if attempt.status() == PaymentAttemptStatus::Approved => {
-            load_applied_subscription(connection, &attempt).await?
-        }
-        _ => None,
+    let subscription = if attempt.status() == PaymentAttemptStatus::Approved {
+        load_applied_subscription(connection, &attempt).await?
+    } else {
+        None
     };
     Ok(SubscriptionEnrollmentPaymentResult::new(
         attempt,

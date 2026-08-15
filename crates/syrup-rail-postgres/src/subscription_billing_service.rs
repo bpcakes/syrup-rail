@@ -591,6 +591,21 @@ fn preserve_concurrent_terminal_payment(
     }
 }
 
+fn attempt_is_prepared(attempt: &PaymentAttempt) -> bool {
+    attempt.status() == PaymentAttemptStatus::Pending
+        && attempt.state().timestamps().submitted_at().is_none()
+}
+
+fn resolved_gateway_matches_attempt(
+    gateway: &syrup_rail::ResolvedGateway,
+    attempt: &PaymentAttempt,
+) -> bool {
+    let identity = attempt.identity();
+    gateway.billing_scope_id() == identity.billing_scope_id()
+        && gateway.gateway_account_id() == identity.gateway_account_id()
+        && gateway.gateway_configuration_id() == identity.gateway_configuration_id()
+}
+
 fn is_retryable_renewal_admission_error(error: &SubscriptionEnrollmentApplicationError) -> bool {
     let sqlstate = match error {
         SubscriptionEnrollmentApplicationError::Sql(sqlx::Error::Database(error)) => error.code(),

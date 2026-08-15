@@ -6,15 +6,20 @@ impl SubscriptionBillingService {
         &self,
         command: ReplaceSubscriptionPaymentMethod,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
-        match self.preflight_payment_method_replacement(&command).await? {
-            SubscriptionPaymentMethodReplacementPreflightOutcome::Continue => {}
+        let prepared_attempt = match self.preflight_payment_method_replacement(&command).await? {
+            SubscriptionPaymentMethodReplacementPreflightOutcome::Continue => None,
+            SubscriptionPaymentMethodReplacementPreflightOutcome::Replay(attempt)
+                if attempt_is_prepared(&attempt) =>
+            {
+                Some(*attempt)
+            }
             SubscriptionPaymentMethodReplacementPreflightOutcome::Replay(attempt) => {
                 return self.payment_result(*attempt).await;
             }
             SubscriptionPaymentMethodReplacementPreflightOutcome::IdempotencyConflict => {
                 return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
-        }
+        };
         self.admit_subscriber_mutation(
             command.billing_scope_id(),
             command.subscriber_id(),
@@ -27,26 +32,35 @@ impl SubscriptionBillingService {
                 command.gateway_configuration_id(),
             )
             .await?;
-        let (reservation, attempt) = match self
-            .reserve_payment_method_replacement(&command, &gateway)
-            .await?
-        {
-            SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(
-                reservation,
-                attempt,
-            ) => (*reservation, *attempt),
-            SubscriptionPaymentMethodReplacementReservationOutcome::Replay(attempt) => {
-                return self.payment_result(*attempt).await;
-            }
-            SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict => {
-                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
-            }
-            SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(reason) => {
-                return Err(
-                    SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(
-                        reason,
-                    ),
-                );
+        let (reservation, attempt) = if let Some(attempt) = prepared_attempt {
+            payment_method_replacement_from_prepared_attempt(attempt, &gateway)?
+        } else {
+            match self
+                .reserve_payment_method_replacement(&command, &gateway)
+                .await?
+            {
+                SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(
+                    reservation,
+                    attempt,
+                ) => (*reservation, *attempt),
+                SubscriptionPaymentMethodReplacementReservationOutcome::Replay(attempt)
+                    if attempt_is_prepared(&attempt) =>
+                {
+                    payment_method_replacement_from_prepared_attempt(*attempt, &gateway)?
+                }
+                SubscriptionPaymentMethodReplacementReservationOutcome::Replay(attempt) => {
+                    return self.payment_result(*attempt).await;
+                }
+                SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict => {
+                    return Err(SubscriptionBillingServiceError::IdempotencyConflict);
+                }
+                SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(reason) => {
+                    return Err(
+                        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(
+                            reason,
+                        ),
+                    );
+                }
             }
         };
         if attempt.status() != PaymentAttemptStatus::Pending
@@ -165,4 +179,25 @@ impl SubscriptionBillingService {
         transaction.commit().await?;
         Ok(outcome)
     }
+}
+
+fn payment_method_replacement_from_prepared_attempt(
+    attempt: PaymentAttempt,
+    gateway: &syrup_rail::ResolvedGateway,
+) -> Result<(SubscriptionPaymentMethodReplacement, PaymentAttempt), SubscriptionBillingServiceError>
+{
+    if !attempt_is_prepared(&attempt) {
+        return Err(SubscriptionBillingServiceError::InvalidState(
+            INVALID_SERVICE_STATE,
+        ));
+    }
+    if !resolved_gateway_matches_attempt(gateway, &attempt) {
+        return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+    }
+    let reservation = SubscriptionPaymentMethodReplacement::from_attempt(
+        &attempt,
+        gateway.provider_key().clone(),
+    )
+    .map_err(|_| SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE))?;
+    Ok((reservation, attempt))
 }

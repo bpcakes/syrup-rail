@@ -195,8 +195,10 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         Some("txn_recovery_approved"),
         "vault_recovery",
     ))));
+    let resolved_gateway =
+        scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&recovery_gateway));
     let resolver = Arc::new(StaticResolver {
-        gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&recovery_gateway)),
+        gateway: resolved_gateway.clone(),
         calls: AtomicUsize::new(0),
     });
     let admission = Arc::new(PermitAdmission {
@@ -209,7 +211,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         admission.clone(),
         Arc::new(fixture.coordinator.clone()),
     );
-    let command = RecoverSubscriptionPayment::new(
+    let prepared_command = RecoverSubscriptionPayment::new(
         syrup_rail::SubscriptionPaymentContext::new(
             PaymentAttemptId::new(Uuid::now_v7()),
             fixture.command.billing_scope_id(),
@@ -222,7 +224,45 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         fixture.command.plan_key().clone(),
     );
 
+    let mut transaction = fixture.database.pool.begin().await?;
+    let prepared_attempt = match reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        &prepared_command,
+        &resolved_gateway,
+    )
+    .await?
+    {
+        SubscriptionRecoveryReservationOutcome::Reserved(_, attempt) => *attempt,
+        other => return Err(format!("unexpected recovery reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    let original_attempt_id = prepared_attempt.identity().attempt_id();
+    let original_order_id = prepared_attempt.request().gateway_order_id().clone();
+    let mut connection = fixture.database.pool.acquire().await?;
+    let prepared_result =
+        payment_result_for_attempt(&mut connection, prepared_attempt.clone()).await?;
+    assert!(prepared_result.subscription().is_none());
+    drop(connection);
+
+    let command = RecoverSubscriptionPayment::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            prepared_command.idempotency_key().clone(),
+            prepared_command.payment_token().clone(),
+            prepared_command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    assert_ne!(command.attempt_id(), original_attempt_id);
+
     let result = service.recover(command.clone()).await?;
+    assert_eq!(
+        result.attempt().identity().attempt_id(),
+        original_attempt_id
+    );
     assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
     assert_eq!(
         result.attempt().kind(),
@@ -244,6 +284,10 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             .unwrap()
     );
     assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        recovery_gateway.sale_order_ids.lock().await.as_slice(),
+        &[original_order_id]
+    );
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
@@ -329,8 +373,9 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     let gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
         approved_outcome_with_reference(Some("txn_method_new"), "vault_method_new"),
     )));
+    let resolved_gateway = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
     let resolver = Arc::new(StaticResolver {
-        gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway)),
+        gateway: resolved_gateway.clone(),
         calls: AtomicUsize::new(0),
     });
     let admission = Arc::new(PermitAdmission {
@@ -343,7 +388,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         admission.clone(),
         Arc::new(fixture.coordinator.clone()),
     );
-    let command = ReplaceSubscriptionPaymentMethod::new(
+    let prepared_command = ReplaceSubscriptionPaymentMethod::new(
         syrup_rail::SubscriptionPaymentContext::new(
             PaymentAttemptId::new(Uuid::now_v7()),
             fixture.command.billing_scope_id(),
@@ -356,7 +401,41 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         fixture.command.plan_key().clone(),
     );
 
+    let mut transaction = fixture.database.pool.begin().await?;
+    let prepared_attempt = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &prepared_command,
+        &resolved_gateway,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(_, attempt) => *attempt,
+        other => {
+            return Err(format!("unexpected payment-method reservation: {other:?}").into());
+        }
+    };
+    transaction.commit().await?;
+    let original_attempt_id = prepared_attempt.identity().attempt_id();
+    let original_order_id = prepared_attempt.request().gateway_order_id().clone();
+    let command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            prepared_command.idempotency_key().clone(),
+            prepared_command.payment_token().clone(),
+            prepared_command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    assert_ne!(command.attempt_id(), original_attempt_id);
+
     let result = service.replace_payment_method(command.clone()).await?;
+    assert_eq!(
+        result.attempt().identity().attempt_id(),
+        original_attempt_id
+    );
     assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
     assert_eq!(
         result.attempt().kind(),
@@ -383,6 +462,10 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             .await?;
     assert_eq!(old_status, "disabled");
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        gateway.store_order_ids.lock().await.as_slice(),
+        &[original_order_id]
+    );
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);

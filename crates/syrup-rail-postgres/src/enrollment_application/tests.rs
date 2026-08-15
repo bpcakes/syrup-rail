@@ -25,7 +25,9 @@ use syrup_rail::{
     PercentOffBasisPoints, RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod,
     ResolvedGateway, SubscriptionDiscountCode, SubscriptionDiscountDuration,
     SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
-    SubscriptionEnrollmentReservationOutcome, SubscriptionRenewalOutcome, SubscriptionStatus,
+    SubscriptionEnrollmentReservationOutcome,
+    SubscriptionPaymentMethodReplacementReservationOutcome, SubscriptionRecoveryReservationOutcome,
+    SubscriptionRenewalOutcome, SubscriptionStatus,
 };
 use tokio::sync::Mutex;
 
@@ -35,6 +37,8 @@ use crate::{
     BillingTransactionSubjectState, GatewayMutationCooldownScope, SubscriptionBillingService,
     SubscriptionBillingServiceError, SubscriptionOfferStore,
     reserve_subscription_enrollment_in_transaction,
+    reserve_subscription_payment_method_replacement_in_transaction,
+    reserve_subscription_recovery_in_transaction,
     test_support::{TestDatabase, create_gateway_account, immediate_offer},
 };
 
@@ -97,8 +101,10 @@ impl PaymentGateway for NeverCalledGateway {
 
 struct ScriptedGateway {
     sale_calls: AtomicUsize,
+    sale_order_ids: Mutex<Vec<GatewayOrderId>>,
     sale_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
     store_calls: AtomicUsize,
+    store_order_ids: Mutex<Vec<GatewayOrderId>>,
     store_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
 }
 
@@ -234,8 +240,10 @@ impl ScriptedGateway {
     fn new(result: Result<GatewayPaymentOutcome, GatewayMutationError>) -> Self {
         Self {
             sale_calls: AtomicUsize::new(0),
+            sale_order_ids: Mutex::new(Vec::new()),
             sale_result: Mutex::new(Some(result)),
             store_calls: AtomicUsize::new(0),
+            store_order_ids: Mutex::new(Vec::new()),
             store_result: Mutex::new(None),
         }
     }
@@ -243,8 +251,10 @@ impl ScriptedGateway {
     fn for_stored_method(result: Result<GatewayPaymentOutcome, GatewayMutationError>) -> Self {
         Self {
             sale_calls: AtomicUsize::new(0),
+            sale_order_ids: Mutex::new(Vec::new()),
             sale_result: Mutex::new(None),
             store_calls: AtomicUsize::new(0),
+            store_order_ids: Mutex::new(Vec::new()),
             store_result: Mutex::new(Some(result)),
         }
     }
@@ -258,9 +268,13 @@ impl PaymentGateway for ScriptedGateway {
 
     async fn sale(
         &self,
-        _request: GatewaySaleRequest,
+        request: GatewaySaleRequest,
     ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
         self.sale_calls.fetch_add(1, Ordering::SeqCst);
+        self.sale_order_ids
+            .lock()
+            .await
+            .push(request.order_id().clone());
         self.sale_result
             .lock()
             .await
@@ -270,9 +284,13 @@ impl PaymentGateway for ScriptedGateway {
 
     async fn store_payment_method(
         &self,
-        _request: GatewayStorePaymentMethodRequest,
+        request: GatewayStorePaymentMethodRequest,
     ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
         self.store_calls.fetch_add(1, Ordering::SeqCst);
+        self.store_order_ids
+            .lock()
+            .await
+            .push(request.order_id().clone());
         self.store_result
             .lock()
             .await

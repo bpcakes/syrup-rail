@@ -10,15 +10,20 @@ impl SubscriptionBillingService {
         &self,
         command: RecoverSubscriptionPayment,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
-        match self.preflight_recovery(&command).await? {
-            SubscriptionRecoveryPreflightOutcome::Continue => {}
+        let prepared_attempt = match self.preflight_recovery(&command).await? {
+            SubscriptionRecoveryPreflightOutcome::Continue => None,
+            SubscriptionRecoveryPreflightOutcome::Replay(attempt)
+                if attempt_is_prepared(&attempt) =>
+            {
+                Some(*attempt)
+            }
             SubscriptionRecoveryPreflightOutcome::Replay(attempt) => {
                 return self.payment_result(*attempt).await;
             }
             SubscriptionRecoveryPreflightOutcome::IdempotencyConflict => {
                 return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
-        }
+        };
 
         self.admit_subscriber_mutation(
             command.billing_scope_id(),
@@ -34,18 +39,29 @@ impl SubscriptionBillingService {
             )
             .await?;
 
-        let (reservation, attempt) = match self.reserve_recovery(&command, &gateway).await? {
-            SubscriptionRecoveryReservationOutcome::Reserved(reservation, attempt) => {
-                (*reservation, *attempt)
-            }
-            SubscriptionRecoveryReservationOutcome::Replay(attempt) => {
-                return self.payment_result(*attempt).await;
-            }
-            SubscriptionRecoveryReservationOutcome::IdempotencyConflict => {
-                return Err(SubscriptionBillingServiceError::IdempotencyConflict);
-            }
-            SubscriptionRecoveryReservationOutcome::Rejected(reason) => {
-                return Err(SubscriptionBillingServiceError::RecoveryReservationRejected(reason));
+        let (reservation, attempt) = if let Some(attempt) = prepared_attempt {
+            recovery_reservation_from_prepared_attempt(attempt, &gateway)?
+        } else {
+            match self.reserve_recovery(&command, &gateway).await? {
+                SubscriptionRecoveryReservationOutcome::Reserved(reservation, attempt) => {
+                    (*reservation, *attempt)
+                }
+                SubscriptionRecoveryReservationOutcome::Replay(attempt)
+                    if attempt_is_prepared(&attempt) =>
+                {
+                    recovery_reservation_from_prepared_attempt(*attempt, &gateway)?
+                }
+                SubscriptionRecoveryReservationOutcome::Replay(attempt) => {
+                    return self.payment_result(*attempt).await;
+                }
+                SubscriptionRecoveryReservationOutcome::IdempotencyConflict => {
+                    return Err(SubscriptionBillingServiceError::IdempotencyConflict);
+                }
+                SubscriptionRecoveryReservationOutcome::Rejected(reason) => {
+                    return Err(
+                        SubscriptionBillingServiceError::RecoveryReservationRejected(reason),
+                    );
+                }
             }
         };
         if attempt.status() != PaymentAttemptStatus::Pending
@@ -152,4 +168,22 @@ impl SubscriptionBillingService {
         transaction.commit().await?;
         Ok(outcome)
     }
+}
+
+fn recovery_reservation_from_prepared_attempt(
+    attempt: PaymentAttempt,
+    gateway: &syrup_rail::ResolvedGateway,
+) -> Result<(SubscriptionRecoveryReservation, PaymentAttempt), SubscriptionBillingServiceError> {
+    if !attempt_is_prepared(&attempt) {
+        return Err(SubscriptionBillingServiceError::InvalidState(
+            INVALID_SERVICE_STATE,
+        ));
+    }
+    if !resolved_gateway_matches_attempt(gateway, &attempt) {
+        return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+    }
+    let reservation =
+        SubscriptionRecoveryReservation::from_attempt(&attempt, gateway.provider_key().clone())
+            .map_err(|_| SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE))?;
+    Ok((reservation, attempt))
 }
