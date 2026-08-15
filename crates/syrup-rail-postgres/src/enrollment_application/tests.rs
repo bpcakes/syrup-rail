@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     error::Error,
     sync::{
         Arc,
@@ -100,6 +101,8 @@ impl PaymentGateway for NeverCalledGateway {
 }
 
 struct ScriptedGateway {
+    account_mode_calls: AtomicUsize,
+    account_mode_results: Mutex<VecDeque<Result<GatewayAccountMode, GatewayError>>>,
     sale_calls: AtomicUsize,
     sale_order_ids: Mutex<Vec<GatewayOrderId>>,
     sale_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
@@ -239,6 +242,8 @@ impl GatewayResolver for StaticResolver {
 impl ScriptedGateway {
     fn new(result: Result<GatewayPaymentOutcome, GatewayMutationError>) -> Self {
         Self {
+            account_mode_calls: AtomicUsize::new(0),
+            account_mode_results: Mutex::new(VecDeque::new()),
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
             sale_result: Mutex::new(Some(result)),
@@ -250,6 +255,8 @@ impl ScriptedGateway {
 
     fn for_stored_method(result: Result<GatewayPaymentOutcome, GatewayMutationError>) -> Self {
         Self {
+            account_mode_calls: AtomicUsize::new(0),
+            account_mode_results: Mutex::new(VecDeque::new()),
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
             sale_result: Mutex::new(None),
@@ -258,12 +265,33 @@ impl ScriptedGateway {
             store_result: Mutex::new(Some(result)),
         }
     }
+
+    fn for_sale_with_readiness(
+        readiness: impl IntoIterator<Item = Result<GatewayAccountMode, GatewayError>>,
+        result: Result<GatewayPaymentOutcome, GatewayMutationError>,
+    ) -> Self {
+        Self {
+            account_mode_calls: AtomicUsize::new(0),
+            account_mode_results: Mutex::new(readiness.into_iter().collect()),
+            sale_calls: AtomicUsize::new(0),
+            sale_order_ids: Mutex::new(Vec::new()),
+            sale_result: Mutex::new(Some(result)),
+            store_calls: AtomicUsize::new(0),
+            store_order_ids: Mutex::new(Vec::new()),
+            store_result: Mutex::new(None),
+        }
+    }
 }
 
 #[async_trait]
 impl PaymentGateway for ScriptedGateway {
     async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
-        Ok(GatewayAccountMode::Live)
+        self.account_mode_calls.fetch_add(1, Ordering::SeqCst);
+        self.account_mode_results
+            .lock()
+            .await
+            .pop_front()
+            .unwrap_or(Ok(GatewayAccountMode::Live))
     }
 
     async fn sale(

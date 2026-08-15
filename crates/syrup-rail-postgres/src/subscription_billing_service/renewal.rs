@@ -329,11 +329,12 @@ impl SubscriptionBillingService {
                 .await?;
                 Ok(false)
             }
-            Err(_) => {
+            Err(error) => {
+                let code = gateway_readiness_resolution_code(&error);
                 self.resolve_renewal_readiness_failure(
                     reservation,
-                    GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
-                    PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                    error.detail().clone(),
+                    code,
                     None,
                     boundary,
                 )

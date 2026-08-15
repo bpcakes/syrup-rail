@@ -330,6 +330,44 @@ fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         "provider asked to retry later"
     );
 
+    for (error, code) in [
+        (
+            GatewayError::RequestRejected(GatewayDiagnostic::new("request rejected")),
+            PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission,
+        ),
+        (
+            GatewayError::Malformed(GatewayDiagnostic::new("malformed response")),
+            PaymentResolutionCode::GatewayMalformedBeforeSubmission,
+        ),
+        (
+            GatewayError::Configuration(GatewayDiagnostic::new("bad configuration")),
+            PaymentResolutionCode::GatewayConfigurationBeforeSubmission,
+        ),
+        (
+            GatewayError::Unavailable(GatewayDiagnostic::new("transport unavailable")),
+            PaymentResolutionCode::GatewayUnavailableBeforeSubmission,
+        ),
+    ] {
+        let detail = error.detail().clone();
+        let failure = SubscriberReadinessFailure::Gateway(error);
+        assert_eq!(failure.resolution_code(), code);
+        assert_eq!(
+            gateway_readiness_resolution_code(
+                &failure.gateway_error().expect("gateway error is retained")
+            ),
+            code
+        );
+        assert!(failure.cooldown().is_none());
+        assert!(failure.cooldown_error_scope().is_none());
+        assert_eq!(
+            preserves_prepared_attempt_for_retry(
+                &failure.gateway_error().expect("gateway error is retained")
+            ),
+            code == PaymentResolutionCode::GatewayUnavailableBeforeSubmission
+        );
+        assert_eq!(failure.into_detail().expose(), detail.expose());
+    }
+
     let readiness = SubscriberReadinessFailure::LiveModeUnavailable;
     assert_eq!(
         readiness.resolution_code(),

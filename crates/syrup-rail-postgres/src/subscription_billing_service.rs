@@ -498,10 +498,18 @@ impl SubscriberInitiatedReservation<'_> {
 enum SubscriberReadinessFailure {
     Cooldown(GatewayMutationCooldownScope),
     ProviderRateLimited(GatewayDiagnostic),
+    Gateway(GatewayError),
     LiveModeUnavailable,
 }
 
 impl SubscriberReadinessFailure {
+    fn gateway_error(&self) -> Option<GatewayError> {
+        let Self::Gateway(error) = self else {
+            return None;
+        };
+        Some(clone_gateway_error(error))
+    }
+
     fn into_detail(self) -> GatewayDiagnostic {
         match self {
             Self::Cooldown(GatewayMutationCooldownScope::Account) => {
@@ -511,6 +519,7 @@ impl SubscriberReadinessFailure {
                 GatewayDiagnostic::new("gateway provider cooldown is active")
             }
             Self::ProviderRateLimited(detail) => detail,
+            Self::Gateway(error) => error.detail().clone(),
             Self::LiveModeUnavailable => GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
         }
     }
@@ -524,6 +533,7 @@ impl SubscriberReadinessFailure {
             | Self::ProviderRateLimited(_) => {
                 PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
             }
+            Self::Gateway(error) => gateway_readiness_resolution_code(error),
             Self::LiveModeUnavailable => {
                 PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
             }
@@ -533,7 +543,7 @@ impl SubscriberReadinessFailure {
     const fn cooldown(&self) -> Option<RateLimitCooldown> {
         match self {
             Self::ProviderRateLimited(_) => Some(RateLimitCooldown::Provider),
-            Self::Cooldown(_) | Self::LiveModeUnavailable => None,
+            Self::Cooldown(_) | Self::Gateway(_) | Self::LiveModeUnavailable => None,
         }
     }
 
@@ -541,8 +551,38 @@ impl SubscriberReadinessFailure {
         match self {
             Self::Cooldown(scope) => Some(*scope),
             Self::ProviderRateLimited(_) => Some(GatewayMutationCooldownScope::Provider),
-            Self::LiveModeUnavailable => None,
+            Self::Gateway(_) | Self::LiveModeUnavailable => None,
         }
+    }
+}
+
+const fn gateway_readiness_resolution_code(error: &GatewayError) -> PaymentResolutionCode {
+    match error {
+        GatewayError::RequestRejected(_) => {
+            PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission
+        }
+        GatewayError::Malformed(_) => PaymentResolutionCode::GatewayMalformedBeforeSubmission,
+        GatewayError::Configuration(_) => {
+            PaymentResolutionCode::GatewayConfigurationBeforeSubmission
+        }
+        GatewayError::Unavailable(_) => PaymentResolutionCode::GatewayUnavailableBeforeSubmission,
+        GatewayError::RateLimited(_) => {
+            PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
+        }
+    }
+}
+
+const fn preserves_prepared_attempt_for_retry(error: &GatewayError) -> bool {
+    matches!(error, GatewayError::Unavailable(_))
+}
+
+fn clone_gateway_error(error: &GatewayError) -> GatewayError {
+    match error {
+        GatewayError::RequestRejected(detail) => GatewayError::RequestRejected(detail.clone()),
+        GatewayError::Malformed(detail) => GatewayError::Malformed(detail.clone()),
+        GatewayError::Configuration(detail) => GatewayError::Configuration(detail.clone()),
+        GatewayError::Unavailable(detail) => GatewayError::Unavailable(detail.clone()),
+        GatewayError::RateLimited(detail) => GatewayError::RateLimited(detail.clone()),
     }
 }
 
@@ -574,7 +614,7 @@ async fn subscriber_gateway_readiness_failure(
         Err(GatewayError::RateLimited(detail)) => {
             Some(SubscriberReadinessFailure::ProviderRateLimited(detail))
         }
-        Err(_) => Some(SubscriberReadinessFailure::LiveModeUnavailable),
+        Err(error) => Some(SubscriberReadinessFailure::Gateway(error)),
     }
 }
 

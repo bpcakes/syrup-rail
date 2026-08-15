@@ -20,13 +20,13 @@ I/O.
 - [x] (2026-08-15) Read the repository, PostgreSQL-crate, planning, and payment
   threat-model guidance.
 - [x] (2026-08-15) Implemented and focused-tested same-key continuation of
-  prepared recovery and payment-method replacement attempts. The slice is
-  ready to commit.
+  prepared recovery and payment-method replacement attempts. Committed as
+  `ce1f861`.
 - [x] (2026-08-15) Implemented and focused-tested local renewal/recovery
   expiry, dispatch/cancellation self-healing, and provider exact-query phase
-  eligibility. The slice is ready to commit.
-- [ ] Implement and test workflow-specific gateway-readiness error mapping;
-  commit the slice.
+  eligibility. Committed as `282f40d`.
+- [x] (2026-08-15) Implemented and focused-tested workflow-specific
+  gateway-readiness error mapping. The slice is ready to commit.
 - [ ] Run the repository's required gates, record evidence, review the final
   diff, and finish this Jig work item.
 
@@ -56,6 +56,11 @@ I/O.
   PostgreSQL parameter positions literally. Adding the local-stale threshold
   therefore required shifting and updating both continuation keyset parameters
   while preserving the ordered due-index plan.
+- A prepared attempt can safely survive `GatewayError::Unavailable`: the
+  readiness query itself performed no mutation, and retaining the row as
+  pending lets the same idempotency key retry. Automatic renewal has no such
+  caller-owned idempotent retry loop, so it terminalizes the attempt with the
+  exact unavailable infrastructure code and follows existing pacing policy.
 
 ## Decision Log
 
@@ -78,11 +83,17 @@ I/O.
   Rationale: these attempts otherwise hold subscription lifecycle locks
   indefinitely. The concrete threshold and terminal transition will follow the
   existing lifecycle policy/constants and be captured in tests.
-- Decision: Preserve each gateway error variant after reservation and persist
-  the matching workflow failure code. Rationale: callers and durable evidence
-  should distinguish provider unavailability, rate limiting, configuration,
-  and readiness failures rather than report all non-rate-limit errors as a live
-  mode problem.
+- Decision: Preserve each gateway error variant after reservation with
+  workflow-specific retry behavior. A prepared subscriber or host-charge
+  attempt remains pending on `Unavailable` and returns typed retryable
+  `GatewayReadiness`; non-retryable readiness errors terminalize it with their
+  matching code. Automatic renewal terminalizes every post-reservation error
+  with its exact infrastructure code so dispatch pacing can proceed. After
+  final admission, even `Unavailable` is known-not-submitted but terminalized
+  rather than reopening one-shot authority. Rationale: this distinguishes
+  transport, configuration, malformed, rejected, rate-limit, and test-mode
+  failures while preserving safe same-key retry where the durable phase allows
+  it.
 
 ## Outcomes & Retrospective
 
@@ -98,6 +109,12 @@ The second slice passes the reconciliation, renewal-dispatch, cancellation, and
 same-key recovery regressions. It also repairs legacy unsubmitted
 `review_required` renewal/recovery rows locally and defensively refuses an
 exact-query observation if the current row has no `submitted_at` boundary.
+
+The third slice passes twelve foreground tests plus the service policy unit
+suite. It proves prepared unavailability stays pending and succeeds on the
+same-key retry, configuration readiness stores its exact configuration code,
+and post-reservation renewal unavailability stores
+`gateway_unavailable_before_submission` rather than a live-mode failure.
 
 ## Context and orientation
 
@@ -201,8 +218,9 @@ Acceptance is observable through regression tests:
   provider query and removes its lifecycle blockage through a deterministic
   local transition. A previously parked unsubmitted row is handled locally too.
 - Given each modeled readiness failure after durable reservation, the caller
-  sees the correct workflow outcome and the durable attempt contains the
-  matching failure code, never an unrelated live-readiness code.
+  sees the correct workflow outcome and never an unrelated live-readiness code.
+  Retryable prepared unavailability remains pending; terminalized variants
+  contain their matching failure code.
 - Repository formatting, linting, tests, SQLx validation, contract checks, and
   Jig gates all pass.
 

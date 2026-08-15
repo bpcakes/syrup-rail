@@ -188,16 +188,25 @@ impl SubscriptionBillingService {
                     )
                     .await;
             }
-            Err(_) => {
-                return self
+            Err(error) if preserves_prepared_attempt_for_retry(&error) => {
+                return Err(SubscriptionBillingServiceError::GatewayReadiness(error));
+            }
+            Err(error) => {
+                let code = gateway_readiness_resolution_code(&error);
+                let payment = self
                     .resolve_host_charge_readiness(
                         targets,
                         &reservation,
-                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
-                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+                        error.detail().clone(),
+                        code,
                         HostChargeBeforeSubmissionResolution::prepared(),
                     )
-                    .await;
+                    .await?;
+                return if payment.attempt().state().resolution_code() == Some(code) {
+                    Err(SubscriptionBillingServiceError::GatewayReadiness(error))
+                } else {
+                    Ok(payment)
+                };
             }
         }
 

@@ -115,6 +115,15 @@ impl SubscriptionBillingService {
         failure: SubscriberReadinessFailure,
         boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
+        let gateway_error = failure.gateway_error();
+        if boundary == OutcomeResolutionBoundary::Prepared
+            && let Some(error) = gateway_error.as_ref()
+            && preserves_prepared_attempt_for_retry(error)
+        {
+            return Err(SubscriptionBillingServiceError::GatewayReadiness(
+                clone_gateway_error(error),
+            ));
+        }
         let code = failure.resolution_code();
         let cooldown = failure.cooldown();
         let cooldown_error_scope = failure.cooldown_error_scope();
@@ -136,6 +145,11 @@ impl SubscriptionBillingService {
             && payment.attempt().state().resolution_code() == Some(code)
         {
             return Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope });
+        }
+        if let Some(error) = gateway_error
+            && payment.attempt().state().resolution_code() == Some(code)
+        {
+            return Err(SubscriptionBillingServiceError::GatewayReadiness(error));
         }
         Ok(payment)
     }
