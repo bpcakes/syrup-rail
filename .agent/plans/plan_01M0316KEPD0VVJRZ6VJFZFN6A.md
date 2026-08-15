@@ -25,6 +25,9 @@ database transaction.
   refreshed the one affected SQLx query artifact.
 - [x] (2026-08-15) Documented the local-before-exact reconciliation phase
   order and the patch-upgrade integration requirement for existing hosts.
+- [x] (2026-08-15) Split three touched test modules after the changed-file
+  policy identified files above the 800-line hard limit; the moved tests and
+  the `v0.2.0`-scoped LOC check pass without behavior changes.
 - [ ] Run focused tests, repository checks, gates, and final diff review.
 
 ## Surprises & Discoveries
@@ -39,6 +42,9 @@ database transaction.
 - The new subscription cleanup phase is public and bounded, but the repository
   has no scheduler implementation. Upgrade guidance must therefore state that
   hosts add it to their existing per-account reconciliation loop.
+- The CI changed-file LOC policy applies its hard limit to any file touched in
+  the reviewed range, including test modules that were already near the limit.
+  Moving focused tests to child modules keeps each owner within policy.
 
 ## Decision Log
 
