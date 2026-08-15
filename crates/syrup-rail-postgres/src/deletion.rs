@@ -3,6 +3,15 @@ use syrup_rail::{
     BillingDeletionBlockers, DeletionBlockerQuery, ScrubSubscriberBillingData, ScrubbedBillingRows,
 };
 
+use crate::{
+    attempts::{
+        INITIAL_PREPARED_STALE_AFTER_SECONDS,
+        PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS,
+        SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
+    },
+    host_charge_reconciliation::HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
+};
+
 /// Reports the canonical financial rows that prevent host account deletion.
 ///
 /// The query is subscriber-wide across plans and uses the caller's transaction.
@@ -29,10 +38,43 @@ pub async fn billing_deletion_blockers(
                 WHERE billing_scope_id = $1
                     AND subscriber_id = $2
                     AND status IN ('pending', 'unknown', 'review_required')
+                    AND NOT (
+                        submitted_at IS NULL
+                        AND status IN ('pending', 'review_required')
+                        AND (
+                            (
+                                attempt_kind = 'subscription_payment_method_update'
+                                AND created_at <= clock_timestamp()
+                                    - ($3::bigint * interval '1 second')
+                            )
+                            OR (
+                                attempt_kind = 'subscription_initial'
+                                AND created_at <= clock_timestamp()
+                                    - ($4::bigint * interval '1 second')
+                            )
+                            OR (
+                                attempt_kind IN (
+                                    'subscription_renewal',
+                                    'subscription_recovery'
+                                )
+                                AND created_at <= clock_timestamp()
+                                    - ($5::bigint * interval '1 second')
+                            )
+                            OR (
+                                attempt_kind = 'host_charge'
+                                AND created_at <= clock_timestamp()
+                                    - ($6::bigint * interval '1 second')
+                            )
+                        )
+                    )
             ) AS "unresolved_payment!"
         "#,
         billing_scope_id,
         subscriber_id,
+        PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS,
+        INITIAL_PREPARED_STALE_AFTER_SECONDS,
+        SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
+        HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
     )
     .fetch_one(connection)
     .await?;
@@ -533,6 +575,22 @@ mod tests {
             .bind(subscription)
             .execute(&database.pool)
             .await?;
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '31 minutes', updated_at = clock_timestamp() - interval '31 minutes' WHERE id = $1",
+            )
+            .bind(attempt)
+            .execute(&database.pool)
+            .await?;
+            let mut transaction = database.pool.begin().await?;
+            let blockers = billing_deletion_blockers(&mut transaction, query).await?;
+            transaction.rollback().await?;
+            if !blockers.is_empty() {
+                return Err(io::Error::other(
+                    "stale local financial work incorrectly blocked deletion",
+                )
+                .into());
+            }
+
             sqlx::query(
                 "UPDATE billing_payment_attempts SET status = 'failed', resolved_at = clock_timestamp() WHERE id = $1",
             )

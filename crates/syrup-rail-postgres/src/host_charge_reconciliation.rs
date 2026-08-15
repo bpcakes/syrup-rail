@@ -13,7 +13,7 @@ use crate::{
     reconciliation::RECONCILIATION_PHASE_BATCH_SIZE,
 };
 
-const HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
+pub(crate) const HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
 const STALE_UNSUBMITTED_HOST_CHARGE_TEXT: &str =
     "Host charge was abandoned before gateway submission.";
 const INVALID_STALE_HOST_CHARGE_STATE: &str =

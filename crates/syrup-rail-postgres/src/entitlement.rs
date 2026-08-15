@@ -14,6 +14,9 @@ use syrup_rail::{
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::attempts::{
+    INITIAL_PREPARED_STALE_AFTER_SECONDS, SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
+};
 use crate::subscription_persistence::{
     RenewalFailurePolicyScalars, SubscriptionPeriodRuleScalars, SubscriptionPersistenceCodecError,
     renewal_failure_policy_from_scalars, subscription_period_rule_from_scalars,
@@ -443,6 +446,12 @@ where
                                 'subscription_initial_current_subscription_conflict'
                         )
                     )
+                    AND NOT (
+                        attempts.status IN ('pending', 'review_required')
+                        AND attempts.submitted_at IS NULL
+                        AND attempts.created_at <= clock_timestamp()
+                            - ($4::bigint * interval '1 second')
+                    )
                     AND NOT EXISTS (
                         SELECT 1
                         FROM billing_subscriptions later_subscription
@@ -461,6 +470,12 @@ where
                         'subscription_recovery'
                     )
                     AND attempts.status IN ('pending', 'unknown', 'review_required')
+                    AND NOT (
+                        attempts.status IN ('pending', 'review_required')
+                        AND attempts.submitted_at IS NULL
+                        AND attempts.created_at <= clock_timestamp()
+                            - ($5::bigint * interval '1 second')
+                    )
             ) AS pending_recovery_confirmation,
             saved.id AS saved_claim_id,
             saved.code_snapshot AS saved_code,
@@ -514,6 +529,8 @@ where
     .bind(query.billing_scope_id().as_uuid())
     .bind(query.subscriber_id().as_uuid())
     .bind(query.plan_key().as_str())
+    .bind(INITIAL_PREPARED_STALE_AFTER_SECONDS)
+    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
     .fetch_one(executor)
     .await?;
 

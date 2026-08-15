@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
 pub(super) const BILLING_OPERATION_TIMEOUT: &str = "5s";
-pub(super) const INITIAL_PREPARED_STALE_AFTER_SECONDS: i64 = 30 * 60;
+pub(crate) const INITIAL_PREPARED_STALE_AFTER_SECONDS: i64 = 30 * 60;
 pub(super) const INITIAL_PREPARED_EXPIRED_TEXT: &str =
     "Prepared checkout expired before processor submission.";
 pub(super) const INITIAL_BILLING_STATE_CHANGED_TEXT: &str =
@@ -22,7 +22,7 @@ pub(super) const RENEWAL_CONFIGURATION_CHANGED_TEXT: &str =
 pub(super) const PAYMENT_METHOD_REPLACEMENT_STATE_CHANGED_TEXT: &str =
     "Payment method replacement was canceled before submission because billing state changed.";
 pub(super) const PAYMENT_METHOD_REPLACEMENT_CONFIGURATION_CHANGED_TEXT: &str = "Payment method replacement was canceled before submission because payment configuration changed.";
-pub(super) const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
+pub(crate) const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
 pub(crate) const SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
 pub(crate) const STALE_UNSUBMITTED_RENEWAL_TEXT: &str =
     "Subscription renewal was abandoned before gateway submission.";

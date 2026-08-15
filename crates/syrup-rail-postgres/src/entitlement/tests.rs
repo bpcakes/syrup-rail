@@ -14,6 +14,8 @@ use super::{
 };
 use crate::test_support::{TestDatabase, create_gateway_account};
 
+mod stale_attempts;
+
 fn guard_subscription(
     status: &str,
     period_end_at: DateTime<Utc>,

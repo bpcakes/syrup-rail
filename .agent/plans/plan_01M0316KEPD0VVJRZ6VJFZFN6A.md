@@ -19,8 +19,10 @@ database transaction.
   subscription aggregate lock before host admission or gateway resolution;
   focused foreground coverage proves all three downstream callbacks remain at
   zero calls.
-- [ ] Make entitlement and deletion reads ignore attempts that are already
-  locally abandoned by canonical age policy.
+- [x] (2026-08-15) Made entitlement and deletion reads ignore attempts that
+  are already locally abandoned by each operation's canonical age policy;
+  added fresh-versus-stale entitlement coverage, deletion coverage, and
+  refreshed the one affected SQLx query artifact.
 - [ ] Document the reconciliation phase order and patch-release integration
   requirement.
 - [ ] Run focused tests, repository checks, gates, and final diff review.
