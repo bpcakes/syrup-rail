@@ -28,7 +28,10 @@ database transaction.
 - [x] (2026-08-15) Split three touched test modules after the changed-file
   policy identified files above the 800-line hard limit; the moved tests and
   the `v0.2.0`-scoped LOC check pass without behavior changes.
-- [ ] Run focused tests, repository checks, gates, and final diff review.
+- [x] (2026-08-15) Ran the focused regressions, every pull-request CI command,
+  the Rust 1.88 all-target check, live RustSec scan, and all three required Jig
+  gates; reviewed the final five-commit implementation diff with no unresolved
+  findings.
 
 ## Surprises & Discoveries
 
@@ -62,7 +65,17 @@ database transaction.
 
 ## Outcomes & Retrospective
 
-- Pending.
+- Abandoned host charges now have a bounded atomic local retirement path that
+  releases host-owned targets without gateway I/O, while fresh same-key retry
+  remains available during the preparation window.
+- Stale payment-method replacement replays resolve before any host admission,
+  live offer read, gateway resolution, or provider call. Entitlement and
+  deletion projections no longer wait for a bounded cleanup backlog to drain.
+- The public integration contract now gives 0.2.0 hosts the required
+  local-before-exact scheduler order. No dependency, schema, or immutable v1
+  artifact changed.
+- The full CI-equivalent matrix and fresh Jig contract, test, and SQLx gates
+  pass on the final committed tree.
 
 ## Context and orientation
 
