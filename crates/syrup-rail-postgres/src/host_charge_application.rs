@@ -894,6 +894,8 @@ mod tests {
         test_support::{TestDatabase, create_gateway_account},
     };
 
+    mod readiness_replay;
+
     #[test]
     fn before_submission_resolution_modes_keep_boundary_and_cooldown_distinct() {
         let prepared = HostChargeBeforeSubmissionResolution::prepared();
