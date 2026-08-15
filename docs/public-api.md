@@ -40,10 +40,12 @@ and configured host charges before `claim_exact_reconciliation_attempts`.
 These phases perform no provider I/O and are safe to repeat; bounded phases
 belong in every scheduled pass so skipped locks and backlogs make progress.
 Host-charge cleanup requires the host's `HostChargeTargetStore` and changes the
-target and canonical attempt atomically. Exact provider queries are reserved
-for attempts with `submitted_at IS NOT NULL`. Hosts upgrading from 0.2.0 must
-add the subscription-charge and host-charge cleanup phases to their existing
-loop when applicable.
+target and canonical attempt atomically. Its summary reports target outcomes
+that were safely skipped, so the host can alert on that target while unrelated
+work and the account's remaining reconciliation phases continue. Exact
+provider queries are reserved for attempts with `submitted_at IS NOT NULL`.
+Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
+cleanup phases to their existing loop when applicable.
 
 Use `assert_runtime_schema_v2_compatible` after host migrations and before
 serving billing traffic. Version 0.2 supports PostgreSQL 18 and schema v2 only;

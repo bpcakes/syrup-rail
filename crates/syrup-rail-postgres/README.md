@@ -76,6 +76,13 @@ are safe to repeat, and the bounded phases should run on every scheduled pass
 so locked work or a backlog is retried later. Exact provider queries are only
 for attempts whose `submitted_at` proves that submission began.
 
+`fail_stale_unsubmitted_host_charges` returns failed and skipped counts. A
+`StaleTarget` or `Unchanged` callback outcome leaves that target and attempt
+untouched, increments `skipped`, and does not prevent later candidates from
+progressing. The host callback should record the target-specific incident for
+operator follow-up; the account scheduler can continue its remaining local and
+exact reconciliation phases.
+
 An existing 0.2.0 host must add the subscription-charge phase, plus the
 host-charge phase when host charges are configured, to its reconciliation loop
 when upgrading to the next patch release. Omitting them leaves abandoned local

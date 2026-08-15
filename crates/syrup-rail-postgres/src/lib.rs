@@ -108,7 +108,9 @@ pub use host_charge_application::{
     HostChargeProviderResult, admit_host_charge_submission, apply_host_charge_gateway_outcome,
     apply_reconciled_host_charge_gateway_outcome, submit_admitted_host_charge,
 };
-pub use host_charge_reconciliation::fail_stale_unsubmitted_host_charges;
+pub use host_charge_reconciliation::{
+    StaleHostChargeCleanupSummary, fail_stale_unsubmitted_host_charges,
+};
 pub use host_charges::{
     HostChargeLedgerAdmission, HostChargeLedgerAdmissionError, HostChargeLedgerAdmissionMode,
     HostChargeLedgerAdmissionQuery, HostChargePreflightOutcome, HostChargeReservationDecision,

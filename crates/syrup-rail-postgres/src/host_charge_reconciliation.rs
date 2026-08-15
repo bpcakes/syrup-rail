@@ -16,8 +16,29 @@ use crate::{
 pub(crate) const HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
 const STALE_UNSUBMITTED_HOST_CHARGE_TEXT: &str =
     "Host charge was abandoned before gateway submission.";
-const INVALID_STALE_HOST_CHARGE_STATE: &str =
-    "stale prepared host charge target could not be released";
+
+/// Outcome of one bounded stale host-charge cleanup page.
+///
+/// A skipped candidate is left unchanged because its host target rejected the
+/// release transition or because the canonical attempt changed concurrently.
+/// The host target callback owns incident reporting for rejected transitions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StaleHostChargeCleanupSummary {
+    failed: u64,
+    skipped: u64,
+}
+
+impl StaleHostChargeCleanupSummary {
+    /// Attempts whose target release and local failure committed atomically.
+    pub const fn failed(self) -> u64 {
+        self.failed
+    }
+
+    /// Candidates left untouched after target rejection or revalidation.
+    pub const fn skipped(self) -> u64 {
+        self.skipped
+    }
+}
 
 #[derive(Clone, Copy)]
 struct StaleHostChargeCandidate {
@@ -32,13 +53,14 @@ struct StaleHostChargeCandidate {
 /// Each candidate transitions its host-owned target to `PaymentFailed` before
 /// locking and revalidating the canonical attempt. Both changes commit in one
 /// transaction. A concurrent submission or terminal outcome rolls the host
-/// transition back and leaves the current attempt untouched. No gateway I/O is
-/// performed.
+/// transition back and counts as skipped. A target-level `StaleTarget` or
+/// `Unchanged` outcome is likewise rolled back and skipped so unrelated targets
+/// continue through the page. No gateway I/O is performed.
 pub async fn fail_stale_unsubmitted_host_charges(
     pool: &PgPool,
     targets: &dyn HostChargeTargetStore,
     gateway_account_id: GatewayAccountId,
-) -> Result<u64, HostChargeApplicationError> {
+) -> Result<StaleHostChargeCleanupSummary, HostChargeApplicationError> {
     let candidates = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>(
         r#"
         SELECT id, billing_scope_id, subscriber_id, host_charge_target_id
@@ -69,7 +91,7 @@ pub async fn fail_stale_unsubmitted_host_charges(
     )
     .collect::<Vec<_>>();
 
-    let mut failed = 0;
+    let mut summary = StaleHostChargeCleanupSummary::default();
     for candidate in candidates {
         let mut transaction = pool.begin().await?;
         set_application_timeouts(&mut transaction).await?;
@@ -95,9 +117,8 @@ pub async fn fail_stale_unsubmitted_host_charges(
                 | HostChargeTargetTransitionOutcome::ExactReplay
         ) {
             transaction.rollback().await?;
-            return Err(HostChargeApplicationError::InvalidState(
-                INVALID_STALE_HOST_CHARGE_STATE,
-            ));
+            summary.skipped += 1;
+            continue;
         }
 
         let result = sqlx::query(
@@ -128,12 +149,13 @@ pub async fn fail_stale_unsubmitted_host_charges(
         .await?;
         if result.rows_affected() == 0 {
             transaction.rollback().await?;
+            summary.skipped += 1;
             continue;
         }
         transaction.commit().await?;
-        failed += 1;
+        summary.failed += 1;
     }
-    Ok(failed)
+    Ok(summary)
 }
 
 #[cfg(test)]

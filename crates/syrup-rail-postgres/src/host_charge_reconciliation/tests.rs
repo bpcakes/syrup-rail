@@ -97,19 +97,7 @@ async fn stale_host_charge_cleanup_releases_target_without_gateway_io() -> Resul
 {
     let database = TestDatabase::start("host_stale").await?;
     let result = async {
-        sqlx::query(
-            r#"
-            CREATE TABLE host_reconciliation_targets (
-                id uuid PRIMARY KEY,
-                billing_scope_id uuid NOT NULL,
-                subscriber_id uuid NOT NULL,
-                attempt_id uuid NOT NULL,
-                status text NOT NULL
-            )
-            "#,
-        )
-        .execute(&database.pool)
-        .await?;
+        install_reconciliation_targets(&database.pool).await?;
         let account = create_gateway_account(&database.pool, "host_reconciliation").await?;
         let sibling = create_gateway_account(&database.pool, "host_reconciliation").await?;
         let stale =
@@ -118,15 +106,14 @@ async fn stale_host_charge_cleanup_releases_target_without_gateway_io() -> Resul
         let sibling_stale =
             insert_host_charge(&database.pool, sibling, Utc::now() - Duration::minutes(31)).await?;
 
-        assert_eq!(
-            fail_stale_unsubmitted_host_charges(
-                &database.pool,
-                &ReconciliationTargets,
-                GatewayAccountId::new(account.gateway_account_id),
-            )
-            .await?,
-            1
-        );
+        let summary = fail_stale_unsubmitted_host_charges(
+            &database.pool,
+            &ReconciliationTargets,
+            GatewayAccountId::new(account.gateway_account_id),
+        )
+        .await?;
+        assert_eq!(summary.failed(), 1);
+        assert_eq!(summary.skipped(), 0);
         assert_eq!(attempt_status(&database.pool, stale.0).await?, "failed");
         assert_eq!(target_status(&database.pool, stale.1).await?, "released");
         assert_eq!(attempt_status(&database.pool, fresh.0).await?, "pending");
@@ -160,6 +147,74 @@ async fn stale_host_charge_cleanup_releases_target_without_gateway_io() -> Resul
     let cleanup = database.cleanup().await;
     result?;
     cleanup
+}
+
+#[tokio::test]
+async fn unreleasable_oldest_targets_do_not_starve_later_cleanup() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("host_stale_skip").await?;
+    let result = async {
+        install_reconciliation_targets(&database.pool).await?;
+        let account = create_gateway_account(&database.pool, "host_reconciliation").await?;
+        let missing =
+            insert_host_charge(&database.pool, account, Utc::now() - Duration::minutes(33)).await?;
+        let inapplicable =
+            insert_host_charge(&database.pool, account, Utc::now() - Duration::minutes(32)).await?;
+        let releasable =
+            insert_host_charge(&database.pool, account, Utc::now() - Duration::minutes(31)).await?;
+        sqlx::query("DELETE FROM host_reconciliation_targets WHERE id = $1")
+            .bind(missing.1)
+            .execute(&database.pool)
+            .await?;
+        sqlx::query("UPDATE host_reconciliation_targets SET status = 'paid' WHERE id = $1")
+            .bind(inapplicable.1)
+            .execute(&database.pool)
+            .await?;
+
+        let summary = fail_stale_unsubmitted_host_charges(
+            &database.pool,
+            &ReconciliationTargets,
+            GatewayAccountId::new(account.gateway_account_id),
+        )
+        .await?;
+        assert_eq!(summary.failed(), 1);
+        assert_eq!(summary.skipped(), 2);
+        assert_eq!(attempt_status(&database.pool, missing.0).await?, "pending");
+        assert_eq!(
+            attempt_status(&database.pool, inapplicable.0).await?,
+            "pending"
+        );
+        assert_eq!(target_status(&database.pool, inapplicable.1).await?, "paid");
+        assert_eq!(
+            attempt_status(&database.pool, releasable.0).await?,
+            "failed"
+        );
+        assert_eq!(
+            target_status(&database.pool, releasable.1).await?,
+            "released"
+        );
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+async fn install_reconciliation_targets(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE TABLE host_reconciliation_targets (
+            id uuid PRIMARY KEY,
+            billing_scope_id uuid NOT NULL,
+            subscriber_id uuid NOT NULL,
+            attempt_id uuid NOT NULL,
+            status text NOT NULL
+        )
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn insert_host_charge(
