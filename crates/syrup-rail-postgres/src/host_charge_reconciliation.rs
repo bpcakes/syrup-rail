@@ -9,8 +9,9 @@ use uuid::Uuid;
 
 use crate::{
     enrollment_application::set_application_timeouts,
-    host_charge_application::HostChargeApplicationError, host_charges::HostChargeTargetStore,
-    reconciliation::RECONCILIATION_PHASE_BATCH_SIZE,
+    host_charge_application::HostChargeApplicationError,
+    host_charges::HostChargeTargetStore,
+    reconciliation::{RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS, RECONCILIATION_PHASE_BATCH_SIZE},
 };
 
 pub(crate) const HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
@@ -19,9 +20,11 @@ const STALE_UNSUBMITTED_HOST_CHARGE_TEXT: &str =
 
 /// Outcome of one bounded stale host-charge cleanup page.
 ///
-/// A skipped candidate is left unchanged because its host target rejected the
-/// release transition or because the canonical attempt changed concurrently.
-/// The host target callback owns incident reporting for rejected transitions.
+/// A skipped candidate keeps its financial and target state because its host
+/// target rejected the release transition, the attempt changed concurrently,
+/// or its row was contended. Its reconciliation claim timestamp advances so
+/// unclaimed work can progress before it is retried. The host target callback
+/// owns incident reporting for rejected transitions.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StaleHostChargeCleanupSummary {
     failed: u64,
@@ -34,7 +37,7 @@ impl StaleHostChargeCleanupSummary {
         self.failed
     }
 
-    /// Candidates left untouched after target rejection or revalidation.
+    /// Candidates left financially unchanged after rejection or revalidation.
     pub const fn skipped(self) -> u64 {
         self.skipped
     }
@@ -50,46 +53,20 @@ struct StaleHostChargeCandidate {
 
 /// Fails one bounded account-scoped batch of stale local host charges.
 ///
-/// Each candidate transitions its host-owned target to `PaymentFailed` before
-/// locking and revalidating the canonical attempt. Both changes commit in one
-/// transaction. A concurrent submission or terminal outcome rolls the host
-/// transition back and counts as skipped. A target-level `StaleTarget` or
-/// `Unchanged` outcome is likewise rolled back and skipped so unrelated targets
-/// continue through the page. No gateway I/O is performed.
+/// Candidate selection first makes a durable scheduling claim with
+/// `FOR UPDATE SKIP LOCKED`. Previously claimed rows sort behind untouched work,
+/// so a bounded page cannot be monopolized by target-local skips. Each claimed
+/// candidate then transitions its host-owned target to `PaymentFailed` before
+/// locking and revalidating the canonical attempt. Both financial changes
+/// commit in one transaction. A concurrent submission, terminal outcome,
+/// target-level `StaleTarget` or `Unchanged`, or contended attempt row rolls the
+/// target transition back and counts as skipped. No gateway I/O is performed.
 pub async fn fail_stale_unsubmitted_host_charges(
     pool: &PgPool,
     targets: &dyn HostChargeTargetStore,
     gateway_account_id: GatewayAccountId,
 ) -> Result<StaleHostChargeCleanupSummary, HostChargeApplicationError> {
-    let candidates = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>(
-        r#"
-        SELECT id, billing_scope_id, subscriber_id, host_charge_target_id
-        FROM billing_payment_attempts
-        WHERE gateway_account_id = $1
-            AND attempt_kind = 'host_charge'
-            AND status IN ('pending', 'review_required')
-            AND submitted_at IS NULL
-            AND created_at <= clock_timestamp()
-                - ($2::bigint * interval '1 second')
-        ORDER BY created_at, id
-        LIMIT $3
-        "#,
-    )
-    .bind(gateway_account_id.as_uuid())
-    .bind(HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
-    .bind(RECONCILIATION_PHASE_BATCH_SIZE)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(
-        |(attempt_id, billing_scope_id, subscriber_id, target_id)| StaleHostChargeCandidate {
-            attempt_id,
-            billing_scope_id,
-            subscriber_id,
-            target_id,
-        },
-    )
-    .collect::<Vec<_>>();
+    let candidates = claim_stale_host_charge_candidates(pool, gateway_account_id).await?;
 
     let mut summary = StaleHostChargeCleanupSummary::default();
     for candidate in candidates {
@@ -146,7 +123,16 @@ pub async fn fail_stale_unsubmitted_host_charges(
         .bind(STALE_UNSUBMITTED_HOST_CHARGE_TEXT)
         .bind(HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
         .execute(&mut *transaction)
-        .await?;
+        .await;
+        let result = match result {
+            Ok(result) => result,
+            Err(error) if is_lock_not_available(&error) => {
+                transaction.rollback().await?;
+                summary.skipped += 1;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if result.rows_affected() == 0 {
             transaction.rollback().await?;
             summary.skipped += 1;
@@ -156,6 +142,79 @@ pub async fn fail_stale_unsubmitted_host_charges(
         summary.failed += 1;
     }
     Ok(summary)
+}
+
+async fn claim_stale_host_charge_candidates(
+    pool: &PgPool,
+    gateway_account_id: GatewayAccountId,
+) -> Result<Vec<StaleHostChargeCandidate>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    let candidates = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>(
+        r#"
+        WITH candidate_attempts AS MATERIALIZED (
+            SELECT attempts.id AS attempt_id,
+                attempts.billing_scope_id,
+                attempts.subscriber_id,
+                attempts.host_charge_target_id AS target_id,
+                attempts.created_at,
+                attempts.updated_at AS claimed_order_at
+            FROM billing_payment_attempts AS attempts
+            WHERE attempts.gateway_account_id = $1
+                AND attempts.attempt_kind = 'host_charge'
+                AND attempts.status IN ('pending', 'review_required')
+                AND attempts.submitted_at IS NULL
+                AND attempts.created_at <= clock_timestamp()
+                    - ($2::bigint * interval '1 second')
+                AND attempts.updated_at <= clock_timestamp()
+                    - ($3::bigint * interval '1 second')
+            ORDER BY attempts.updated_at, attempts.created_at, attempts.id
+            LIMIT $4
+            FOR UPDATE OF attempts SKIP LOCKED
+        ), claimed_attempts AS (
+            UPDATE billing_payment_attempts AS attempts
+            SET updated_at = clock_timestamp()
+            FROM candidate_attempts
+            WHERE attempts.id = candidate_attempts.attempt_id
+            RETURNING attempts.id
+        )
+        SELECT candidate_attempts.attempt_id,
+            candidate_attempts.billing_scope_id,
+            candidate_attempts.subscriber_id,
+            candidate_attempts.target_id
+        FROM candidate_attempts
+        INNER JOIN claimed_attempts
+            ON claimed_attempts.id = candidate_attempts.attempt_id
+        ORDER BY candidate_attempts.claimed_order_at,
+            candidate_attempts.created_at,
+            candidate_attempts.attempt_id
+        "#,
+    )
+    .bind(gateway_account_id.as_uuid())
+    .bind(HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS)
+    .bind(RECONCILIATION_PHASE_BATCH_SIZE)
+    .fetch_all(&mut *transaction)
+    .await?
+    .into_iter()
+    .map(
+        |(attempt_id, billing_scope_id, subscriber_id, target_id)| StaleHostChargeCandidate {
+            attempt_id,
+            billing_scope_id,
+            subscriber_id,
+            target_id,
+        },
+    )
+    .collect::<Vec<_>>();
+    transaction.commit().await?;
+    Ok(candidates)
+}
+
+fn is_lock_not_available(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(error) if error.code().as_deref() == Some("55P03")
+    )
 }
 
 #[cfg(test)]

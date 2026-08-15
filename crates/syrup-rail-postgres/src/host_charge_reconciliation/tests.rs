@@ -18,6 +18,8 @@ use crate::{
     test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account},
 };
 
+mod progress;
+
 struct ReconciliationTargets;
 
 #[async_trait]

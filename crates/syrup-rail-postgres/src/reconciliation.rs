@@ -24,10 +24,10 @@ mod classification;
 
 const PAYMENT_METHOD_REPLACEMENT_STALE_AFTER_SECONDS: i64 = 3 * 60;
 pub(crate) const RECONCILIATION_PHASE_BATCH_SIZE: i64 = 100;
+pub(crate) const RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS: i64 = 60;
 const STALE_PAYMENT_METHOD_REPLACEMENT_RESPONSE_TEXT: &str =
     "Payment method update was abandoned before gateway submission.";
 const PROCESSOR_CHARGE_CANDIDATE_PAGE_SIZE: i64 = 128;
-const EXACT_REQUERY_AFTER_SECONDS: i64 = 60;
 const EXACT_STALE_AFTER_SECONDS: i64 = 30 * 60;
 const EXACT_RECENT_TERMINAL_SECONDS: i64 = 24 * 60 * 60;
 const EXACT_EMPTY_REVIEW_KEEPALIVE_TEXT: &str =
@@ -223,7 +223,7 @@ pub async fn claim_exact_reconciliation_attempts(
         "#,
     )
     .bind(gateway_account_id.as_uuid())
-    .bind(EXACT_REQUERY_AFTER_SECONDS)
+    .bind(RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS)
     .bind(EXACT_STALE_AFTER_SECONDS)
     .bind(EXACT_RECENT_TERMINAL_SECONDS)
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)

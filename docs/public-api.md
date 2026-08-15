@@ -51,9 +51,11 @@ These phases perform no provider I/O and are safe to repeat; bounded phases
 belong in every scheduled pass so skipped locks and backlogs make progress.
 Host-charge cleanup requires the host's `HostChargeTargetStore` and changes the
 target and canonical attempt atomically. Its summary reports target outcomes
-that were safely skipped, so the host can alert on that target while unrelated
-work and the account's remaining reconciliation phases continue. Exact
-provider queries are reserved for attempts with `submitted_at IS NOT NULL`.
+that were safely skipped; a durable scheduling claim places those rows behind
+unclaimed work without changing their financial outcome, so the host can alert
+on that target while unrelated work and the account's remaining reconciliation
+phases continue. Exact provider queries are reserved for attempts with
+`submitted_at IS NOT NULL`.
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
