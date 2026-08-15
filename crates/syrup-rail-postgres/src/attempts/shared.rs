@@ -44,6 +44,18 @@ pub(crate) enum AttemptReplayDisposition {
     ReturnCanonical,
 }
 
+/// The immutable first-stage decision for subscriber-initiated preflight.
+///
+/// Only attempts that may resume or need local repair reach the aggregate-lock
+/// stage. A matching canonical replay is complete without mutable subscription
+/// context and must not inherit its lock availability.
+pub(super) enum ExistingAttemptPreflight {
+    Continue,
+    IdempotencyConflict,
+    ReplayCanonical(Box<PaymentAttempt>),
+    RequiresLockedContext,
+}
+
 pub(crate) fn attempt_replay_disposition(attempt: &PaymentAttempt) -> AttemptReplayDisposition {
     attempt_replay_disposition_for(
         attempt.status(),
@@ -62,6 +74,38 @@ const fn attempt_replay_disposition_for(
         }
         _ => AttemptReplayDisposition::ReturnCanonical,
     }
+}
+
+pub(super) async fn preflight_existing_attempt(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    idempotency_key: &IdempotencyKey,
+    matches_command: impl FnOnce(&PaymentAttempt) -> bool,
+) -> Result<ExistingAttemptPreflight, PaymentAttemptStoreError> {
+    let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        billing_scope_id,
+        subscriber_id,
+        idempotency_key,
+        false,
+    )
+    .await?
+    else {
+        return Ok(ExistingAttemptPreflight::Continue);
+    };
+    if !matches_command(&existing) {
+        return Ok(ExistingAttemptPreflight::IdempotencyConflict);
+    }
+    Ok(match attempt_replay_disposition(&existing) {
+        AttemptReplayDisposition::ReturnCanonical => {
+            ExistingAttemptPreflight::ReplayCanonical(Box::new(existing))
+        }
+        AttemptReplayDisposition::ResumePrepared
+        | AttemptReplayDisposition::RepairUnsubmittedReview => {
+            ExistingAttemptPreflight::RequiresLockedContext
+        }
+    })
 }
 
 /// The exact gateway identity a locked database row must still expose before

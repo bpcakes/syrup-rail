@@ -656,6 +656,20 @@ async fn enrollment_fixture(
     })
 }
 
+async fn hold_subscription_aggregate_lock(
+    pool: &sqlx::PgPool,
+    subscriber_id: Uuid,
+    plan_key: &str,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(subscriber_id)
+        .bind(plan_key)
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
 fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
     approved_outcome_with_reference(Some(transaction_id), "vault_application")
 }

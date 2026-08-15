@@ -278,24 +278,25 @@ pub async fn preflight_subscription_enrollment_in_transaction(
     command: &syrup_rail::EnrollSubscription,
 ) -> Result<SubscriptionEnrollmentPreflightOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
-    let Some(existing) = payment_attempt_by_idempotency(
+    match preflight_existing_attempt(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        false,
+        |existing| replay_matches_command(existing, command),
     )
     .await?
-    else {
-        return Ok(SubscriptionEnrollmentPreflightOutcome::Continue);
-    };
-    if !replay_matches_command(&existing, command) {
-        return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
-    }
-    if attempt_replay_disposition(&existing) == AttemptReplayDisposition::ReturnCanonical {
-        return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
-            existing,
-        )));
+    {
+        ExistingAttemptPreflight::Continue => {
+            return Ok(SubscriptionEnrollmentPreflightOutcome::Continue);
+        }
+        ExistingAttemptPreflight::IdempotencyConflict => {
+            return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
+        }
+        ExistingAttemptPreflight::ReplayCanonical(existing) => {
+            return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(existing));
+        }
+        ExistingAttemptPreflight::RequiresLockedContext => {}
     }
 
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;

@@ -309,7 +309,14 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     .await?;
     assert_eq!(discount, (2, "active".to_owned(), 800));
 
+    let aggregate_lock = hold_subscription_aggregate_lock(
+        &fixture.database.pool,
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
+    )
+    .await?;
     let replay = service.recover(command.clone()).await?;
+    aggregate_lock.rollback().await?;
     assert_eq!(replay, result);
     assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
@@ -549,7 +556,14 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
+    let aggregate_lock = hold_subscription_aggregate_lock(
+        &fixture.database.pool,
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
+    )
+    .await?;
     let replay = service.replace_payment_method(command.clone()).await?;
+    aggregate_lock.rollback().await?;
     assert_eq!(replay, result);
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
