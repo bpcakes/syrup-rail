@@ -11,6 +11,7 @@ use crate::test_support::{
 
 use self::support::*;
 
+mod local_attempts;
 mod support;
 
 #[tokio::test]
@@ -437,37 +438,6 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
     )
     .await?;
 
-    let stale_local_charge = insert_due_subscription_at(
-        &database.pool,
-        account,
-        "stale-local-charge-plan",
-        Uuid::from_u128(14),
-        due_at,
-    )
-    .await?;
-    insert_renewal_attempt(
-        &database.pool,
-        account,
-        &stale_local_charge,
-        due_at,
-        "subscription_recovery",
-        "review_required",
-        None,
-        None,
-    )
-    .await?;
-    sqlx::query(
-        r#"
-        UPDATE billing_payment_attempts
-        SET created_at = clock_timestamp() - interval '31 minutes',
-            updated_at = clock_timestamp() - interval '31 minutes'
-        WHERE subscription_id = $1
-        "#,
-    )
-    .bind(stale_local_charge.subscription_id)
-    .execute(&database.pool)
-    .await?;
-
     let payment_method_update = insert_due_subscription_at(
         &database.pool,
         account,
@@ -558,7 +528,6 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
         included.subscription_id,
         stale_update.subscription_id,
         past_due.subscription_id,
-        stale_local_charge.subscription_id,
     ]
     .into_iter()
     .collect::<HashSet<_>>();
