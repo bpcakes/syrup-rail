@@ -13,6 +13,17 @@ All notable changes to the Syrup Rail crates are documented in this file.
   exclude every never-submitted attempt from exact gateway reconciliation.
 - Preserve exact gateway-readiness failure categories after reservation while
   keeping retry-safe prepared attempts pending on transient unavailability.
+- Retire stale unsubmitted host charges together with their host-owned targets,
+  and stop stale local attempts from blocking entitlement and deletion reads.
+
+### Migration
+
+- Hosts upgrading an existing 0.2.0 deployment must extend each gateway
+  account's reconciliation pass with the local payment-method replacement,
+  subscription charge, enrollment, and (when configured) host-charge cleanup
+  phases before claiming attempts for exact provider queries. These cleanup
+  phases retire attempts that never crossed the provider boundary; run the
+  bounded phases on every scheduled pass so a backlog drains safely.
 
 ## [0.2.0] - 2026-08-13
 

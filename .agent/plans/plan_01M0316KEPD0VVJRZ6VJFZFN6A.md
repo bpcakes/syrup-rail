@@ -23,8 +23,8 @@ database transaction.
   are already locally abandoned by each operation's canonical age policy;
   added fresh-versus-stale entitlement coverage, deletion coverage, and
   refreshed the one affected SQLx query artifact.
-- [ ] Document the reconciliation phase order and patch-release integration
-  requirement.
+- [x] (2026-08-15) Documented the local-before-exact reconciliation phase
+  order and the patch-upgrade integration requirement for existing hosts.
 - [ ] Run focused tests, repository checks, gates, and final diff review.
 
 ## Surprises & Discoveries

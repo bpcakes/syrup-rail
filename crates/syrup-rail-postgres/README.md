@@ -58,6 +58,30 @@ error only by classifying the outer service error, destructuring an owned
 callback-error variant, and consuming that wrapper with `into_source()` in a
 protected diagnostic path.
 
+## Reconciliation phase order
+
+The host owns the reconciliation scheduler. For each account returned by
+`reconciliation_gateway_accounts`, run the local-only cleanup phases before
+calling `claim_exact_reconciliation_attempts`:
+
+1. `fail_stale_unsubmitted_payment_method_replacements`;
+2. `fail_stale_unsubmitted_subscription_charges`;
+3. `fail_stale_unsubmitted_subscription_enrollments`; and
+4. `fail_stale_unsubmitted_host_charges` when host charges are configured.
+
+The host-charge phase also requires the host's `HostChargeTargetStore`; it
+releases the host-owned target and fails the canonical attempt in one database
+transaction. Local cleanup never contacts the gateway. The cleanup functions
+are safe to repeat, and the bounded phases should run on every scheduled pass
+so locked work or a backlog is retried later. Exact provider queries are only
+for attempts whose `submitted_at` proves that submission began.
+
+An existing 0.2.0 host must add the subscription-charge phase, plus the
+host-charge phase when host charges are configured, to its reconciliation loop
+when upgrading to the next patch release. Omitting them leaves abandoned local
+rows for foreground reads or later cleanup even though exact reconciliation
+correctly excludes never-submitted attempts.
+
 Customer billing portal/history queries, stable due-renewal pagination, and
 other lower-level transaction-local operations remain available for hosts that
 need to compose them into a larger application transaction. The protected-write
