@@ -218,7 +218,8 @@ pub(crate) async fn expire_stale_initial_attempts(
             ),
             resolved_at = clock_timestamp(), updated_at = clock_timestamp()
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
-            AND attempt_kind = 'subscription_initial' AND status = 'pending'
+            AND attempt_kind = 'subscription_initial'
+            AND status IN ('pending', 'review_required')
             AND submitted_at IS NULL
             AND created_at <= clock_timestamp()
                 - ($5::bigint * interval '1 second')

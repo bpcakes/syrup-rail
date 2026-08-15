@@ -11,6 +11,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
   their persisted attempt and gateway order identities.
 - Expire abandoned unsubmitted renewal and recovery attempts locally, and
   exclude every never-submitted attempt from exact gateway reconciliation.
+- Locally expire never-submitted initial attempts that version 0.2.0 exact
+  reconciliation had already parked as `review_required`.
 - Preserve exact gateway-readiness failure categories after reservation while
   keeping retry-safe prepared attempts pending on transient unavailability.
 - Retire stale unsubmitted host charges together with their host-owned targets,
@@ -23,7 +25,9 @@ All notable changes to the Syrup Rail crates are documented in this file.
   subscription charge, enrollment, and (when configured) host-charge cleanup
   phases before claiming attempts for exact provider queries. These cleanup
   phases retire attempts that never crossed the provider boundary; run the
-  bounded phases on every scheduled pass so a backlog drains safely.
+  bounded phases on every scheduled pass so a backlog drains safely. The
+  enrollment phase automatically repairs affected 0.2.0 `review_required`
+  rows; no schema migration or manual backfill is required.
 
 ## [0.2.0] - 2026-08-13
 

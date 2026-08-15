@@ -87,7 +87,9 @@ An existing 0.2.0 host must add the subscription-charge phase, plus the
 host-charge phase when host charges are configured, to its reconciliation loop
 when upgrading to the next patch release. Omitting them leaves abandoned local
 rows for foreground reads or later cleanup even though exact reconciliation
-correctly excludes never-submitted attempts.
+correctly excludes never-submitted attempts. The existing enrollment phase also
+repairs never-submitted initial attempts that 0.2.0 may already have parked as
+`review_required`; no schema migration or manual backfill is required.
 
 Customer billing portal/history queries, stable due-renewal pagination, and
 other lower-level transaction-local operations remain available for hosts that

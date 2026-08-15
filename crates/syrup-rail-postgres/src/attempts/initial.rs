@@ -42,9 +42,6 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         if !replay_matches_reservation(&existing, reservation) {
             return Ok(SubscriptionEnrollmentReservationOutcome::IdempotencyConflict);
         }
-        if attempt_is_already_replayable(&existing) {
-            return Ok(SubscriptionEnrollmentReservationOutcome::Replay(existing));
-        }
         if initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
             lock_initial_attempt_rows(
                 transaction,
@@ -77,6 +74,9 @@ pub async fn reserve_subscription_enrollment_in_transaction(
             .await?
             .ok_or_else(invalid_state)?;
             return Ok(SubscriptionEnrollmentReservationOutcome::Replay(expired));
+        }
+        if attempt_is_already_replayable(&existing) {
+            return Ok(SubscriptionEnrollmentReservationOutcome::Replay(existing));
         }
     }
 
@@ -284,7 +284,10 @@ pub async fn preflight_subscription_enrollment_in_transaction(
     if !replay_matches_command(&existing, command) {
         return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
     }
-    if attempt_is_already_replayable(&existing) {
+    if attempt_is_already_replayable(&existing)
+        && !(existing.status() == PaymentAttemptStatus::ReviewRequired
+            && existing.state().timestamps().submitted_at().is_none())
+    {
         return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
             existing,
         )));
@@ -303,12 +306,12 @@ pub async fn preflight_subscription_enrollment_in_transaction(
     if !replay_matches_command(&existing, command) {
         return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
     }
-    if attempt_is_already_replayable(&existing) {
-        return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
-            existing,
-        )));
-    }
     if !initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
+        if attempt_is_already_replayable(&existing) {
+            return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
+                existing,
+            )));
+        }
         return Ok(SubscriptionEnrollmentPreflightOutcome::Continue);
     }
 

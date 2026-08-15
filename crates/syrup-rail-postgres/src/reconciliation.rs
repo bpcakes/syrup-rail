@@ -483,7 +483,7 @@ pub async fn fail_stale_unsubmitted_subscription_enrollments(
         FROM billing_payment_attempts
         WHERE gateway_account_id = $1
             AND attempt_kind = 'subscription_initial'
-            AND status = 'pending'
+            AND status IN ('pending', 'review_required')
             AND submitted_at IS NULL
             AND created_at <= clock_timestamp() - interval '30 minutes'
         ORDER BY billing_scope_id, subscriber_id, plan_key

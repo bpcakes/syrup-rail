@@ -3,6 +3,66 @@ use chrono::{DateTime, Duration, Utc};
 use super::*;
 
 #[tokio::test]
+async fn legacy_unsubmitted_initial_review_is_failed_locally_and_unblocks_enrollment()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("recon_init_rev").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "test_gateway").await?;
+        let subscriber_id = Uuid::now_v7();
+        let plan_key = "legacy_review";
+        let legacy =
+            insert_stale_enrollment(&database.pool, account, subscriber_id, plan_key).await?;
+        sqlx::query(
+            r#"
+            UPDATE billing_payment_attempts
+            SET status = 'review_required',
+                gateway_response_text = 'legacy empty exact-query observation'
+            WHERE id = $1
+            "#,
+        )
+        .bind(legacy)
+        .execute(&database.pool)
+        .await?;
+
+        assert!(
+            claim_exact_reconciliation_attempts(
+                &database.pool,
+                GatewayAccountId::new(account.gateway_account_id),
+            )
+            .await?
+            .is_empty()
+        );
+        assert_eq!(
+            fail_stale_unsubmitted_subscription_enrollments(
+                &database.pool,
+                GatewayAccountId::new(account.gateway_account_id),
+            )
+            .await?,
+            1
+        );
+        let state: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts WHERE id = $1",
+        )
+        .bind(legacy)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(state.0, "failed");
+        assert_eq!(
+            state.1.as_deref(),
+            Some("subscription_initial_prepared_attempt_expired")
+        );
+        assert!(state.2.is_none());
+
+        insert_stale_enrollment(&database.pool, account, subscriber_id, plan_key).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn stale_local_subscription_charges_fail_without_exact_query() -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("recon_charge").await?;
     let result = async {

@@ -285,6 +285,106 @@ async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offe
 }
 
 #[tokio::test]
+async fn legacy_unsubmitted_review_replay_expires_before_live_policy() -> Result<(), Box<dyn Error>>
+{
+    let database = TestDatabase::start("enroll_review").await?;
+    install_host_offers(&database).await?;
+    let account = create_gateway_account(&database.pool, "nmi").await?;
+    let plan_key = "base_subscription";
+    set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+    let gateway = resolved_gateway(account);
+    let subscriber_id = Uuid::now_v7();
+    let command = enrollment_command(
+        account,
+        subscriber_id,
+        Uuid::now_v7(),
+        "legacy-review",
+        full_price(plan_key, 1_000),
+    );
+    let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let mut transaction = database.pool.begin().await?;
+    let prepared = match reserve_subscription_enrollment_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &reservation,
+    )
+    .await?
+    {
+        SubscriptionEnrollmentReservationOutcome::Reserved(attempt) => attempt,
+        other => return Err(format!("unexpected reservation outcome: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'review_required',
+            gateway_response_text = 'legacy empty exact-query observation',
+            created_at = clock_timestamp() - interval '31 minutes'
+        WHERE id = $1
+        "#,
+    )
+    .bind(prepared.identity().attempt_id().as_uuid())
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
+    )
+    .bind(account.billing_scope_id)
+    .bind(plan_key)
+    .execute(&database.pool)
+    .await?;
+
+    let replay_command = enrollment_command(
+        account,
+        subscriber_id,
+        Uuid::now_v7(),
+        "legacy-review",
+        full_price(plan_key, 1_000),
+    );
+    let mut transaction = database.pool.begin().await?;
+    let replay =
+        preflight_subscription_enrollment_in_transaction(&mut transaction, &replay_command).await?;
+    let SubscriptionEnrollmentPreflightOutcome::Replay(expired) = replay else {
+        return Err(format!("unexpected legacy review replay: {replay:?}").into());
+    };
+    assert_eq!(
+        expired.identity().attempt_id(),
+        prepared.identity().attempt_id()
+    );
+    assert_eq!(expired.status(), PaymentAttemptStatus::Failed);
+    assert_eq!(
+        expired.state().resolution_code(),
+        Some(PaymentResolutionCode::SubscriptionInitialPreparedAttemptExpired)
+    );
+    assert!(expired.state().timestamps().submitted_at().is_none());
+    transaction.commit().await?;
+
+    set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+    let replacement = SubscriptionEnrollmentReservation::from_command(
+        &enrollment_command(
+            account,
+            subscriber_id,
+            Uuid::now_v7(),
+            "replacement-key",
+            full_price(plan_key, 1_000),
+        ),
+        &gateway,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    assert!(matches!(
+        reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &replacement,
+        )
+        .await?,
+        SubscriptionEnrollmentReservationOutcome::Reserved(_)
+    ));
+    transaction.commit().await?;
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn saved_discount_survives_repricing_but_not_pre_submission_expiry()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("enroll_discount").await?;

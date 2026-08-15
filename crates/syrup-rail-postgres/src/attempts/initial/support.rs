@@ -7,7 +7,7 @@ pub(super) async fn initial_attempt_is_stale(
     sqlx::query_scalar(
         r#"
         SELECT attempt_kind = 'subscription_initial'
-            AND status = 'pending'
+            AND status IN ('pending', 'review_required')
             AND submitted_at IS NULL
             AND created_at <= clock_timestamp()
                 - ($2::bigint * interval '1 second')
