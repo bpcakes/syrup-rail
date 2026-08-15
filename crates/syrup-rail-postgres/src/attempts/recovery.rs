@@ -99,7 +99,7 @@ async fn expire_stale_recovery_context_and_reload(
     let Some(subscription_id) = attempt.request().target().subscription_id() else {
         return Err(invalid_state());
     };
-    fail_stale_unsubmitted_subscription_charges(&mut **transaction, subscription_id).await?;
+    fail_stale_unsubmitted_subscription_charges(transaction, subscription_id).await?;
     find_payment_attempt_by_id_in_transaction(
         transaction,
         attempt.identity().billing_scope_id(),
@@ -365,7 +365,7 @@ pub async fn reserve_subscription_recovery_in_transaction(
 
     let subscription_id = SubscriptionId::new(row.try_get("id")?);
     fail_stale_unsubmitted_payment_method_updates(transaction, subscription_id).await?;
-    fail_stale_unsubmitted_subscription_charges(&mut **transaction, subscription_id).await?;
+    fail_stale_unsubmitted_subscription_charges(transaction, subscription_id).await?;
     let gateway_account_id = GatewayAccountId::new(row.try_get("gateway_account_id")?);
     let expected_gateway = ExpectedGatewayIdentity::for_gateway(
         command.billing_scope_id(),
@@ -458,8 +458,7 @@ pub async fn admit_subscription_recovery_submission_in_transaction(
     .await?;
     fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
         .await?;
-    fail_stale_unsubmitted_subscription_charges(&mut **transaction, reservation.subscription_id())
-        .await?;
+    fail_stale_unsubmitted_subscription_charges(transaction, reservation.subscription_id()).await?;
     let attempt = payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),

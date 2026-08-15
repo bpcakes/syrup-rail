@@ -337,7 +337,7 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
     }
     let subscription_id = SubscriptionId::new(row.try_get("id")?);
     fail_stale_unsubmitted_payment_method_updates(transaction, subscription_id).await?;
-    fail_stale_unsubmitted_subscription_charges(&mut **transaction, subscription_id).await?;
+    fail_stale_unsubmitted_subscription_charges(transaction, subscription_id).await?;
     if blocking_subscription_charge_attempt_exists_for_method_replacement(
         transaction,
         subscription_id,
@@ -442,8 +442,7 @@ pub async fn admit_subscription_payment_method_replacement_in_transaction(
     .await?;
     fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
         .await?;
-    fail_stale_unsubmitted_subscription_charges(&mut **transaction, reservation.subscription_id())
-        .await?;
+    fail_stale_unsubmitted_subscription_charges(transaction, reservation.subscription_id()).await?;
     let attempt = payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
