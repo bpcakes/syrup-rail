@@ -28,6 +28,12 @@ All notable changes to the Syrup Rail crates are documented in this file.
   bounded phases on every scheduled pass so a backlog drains safely. The
   enrollment phase automatically repairs affected 0.2.0 `review_required`
   rows; no schema migration or manual backfill is required.
+- Subscriber and host-charge mutations may now return an exact
+  `GatewayReadiness` error after committing a token-free attempt. Transient
+  unavailability leaves it pending; determinate readiness failures persist a
+  terminal result first. Hosts must not infer that `Err` means no durable
+  attempt exists and must reuse the same idempotency key to recover or resume
+  that canonical result.
 
 ## [0.2.0] - 2026-08-13
 

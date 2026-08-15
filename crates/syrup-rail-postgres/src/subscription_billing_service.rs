@@ -225,6 +225,13 @@ pub enum SubscriptionBillingServiceError {
     #[error("gateway mutation was not submitted")]
     GatewayNotSubmitted(#[source] GatewayNotSubmittedError),
     /// The gateway readiness query failed before mutation submission.
+    ///
+    /// This error does not by itself prove that no durable attempt exists. If
+    /// readiness fails after reservation, transient unavailability leaves the
+    /// prepared attempt retryable, while a determinate readiness failure may
+    /// terminalize it with an exact resolution code before returning this
+    /// error. Replaying the same command and idempotency key recovers that
+    /// canonical result before admission, resolution, or provider I/O.
     #[error("gateway readiness check failed")]
     GatewayReadiness(#[source] GatewayError),
     /// Durable canonical state violated an invariant required by the facade.

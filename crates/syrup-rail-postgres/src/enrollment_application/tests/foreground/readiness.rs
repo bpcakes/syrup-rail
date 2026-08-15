@@ -159,7 +159,7 @@ async fn foreground_unavailable_readiness_keeps_the_prepared_attempt_retryable()
 }
 
 #[tokio::test]
-async fn foreground_configuration_readiness_keeps_its_exact_failure_code()
+async fn foreground_configuration_readiness_is_typed_and_same_key_recovers_terminal_result()
 -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("svc_ready_config", false, false, false).await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
@@ -168,16 +168,18 @@ async fn foreground_configuration_readiness_keeps_its_exact_failure_code()
         )))],
         Ok(approved_outcome("txn_config_must_not_submit")),
     ));
+    let resolver = Arc::new(StaticResolver {
+        gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway)),
+        calls: AtomicUsize::new(0),
+    });
+    let admission = Arc::new(PermitAdmission {
+        calls: AtomicUsize::new(0),
+    });
     let service = SubscriptionBillingService::new(
         fixture.database.pool.clone(),
         Arc::new(TestOfferStore),
-        Arc::new(StaticResolver {
-            gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway)),
-            calls: AtomicUsize::new(0),
-        }),
-        Arc::new(PermitAdmission {
-            calls: AtomicUsize::new(0),
-        }),
+        resolver.clone(),
+        admission.clone(),
         Arc::new(fixture.coordinator.clone()),
     );
 
@@ -202,6 +204,19 @@ async fn foreground_configuration_readiness_keeps_its_exact_failure_code()
             Some("gateway_configuration_before_submission".to_owned())
         )
     );
+    let replay = service.enroll(fixture.command.clone()).await?;
+    assert_eq!(replay.attempt().status(), PaymentAttemptStatus::Failed);
+    assert_eq!(
+        replay.attempt().identity().attempt_id(),
+        fixture.command.attempt_id()
+    );
+    assert_eq!(
+        replay.attempt().state().resolution_code(),
+        Some(PaymentResolutionCode::GatewayConfigurationBeforeSubmission)
+    );
+    assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 1);
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
     fixture.cleanup().await
 }

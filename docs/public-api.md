@@ -24,6 +24,16 @@ composition guide. `SubscriptionBillingServiceError::disposition()` is the
 stable operational classification boundary; callers retain a wildcard because
 the error and disposition enums are non-exhaustive.
 
+A `GatewayReadiness` error does not imply that no attempt was committed. For
+subscriber and host-charge mutations whose readiness query fails after a
+token-free reservation, transient `Unavailable` keeps the prepared attempt
+pending, while a determinate `RequestRejected`, `Malformed`, or `Configuration`
+failure records the exact terminal resolution before returning the typed
+error. Reissue only the same command and idempotency key to recover or resume
+the canonical result; terminal replay completes before host admission, gateway
+resolution, readiness, or provider mutation. Do not replace the key merely
+because the first call returned `Err`.
+
 ## Read and scheduler surface
 
 Use `subscription_billing_portal` and `subscription_payment_history_page` for

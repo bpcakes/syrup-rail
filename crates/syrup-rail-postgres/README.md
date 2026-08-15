@@ -58,6 +58,13 @@ error only by classifying the outer service error, destructuring an owned
 callback-error variant, and consuming that wrapper with `into_source()` in a
 protected diagnostic path.
 
+`GatewayReadiness` can be returned after a token-free attempt was committed.
+At that boundary, transient unavailability leaves the attempt pending for the
+same-key retry, while determinate readiness failures first persist their exact
+terminal resolution. Replaying the same command and idempotency key returns or
+resumes the canonical attempt before host admission or gateway I/O; an error is
+not permission to substitute a new key.
+
 ## Reconciliation phase order
 
 The host owns the reconciliation scheduler. For each account returned by
