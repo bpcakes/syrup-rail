@@ -78,12 +78,12 @@ async fn recovery_attempt_for_replay(
     transaction: &mut Transaction<'_, Postgres>,
     attempt: PaymentAttempt,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical {
+    if attempt_replay_disposition(&attempt) == AttemptReplayDisposition::ReturnCanonical {
         return Ok(Some(attempt));
     }
 
     let attempt = expire_stale_recovery_context_and_reload(transaction, &attempt).await?;
-    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical
+    if attempt_replay_disposition(&attempt) == AttemptReplayDisposition::ReturnCanonical
         || recovery_attempt_matches_replay_context(transaction, &attempt).await?
     {
         Ok(Some(attempt))

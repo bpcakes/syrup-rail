@@ -29,25 +29,38 @@ pub(crate) const STALE_UNSUBMITTED_RENEWAL_TEXT: &str =
 pub(crate) const STALE_UNSUBMITTED_RECOVERY_TEXT: &str =
     "Subscription recovery was abandoned before gateway submission.";
 
-/// The only two replay phases exposed by a durable payment attempt.
+/// The replay action for a durable payment attempt.
 ///
-/// Mutable billing context is relevant only while a prepared attempt could
-/// still cause provider I/O. Once an attempt was submitted or terminalized,
-/// its immutable request and durable result are the canonical idempotency
-/// response even if the surrounding subscription later changes.
+/// Provider submission and storage status are separate dimensions. A prepared
+/// attempt can resume, while a `review_required` attempt that never crossed the
+/// provider boundary must first be checked for local expiry. Once an attempt
+/// was submitted or terminalized, its immutable request and durable result are
+/// the canonical idempotency response even if the surrounding subscription
+/// later changes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AttemptReplayPhase {
+pub(crate) enum AttemptReplayDisposition {
     ResumePrepared,
+    RepairUnsubmittedReview,
     ReturnCanonical,
 }
 
-pub(crate) fn attempt_replay_phase(attempt: &PaymentAttempt) -> AttemptReplayPhase {
-    if attempt.status() == PaymentAttemptStatus::Pending
-        && attempt.state().timestamps().submitted_at().is_none()
-    {
-        AttemptReplayPhase::ResumePrepared
-    } else {
-        AttemptReplayPhase::ReturnCanonical
+pub(crate) fn attempt_replay_disposition(attempt: &PaymentAttempt) -> AttemptReplayDisposition {
+    attempt_replay_disposition_for(
+        attempt.status(),
+        attempt.state().timestamps().submitted_at().is_some(),
+    )
+}
+
+const fn attempt_replay_disposition_for(
+    status: PaymentAttemptStatus,
+    was_submitted: bool,
+) -> AttemptReplayDisposition {
+    match (status, was_submitted) {
+        (PaymentAttemptStatus::Pending, false) => AttemptReplayDisposition::ResumePrepared,
+        (PaymentAttemptStatus::ReviewRequired, false) => {
+            AttemptReplayDisposition::RepairUnsubmittedReview
+        }
+        _ => AttemptReplayDisposition::ReturnCanonical,
     }
 }
 
@@ -311,7 +324,8 @@ pub(super) async fn fail_stale_unsubmitted_payment_method_updates(
             updated_at = clock_timestamp()
         WHERE attempt_kind = 'subscription_payment_method_update'
             AND subscription_id = $1
-            AND status = 'pending' AND submitted_at IS NULL
+            AND status IN ('pending', 'review_required')
+            AND submitted_at IS NULL
             AND created_at <= clock_timestamp()
                 - ($2::bigint * interval '1 second')
         "#,
@@ -417,4 +431,39 @@ pub(super) async fn blocking_payment_method_update_exists(
     .bind(subscription_id.as_uuid())
     .fetch_one(&mut **transaction)
     .await
+}
+
+#[cfg(test)]
+mod replay_disposition_tests {
+    use super::*;
+
+    #[test]
+    fn replay_disposition_keeps_local_review_distinct_from_prepared_and_canonical() {
+        assert_eq!(
+            attempt_replay_disposition_for(PaymentAttemptStatus::Pending, false),
+            AttemptReplayDisposition::ResumePrepared,
+        );
+        assert_eq!(
+            attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, false),
+            AttemptReplayDisposition::RepairUnsubmittedReview,
+        );
+
+        for status in PaymentAttemptStatus::ALL {
+            assert_eq!(
+                attempt_replay_disposition_for(status, true),
+                AttemptReplayDisposition::ReturnCanonical,
+            );
+        }
+        for status in [
+            PaymentAttemptStatus::Approved,
+            PaymentAttemptStatus::Declined,
+            PaymentAttemptStatus::Unknown,
+            PaymentAttemptStatus::Failed,
+        ] {
+            assert_eq!(
+                attempt_replay_disposition_for(status, false),
+                AttemptReplayDisposition::ReturnCanonical,
+            );
+        }
+    }
 }

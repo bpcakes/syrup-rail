@@ -375,8 +375,10 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     sqlx::query(
         r#"
         UPDATE billing_payment_attempts
-        SET created_at = clock_timestamp() - interval '31 minutes',
-            updated_at = clock_timestamp() - interval '31 minutes'
+        SET status = 'review_required',
+            gateway_response_text = 'Legacy exact query found no transaction.',
+            created_at = clock_timestamp() - interval '31 minutes',
+            updated_at = clock_timestamp()
         WHERE id = $1
         "#,
     )
@@ -607,8 +609,10 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     sqlx::query(
         r#"
         UPDATE billing_payment_attempts
-        SET created_at = clock_timestamp() - interval '4 minutes',
-            updated_at = clock_timestamp() - interval '4 minutes'
+        SET status = 'review_required',
+            gateway_response_text = 'Persisted local review before submission.',
+            created_at = clock_timestamp() - interval '4 minutes',
+            updated_at = clock_timestamp()
         WHERE id = $1
         "#,
     )

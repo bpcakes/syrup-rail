@@ -80,13 +80,13 @@ async fn payment_method_replacement_attempt_for_replay(
     transaction: &mut Transaction<'_, Postgres>,
     attempt: PaymentAttempt,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical {
+    if attempt_replay_disposition(&attempt) == AttemptReplayDisposition::ReturnCanonical {
         return Ok(Some(attempt));
     }
 
     let attempt =
         expire_stale_payment_method_replacement_context_and_reload(transaction, &attempt).await?;
-    if attempt_replay_phase(&attempt) == AttemptReplayPhase::ReturnCanonical
+    if attempt_replay_disposition(&attempt) == AttemptReplayDisposition::ReturnCanonical
         || payment_method_replacement_attempt_matches_replay_context(transaction, &attempt).await?
     {
         Ok(Some(attempt))

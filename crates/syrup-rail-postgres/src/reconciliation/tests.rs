@@ -220,8 +220,20 @@ async fn stale_payment_method_replacement_cleanup_is_bounded_and_account_scoped(
     let result = async {
         let account = create_gateway_account(&database.pool, "test_gateway").await?;
         let sibling = create_gateway_account(&database.pool, "test_gateway").await?;
-        for position in 0..=RECONCILIATION_PHASE_BATCH_SIZE {
-            insert_stale_payment_method_replacement(
+        let unsubmitted_review = insert_stale_payment_method_replacement(
+            &database.pool,
+            account.billing_scope_id,
+            account.gateway_account_id,
+            account.gateway_configuration_id,
+            0,
+        )
+        .await?;
+        sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
+            .bind(unsubmitted_review)
+            .execute(&database.pool)
+            .await?;
+        for position in 1..=RECONCILIATION_PHASE_BATCH_SIZE {
+            let _ = insert_stale_payment_method_replacement(
                 &database.pool,
                 account.billing_scope_id,
                 account.gateway_account_id,
@@ -230,7 +242,7 @@ async fn stale_payment_method_replacement_cleanup_is_bounded_and_account_scoped(
             )
             .await?;
         }
-        insert_stale_payment_method_replacement(
+        let _ = insert_stale_payment_method_replacement(
             &database.pool,
             sibling.billing_scope_id,
             sibling.gateway_account_id,
@@ -262,6 +274,10 @@ async fn stale_payment_method_replacement_cleanup_is_bounded_and_account_scoped(
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(sibling_status, "pending");
+        assert_eq!(
+            attempt_status(&database.pool, unsubmitted_review).await?,
+            "failed"
+        );
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
@@ -276,7 +292,7 @@ async fn insert_stale_payment_method_replacement(
     gateway_account_id: Uuid,
     gateway_configuration_id: Uuid,
     position: i64,
-) -> Result<(), sqlx::Error> {
+) -> Result<Uuid, sqlx::Error> {
     let subscriber_id = Uuid::now_v7();
     let payment_method_id = Uuid::now_v7();
     let subscription_id = Uuid::now_v7();
@@ -360,7 +376,7 @@ async fn insert_stale_payment_method_replacement(
     .bind(transaction_id)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(attempt_id)
 }
 
 #[tokio::test]

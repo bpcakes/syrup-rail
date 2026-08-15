@@ -48,7 +48,7 @@ use crate::{
     apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
     apply_reconciled_subscription_recovery_gateway_outcome,
     apply_reconciled_subscription_renewal_gateway_outcome,
-    attempts::{AttemptReplayPhase, AttemptResolutionStatus, attempt_replay_phase},
+    attempts::{AttemptReplayDisposition, AttemptResolutionStatus, attempt_replay_disposition},
     enrollment_application::{
         OutcomeResolutionBoundary, RateLimitCooldown, payment_result_for_attempt,
         resolve_non_approved_outcome, resolve_payment_method_replacement_non_approved_outcome,
@@ -639,7 +639,7 @@ fn preserve_concurrent_terminal_payment(
 }
 
 fn attempt_is_prepared(attempt: &PaymentAttempt) -> bool {
-    attempt_replay_phase(attempt) == AttemptReplayPhase::ResumePrepared
+    attempt_replay_disposition(attempt) == AttemptReplayDisposition::ResumePrepared
 }
 
 fn resolved_gateway_matches_attempt(

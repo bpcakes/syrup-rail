@@ -387,7 +387,7 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
             SELECT id
             FROM billing_payment_attempts
             WHERE attempt_kind = 'subscription_payment_method_update'
-                AND status = 'pending'
+                AND status IN ('pending', 'review_required')
                 AND submitted_at IS NULL
                 AND created_at <= clock_timestamp()
                     - ($1::bigint * interval '1 second')

@@ -75,7 +75,11 @@ pub async fn reserve_subscription_enrollment_in_transaction(
             .ok_or_else(invalid_state)?;
             return Ok(SubscriptionEnrollmentReservationOutcome::Replay(expired));
         }
-        if attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical {
+        if matches!(
+            attempt_replay_disposition(&existing),
+            AttemptReplayDisposition::RepairUnsubmittedReview
+                | AttemptReplayDisposition::ReturnCanonical
+        ) {
             return Ok(SubscriptionEnrollmentReservationOutcome::Replay(existing));
         }
     }
@@ -138,7 +142,11 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         true,
     )
     .await?
-        && attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical
+        && matches!(
+            attempt_replay_disposition(&existing),
+            AttemptReplayDisposition::RepairUnsubmittedReview
+                | AttemptReplayDisposition::ReturnCanonical
+        )
     {
         return Ok(if replay_matches_reservation(&existing, reservation) {
             SubscriptionEnrollmentReservationOutcome::Replay(existing)
@@ -284,10 +292,7 @@ pub async fn preflight_subscription_enrollment_in_transaction(
     if !replay_matches_command(&existing, command) {
         return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
     }
-    if attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical
-        && !(existing.status() == PaymentAttemptStatus::ReviewRequired
-            && existing.state().timestamps().submitted_at().is_none())
-    {
+    if attempt_replay_disposition(&existing) == AttemptReplayDisposition::ReturnCanonical {
         return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
             existing,
         )));
@@ -307,12 +312,17 @@ pub async fn preflight_subscription_enrollment_in_transaction(
         return Ok(SubscriptionEnrollmentPreflightOutcome::IdempotencyConflict);
     }
     if !initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
-        if attempt_replay_phase(&existing) == AttemptReplayPhase::ReturnCanonical {
-            return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
-                existing,
-            )));
+        match attempt_replay_disposition(&existing) {
+            AttemptReplayDisposition::ResumePrepared => {
+                return Ok(SubscriptionEnrollmentPreflightOutcome::Continue);
+            }
+            AttemptReplayDisposition::RepairUnsubmittedReview
+            | AttemptReplayDisposition::ReturnCanonical => {
+                return Ok(SubscriptionEnrollmentPreflightOutcome::Replay(Box::new(
+                    existing,
+                )));
+            }
         }
-        return Ok(SubscriptionEnrollmentPreflightOutcome::Continue);
     }
 
     lock_initial_attempt_rows(
