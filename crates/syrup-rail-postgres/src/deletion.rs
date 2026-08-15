@@ -201,6 +201,7 @@ mod tests {
     use super::scrub_subscriber_billing_data;
     use crate::test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account};
 
+    mod blocker_matrix;
     mod stale_attempts;
 
     struct ScrubFixture {
