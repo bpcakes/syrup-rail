@@ -26,9 +26,12 @@ I/O.
   expiry, dispatch/cancellation self-healing, and provider exact-query phase
   eligibility. Committed as `282f40d`.
 - [x] (2026-08-15) Implemented and focused-tested workflow-specific
-  gateway-readiness error mapping. The slice is ready to commit.
-- [ ] Run the repository's required gates, record evidence, review the final
-  diff, and finish this Jig work item.
+  gateway-readiness error mapping. Committed as `038e534`.
+- [x] (2026-08-15) Split the new regression coverage to satisfy repository
+  Rust-file limits (`c63554f`) and applied the Clippy-requested transaction
+  coercions (`3fb03e3`).
+- [x] (2026-08-15) Ran the repository's required gates, reviewed the final
+  commit range, and prepared the Jig evidence for closure.
 
 ## Surprises & Discoveries
 
@@ -97,24 +100,28 @@ I/O.
 
 ## Outcomes & Retrospective
 
-Work is in progress. On completion this section will list the three commit IDs,
-the exact accepted behavior, final gate results, and any residual risk.
+The three behavioral slices were completed independently:
 
-The first slice passes all nine focused foreground tests. Its crash-window tests
-prove the high-level retry returns the original durable attempt ID and sends the
-original durable gateway order ID for both a recovery sale and a stored-method
-mutation.
+- `ce1f861` resumes prepared recovery and payment-method replacement attempts.
+  Its crash-window tests prove the high-level retry returns the original
+  durable attempt ID and sends the original durable gateway order ID for both
+  a recovery sale and a stored-method mutation.
+- `282f40d` expires abandoned local subscription charges and restricts exact
+  reconciliation to attempts with durable submission evidence. Reconciliation,
+  renewal-dispatch, cancellation, and same-key recovery regressions prove the
+  repaired rows no longer block lifecycle work or cause provider queries.
+- `038e534` preserves workflow-specific gateway-readiness errors. Foreground
+  and service-policy tests prove prepared unavailability stays pending and
+  succeeds on same-key retry, configuration errors retain their exact code,
+  and renewal unavailability is not misclassified as a live-mode failure.
 
-The second slice passes the reconciliation, renewal-dispatch, cancellation, and
-same-key recovery regressions. It also repairs legacy unsubmitted
-`review_required` renewal/recovery rows locally and defensively refuses an
-exact-query observation if the current row has no `submitted_at` boundary.
-
-The third slice passes twelve foreground tests plus the service policy unit
-suite. It proves prepared unavailability stays pending and succeeds on the
-same-key retry, configuration readiness stores its exact configuration code,
-and post-reservation renewal unavailability stores
-`gateway_unavailable_before_submission` rather than a live-mode failure.
+The test-only source split is `c63554f`; the Clippy-only coercion cleanup is
+`3fb03e3`. Final validation passed `scripts/jig check fmt`, `clippy`, `test`,
+`test-locked`, `sqlx`, `contract`, `agent-map`, `no-mod-rs`, `rust-file-loc`,
+and `migration-immutability`, plus the Rust 1.88 locked workspace check, live
+RustSec audit, public API/doctest check, and both schema-immutability scripts.
+No schema artifact or SQLx metadata changed. The original untracked findings
+document remains unmodified and outside all implementation commits.
 
 ## Context and orientation
 

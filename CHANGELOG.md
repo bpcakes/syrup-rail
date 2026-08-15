@@ -4,6 +4,16 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Resume same-idempotency-key subscription recovery and payment-method
+  replacement attempts that were durably prepared but not submitted, reusing
+  their persisted attempt and gateway order identities.
+- Expire abandoned unsubmitted renewal and recovery attempts locally, and
+  exclude every never-submitted attempt from exact gateway reconciliation.
+- Preserve exact gateway-readiness failure categories after reservation while
+  keeping retry-safe prepared attempts pending on transient unavailability.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added
