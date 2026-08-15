@@ -23,7 +23,7 @@ use classification::{
 mod classification;
 
 const PAYMENT_METHOD_REPLACEMENT_STALE_AFTER_SECONDS: i64 = 3 * 60;
-const RECONCILIATION_PHASE_BATCH_SIZE: i64 = 100;
+pub(crate) const RECONCILIATION_PHASE_BATCH_SIZE: i64 = 100;
 const STALE_PAYMENT_METHOD_REPLACEMENT_RESPONSE_TEXT: &str =
     "Payment method update was abandoned before gateway submission.";
 const PROCESSOR_CHARGE_CANDIDATE_PAGE_SIZE: i64 = 128;
