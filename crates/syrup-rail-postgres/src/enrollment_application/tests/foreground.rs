@@ -547,6 +547,75 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
+    let stale_command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("stale-replace-method-key")?,
+            PaymentToken::new("opaque-stale-replacement-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let stale_attempt_id = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &stale_command,
+        &resolved_gateway,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(_, attempt) => {
+            attempt.identity().attempt_id()
+        }
+        other => {
+            return Err(format!("unexpected stale payment-method reservation: {other:?}").into());
+        }
+    };
+    transaction.commit().await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET created_at = clock_timestamp() - interval '4 minutes',
+            updated_at = clock_timestamp() - interval '4 minutes'
+        WHERE id = $1
+        "#,
+    )
+    .bind(stale_attempt_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+    let stale_gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
+        approved_outcome_with_reference(
+            Some("txn_stale_method_must_not_submit"),
+            "vault_stale_method_must_not_store",
+        ),
+    )));
+    let stale_resolver = Arc::new(StaticResolver {
+        gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&stale_gateway)),
+        calls: AtomicUsize::new(0),
+    });
+    let stale_admission = Arc::new(PermitAdmission {
+        calls: AtomicUsize::new(0),
+    });
+    let stale_service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        stale_resolver.clone(),
+        stale_admission.clone(),
+        Arc::new(fixture.coordinator.clone()),
+    );
+    let stale_result = stale_service.replace_payment_method(stale_command).await?;
+    assert_eq!(
+        stale_result.attempt().status(),
+        PaymentAttemptStatus::Failed
+    );
+    assert!(stale_result.subscription().is_none());
+    assert_eq!(stale_gateway.store_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(stale_resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(stale_admission.calls.load(Ordering::SeqCst), 0);
+
     let additional_transaction_id = "txn_method_unexpected_additional";
     let reconciled = service
         .apply_reconciled_outcome(

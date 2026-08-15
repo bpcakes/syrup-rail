@@ -15,8 +15,10 @@ database transaction.
 - [x] (2026-08-15) Added bounded, host-aware retirement for stale
   unsubmitted host charges and focused coverage for atomic target release,
   account scoping, and fresh-attempt preservation.
-- [ ] Resolve stale payment-method replacement replays before host admission or
-  gateway resolution.
+- [x] (2026-08-15) Resolved stale payment-method replacement replays under the
+  subscription aggregate lock before host admission or gateway resolution;
+  focused foreground coverage proves all three downstream callbacks remain at
+  zero calls.
 - [ ] Make entitlement and deletion reads ignore attempts that are already
   locally abandoned by canonical age policy.
 - [ ] Document the reconciliation phase order and patch-release integration

@@ -86,6 +86,26 @@ fn payment_method_replacement_attempt_belongs_to_reservation(
         && attempt.request().gateway_order_id() == reservation.request().gateway_order_id()
 }
 
+async fn expire_stale_payment_method_replacement_context_and_reload(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: &PaymentAttempt,
+) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
+    let PaymentAttemptTarget::SubscriptionPaymentMethodUpdate { expected_state, .. } =
+        attempt.request().target()
+    else {
+        return Err(invalid_state());
+    };
+    fail_stale_unsubmitted_payment_method_updates(transaction, expected_state.subscription_id())
+        .await?;
+    find_payment_attempt_by_id_in_transaction(
+        transaction,
+        attempt.identity().billing_scope_id(),
+        attempt.identity().attempt_id(),
+    )
+    .await?
+    .ok_or_else(invalid_state)
+}
+
 fn locked_payment_method_replacement_terms_from_row(
     row: &PgRow,
     subscription_id: SubscriptionId,
@@ -251,7 +271,7 @@ pub async fn preflight_subscription_payment_method_replacement_in_transaction(
     command: &syrup_rail::ReplaceSubscriptionPaymentMethod,
 ) -> Result<SubscriptionPaymentMethodReplacementPreflightOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
-    let Some(existing) = payment_attempt_by_idempotency(
+    let Some(candidate) = payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
@@ -262,10 +282,28 @@ pub async fn preflight_subscription_payment_method_replacement_in_transaction(
     else {
         return Ok(SubscriptionPaymentMethodReplacementPreflightOutcome::Continue);
     };
+    if !payment_method_replacement_attempt_matches_command(&candidate, command) {
+        return Ok(SubscriptionPaymentMethodReplacementPreflightOutcome::IdempotencyConflict);
+    }
+    lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
+    let Some(existing) = payment_attempt_by_idempotency(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+        true,
+    )
+    .await?
+    else {
+        return Err(invalid_state());
+    };
+    if !payment_method_replacement_attempt_matches_command(&existing, command) {
+        return Ok(SubscriptionPaymentMethodReplacementPreflightOutcome::IdempotencyConflict);
+    }
+    let existing =
+        expire_stale_payment_method_replacement_context_and_reload(transaction, &existing).await?;
     Ok(
-        if payment_method_replacement_attempt_matches_command(&existing, command)
-            && payment_method_replacement_attempt_matches_replay_context(transaction, &existing)
-                .await?
+        if payment_method_replacement_attempt_matches_replay_context(transaction, &existing).await?
         {
             SubscriptionPaymentMethodReplacementPreflightOutcome::Replay(Box::new(existing))
         } else {
