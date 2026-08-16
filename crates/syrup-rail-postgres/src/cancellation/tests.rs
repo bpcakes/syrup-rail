@@ -330,6 +330,81 @@ async fn caller_rollback_restores_cancellation() -> Result<(), Box<dyn Error>> {
     result
 }
 
+#[tokio::test]
+async fn contended_stale_charge_remains_a_cancellation_blocker() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_cn_lock_chg").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let fixture = insert_subscription(
+            &database.pool,
+            account,
+            Uuid::now_v7(),
+            "locked_stale_renewal",
+            SubscriptionStatus::Active,
+        )
+        .await?;
+        let attempt_id = insert_renewal(
+            &database.pool,
+            &fixture,
+            Utc::now()
+                - Duration::seconds(
+                    LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal)
+                        .stale_after_seconds()
+                        + 1,
+                ),
+        )
+        .await?;
+
+        let mut blocker = database.pool.begin().await?;
+        sqlx::query("SELECT id FROM billing_payment_attempts WHERE id = $1 FOR UPDATE")
+            .bind(attempt_id)
+            .execute(&mut *blocker)
+            .await?;
+
+        let mut cancellation = database.pool.begin().await?;
+        let outcome =
+            cancel_subscription_in_transaction(&mut cancellation, &fixture.command()).await?;
+        cancellation.commit().await?;
+        if outcome != CancelSubscriptionOutcome::BlockedByRenewal {
+            return Err(io::Error::other(format!(
+                "contended stale charge was not preserved as a blocker: {outcome:?}"
+            ))
+            .into());
+        }
+        let locked_status: String =
+            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+                .bind(attempt_id)
+                .fetch_one(&database.pool)
+                .await?;
+        if locked_status != "pending" {
+            return Err(io::Error::other("contended stale charge was mutated").into());
+        }
+
+        blocker.rollback().await?;
+        let mut cancellation = database.pool.begin().await?;
+        let outcome =
+            cancel_subscription_in_transaction(&mut cancellation, &fixture.command()).await?;
+        cancellation.commit().await?;
+        if !matches!(outcome, CancelSubscriptionOutcome::Canceled { .. }) {
+            return Err(
+                io::Error::other("released stale charge still blocked cancellation").into(),
+            );
+        }
+        let released_status: String =
+            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+                .bind(attempt_id)
+                .fetch_one(&database.pool)
+                .await?;
+        if released_status != "failed" {
+            return Err(io::Error::other("released stale charge was not cleaned up").into());
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}
+
 async fn assert_outcome(
     pool: &sqlx::PgPool,
     command: &CancelSubscription,

@@ -470,9 +470,20 @@ pub(crate) async fn fail_stale_unsubmitted_subscription_charges(
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
     let result = sqlx::query(
         r#"
-        UPDATE billing_payment_attempts
+        WITH stale_attempts AS (
+            SELECT id
+            FROM billing_payment_attempts
+            WHERE attempt_kind IN ('subscription_renewal', 'subscription_recovery')
+                AND subscription_id = $1
+                AND status = ANY($2::text[])
+                AND submitted_at IS NULL
+                AND created_at <= clock_timestamp()
+                    - ($3::bigint * interval '1 second')
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE billing_payment_attempts AS attempts
         SET status = 'failed',
-            gateway_response_text = CASE attempt_kind
+            gateway_response_text = CASE attempts.attempt_kind
                 WHEN 'subscription_renewal'
                 THEN $4
                 WHEN 'subscription_recovery'
@@ -481,12 +492,8 @@ pub(crate) async fn fail_stale_unsubmitted_subscription_charges(
             gateway_condition = COALESCE(gateway_condition, 'failed'),
             resolved_at = COALESCE(resolved_at, clock_timestamp()),
             updated_at = clock_timestamp()
-        WHERE attempt_kind IN ('subscription_renewal', 'subscription_recovery')
-            AND subscription_id = $1
-            AND status = ANY($2::text[])
-            AND submitted_at IS NULL
-            AND created_at <= clock_timestamp()
-                - ($3::bigint * interval '1 second')
+        FROM stale_attempts
+        WHERE attempts.id = stale_attempts.id
         "#,
     )
     .bind(subscription_id.as_uuid())
