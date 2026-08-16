@@ -2014,11 +2014,7 @@ mod tests {
                 command.gateway_configuration_id(),
                 PaymentToken::new("tok_host_resume_retry")?,
                 command.idempotency_key().clone(),
-                Some(BillingContact::new(
-                    None,
-                    None,
-                    Some("retry@example.test".into()),
-                )?),
+                command.billing_contact().cloned(),
             );
             let second_service = service.clone();
             let second =
