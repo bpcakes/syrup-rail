@@ -4,6 +4,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-16
+
 ### Fixed
 
 - Resume same-idempotency-key subscription recovery and payment-method
@@ -17,6 +19,19 @@ All notable changes to the Syrup Rail crates are documented in this file.
   keeping retry-safe prepared attempts pending on transient unavailability.
 - Retire stale unsubmitted host charges together with their host-owned targets,
   and stop stale local attempts from blocking entitlement and deletion reads.
+- Enforce durable account and provider cooldowns before host-charge gateway
+  resolution, so a closed local gate performs no credential resolution or
+  provider readiness I/O.
+- Skip contended abandoned renewal/recovery rows during local cleanup while
+  preserving them as semantic cancellation blockers instead of leaking a
+  transient database lock failure.
+- Include the normalized durable billing-contact snapshot in replay identity
+  for every token-bearing foreground payment command. A same-key retry can
+  refresh its memory-only token and candidate attempt ID, but changed contact
+  now returns an idempotency conflict before provider submission.
+- Reject structurally incoherent payment results, including host attempts in
+  subscription results, mismatched applied subscriptions, and confirmation-
+  pending results without an authoritative approved gateway outcome.
 
 ### Migration
 
@@ -39,6 +54,10 @@ All notable changes to the Syrup Rail crates are documented in this file.
   `not_applied`, and `confirmation_pending` constructors. This prevents an
   approved result without an applied subscription and prevents non-applied or
   confirmation-pending results from carrying one.
+- Update host-charge payment-result construction to return checked results,
+  and derive confirmation-pending processor evidence only from an
+  authoritative approved gateway outcome. Hosts that directly construct
+  these public result values must handle the new validation errors.
 
 ## [0.2.0] - 2026-08-13
 
@@ -315,7 +334,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/bpcakes/syrup-rail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bpcakes/syrup-rail/tree/v0.1.0

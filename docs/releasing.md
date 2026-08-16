@@ -39,7 +39,7 @@ scripts/jig check sqlx
 ```
 
 Replace `VERSION` with the exact stable semantic version recorded in the
-workspace, such as `0.2.0`. The advisory check permits only the documented,
+workspace, such as `0.3.0`. The advisory check permits only the documented,
 unreachable SQLx-MySQL advisory described in
 [`security/dependency-advisories.md`](security/dependency-advisories.md), and
 fails if that dependency becomes reachable from a workspace build.

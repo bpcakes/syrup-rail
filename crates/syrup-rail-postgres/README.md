@@ -1,19 +1,19 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.2
+SQLx operations, and high-level subscription billing service. Version 0.3
 supports PostgreSQL 18 only and uses schema v2.
 
 ```toml
 [dependencies]
-syrup-rail = "0.2.0"
-syrup-rail-postgres = "0.2.0"
+syrup-rail = "0.3.0"
+syrup-rail-postgres = "0.3.0"
 ```
 
 New hosts install `schema/v2/install.sql` through their normal migration
 system. Hosts upgrading from 0.1 must stop every 0.1 billing writer, run the
 checked-in v1 preflight and retry-reclassification audit, apply
-`schema/v2/upgrade_from_v1.sql` transactionally, and roll forward with 0.2.
+`schema/v2/upgrade_from_v1.sql` transactionally, and roll forward with 0.3.
 Schema v1 is immutable. Budget the stopped-writer maintenance window for a
 full payment-attempt heap scan and transactional partial-index construction;
 the detailed cutover guide explains the lock and rehearsal requirements.
@@ -95,7 +95,7 @@ reconciliation phases.
 
 An existing 0.2.0 host must add the subscription-charge phase, plus the
 host-charge phase when host charges are configured, to its reconciliation loop
-when upgrading to the next patch release. Omitting them leaves abandoned local
+when upgrading to 0.3.0. Omitting them leaves abandoned local
 rows for foreground reads or later cleanup even though exact reconciliation
 correctly excludes never-submitted attempts. The existing enrollment phase also
 repairs never-submitted initial attempts that 0.2.0 may already have parked as

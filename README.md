@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.2.0"
-syrup-rail-postgres = "0.2.0"
-syrup-rail-nmi = "0.2.0" # only for NMI-backed hosts
+syrup-rail = "0.3.0"
+syrup-rail-postgres = "0.3.0"
+syrup-rail-nmi = "0.3.0" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.2.0"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.3.0"`
 directly.
 
 ## Subscription terms
@@ -216,7 +216,7 @@ compile the integration boundary without contacting a database or provider.
 - `scripts/check-public-api.sh`
 - `cargo test -p syrup-rail-nmi-client`
 
-See [the 0.2 public API guide](docs/public-api.md) for the supported facade,
+See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.
 
 ## Releasing
