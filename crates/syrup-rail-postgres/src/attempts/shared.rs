@@ -1,8 +1,10 @@
 use super::*;
+use std::sync::LazyLock;
 
 pub(super) const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
 pub(super) const BILLING_OPERATION_TIMEOUT: &str = "5s";
-pub(crate) const INITIAL_PREPARED_STALE_AFTER_SECONDS: i64 = 30 * 60;
+const STANDARD_LOCAL_ATTEMPT_STALE_AFTER_SECONDS: i64 = 30 * 60;
+const PAYMENT_METHOD_UPDATE_LOCAL_ATTEMPT_STALE_AFTER_SECONDS: i64 = 3 * 60;
 pub(super) const INITIAL_PREPARED_EXPIRED_TEXT: &str =
     "Prepared checkout expired before processor submission.";
 pub(super) const INITIAL_BILLING_STATE_CHANGED_TEXT: &str =
@@ -22,8 +24,6 @@ pub(super) const RENEWAL_CONFIGURATION_CHANGED_TEXT: &str =
 pub(super) const PAYMENT_METHOD_REPLACEMENT_STATE_CHANGED_TEXT: &str =
     "Payment method replacement was canceled before submission because billing state changed.";
 pub(super) const PAYMENT_METHOD_REPLACEMENT_CONFIGURATION_CHANGED_TEXT: &str = "Payment method replacement was canceled before submission because payment configuration changed.";
-pub(crate) const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
-pub(crate) const SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
 pub(crate) const STALE_UNSUBMITTED_RENEWAL_TEXT: &str =
     "Subscription renewal was abandoned before gateway submission.";
 pub(crate) const STALE_UNSUBMITTED_RECOVERY_TEXT: &str =
@@ -42,6 +42,83 @@ pub(crate) enum AttemptReplayDisposition {
     ResumePrepared,
     RepairUnsubmittedReview,
     ReturnCanonical,
+}
+
+/// The database policy for attempts that are still wholly local.
+///
+/// Every cleanup and stale-aware blocker query binds both its timeout and its
+/// expirable status values from this type. The status classification
+/// intentionally derives from the replay disposition: only a prepared attempt
+/// or an unsubmitted review repair can expire without provider reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LocalAttemptPolicy {
+    kind: PaymentAttemptKind,
+}
+
+static LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES: LazyLock<Vec<(PaymentAttemptKind, Vec<String>)>> =
+    LazyLock::new(|| {
+        PaymentAttemptKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let policy = LocalAttemptPolicy::for_kind(kind);
+                let statuses = PaymentAttemptStatus::ALL
+                    .into_iter()
+                    .filter(|status| policy.should_expire(*status, false, true))
+                    .map(|status| status.as_str().to_owned())
+                    .collect();
+                (kind, statuses)
+            })
+            .collect()
+    });
+
+impl LocalAttemptPolicy {
+    pub(crate) const fn for_kind(kind: PaymentAttemptKind) -> Self {
+        Self { kind }
+    }
+
+    pub(crate) const fn stale_after_seconds(self) -> i64 {
+        match self.kind {
+            PaymentAttemptKind::SubscriptionPaymentMethodUpdate => {
+                PAYMENT_METHOD_UPDATE_LOCAL_ATTEMPT_STALE_AFTER_SECONDS
+            }
+            PaymentAttemptKind::HostCharge
+            | PaymentAttemptKind::SubscriptionInitial
+            | PaymentAttemptKind::SubscriptionRenewal
+            | PaymentAttemptKind::SubscriptionRecovery => {
+                STANDARD_LOCAL_ATTEMPT_STALE_AFTER_SECONDS
+            }
+        }
+    }
+
+    pub(crate) fn expirable_status_values(self) -> &'static [String] {
+        LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES
+            .iter()
+            .find(|(kind, _)| *kind == self.kind)
+            .map(|(_, statuses)| statuses.as_slice())
+            .expect("local attempt status policy covers every payment attempt kind")
+    }
+
+    pub(crate) const fn should_expire(
+        self,
+        status: PaymentAttemptStatus,
+        was_submitted: bool,
+        is_stale: bool,
+    ) -> bool {
+        let kind_has_local_expiry = match self.kind {
+            PaymentAttemptKind::HostCharge
+            | PaymentAttemptKind::SubscriptionInitial
+            | PaymentAttemptKind::SubscriptionRenewal
+            | PaymentAttemptKind::SubscriptionRecovery
+            | PaymentAttemptKind::SubscriptionPaymentMethodUpdate => true,
+        };
+        kind_has_local_expiry
+            && is_stale
+            && matches!(
+                attempt_replay_disposition_for(status, was_submitted),
+                AttemptReplayDisposition::ResumePrepared
+                    | AttemptReplayDisposition::RepairUnsubmittedReview
+            )
+    }
 }
 
 /// The immutable first-stage decision for subscriber-initiated preflight.
@@ -285,6 +362,7 @@ pub(crate) async fn expire_stale_initial_attempts(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<u64, sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
     let result = sqlx::query(
         r#"
         UPDATE billing_payment_attempts
@@ -298,17 +376,18 @@ pub(crate) async fn expire_stale_initial_attempts(
             resolved_at = clock_timestamp(), updated_at = clock_timestamp()
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
             AND attempt_kind = 'subscription_initial'
-            AND status IN ('pending', 'review_required')
+            AND status = ANY($5::text[])
             AND submitted_at IS NULL
             AND created_at <= clock_timestamp()
-                - ($5::bigint * interval '1 second')
+                - ($6::bigint * interval '1 second')
         "#,
     )
     .bind(billing_scope_id.as_uuid())
     .bind(subscriber_id.as_uuid())
     .bind(plan_key.as_str())
     .bind(INITIAL_PREPARED_EXPIRED_TEXT)
-    .bind(INITIAL_PREPARED_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected())
@@ -352,10 +431,11 @@ pub(super) fn locked_subscription_payment_state(
     .map_err(|_| invalid_state())
 }
 
-pub(super) async fn fail_stale_unsubmitted_payment_method_updates(
-    transaction: &mut Transaction<'_, Postgres>,
+pub(crate) async fn fail_stale_unsubmitted_payment_method_updates(
+    connection: &mut PgConnection,
     subscription_id: SubscriptionId,
 ) -> Result<(), sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
     sqlx::query(
         r#"
         UPDATE billing_payment_attempts
@@ -364,19 +444,21 @@ pub(super) async fn fail_stale_unsubmitted_payment_method_updates(
                 gateway_response_text,
                 'Payment method update was abandoned before gateway submission.'
             ),
+            gateway_condition = COALESCE(gateway_condition, 'failed'),
             resolved_at = COALESCE(resolved_at, clock_timestamp()),
             updated_at = clock_timestamp()
         WHERE attempt_kind = 'subscription_payment_method_update'
             AND subscription_id = $1
-            AND status IN ('pending', 'review_required')
+            AND status = ANY($2::text[])
             AND submitted_at IS NULL
             AND created_at <= clock_timestamp()
-                - ($2::bigint * interval '1 second')
+                - ($3::bigint * interval '1 second')
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .bind(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS)
-    .execute(&mut **transaction)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
+    .execute(connection)
     .await?;
     Ok(())
 }
@@ -385,29 +467,31 @@ pub(crate) async fn fail_stale_unsubmitted_subscription_charges(
     connection: &mut PgConnection,
     subscription_id: SubscriptionId,
 ) -> Result<u64, sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
     let result = sqlx::query(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed',
             gateway_response_text = CASE attempt_kind
                 WHEN 'subscription_renewal'
-                THEN $3
-                WHEN 'subscription_recovery'
                 THEN $4
+                WHEN 'subscription_recovery'
+                THEN $5
             END,
             gateway_condition = COALESCE(gateway_condition, 'failed'),
             resolved_at = COALESCE(resolved_at, clock_timestamp()),
             updated_at = clock_timestamp()
         WHERE attempt_kind IN ('subscription_renewal', 'subscription_recovery')
             AND subscription_id = $1
-            AND status IN ('pending', 'review_required')
+            AND status = ANY($2::text[])
             AND submitted_at IS NULL
             AND created_at <= clock_timestamp()
-                - ($2::bigint * interval '1 second')
+                - ($3::bigint * interval '1 second')
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .bind(STALE_UNSUBMITTED_RENEWAL_TEXT)
     .bind(STALE_UNSUBMITTED_RECOVERY_TEXT)
     .execute(connection)
@@ -458,8 +542,8 @@ pub(super) async fn blocking_subscription_charge_attempt_exists_except(
     .await
 }
 
-pub(super) async fn blocking_payment_method_update_exists(
-    transaction: &mut Transaction<'_, Postgres>,
+pub(crate) async fn blocking_payment_method_update_exists(
+    connection: &mut PgConnection,
     subscription_id: SubscriptionId,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
@@ -473,7 +557,7 @@ pub(super) async fn blocking_payment_method_update_exists(
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .fetch_one(&mut **transaction)
+    .fetch_one(connection)
     .await
 }
 
@@ -507,6 +591,49 @@ mod replay_disposition_tests {
             assert_eq!(
                 attempt_replay_disposition_for(status, false),
                 AttemptReplayDisposition::ReturnCanonical,
+            );
+        }
+    }
+
+    #[test]
+    fn local_attempt_policy_covers_the_complete_state_matrix() {
+        for kind in PaymentAttemptKind::ALL {
+            let policy = LocalAttemptPolicy::for_kind(kind);
+            for status in PaymentAttemptStatus::ALL {
+                for was_submitted in [false, true] {
+                    for is_stale in [false, true] {
+                        let expected = is_stale
+                            && !was_submitted
+                            && matches!(
+                                status,
+                                PaymentAttemptStatus::Pending
+                                    | PaymentAttemptStatus::ReviewRequired
+                            );
+                        assert_eq!(
+                            policy.should_expire(status, was_submitted, is_stale),
+                            expected,
+                            "kind={kind:?} status={status:?} submitted={was_submitted} stale={is_stale}",
+                        );
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial)
+                .expirable_status_values(),
+            &["pending", "review_required"],
+        );
+        for kind in PaymentAttemptKind::ALL {
+            let expected = if kind == PaymentAttemptKind::SubscriptionPaymentMethodUpdate {
+                3 * 60
+            } else {
+                30 * 60
+            };
+            assert_eq!(
+                LocalAttemptPolicy::for_kind(kind).stale_after_seconds(),
+                expected,
+                "kind={kind:?}",
             );
         }
     }

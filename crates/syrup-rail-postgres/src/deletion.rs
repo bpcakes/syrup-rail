@@ -1,16 +1,10 @@
 use sqlx::PgConnection;
 use syrup_rail::{
-    BillingDeletionBlockers, DeletionBlockerQuery, ScrubSubscriberBillingData, ScrubbedBillingRows,
+    BillingDeletionBlockers, DeletionBlockerQuery, PaymentAttemptKind, ScrubSubscriberBillingData,
+    ScrubbedBillingRows,
 };
 
-use crate::{
-    attempts::{
-        INITIAL_PREPARED_STALE_AFTER_SECONDS,
-        PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS,
-        SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-    },
-    host_charge_reconciliation::HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-};
+use crate::attempts::LocalAttemptPolicy;
 
 /// Reports the canonical financial rows that prevent host account deletion.
 ///
@@ -22,6 +16,12 @@ pub async fn billing_deletion_blockers(
 ) -> Result<BillingDeletionBlockers, sqlx::Error> {
     let billing_scope_id = query.billing_scope_id().into_uuid();
     let subscriber_id = query.subscriber_id().into_uuid();
+    let payment_method_update_policy =
+        LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
+    let initial_policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
+    let subscription_charge_policy =
+        LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
+    let host_charge_policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::HostCharge);
     let row = sqlx::query!(
         r#"
         SELECT
@@ -40,7 +40,7 @@ pub async fn billing_deletion_blockers(
                     AND status IN ('pending', 'unknown', 'review_required')
                     AND NOT (
                         submitted_at IS NULL
-                        AND status IN ('pending', 'review_required')
+                        AND status = ANY($7::text[])
                         AND (
                             (
                                 attempt_kind = 'subscription_payment_method_update'
@@ -71,10 +71,11 @@ pub async fn billing_deletion_blockers(
         "#,
         billing_scope_id,
         subscriber_id,
-        PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS,
-        INITIAL_PREPARED_STALE_AFTER_SECONDS,
-        SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-        HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
+        payment_method_update_policy.stale_after_seconds(),
+        initial_policy.stale_after_seconds(),
+        subscription_charge_policy.stale_after_seconds(),
+        host_charge_policy.stale_after_seconds(),
+        initial_policy.expirable_status_values(),
     )
     .fetch_one(connection)
     .await?;

@@ -5,18 +5,17 @@ use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, Transaction, postgres:
 use syrup_rail::{
     ActorId, AppliedSubscriptionDiscount, BillingPeriod, ChargeAmount, CurrencyCode,
     DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, LimitedDiscountMonths,
-    MissingSubscriptionAction, PastDueAccess, PastDueAccessPolicy, PastDueAction, PaymentMethodId,
-    PercentOffBasisPoints, PositiveDiscountCents, SavedSubscriptionDiscount, Subscription,
-    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
-    SubscriptionDiscountSnapshot, SubscriptionGrant, SubscriptionGrantId, SubscriptionGrantKind,
-    SubscriptionId, SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
+    MissingSubscriptionAction, PastDueAccess, PastDueAccessPolicy, PastDueAction,
+    PaymentAttemptKind, PaymentMethodId, PercentOffBasisPoints, PositiveDiscountCents,
+    SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
+    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
+    SubscriptionGrant, SubscriptionGrantId, SubscriptionGrantKind, SubscriptionId,
+    SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::attempts::{
-    INITIAL_PREPARED_STALE_AFTER_SECONDS, SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-};
+use crate::attempts::LocalAttemptPolicy;
 use crate::subscription_persistence::{
     RenewalFailurePolicyScalars, SubscriptionPeriodRuleScalars, SubscriptionPersistenceCodecError,
     renewal_failure_policy_from_scalars, subscription_period_rule_from_scalars,
@@ -360,6 +359,9 @@ async fn entitlement_on_executor<'e, E>(
 where
     E: Executor<'e, Database = Postgres>,
 {
+    let initial_policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
+    let subscription_charge_policy =
+        LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
     let row = sqlx::query(
         r#"
         WITH clock AS MATERIALIZED (
@@ -447,7 +449,7 @@ where
                         )
                     )
                     AND NOT (
-                        attempts.status IN ('pending', 'review_required')
+                        attempts.status = ANY($6::text[])
                         AND attempts.submitted_at IS NULL
                         AND attempts.created_at <= clock_timestamp()
                             - ($4::bigint * interval '1 second')
@@ -471,7 +473,7 @@ where
                     )
                     AND attempts.status IN ('pending', 'unknown', 'review_required')
                     AND NOT (
-                        attempts.status IN ('pending', 'review_required')
+                        attempts.status = ANY($6::text[])
                         AND attempts.submitted_at IS NULL
                         AND attempts.created_at <= clock_timestamp()
                             - ($5::bigint * interval '1 second')
@@ -529,8 +531,9 @@ where
     .bind(query.billing_scope_id().as_uuid())
     .bind(query.subscriber_id().as_uuid())
     .bind(query.plan_key().as_str())
-    .bind(INITIAL_PREPARED_STALE_AFTER_SECONDS)
-    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(initial_policy.stale_after_seconds())
+    .bind(subscription_charge_policy.stale_after_seconds())
+    .bind(initial_policy.expirable_status_values())
     .fetch_one(executor)
     .await?;
 

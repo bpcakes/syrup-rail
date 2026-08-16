@@ -296,7 +296,7 @@ pub(super) async fn insert_pending_payment_method_update(
     account: GatewayAccountFixture,
     subscription: &DueSubscriptionFixture,
     created_at: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
+) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
     sqlx::query(
         r#"
@@ -330,7 +330,7 @@ pub(super) async fn insert_pending_payment_method_update(
     .bind(created_at)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(attempt_id)
 }
 
 pub(super) fn dispatch_ids(page: &RenewalDispatchPage) -> Vec<Uuid> {

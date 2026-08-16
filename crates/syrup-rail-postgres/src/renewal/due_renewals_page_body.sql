@@ -1,5 +1,5 @@
 -- Composition contract: this fragment closes eligible_subscriptions and uses
--- $1-$3/$5-$11. Its caller appends $12 (first page) or $14 (continuation) as
+-- $1-$3/$5-$12. Its caller appends $13 (first page) or $15 (continuation) as
 -- the LIMIT placeholder.
 )
 SELECT subscriptions.billing_scope_id, subscriptions.id,
@@ -38,7 +38,7 @@ LEFT JOIN LATERAL (
         BOOL_OR(
             attempts.status IN ('pending', 'unknown', 'review_required', 'approved')
             AND NOT (
-                attempts.status IN ('pending', 'review_required')
+                attempts.status = ANY($12::text[])
                 AND attempts.submitted_at IS NULL
                 AND attempts.created_at <= $10::timestamptz
                     - ($11::bigint * interval '1 second')

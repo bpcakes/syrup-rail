@@ -208,6 +208,8 @@ impl SubscriptionBillingService {
         let now = sqlx::query_scalar("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
+        let payment_method_update_policy =
+            LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
         let has_payment_method_update: bool = sqlx::query_scalar(
             r#"
             SELECT EXISTS (
@@ -216,13 +218,16 @@ impl SubscriptionBillingService {
                     AND attempt_kind = 'subscription_payment_method_update'
                     AND status IN ('pending', 'unknown', 'review_required')
                     AND NOT (
-                        status = 'pending' AND submitted_at IS NULL
-                        AND created_at <= clock_timestamp() - interval '3 minutes'
+                        status = ANY($2::text[]) AND submitted_at IS NULL
+                        AND created_at <= clock_timestamp()
+                            - ($3::bigint * interval '1 second')
                     )
             )
             "#,
         )
         .bind(command.subscription_id().as_uuid())
+        .bind(payment_method_update_policy.expirable_status_values())
+        .bind(payment_method_update_policy.stale_after_seconds())
         .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;

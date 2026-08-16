@@ -104,7 +104,7 @@ async fn representative_first_and_continuation_plans_are_limit_driven_and_index_
                 .get("Index Cond")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if !index_condition.contains("$12") || !index_condition.contains("$13") {
+            if !index_condition.contains("$13") || !index_condition.contains("$14") {
                 return Err(io::Error::other(format!(
                     "continuation keyset was not pushed into the due-index condition:\n{rendered}"
                 ))
@@ -332,9 +332,38 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
         &database.pool,
         account,
         &stale_update,
-        Utc::now() - Duration::seconds(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS + 1),
+        Utc::now()
+            - Duration::seconds(
+                LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate)
+                    .stale_after_seconds()
+                    + 1,
+            ),
     )
     .await?;
+    let stale_review_update = insert_due_subscription_at(
+        &database.pool,
+        account,
+        "stale-review-update-plan",
+        Uuid::from_u128(14),
+        due_at,
+    )
+    .await?;
+    let stale_review_attempt = insert_pending_payment_method_update(
+        &database.pool,
+        account,
+        &stale_review_update,
+        Utc::now()
+            - Duration::seconds(
+                LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate)
+                    .stale_after_seconds()
+                    + 1,
+            ),
+    )
+    .await?;
+    sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
+        .bind(stale_review_attempt)
+        .execute(&database.pool)
+        .await?;
     let past_due = insert_due_subscription_at(
         &database.pool,
         account,
@@ -527,6 +556,7 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
     let expected = [
         included.subscription_id,
         stale_update.subscription_id,
+        stale_review_update.subscription_id,
         past_due.subscription_id,
     ]
     .into_iter()
@@ -631,7 +661,12 @@ async fn continuation_keeps_every_clock_dependent_gate_at_the_first_page_time()
         &database.pool,
         account,
         &stale_update,
-        observed_at - Duration::seconds(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS - 1),
+        observed_at
+            - Duration::seconds(
+                LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate)
+                    .stale_after_seconds()
+                    - 1,
+            ),
     )
     .await?;
 

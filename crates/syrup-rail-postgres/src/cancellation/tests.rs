@@ -2,13 +2,13 @@ use std::{error::Error, io};
 
 use chrono::Duration;
 use syrup_rail::{
-    BillingEventKey, BillingScopeId, CancelSubscription, CancelSubscriptionOutcome, PlanKey,
-    SubscriberId, SubscriptionStatus,
+    BillingEventKey, BillingScopeId, CancelSubscription, CancelSubscriptionOutcome,
+    PaymentAttemptKind, PlanKey, SubscriberId, SubscriptionStatus,
 };
 
 use super::*;
 use crate::{
-    attempts::SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
+    attempts::LocalAttemptPolicy,
     test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account},
 };
 
@@ -151,7 +151,13 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
             &database.pool,
             &stale,
             Utc::now()
-                - Duration::seconds(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS + 1),
+                - Duration::seconds(
+                    LocalAttemptPolicy::for_kind(
+                        PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                    )
+                    .stale_after_seconds()
+                        + 1,
+                ),
         )
         .await?;
         let mut transaction = database.pool.begin().await?;
@@ -168,6 +174,51 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
                 .await?;
         if stale_status != "failed" {
             return Err(io::Error::other("stale update was not failed atomically").into());
+        }
+
+        let stale_review = insert_subscription(
+            &database.pool,
+            account,
+            subscriber_id,
+            "stale_review_update",
+            SubscriptionStatus::Active,
+        )
+        .await?;
+        let stale_review_attempt = insert_payment_method_update(
+            &database.pool,
+            &stale_review,
+            Utc::now()
+                - Duration::seconds(
+                    LocalAttemptPolicy::for_kind(
+                        PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                    )
+                    .stale_after_seconds()
+                        + 1,
+                ),
+        )
+        .await?;
+        sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
+            .bind(stale_review_attempt)
+            .execute(&database.pool)
+            .await?;
+        let mut transaction = database.pool.begin().await?;
+        let outcome =
+            cancel_subscription_in_transaction(&mut transaction, &stale_review.command()).await?;
+        transaction.commit().await?;
+        if !matches!(outcome, CancelSubscriptionOutcome::Canceled { .. }) {
+            return Err(
+                io::Error::other("stale unsubmitted review still blocked cancellation").into(),
+            );
+        }
+        let stale_review_status: String =
+            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+                .bind(stale_review_attempt)
+                .fetch_one(&database.pool)
+                .await?;
+        if stale_review_status != "failed" {
+            return Err(
+                io::Error::other("stale unsubmitted review was not failed atomically").into(),
+            );
         }
 
         let renewal = insert_subscription(
@@ -197,7 +248,12 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
         let stale_renewal_attempt = insert_renewal(
             &database.pool,
             &stale_renewal,
-            Utc::now() - Duration::seconds(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS + 1),
+            Utc::now()
+                - Duration::seconds(
+                    LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal)
+                        .stale_after_seconds()
+                        + 1,
+                ),
         )
         .await?;
         let mut transaction = database.pool.begin().await?;

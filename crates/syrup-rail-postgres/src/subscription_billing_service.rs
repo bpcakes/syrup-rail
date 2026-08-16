@@ -48,7 +48,10 @@ use crate::{
     apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
     apply_reconciled_subscription_recovery_gateway_outcome,
     apply_reconciled_subscription_renewal_gateway_outcome,
-    attempts::{AttemptReplayDisposition, AttemptResolutionStatus, attempt_replay_disposition},
+    attempts::{
+        AttemptReplayDisposition, AttemptResolutionStatus, LocalAttemptPolicy,
+        attempt_replay_disposition,
+    },
     enrollment_application::{
         OutcomeResolutionBoundary, RateLimitCooldown, payment_result_for_attempt,
         resolve_non_approved_outcome, resolve_payment_method_replacement_non_approved_outcome,

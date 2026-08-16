@@ -4,19 +4,21 @@ pub(super) async fn initial_attempt_is_stale(
     transaction: &mut Transaction<'_, Postgres>,
     attempt_id: PaymentAttemptId,
 ) -> Result<bool, sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
     sqlx::query_scalar(
         r#"
         SELECT attempt_kind = 'subscription_initial'
-            AND status IN ('pending', 'review_required')
+            AND status = ANY($2::text[])
             AND submitted_at IS NULL
             AND created_at <= clock_timestamp()
-                - ($2::bigint * interval '1 second')
+                - ($3::bigint * interval '1 second')
         FROM billing_payment_attempts
         WHERE id = $1
         "#,
     )
     .bind(attempt_id.as_uuid())
-    .bind(INITIAL_PREPARED_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .fetch_one(&mut **transaction)
     .await
 }

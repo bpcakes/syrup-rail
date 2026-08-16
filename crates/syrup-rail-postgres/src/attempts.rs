@@ -78,13 +78,12 @@ pub use renewal::{
 };
 use shared::*;
 pub(crate) use shared::{
-    AttemptReplayDisposition, INITIAL_PREPARED_STALE_AFTER_SECONDS,
-    PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS, STALE_UNSUBMITTED_RECOVERY_TEXT,
-    STALE_UNSUBMITTED_RENEWAL_TEXT, SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-    attempt_replay_disposition, expire_stale_initial_attempts,
-    fail_stale_unsubmitted_subscription_charges, lock_initial_attempt_rows,
-    lock_initial_charge_rows, lock_subscription_aggregate, set_enrollment_timeouts,
-    try_lock_subscription_aggregate,
+    AttemptReplayDisposition, LocalAttemptPolicy, STALE_UNSUBMITTED_RECOVERY_TEXT,
+    STALE_UNSUBMITTED_RENEWAL_TEXT, attempt_replay_disposition,
+    blocking_payment_method_update_exists, expire_stale_initial_attempts,
+    fail_stale_unsubmitted_payment_method_updates, fail_stale_unsubmitted_subscription_charges,
+    lock_initial_attempt_rows, lock_initial_charge_rows, lock_subscription_aggregate,
+    set_enrollment_timeouts, try_lock_subscription_aggregate,
 };
 pub(crate) use transitions::{
     AttemptApproval, AttemptResolutionStatus, AttemptTransition, persist_attempt_transition,

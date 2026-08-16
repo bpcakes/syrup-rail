@@ -1,14 +1,17 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use syrup_rail::{
-    BillingEvent, CancelSubscription, CancelSubscriptionOutcome, PastDueAccessPolicy, PlanKey,
-    Subscription, SubscriptionId, SubscriptionStatus,
+    BillingEvent, CancelSubscription, CancelSubscriptionOutcome, PastDueAccessPolicy,
+    PaymentAttemptKind, PlanKey, Subscription, SubscriptionId, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    attempts::fail_stale_unsubmitted_subscription_charges,
+    attempts::{
+        LocalAttemptPolicy, blocking_payment_method_update_exists,
+        fail_stale_unsubmitted_subscription_charges,
+    },
     renewal_failure::{RenewalFailureStoreError, past_due_causal_history},
     subscription_persistence::{
         SubscriptionPersistenceCodecError, subscription_from_row as decode_subscription_row,
@@ -17,7 +20,6 @@ use crate::{
 
 const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
 const CURRENT_SUBSCRIPTION_LOCK_MAX_ATTEMPTS: usize = 2;
-const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
 const UNSUBMITTED_PAYMENT_METHOD_UPDATE_FAILED_RESPONSE_TEXT: &str =
     "Payment method update was abandoned before gateway submission.";
 const INVALID_SUBSCRIPTION_STATE: &str = "canonical subscription state is invalid";
@@ -106,7 +108,7 @@ pub(crate) async fn cancel_subscription_on_connection(
                 return Ok(CancelSubscriptionOutcome::BlockedByRenewal);
             }
             expire_stale_payment_method_updates(connection, subscription.id()).await?;
-            if has_blocking_payment_method_update(connection, subscription.id()).await? {
+            if blocking_payment_method_update_exists(connection, subscription.id()).await? {
                 return Ok(CancelSubscriptionOutcome::BlockedByPaymentMethodUpdate);
             }
 
@@ -314,6 +316,7 @@ async fn expire_stale_payment_method_updates(
     connection: &mut PgConnection,
     subscription_id: SubscriptionId,
 ) -> Result<(), sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
     sqlx::query(
         r#"
         WITH stale_attempts AS (
@@ -321,14 +324,14 @@ async fn expire_stale_payment_method_updates(
             FROM billing_payment_attempts
             WHERE subscription_id = $1
                 AND attempt_kind = 'subscription_payment_method_update'
-                AND status = 'pending'
+                AND status = ANY($2::text[])
                 AND submitted_at IS NULL
-                AND created_at <= now() - ($2::bigint * interval '1 second')
+                AND created_at <= now() - ($3::bigint * interval '1 second')
             FOR UPDATE SKIP LOCKED
         )
         UPDATE billing_payment_attempts attempts
         SET status = 'failed',
-            gateway_response_text = COALESCE(gateway_response_text, $3),
+            gateway_response_text = COALESCE(gateway_response_text, $4),
             gateway_condition = COALESCE(gateway_condition, 'failed'),
             resolved_at = now(),
             updated_at = now()
@@ -337,31 +340,12 @@ async fn expire_stale_payment_method_updates(
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .bind(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .bind(UNSUBMITTED_PAYMENT_METHOD_UPDATE_FAILED_RESPONSE_TEXT)
     .execute(connection)
     .await?;
     Ok(())
-}
-
-async fn has_blocking_payment_method_update(
-    connection: &mut PgConnection,
-    subscription_id: SubscriptionId,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM billing_payment_attempts
-            WHERE subscription_id = $1
-                AND attempt_kind = 'subscription_payment_method_update'
-                AND status IN ('pending', 'unknown', 'review_required')
-        )
-        "#,
-    )
-    .bind(subscription_id.as_uuid())
-    .fetch_one(&mut *connection)
-    .await
 }
 
 async fn cancel_current_subscription(

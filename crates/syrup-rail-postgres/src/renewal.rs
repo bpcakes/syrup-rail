@@ -1,29 +1,30 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgArguments, query::Query};
 use syrup_rail::{
-    BillingScopeId, PaymentAttemptId, PaymentResolutionCode, RenewalAttemptState, RenewalDispatch,
-    RenewalDispatchPage, RenewalDispatchPageCursor, SubscriptionId,
+    BillingScopeId, PaymentAttemptId, PaymentAttemptKind, PaymentResolutionCode,
+    RenewalAttemptState, RenewalDispatch, RenewalDispatchPage, RenewalDispatchPageCursor,
+    SubscriptionId,
 };
 use thiserror::Error;
 
-use crate::attempts::SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS;
+use crate::attempts::LocalAttemptPolicy;
 
-const PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 3 * 60;
 // SQL composition contract: the head uses $4/$10 and opens
 // eligible_subscriptions; the body uses $1-$3/$5-$11 and closes it. The
-// continuation inserts only its $12/$13 keyset predicate. The final
-// placeholder is LIMIT: $12 on the first page and $14 on a continuation.
+// shared local-status policy is $12. The continuation inserts only its
+// $13/$14 keyset predicate. The final placeholder is LIMIT: $13 on the first
+// page and $15 on a continuation.
 const DUE_RENEWALS_FIRST_PAGE_SQL: &str = concat!(
     include_str!("renewal/due_renewals_page_head.sql"),
     include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $12\n"
+    "LIMIT $13\n"
 );
 const DUE_RENEWALS_CONTINUATION_SQL: &str = concat!(
     include_str!("renewal/due_renewals_page_head.sql"),
     "        AND (subscriptions.next_payment_attempt_at, subscriptions.id)\n",
-    "            > ($12::timestamptz, $13::uuid)\n",
+    "            > ($13::timestamptz, $14::uuid)\n",
     include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $14\n"
+    "LIMIT $15\n"
 );
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,18 +66,23 @@ impl DueRenewalPageQuery {
         infrastructure_retry_codes: &'args [&'static str],
         infrastructure_pacing_codes: &'args [&'static str],
     ) -> Query<'args, Postgres, PgArguments> {
+        let payment_method_update_policy =
+            LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
+        let subscription_charge_policy =
+            LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
         let query = sqlx::query(self.sql())
             .bind(infrastructure_retry_codes)
             .bind(infrastructure_pacing_codes)
             .bind(PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission.as_str())
-            .bind(PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS)
+            .bind(payment_method_update_policy.stale_after_seconds())
             .bind(syrup_rail::MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION)
             .bind(syrup_rail::RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS)
             .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS)
             .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS)
             .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
             .bind(self.observed_at())
-            .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS);
+            .bind(subscription_charge_policy.stale_after_seconds())
+            .bind(subscription_charge_policy.expirable_status_values());
         match self {
             Self::First(_) => query.bind(syrup_rail::RENEWAL_DISPATCH_LIMIT + 1),
             Self::Continuation(cursor) => query
@@ -195,6 +201,7 @@ pub async fn renewal_attempt_state(
     period_start_at: DateTime<Utc>,
     excluded_attempt_id: Option<PaymentAttemptId>,
 ) -> Result<RenewalAttemptState, RenewalStoreError> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
     let infrastructure_retry_codes =
         resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_RETRY_CODES);
     let infrastructure_pacing_codes =
@@ -243,10 +250,10 @@ pub async fn renewal_attempt_state(
                 BOOL_OR(
                     status IN ('pending', 'unknown', 'review_required', 'approved')
                     AND NOT (
-                        status IN ('pending', 'review_required')
+                        status = ANY($7::text[])
                         AND submitted_at IS NULL
                         AND created_at <= clock_timestamp()
-                            - ($7::bigint * interval '1 second')
+                            - ($8::bigint * interval '1 second')
                     )
                 ),
                 false
@@ -264,7 +271,8 @@ pub async fn renewal_attempt_state(
     .bind(&infrastructure_retry_codes)
     .bind(&infrastructure_pacing_codes)
     .bind(PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission.as_str())
-    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .fetch_one(&mut **transaction)
     .await?;
     Ok(RenewalAttemptState {

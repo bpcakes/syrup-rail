@@ -3,18 +3,18 @@ use sqlx::PgPool;
 use syrup_rail::{
     BillingScopeId, GatewayAccountId, HostChargeTargetId, HostChargeTargetTransition,
     HostChargeTargetTransitionKind, HostChargeTargetTransitionOutcome, PaymentAttemptId,
-    SubscriberId,
+    PaymentAttemptKind, SubscriberId,
 };
 use uuid::Uuid;
 
 use crate::{
+    attempts::LocalAttemptPolicy,
     enrollment_application::set_application_timeouts,
     host_charge_application::HostChargeApplicationError,
     host_charges::HostChargeTargetStore,
     reconciliation::{RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS, RECONCILIATION_PHASE_BATCH_SIZE},
 };
 
-pub(crate) const HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS: i64 = 30 * 60;
 const STALE_UNSUBMITTED_HOST_CHARGE_TEXT: &str =
     "Host charge was abandoned before gateway submission.";
 
@@ -66,6 +66,7 @@ pub async fn fail_stale_unsubmitted_host_charges(
     targets: &dyn HostChargeTargetStore,
     gateway_account_id: GatewayAccountId,
 ) -> Result<StaleHostChargeCleanupSummary, HostChargeApplicationError> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::HostCharge);
     let candidates = claim_stale_host_charge_candidates(pool, gateway_account_id).await?;
 
     let mut summary = StaleHostChargeCleanupSummary::default();
@@ -109,10 +110,10 @@ pub async fn fail_stale_unsubmitted_host_charges(
             WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
                 AND host_charge_target_id = $4 AND gateway_account_id = $5
                 AND attempt_kind = 'host_charge'
-                AND status IN ('pending', 'review_required')
+                AND status = ANY($7::text[])
                 AND submitted_at IS NULL
                 AND created_at <= clock_timestamp()
-                    - ($7::bigint * interval '1 second')
+                    - ($8::bigint * interval '1 second')
             "#,
         )
         .bind(candidate.attempt_id)
@@ -121,7 +122,8 @@ pub async fn fail_stale_unsubmitted_host_charges(
         .bind(candidate.target_id)
         .bind(gateway_account_id.as_uuid())
         .bind(STALE_UNSUBMITTED_HOST_CHARGE_TEXT)
-        .bind(HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+        .bind(policy.expirable_status_values())
+        .bind(policy.stale_after_seconds())
         .execute(&mut *transaction)
         .await;
         let result = match result {
@@ -148,6 +150,7 @@ async fn claim_stale_host_charge_candidates(
     pool: &PgPool,
     gateway_account_id: GatewayAccountId,
 ) -> Result<Vec<StaleHostChargeCandidate>, sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::HostCharge);
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
     let candidates = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>(
@@ -162,14 +165,14 @@ async fn claim_stale_host_charge_candidates(
             FROM billing_payment_attempts AS attempts
             WHERE attempts.gateway_account_id = $1
                 AND attempts.attempt_kind = 'host_charge'
-                AND attempts.status IN ('pending', 'review_required')
+                AND attempts.status = ANY($2::text[])
                 AND attempts.submitted_at IS NULL
                 AND attempts.created_at <= clock_timestamp()
-                    - ($2::bigint * interval '1 second')
-                AND attempts.updated_at <= clock_timestamp()
                     - ($3::bigint * interval '1 second')
+                AND attempts.updated_at <= clock_timestamp()
+                    - ($4::bigint * interval '1 second')
             ORDER BY attempts.updated_at, attempts.created_at, attempts.id
-            LIMIT $4
+            LIMIT $5
             FOR UPDATE OF attempts SKIP LOCKED
         ), claimed_attempts AS (
             UPDATE billing_payment_attempts AS attempts
@@ -191,7 +194,8 @@ async fn claim_stale_host_charge_candidates(
         "#,
     )
     .bind(gateway_account_id.as_uuid())
-    .bind(HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .bind(RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS)
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)
     .fetch_all(&mut *transaction)

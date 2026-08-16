@@ -8,10 +8,10 @@ use uuid::Uuid;
 
 use crate::PaymentAttemptStoreError;
 use crate::attempts::{
-    STALE_UNSUBMITTED_RECOVERY_TEXT, STALE_UNSUBMITTED_RENEWAL_TEXT,
-    SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS, expire_stale_initial_attempts,
-    lock_initial_attempt_rows, lock_initial_charge_rows, lock_payment_attempt_by_id_on_connection,
-    payment_attempt_from_row, set_enrollment_timeouts, try_lock_subscription_aggregate,
+    LocalAttemptPolicy, STALE_UNSUBMITTED_RECOVERY_TEXT, STALE_UNSUBMITTED_RENEWAL_TEXT,
+    expire_stale_initial_attempts, lock_initial_attempt_rows, lock_initial_charge_rows,
+    lock_payment_attempt_by_id_on_connection, payment_attempt_from_row, set_enrollment_timeouts,
+    try_lock_subscription_aggregate,
 };
 
 use classification::{
@@ -22,7 +22,6 @@ use classification::{
 
 mod classification;
 
-const PAYMENT_METHOD_REPLACEMENT_STALE_AFTER_SECONDS: i64 = 3 * 60;
 pub(crate) const RECONCILIATION_PHASE_BATCH_SIZE: i64 = 100;
 pub(crate) const RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS: i64 = 60;
 const STALE_PAYMENT_METHOD_REPLACEMENT_RESPONSE_TEXT: &str =
@@ -377,6 +376,7 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
     pool: &PgPool,
     gateway_account_id: GatewayAccountId,
 ) -> Result<u64, sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT set_config('lock_timeout', '250ms', true)")
         .execute(&mut *transaction)
@@ -387,18 +387,18 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
             SELECT id
             FROM billing_payment_attempts
             WHERE attempt_kind = 'subscription_payment_method_update'
-                AND status IN ('pending', 'review_required')
+                AND status = ANY($1::text[])
                 AND submitted_at IS NULL
                 AND created_at <= clock_timestamp()
-                    - ($1::bigint * interval '1 second')
-                AND gateway_account_id = $2
+                    - ($2::bigint * interval '1 second')
+                AND gateway_account_id = $3
             ORDER BY created_at, id
-            LIMIT $3
+            LIMIT $4
             FOR UPDATE SKIP LOCKED
         )
         UPDATE billing_payment_attempts AS attempts
         SET status = 'failed',
-            gateway_response_text = COALESCE(gateway_response_text, $4),
+            gateway_response_text = COALESCE(gateway_response_text, $5),
             gateway_condition = COALESCE(gateway_condition, 'failed'),
             resolved_at = clock_timestamp(),
             updated_at = clock_timestamp()
@@ -406,7 +406,8 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
         WHERE attempts.id = stale_attempts.id
         "#,
     )
-    .bind(PAYMENT_METHOD_REPLACEMENT_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .bind(gateway_account_id.as_uuid())
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)
     .bind(STALE_PAYMENT_METHOD_REPLACEMENT_RESPONSE_TEXT)
@@ -425,6 +426,7 @@ pub async fn fail_stale_unsubmitted_subscription_charges(
     pool: &PgPool,
     gateway_account_id: GatewayAccountId,
 ) -> Result<u64, sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
     let mut transaction = pool.begin().await?;
     sqlx::query("SELECT set_config('lock_timeout', '250ms', true)")
         .execute(&mut *transaction)
@@ -435,20 +437,20 @@ pub async fn fail_stale_unsubmitted_subscription_charges(
             SELECT id
             FROM billing_payment_attempts
             WHERE attempt_kind IN ('subscription_renewal', 'subscription_recovery')
-                AND status IN ('pending', 'review_required')
+                AND status = ANY($1::text[])
                 AND submitted_at IS NULL
                 AND created_at <= clock_timestamp()
-                    - ($1::bigint * interval '1 second')
-                AND gateway_account_id = $2
+                    - ($2::bigint * interval '1 second')
+                AND gateway_account_id = $3
             ORDER BY created_at, id
-            LIMIT $3
+            LIMIT $4
             FOR UPDATE SKIP LOCKED
         )
         UPDATE billing_payment_attempts AS attempts
         SET status = 'failed',
             gateway_response_text = CASE attempts.attempt_kind
-                WHEN 'subscription_renewal' THEN $4
-                WHEN 'subscription_recovery' THEN $5
+                WHEN 'subscription_renewal' THEN $5
+                WHEN 'subscription_recovery' THEN $6
             END,
             gateway_condition = COALESCE(attempts.gateway_condition, 'failed'),
             resolved_at = COALESCE(attempts.resolved_at, clock_timestamp()),
@@ -457,7 +459,8 @@ pub async fn fail_stale_unsubmitted_subscription_charges(
         WHERE attempts.id = stale_attempts.id
         "#,
     )
-    .bind(SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS)
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .bind(gateway_account_id.as_uuid())
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)
     .bind(STALE_UNSUBMITTED_RENEWAL_TEXT)
@@ -477,19 +480,23 @@ pub async fn fail_stale_unsubmitted_subscription_enrollments(
     pool: &PgPool,
     gateway_account_id: GatewayAccountId,
 ) -> Result<u64, sqlx::Error> {
+    let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
     let candidates = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
         SELECT DISTINCT billing_scope_id, subscriber_id, plan_key
         FROM billing_payment_attempts
         WHERE gateway_account_id = $1
             AND attempt_kind = 'subscription_initial'
-            AND status IN ('pending', 'review_required')
+            AND status = ANY($2::text[])
             AND submitted_at IS NULL
-            AND created_at <= clock_timestamp() - interval '30 minutes'
+            AND created_at <= clock_timestamp()
+                - ($3::bigint * interval '1 second')
         ORDER BY billing_scope_id, subscriber_id, plan_key
         "#,
     )
     .bind(gateway_account_id.as_uuid())
+    .bind(policy.expirable_status_values())
+    .bind(policy.stale_after_seconds())
     .fetch_all(pool)
     .await?;
 

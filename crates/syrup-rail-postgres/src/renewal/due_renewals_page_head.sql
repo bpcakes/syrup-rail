@@ -1,6 +1,6 @@
--- Composition contract: this fragment uses $4/$10 and opens
+-- Composition contract: this fragment uses $4/$10/$12 and opens
 -- eligible_subscriptions. The first-page statement appends the body directly;
--- the continuation inserts its $12/$13 keyset predicate first.
+-- the continuation inserts its $13/$14 keyset predicate first.
 -- NOT MATERIALIZED removes the old mandatory full-candidate evaluation and
 -- lets PostgreSQL stop an ordered index plan at the outer LIMIT. Plan choice
 -- remains cost-based and must be rehearsed against representative host data.
@@ -31,7 +31,7 @@ WITH eligible_subscriptions AS NOT MATERIALIZED (
                 AND update_attempts.attempt_kind = 'subscription_payment_method_update'
                 AND update_attempts.status IN ('pending', 'unknown', 'review_required')
                 AND NOT (
-                    update_attempts.status = 'pending'
+                    update_attempts.status = ANY($12::text[])
                     AND update_attempts.submitted_at IS NULL
                     AND update_attempts.created_at <= $10::timestamptz
                         - ($4::bigint * interval '1 second')

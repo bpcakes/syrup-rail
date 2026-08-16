@@ -1,17 +1,9 @@
 use chrono::{Duration, Utc};
 use sqlx::PgConnection;
-use syrup_rail::{BillingScopeId, DeletionBlockerQuery, SubscriberId};
+use syrup_rail::{BillingScopeId, DeletionBlockerQuery, PaymentAttemptKind, SubscriberId};
 
 use super::*;
-use crate::{
-    attempts::{
-        INITIAL_PREPARED_STALE_AFTER_SECONDS,
-        PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS,
-        SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-    },
-    billing_deletion_blockers,
-    host_charge_reconciliation::HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-};
+use crate::{attempts::LocalAttemptPolicy, billing_deletion_blockers};
 
 struct BlockerFixture {
     account: GatewayAccountFixture,
@@ -34,22 +26,12 @@ async fn deletion_blockers_cover_every_attempt_kind_and_submission_boundary()
     let database = TestDatabase::start("delete_matrix").await?;
     let result = async {
         let fixture = blocker_fixture(&database.pool).await?;
-        let kinds = [
+        let kinds = PaymentAttemptKind::ALL.map(|kind| {
             (
-                "subscription_payment_method_update",
-                PAYMENT_METHOD_UPDATE_UNSUBMITTED_STALE_AFTER_SECONDS,
-            ),
-            ("subscription_initial", INITIAL_PREPARED_STALE_AFTER_SECONDS),
-            (
-                "subscription_renewal",
-                SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-            ),
-            (
-                "subscription_recovery",
-                SUBSCRIPTION_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS,
-            ),
-            ("host_charge", HOST_CHARGE_UNSUBMITTED_STALE_AFTER_SECONDS),
-        ];
+                kind.as_str(),
+                LocalAttemptPolicy::for_kind(kind).stale_after_seconds(),
+            )
+        });
         let mut connection = database.pool.acquire().await?;
         for (kind, stale_after) in kinds {
             let cases = [
