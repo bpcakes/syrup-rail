@@ -3,7 +3,7 @@ use super::*;
 pub(super) async fn apply_payment_method_replacement_approved_outcome(
     coordinator: &dyn BillingTransactionCoordinator,
     reservation: &SubscriptionPaymentMethodReplacement,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
     let mut transaction = coordinator
@@ -17,7 +17,7 @@ pub(super) async fn apply_payment_method_replacement_approved_outcome(
         transaction.connection(),
         subject_state,
         reservation,
-        evidence,
+        approved_evidence,
     )
     .await;
     finalize_approved_application(transaction, application).await
@@ -27,11 +27,12 @@ async fn apply_payment_method_replacement_approved_on_connection(
     connection: &mut PgConnection,
     subject_state: BillingTransactionSubjectState,
     reservation: &SubscriptionPaymentMethodReplacement,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
 ) -> Result<
     (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
     SubscriptionEnrollmentApplicationError,
 > {
+    let evidence = approved_evidence.evidence();
     set_application_timeouts(connection).await?;
     let identity = reservation.identity();
     lock_payment_method_domain(
@@ -79,7 +80,10 @@ async fn apply_payment_method_replacement_approved_on_connection(
         )
         .await?;
         return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(attempt, evidence.clone())?,
+            SubscriptionEnrollmentPaymentResult::confirmation_pending(
+                attempt,
+                approved_evidence.clone(),
+            )?,
             None,
         ));
     }

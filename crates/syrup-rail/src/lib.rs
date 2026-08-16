@@ -71,14 +71,14 @@ pub use event::{
     SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureDisposition,
 };
 pub use gateway::{
-    CardLastFour, GatewayAccountMode, GatewayError, GatewayLifecycleEvidence,
-    GatewayLifecycleEvidenceError, GatewayLifecycleQuarantine, GatewayLifecycleQuarantineError,
-    GatewayLifecycleQuarantineReason, GatewayLifecycleQuarantineResolutionReason,
-    GatewayLifecycleQuarantineResolutionReasonError, GatewayLifecycleQueryPolicy,
-    GatewayLifecycleQueryPolicyError, GatewayLifecycleState, GatewayMutationError,
-    GatewayMutationReferenceFactory, GatewayNotSubmittedError, GatewayPaymentDescriptor,
-    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayQueryRequest, GatewayRequestError,
-    GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
+    ApprovedProcessorEvidence, CardLastFour, GatewayAccountMode, GatewayError,
+    GatewayLifecycleEvidence, GatewayLifecycleEvidenceError, GatewayLifecycleQuarantine,
+    GatewayLifecycleQuarantineError, GatewayLifecycleQuarantineReason,
+    GatewayLifecycleQuarantineResolutionReason, GatewayLifecycleQuarantineResolutionReasonError,
+    GatewayLifecycleQueryPolicy, GatewayLifecycleQueryPolicyError, GatewayLifecycleState,
+    GatewayMutationError, GatewayMutationReferenceFactory, GatewayNotSubmittedError,
+    GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayQueryRequest,
+    GatewayRequestError, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
     GatewayTransactionReport, GatewayTransactionReportRequest, MutationCertainty, PaymentCardBrand,
     PaymentGateway, PaymentReversalKind, ProcessorEvidence, SharedGatewayMutationReferenceFactory,
     SharedPaymentGateway,
@@ -91,10 +91,10 @@ pub use gateway_value::{
     sanitize_gateway_detail, truncate_gateway_detail_to_length,
 };
 pub use host_charge::{
-    ChargeHostTarget, HostChargePaymentResult, HostChargeReservation,
-    HostChargeReservationBuildError, HostChargeTargetNoChange, HostChargeTargetRejection,
-    HostChargeTargetSnapshot, HostChargeTargetTransition, HostChargeTargetTransitionKind,
-    HostChargeTargetTransitionOutcome,
+    ChargeHostTarget, HostChargePaymentResult, HostChargePaymentResultBuildError,
+    HostChargeReservation, HostChargeReservationBuildError, HostChargeTargetNoChange,
+    HostChargeTargetRejection, HostChargeTargetSnapshot, HostChargeTargetTransition,
+    HostChargeTargetTransitionKind, HostChargeTargetTransitionOutcome,
 };
 pub use identity::{
     ActorId, BillingScopeId, DiscountClaimId, DiscountCodeId, GatewayAccountId,

@@ -506,6 +506,43 @@ impl ProcessorEvidence {
     pub const fn has_gateway_reference(&self) -> bool {
         self.transaction_id.is_some() || self.payment_method_reference.is_some()
     }
+
+    /// Returns whether the evidence conservatively identifies an approved
+    /// payment at the processor.
+    ///
+    /// A transaction identity is required in addition to an approved response,
+    /// response code, or lifecycle condition. Free-form response text is not
+    /// treated as authoritative approval evidence.
+    pub fn indicates_approved_payment(&self) -> bool {
+        self.transaction_id.is_some()
+            && (crate::gateway_response_is_approved(
+                self.response.as_ref().map(GatewayDiagnostic::expose),
+            ) || crate::gateway_response_is_approved(
+                self.response_code.as_ref().map(GatewayDiagnostic::expose),
+            ) || self
+                .condition
+                .as_ref()
+                .is_some_and(|value| crate::gateway_state_is_approved(value.expose())))
+    }
+}
+
+/// Processor evidence refined by an authoritative approved gateway outcome.
+///
+/// Raw processor fields are intentionally not reclassified here: some valid
+/// approved outcomes carry incomplete evidence until exact reconciliation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApprovedProcessorEvidence {
+    evidence: ProcessorEvidence,
+}
+
+impl ApprovedProcessorEvidence {
+    pub const fn evidence(&self) -> &ProcessorEvidence {
+        &self.evidence
+    }
+
+    pub fn into_evidence(self) -> ProcessorEvidence {
+        self.evidence
+    }
 }
 
 impl fmt::Debug for ProcessorEvidence {
@@ -544,6 +581,14 @@ impl GatewayPaymentOutcome {
 
     pub const fn evidence(&self) -> &ProcessorEvidence {
         &self.evidence
+    }
+
+    /// Refines this outcome's evidence only when the provider decision is
+    /// authoritatively approved.
+    pub fn approved_evidence(&self) -> Option<ApprovedProcessorEvidence> {
+        (self.status == GatewayPaymentStatus::Approved).then(|| ApprovedProcessorEvidence {
+            evidence: self.evidence.clone(),
+        })
     }
 
     pub fn into_parts(self) -> (GatewayPaymentStatus, ProcessorEvidence) {

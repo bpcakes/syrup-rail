@@ -2,12 +2,13 @@ use std::fmt;
 
 use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
-    BillingEvent, BillingEventSubject, BillingScopeId, GatewayMutationError,
-    GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
-    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
-    ResolvedGateway, SubscriptionEnrollmentPaymentResult, SubscriptionRenewalReservation,
-    SubscriptionRenewalSubmissionOutcome, SubscriptionRenewalSubmissionRejection,
+    ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
+    GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
+    ProcessorEvidence, ResolvedGateway, SubscriptionEnrollmentPaymentResult,
+    SubscriptionRenewalReservation, SubscriptionRenewalSubmissionOutcome,
+    SubscriptionRenewalSubmissionRejection,
 };
 
 use crate::{
@@ -223,17 +224,20 @@ pub async fn apply_subscription_renewal_gateway_outcome(
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     match outcome.status() {
         GatewayPaymentStatus::Approved => {
+            let approved_evidence = outcome.approved_evidence().ok_or(
+                SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE),
+            )?;
             if outcome.transaction_id().is_none() {
                 return park_renewal_approved_outcome(
                     pool,
                     reservation,
-                    outcome.evidence(),
+                    &approved_evidence,
                     RENEWAL_INCOMPLETE_APPROVAL_TEXT,
                 )
                 .await;
             }
             for attempt_index in 0..APPROVED_APPLICATION_ATTEMPTS {
-                match apply_renewal_approved_outcome(coordinator, reservation, outcome.evidence())
+                match apply_renewal_approved_outcome(coordinator, reservation, &approved_evidence)
                     .await
                 {
                     Ok(result) => return Ok(result),
@@ -246,7 +250,7 @@ pub async fn apply_subscription_renewal_gateway_outcome(
             park_renewal_approved_outcome(
                 pool,
                 reservation,
-                outcome.evidence(),
+                &approved_evidence,
                 RENEWAL_APPROVED_STORAGE_FAILURE_TEXT,
             )
             .await
@@ -326,7 +330,7 @@ pub async fn apply_reconciled_subscription_renewal_gateway_outcome(
 async fn apply_renewal_approved_outcome(
     coordinator: &dyn BillingTransactionCoordinator,
     reservation: &SubscriptionRenewalReservation,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
     let mut transaction = coordinator
@@ -340,7 +344,7 @@ async fn apply_renewal_approved_outcome(
         transaction.connection(),
         subject_state,
         reservation,
-        evidence,
+        approved_evidence,
     )
     .await;
     finalize_approved_application(transaction, application).await
@@ -350,11 +354,12 @@ async fn apply_renewal_approved_on_connection(
     connection: &mut PgConnection,
     subject_state: BillingTransactionSubjectState,
     reservation: &SubscriptionRenewalReservation,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
 ) -> Result<
     (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
     SubscriptionEnrollmentApplicationError,
 > {
+    let evidence = approved_evidence.evidence();
     set_application_timeouts(connection).await?;
     let identity = reservation.identity();
     lock_payment_method_domain(
@@ -409,7 +414,10 @@ async fn apply_renewal_approved_on_connection(
             .await?;
         }
         return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(attempt, evidence.clone())?,
+            SubscriptionEnrollmentPaymentResult::confirmation_pending(
+                attempt,
+                approved_evidence.clone(),
+            )?,
             None,
         ));
     }
@@ -675,9 +683,10 @@ async fn resolve_renewal_unknown_outcome(
 async fn park_renewal_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionRenewalReservation,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let evidence = approved_evidence.evidence();
     match try_park_renewal_approved_outcome(pool, reservation, evidence, message).await {
         Ok(result) => Ok(result),
         Err(_) => {
@@ -697,7 +706,7 @@ async fn park_renewal_approved_outcome(
             } else {
                 SubscriptionEnrollmentPaymentResult::confirmation_pending(
                     attempt,
-                    evidence.clone(),
+                    approved_evidence.clone(),
                 )?
             };
             transaction.commit().await?;

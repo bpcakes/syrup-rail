@@ -1,11 +1,11 @@
 use chrono::{DateTime, Utc};
 
 use crate::{
-    BillingContact, BillingContactSnapshot, BillingScopeId, ChargeAmount, GatewayConfigurationId,
-    HostChargeTargetId, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
-    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
-    PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind, PaymentToken,
-    ProcessorEvidence, ResolvedGateway, SubscriberId,
+    ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
+    ChargeAmount, GatewayConfigurationId, HostChargeTargetId, IdempotencyKey, PaymentAttempt,
+    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
+    PaymentAttemptRequest, PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind,
+    PaymentToken, ProcessorEvidence, ResolvedGateway, SubscriberId,
 };
 use thiserror::Error;
 
@@ -276,25 +276,38 @@ pub enum HostChargeTargetTransitionOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HostChargePaymentResult {
     attempt: PaymentAttempt,
-    pending_confirmation_evidence: Option<ProcessorEvidence>,
+    pending_confirmation_evidence: Option<ApprovedProcessorEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum HostChargePaymentResultBuildError {
+    #[error("a host-charge payment result requires a host-charge attempt")]
+    AttemptNotHostCharge,
+    #[error("an approved attempt cannot produce a confirmation-pending payment result")]
+    ConfirmationPendingAttemptApproved,
 }
 
 impl HostChargePaymentResult {
-    pub const fn new(attempt: PaymentAttempt) -> Self {
-        Self {
+    pub fn new(attempt: PaymentAttempt) -> Result<Self, HostChargePaymentResultBuildError> {
+        require_host_charge_attempt(&attempt)?;
+        Ok(Self {
             attempt,
             pending_confirmation_evidence: None,
-        }
+        })
     }
 
-    pub const fn confirmation_pending(
+    pub fn confirmation_pending(
         attempt: PaymentAttempt,
-        evidence: ProcessorEvidence,
-    ) -> Self {
-        Self {
+        evidence: ApprovedProcessorEvidence,
+    ) -> Result<Self, HostChargePaymentResultBuildError> {
+        require_host_charge_attempt(&attempt)?;
+        if attempt.status() == PaymentAttemptStatus::Approved {
+            return Err(HostChargePaymentResultBuildError::ConfirmationPendingAttemptApproved);
+        }
+        Ok(Self {
             attempt,
             pending_confirmation_evidence: Some(evidence),
-        }
+        })
     }
 
     pub const fn attempt(&self) -> &PaymentAttempt {
@@ -312,11 +325,22 @@ impl HostChargePaymentResult {
     pub fn processor_evidence(&self) -> &ProcessorEvidence {
         self.pending_confirmation_evidence
             .as_ref()
+            .map(ApprovedProcessorEvidence::evidence)
             .unwrap_or_else(|| self.attempt.state().processor_evidence())
     }
 
     pub const fn is_confirmation_pending(&self) -> bool {
         self.pending_confirmation_evidence.is_some()
+    }
+}
+
+fn require_host_charge_attempt(
+    attempt: &PaymentAttempt,
+) -> Result<(), HostChargePaymentResultBuildError> {
+    if attempt.kind() == PaymentAttemptKind::HostCharge {
+        Ok(())
+    } else {
+        Err(HostChargePaymentResultBuildError::AttemptNotHostCharge)
     }
 }
 

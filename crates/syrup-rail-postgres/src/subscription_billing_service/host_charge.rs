@@ -20,6 +20,13 @@ impl HostChargePreSubmissionOutcome {
     }
 }
 
+fn host_charge_payment_result(
+    attempt: PaymentAttempt,
+) -> Result<HostChargePaymentResult, SubscriptionBillingServiceError> {
+    HostChargePaymentResult::new(attempt)
+        .map_err(|_| SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE))
+}
+
 impl SubscriptionBillingService {
     /// Charges one host-owned target through the canonical attempt ledger.
     ///
@@ -45,7 +52,7 @@ impl SubscriptionBillingService {
                 (reservation.snapshot(), Some(reservation))
             }
             HostChargePreflightOutcome::Replay(attempt) => {
-                return Ok(HostChargePaymentResult::new(*attempt));
+                return host_charge_payment_result(*attempt);
             }
             HostChargePreflightOutcome::IdempotencyConflict => {
                 return Err(SubscriptionBillingServiceError::IdempotencyConflict);
@@ -146,7 +153,7 @@ impl SubscriptionBillingService {
                 attempt
             }
             HostChargeReservationOutcome::Replay(attempt) => {
-                return Ok(HostChargePaymentResult::new(attempt));
+                return host_charge_payment_result(attempt);
             }
             HostChargeReservationOutcome::IdempotencyConflict => {
                 return Err(SubscriptionBillingServiceError::IdempotencyConflict);
@@ -197,10 +204,10 @@ impl SubscriptionBillingService {
             match admit_host_charge_submission(&self.pool, targets, &reservation).await? {
                 HostChargeAdmissionOutcome::Admitted(admission) => *admission,
                 HostChargeAdmissionOutcome::AlreadyAdmitted(attempt) => {
-                    return Ok(HostChargePaymentResult::new(attempt));
+                    return host_charge_payment_result(attempt);
                 }
                 HostChargeAdmissionOutcome::Rejected { attempt, .. } => {
-                    return Ok(HostChargePaymentResult::new(attempt));
+                    return host_charge_payment_result(attempt);
                 }
             };
         if let Some(scope) = self.active_cooldown(&account).await? {

@@ -185,6 +185,47 @@ fn sensitive_debug_output_is_value_free() {
 }
 
 #[test]
+fn approved_payment_evidence_requires_identity_and_an_authoritative_decision() {
+    let approved =
+        |response: Option<&str>, response_code: Option<&str>, condition: Option<&str>| {
+            ProcessorEvidence::new(
+                Some(GatewayTransactionId::new("txn-approved-evidence").unwrap()),
+                None,
+                response.map(GatewayDiagnostic::new),
+                response_code.map(GatewayDiagnostic::new),
+                None,
+                condition.map(GatewayDiagnostic::new),
+                GatewayPaymentDescriptor::default(),
+            )
+        };
+    assert!(approved(Some("1"), None, None).indicates_approved_payment());
+    assert!(approved(None, Some("100"), None).indicates_approved_payment());
+    assert!(approved(None, None, Some("complete")).indicates_approved_payment());
+    assert!(!approved(Some("2"), Some("200"), Some("declined")).indicates_approved_payment());
+    assert!(!approved(None, None, None).indicates_approved_payment());
+
+    let missing_identity = ProcessorEvidence::new(
+        None,
+        None,
+        Some(GatewayDiagnostic::new("1")),
+        Some(GatewayDiagnostic::new("100")),
+        Some(GatewayDiagnostic::new("Approved")),
+        Some(GatewayDiagnostic::new("complete")),
+        GatewayPaymentDescriptor::default(),
+    );
+    assert!(!missing_identity.indicates_approved_payment());
+
+    let incomplete_but_authoritative =
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, ProcessorEvidence::default());
+    assert!(incomplete_but_authoritative.approved_evidence().is_some());
+    let non_approved = GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Unknown,
+        approved(Some("1"), None, None),
+    );
+    assert!(non_approved.approved_evidence().is_none());
+}
+
+#[test]
 fn quarantine_resolution_reason_is_normalized_bounded_and_card_safe() {
     let reason = GatewayLifecycleQuarantineResolutionReason::new("  reviewed evidence  ").unwrap();
     assert_eq!(reason.expose(), "reviewed evidence");

@@ -728,7 +728,7 @@ async fn resolve_pool_outcome(
         if resolution.clears_submitted_at() {
             clear_attempt_submission(&mut transaction, &attempt).await?;
         }
-        if resolution.records_pending_evidence(status) && evidence_looks_approved(evidence) {
+        if resolution.records_pending_evidence(status) && evidence.indicates_approved_payment() {
             observe_processor_charge(
                 &mut transaction,
                 &attempt,
@@ -1027,16 +1027,6 @@ pub(crate) async fn park_locked_attempt(
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
         INVALID_APPLICATION_STATE,
     ))
-}
-
-fn evidence_looks_approved(evidence: &ProcessorEvidence) -> bool {
-    evidence.transaction_id().is_some()
-        && (evidence
-            .response()
-            .is_some_and(|value| syrup_rail::gateway_response_is_approved(Some(value.expose())))
-            || evidence
-                .condition()
-                .is_some_and(|value| syrup_rail::gateway_state_is_approved(value.expose())))
 }
 
 pub(crate) async fn payment_result_for_attempt(

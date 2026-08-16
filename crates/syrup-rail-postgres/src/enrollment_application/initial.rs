@@ -3,15 +3,15 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
-    BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId, EnrollSubscription,
-    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
-    GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, GatewayTransactionId,
-    PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode,
-    ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence, ResolvedGateway,
-    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
-    SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
-    SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionPhase,
-    next_billing_period,
+    ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId,
+    EnrollSubscription, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome,
+    GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest,
+    GatewayTransactionId, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentMethodId,
+    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
+    ResolvedGateway, SubscriptionDiscountDuration, SubscriptionDiscountKind,
+    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentReservation,
+    SubscriptionEnrollmentSubmissionOutcome, SubscriptionEnrollmentSubmissionRejection,
+    SubscriptionId, SubscriptionPhase, next_billing_period,
 };
 use uuid::Uuid;
 
@@ -230,11 +230,14 @@ pub async fn apply_subscription_enrollment_gateway_outcome(
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     match outcome.status() {
         GatewayPaymentStatus::Approved => {
+            let approved_evidence = outcome.approved_evidence().ok_or(
+                SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE),
+            )?;
             if outcome.transaction_id().is_none() || outcome.payment_method_reference().is_none() {
                 return park_approved_outcome(
                     pool,
                     reservation,
-                    outcome.evidence(),
+                    &approved_evidence,
                     INCOMPLETE_APPROVAL_TEXT,
                 )
                 .await;
@@ -252,7 +255,7 @@ pub async fn apply_subscription_enrollment_gateway_outcome(
             park_approved_outcome(
                 pool,
                 reservation,
-                outcome.evidence(),
+                &approved_evidence,
                 APPROVED_STORAGE_FAILURE_TEXT,
             )
             .await
@@ -376,9 +379,10 @@ async fn resolve_unknown_outcome(
 async fn park_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionEnrollmentReservation,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let evidence = approved_evidence.evidence();
     match try_park_approved_outcome(pool, reservation, evidence, message).await {
         Ok(result) => Ok(result),
         Err(_) => {
@@ -398,7 +402,7 @@ async fn park_approved_outcome(
             } else {
                 SubscriptionEnrollmentPaymentResult::confirmation_pending(
                     attempt,
-                    evidence.clone(),
+                    approved_evidence.clone(),
                 )?
             };
             transaction.commit().await?;

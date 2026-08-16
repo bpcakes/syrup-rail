@@ -1,12 +1,12 @@
 use std::fmt;
 
 use crate::{
-    BillingContact, BillingContactSnapshot, BillingScopeId, ChargeAmount, DiscountClaimId,
-    DiscountCodeId, GatewayConfigurationId, GatewayOrderId, GatewayProviderKey, IdempotencyKey,
-    PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptStatus, PaymentAttemptTarget, PaymentToken, PlanKey, ProcessorEvidence,
-    ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountSnapshot, SubscriptionOffer,
-    SubscriptionPaymentContext,
+    ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
+    ChargeAmount, DiscountClaimId, DiscountCodeId, GatewayConfigurationId, GatewayOrderId,
+    GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget, PaymentToken, PlanKey,
+    ProcessorEvidence, ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountSnapshot,
+    SubscriptionOffer, SubscriptionPaymentContext,
 };
 use thiserror::Error;
 
@@ -568,7 +568,7 @@ pub enum SubscriptionEnrollmentSubmissionOutcome {
     },
 }
 
-/// Durable result of applying one initial-enrollment provider outcome.
+/// Durable result of applying one subscription provider outcome.
 ///
 /// Construction distinguishes an applied approval, a result that was not
 /// applied, and approved evidence whose confirmation is still pending. A
@@ -585,14 +585,20 @@ pub struct SubscriptionEnrollmentPaymentResult {
 enum SubscriptionEnrollmentPaymentResultState {
     Applied(Subscription),
     NotApplied,
-    ConfirmationPending(ProcessorEvidence),
+    ConfirmationPending(ApprovedProcessorEvidence),
 }
 
 /// Invalid attempt state supplied to a payment-result constructor.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum SubscriptionEnrollmentPaymentResultBuildError {
+    #[error("a subscription payment result requires a subscription attempt")]
+    AttemptNotSubscription,
     #[error("an applied payment result requires an approved attempt")]
     AppliedAttemptNotApproved,
+    #[error("the applied subscription ID does not match the payment attempt target")]
+    AppliedSubscriptionIdMismatch,
+    #[error("the applied subscription plan does not match the payment attempt target")]
+    AppliedSubscriptionPlanMismatch,
     #[error("an approved attempt cannot produce a not-applied payment result")]
     NotAppliedAttemptApproved,
     #[error("an approved attempt cannot produce a confirmation-pending payment result")]
@@ -605,8 +611,19 @@ impl SubscriptionEnrollmentPaymentResult {
         attempt: PaymentAttempt,
         subscription: Subscription,
     ) -> Result<Self, SubscriptionEnrollmentPaymentResultBuildError> {
+        require_subscription_attempt(&attempt)?;
         if attempt.status() != PaymentAttemptStatus::Approved {
             return Err(SubscriptionEnrollmentPaymentResultBuildError::AppliedAttemptNotApproved);
+        }
+        if attempt.request().target().subscription_id() != Some(subscription.id()) {
+            return Err(
+                SubscriptionEnrollmentPaymentResultBuildError::AppliedSubscriptionIdMismatch,
+            );
+        }
+        if attempt.request().target().plan_key() != Some(subscription.plan_key()) {
+            return Err(
+                SubscriptionEnrollmentPaymentResultBuildError::AppliedSubscriptionPlanMismatch,
+            );
         }
         Ok(Self {
             attempt,
@@ -618,6 +635,7 @@ impl SubscriptionEnrollmentPaymentResult {
     pub fn not_applied(
         attempt: PaymentAttempt,
     ) -> Result<Self, SubscriptionEnrollmentPaymentResultBuildError> {
+        require_subscription_attempt(&attempt)?;
         if attempt.status() == PaymentAttemptStatus::Approved {
             return Err(SubscriptionEnrollmentPaymentResultBuildError::NotAppliedAttemptApproved);
         }
@@ -633,8 +651,9 @@ impl SubscriptionEnrollmentPaymentResult {
     /// pending rather than as the attempt's older status.
     pub fn confirmation_pending(
         attempt: PaymentAttempt,
-        evidence: ProcessorEvidence,
+        evidence: ApprovedProcessorEvidence,
     ) -> Result<Self, SubscriptionEnrollmentPaymentResultBuildError> {
+        require_subscription_attempt(&attempt)?;
         if attempt.status() == PaymentAttemptStatus::Approved {
             return Err(
                 SubscriptionEnrollmentPaymentResultBuildError::ConfirmationPendingAttemptApproved,
@@ -670,7 +689,9 @@ impl SubscriptionEnrollmentPaymentResult {
 
     pub fn processor_evidence(&self) -> &ProcessorEvidence {
         match &self.state {
-            SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence) => evidence,
+            SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence) => {
+                evidence.evidence()
+            }
             SubscriptionEnrollmentPaymentResultState::Applied(_)
             | SubscriptionEnrollmentPaymentResultState::NotApplied => {
                 self.attempt.state().processor_evidence()
@@ -698,8 +719,22 @@ impl SubscriptionEnrollmentPaymentResult {
             }
             SubscriptionEnrollmentPaymentResultState::NotApplied => (self.attempt, None, None),
             SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence) => {
-                (self.attempt, None, Some(evidence))
+                (self.attempt, None, Some(evidence.into_evidence()))
             }
+        }
+    }
+}
+
+fn require_subscription_attempt(
+    attempt: &PaymentAttempt,
+) -> Result<(), SubscriptionEnrollmentPaymentResultBuildError> {
+    match attempt.kind() {
+        PaymentAttemptKind::SubscriptionInitial
+        | PaymentAttemptKind::SubscriptionRenewal
+        | PaymentAttemptKind::SubscriptionRecovery
+        | PaymentAttemptKind::SubscriptionPaymentMethodUpdate => Ok(()),
+        PaymentAttemptKind::HostCharge => {
+            Err(SubscriptionEnrollmentPaymentResultBuildError::AttemptNotSubscription)
         }
     }
 }

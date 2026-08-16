@@ -2,13 +2,13 @@ use std::fmt;
 
 use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
-    BillingEvent, BillingEventSubject, BillingScopeId, GatewayMutationError,
-    GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
-    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
-    RecoverSubscriptionPayment, ResolvedGateway, SubscriptionEnrollmentPaymentResult,
-    SubscriptionRecoveryReservation, SubscriptionRecoverySubmissionOutcome,
-    SubscriptionRecoverySubmissionRejection,
+    ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
+    GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
+    ProcessorEvidence, RecoverSubscriptionPayment, ResolvedGateway,
+    SubscriptionEnrollmentPaymentResult, SubscriptionRecoveryReservation,
+    SubscriptionRecoverySubmissionOutcome, SubscriptionRecoverySubmissionRejection,
 };
 
 use crate::{
@@ -215,17 +215,20 @@ pub async fn apply_subscription_recovery_gateway_outcome(
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     match outcome.status() {
         GatewayPaymentStatus::Approved => {
+            let approved_evidence = outcome.approved_evidence().ok_or(
+                SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE),
+            )?;
             if outcome.transaction_id().is_none() || outcome.payment_method_reference().is_none() {
                 return park_recovery_approved_outcome(
                     pool,
                     reservation,
-                    outcome.evidence(),
+                    &approved_evidence,
                     RECOVERY_INCOMPLETE_APPROVAL_TEXT,
                 )
                 .await;
             }
             for attempt_index in 0..APPROVED_APPLICATION_ATTEMPTS {
-                match apply_recovery_approved_outcome(coordinator, reservation, outcome.evidence())
+                match apply_recovery_approved_outcome(coordinator, reservation, &approved_evidence)
                     .await
                 {
                     Ok(result) => return Ok(result),
@@ -238,7 +241,7 @@ pub async fn apply_subscription_recovery_gateway_outcome(
             park_recovery_approved_outcome(
                 pool,
                 reservation,
-                outcome.evidence(),
+                &approved_evidence,
                 RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
             )
             .await
@@ -320,7 +323,7 @@ pub async fn apply_reconciled_subscription_recovery_gateway_outcome(
 async fn apply_recovery_approved_outcome(
     coordinator: &dyn BillingTransactionCoordinator,
     reservation: &SubscriptionRecoveryReservation,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
     let mut transaction = coordinator
@@ -334,7 +337,7 @@ async fn apply_recovery_approved_outcome(
         transaction.connection(),
         subject_state,
         reservation,
-        evidence,
+        approved_evidence,
     )
     .await;
     finalize_approved_application(transaction, application).await
@@ -344,11 +347,12 @@ async fn apply_recovery_approved_on_connection(
     connection: &mut PgConnection,
     subject_state: BillingTransactionSubjectState,
     reservation: &SubscriptionRecoveryReservation,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
 ) -> Result<
     (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
     SubscriptionEnrollmentApplicationError,
 > {
+    let evidence = approved_evidence.evidence();
     set_application_timeouts(connection).await?;
     let identity = reservation.identity();
     lock_payment_method_domain(
@@ -404,7 +408,10 @@ async fn apply_recovery_approved_on_connection(
             .await?;
         }
         return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(attempt, evidence.clone())?,
+            SubscriptionEnrollmentPaymentResult::confirmation_pending(
+                attempt,
+                approved_evidence.clone(),
+            )?,
             None,
         ));
     }
@@ -615,9 +622,10 @@ async fn resolve_recovery_unknown_outcome(
 async fn park_recovery_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionRecoveryReservation,
-    evidence: &ProcessorEvidence,
+    approved_evidence: &ApprovedProcessorEvidence,
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let evidence = approved_evidence.evidence();
     match try_park_recovery_approved_outcome(pool, reservation, evidence, message).await {
         Ok(result) => Ok(result),
         Err(_) => {
@@ -637,7 +645,7 @@ async fn park_recovery_approved_outcome(
             } else {
                 SubscriptionEnrollmentPaymentResult::confirmation_pending(
                     attempt,
-                    evidence.clone(),
+                    approved_evidence.clone(),
                 )?
             };
             transaction.commit().await?;
