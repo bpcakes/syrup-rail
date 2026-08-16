@@ -54,36 +54,64 @@ impl PaymentAttemptTimestamps {
     }
 }
 
-/// Durable contact metadata attached to an attempt.
+/// Durable provider-neutral contact metadata attached to an attempt.
 ///
-/// The command-side [`crate::BillingContact`] remains the provider-neutral
-/// structured input. This snapshot mirrors the deliberately smaller durable
-/// projection used for receipts and support, and keeps ordinary formatting
+/// First and last name remain separate because this value participates in
+/// immutable replay identity and provider request reconstruction. `name` is a
+/// derived receipt/support projection only. Ordinary formatting remains
 /// value-free.
 #[derive(Clone, Eq, PartialEq)]
 pub struct BillingContactSnapshot {
+    first_name: Option<String>,
+    last_name: Option<String>,
     name: Option<String>,
     email: Option<String>,
 }
 
 impl BillingContactSnapshot {
+    /// Builds a canonical snapshot from a historical combined display name.
+    ///
+    /// The combined name becomes `first_name` and `last_name` remains absent.
+    /// New command and persistence boundaries should prefer
+    /// [`Self::from_parts`] or [`Self::from_billing_contact`].
     pub fn new(name: Option<String>, email: Option<String>) -> Self {
+        Self::from_parts(name, None, email)
+    }
+
+    pub fn from_parts(
+        first_name: Option<String>,
+        last_name: Option<String>,
+        email: Option<String>,
+    ) -> Self {
+        let first_name = normalize_optional(first_name);
+        let last_name = normalize_optional(last_name);
+        let name = [first_name.as_deref(), last_name.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ");
         Self {
-            name: normalize_optional(name),
+            first_name,
+            last_name,
+            name: (!name.is_empty()).then_some(name),
             email: normalize_optional(email),
         }
     }
 
     pub fn from_billing_contact(contact: &BillingContact) -> Self {
-        let name = [contact.first_name(), contact.last_name()]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(" ");
-        Self::new(
-            (!name.is_empty()).then_some(name),
+        Self::from_parts(
+            contact.first_name().map(ToOwned::to_owned),
+            contact.last_name().map(ToOwned::to_owned),
             contact.email().map(ToOwned::to_owned),
         )
+    }
+
+    pub fn first_name(&self) -> Option<&str> {
+        self.first_name.as_deref()
+    }
+
+    pub fn last_name(&self) -> Option<&str> {
+        self.last_name.as_deref()
     }
 
     pub fn name(&self) -> Option<&str> {
@@ -95,7 +123,7 @@ impl BillingContactSnapshot {
     }
 
     pub const fn is_empty(&self) -> bool {
-        self.name.is_none() && self.email.is_none()
+        self.first_name.is_none() && self.last_name.is_none() && self.email.is_none()
     }
 }
 
@@ -103,6 +131,8 @@ impl fmt::Debug for BillingContactSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("BillingContactSnapshot")
+            .field("has_first_name", &self.first_name.is_some())
+            .field("has_last_name", &self.last_name.is_some())
             .field("has_name", &self.name.is_some())
             .field("has_email", &self.email.is_some())
             .finish()

@@ -103,6 +103,34 @@ fn fingerprints_are_nonempty_and_value_safe_to_format() {
 }
 
 #[test]
+fn billing_contact_snapshot_preserves_structure_while_deriving_display_name() {
+    let first = BillingContact::new(
+        Some("Mary Ann".to_owned()),
+        Some("Smith".to_owned()),
+        Some("mary@example.test".to_owned()),
+    )
+    .unwrap();
+    let second = BillingContact::new(
+        Some("Mary".to_owned()),
+        Some("Ann Smith".to_owned()),
+        Some("mary@example.test".to_owned()),
+    )
+    .unwrap();
+
+    let first = BillingContactSnapshot::from_billing_contact(&first);
+    let second = BillingContactSnapshot::from_billing_contact(&second);
+
+    assert_eq!(first.name(), Some("Mary Ann Smith"));
+    assert_eq!(second.name(), Some("Mary Ann Smith"));
+    assert_eq!(first.first_name(), Some("Mary Ann"));
+    assert_eq!(first.last_name(), Some("Smith"));
+    assert_eq!(second.first_name(), Some("Mary"));
+    assert_eq!(second.last_name(), Some("Ann Smith"));
+    assert_ne!(first, second);
+    assert!(!format!("{first:?}").contains("Mary"));
+}
+
+#[test]
 fn payment_state_snapshots_are_typed_and_redact_transaction_identity() {
     let transaction = GatewayTransactionId::new("txn-secret").unwrap();
     let update = PaymentMethodUpdateSnapshot::new(subscription(1), method(2), transaction.clone());
