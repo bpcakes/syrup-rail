@@ -60,6 +60,9 @@ and transaction orchestration.
 - `src/host_charge_application.rs` — host-charge final admission, one-shot
   provider submission, atomic host target/attempt/charge/event application,
   exact reconciliation, and approved-failure compensation.
+- `src/host_charge_reconciliation.rs` — bounded stale-unsubmitted host-charge
+  claiming, host-target release, and atomic local attempt failure without
+  gateway I/O.
 - `src/transactions.rs` — host-prepared billing transaction and typed event
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
@@ -204,6 +207,10 @@ and transaction orchestration.
 - Change host-charge outcome application or exact reconciliation in
   `src/host_charge_application.rs`; target transition, attempt resolution,
   processor evidence, and event append must share the host transaction.
+- Change stale unsubmitted host-charge cleanup in
+  `src/host_charge_reconciliation.rs`; preserve the bounded durable claim,
+  transition the host target before canonical attempt failure, commit both
+  changes atomically, and never perform gateway I/O.
 
 ## Invariants
 
