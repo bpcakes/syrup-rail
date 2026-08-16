@@ -81,7 +81,7 @@ impl TestDatabase {
         Ok(database)
     }
 
-    async fn upgrade_v2_to_v3(&self) -> Result<(), Box<dyn Error>> {
+    pub(crate) async fn upgrade_v2_to_v3(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
         sqlx::raw_sql(V2_TO_V3_UPGRADE_SQL)
             .execute(&mut *transaction)

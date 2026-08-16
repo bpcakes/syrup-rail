@@ -68,11 +68,7 @@ async fn v2_upgrade_canonicalizes_legacy_combined_name_without_losing_display()
         .execute(&database.pool)
         .await?;
 
-        let mut transaction = database.pool.begin().await?;
-        sqlx::raw_sql(V2_TO_V3_UPGRADE_SQL)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
+        database.upgrade_v2_to_v3().await?;
 
         let contact = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>)>(
             r#"
