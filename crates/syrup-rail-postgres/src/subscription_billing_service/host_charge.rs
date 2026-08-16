@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Clone, Copy)]
-enum HostChargeReadinessStage<'a> {
+enum HostChargePreSubmissionStage<'a> {
     Unreserved,
     Prepared {
         targets: &'a dyn HostChargeTargetStore,
@@ -9,12 +9,12 @@ enum HostChargeReadinessStage<'a> {
     },
 }
 
-enum HostChargeReadinessOutcome {
+enum HostChargePreSubmissionOutcome {
     Ready,
     Resolved(Box<HostChargePaymentResult>),
 }
 
-impl HostChargeReadinessOutcome {
+impl HostChargePreSubmissionOutcome {
     fn resolved(payment: HostChargePaymentResult) -> Self {
         Self::Resolved(Box::new(payment))
     }
@@ -61,6 +61,24 @@ impl SubscriptionBillingService {
                 command.gateway_configuration_id(),
             )
             .await?;
+        if prepared_reservation.as_ref().is_some_and(|reservation| {
+            reservation.identity().gateway_account_id() != account.account_id
+        }) {
+            return Err(SubscriptionBillingServiceError::InvalidState(
+                INVALID_SERVICE_STATE,
+            ));
+        }
+        let cooldown_stage = prepared_reservation.as_ref().map_or(
+            HostChargePreSubmissionStage::Unreserved,
+            |reservation| HostChargePreSubmissionStage::Prepared {
+                targets,
+                reservation,
+            },
+        );
+        match self.host_charge_cooldown(&account, cooldown_stage).await? {
+            HostChargePreSubmissionOutcome::Ready => {}
+            HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
+        }
         let gateway = self
             .resolver
             .resolve(
@@ -91,11 +109,15 @@ impl SubscriptionBillingService {
         }
         if prepared_reservation.is_none() {
             match self
-                .host_charge_readiness(&account, &gateway, HostChargeReadinessStage::Unreserved)
+                .host_charge_gateway_readiness(
+                    &account,
+                    &gateway,
+                    HostChargePreSubmissionStage::Unreserved,
+                )
                 .await?
             {
-                HostChargeReadinessOutcome::Ready => {}
-                HostChargeReadinessOutcome::Resolved(payment) => return Ok(*payment),
+                HostChargePreSubmissionOutcome::Ready => {}
+                HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
             }
             self.admit_subscriber_mutation(
                 command.billing_scope_id(),
@@ -155,19 +177,20 @@ impl SubscriptionBillingService {
             }
         }
 
+        let prepared_stage = HostChargePreSubmissionStage::Prepared {
+            targets,
+            reservation: &reservation,
+        };
+        match self.host_charge_cooldown(&account, prepared_stage).await? {
+            HostChargePreSubmissionOutcome::Ready => {}
+            HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
+        }
         match self
-            .host_charge_readiness(
-                &account,
-                &gateway,
-                HostChargeReadinessStage::Prepared {
-                    targets,
-                    reservation: &reservation,
-                },
-            )
+            .host_charge_gateway_readiness(&account, &gateway, prepared_stage)
             .await?
         {
-            HostChargeReadinessOutcome::Ready => {}
-            HostChargeReadinessOutcome::Resolved(payment) => return Ok(*payment),
+            HostChargePreSubmissionOutcome::Ready => {}
+            HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
         }
 
         let admission =
@@ -261,18 +284,17 @@ impl SubscriptionBillingService {
         Ok(outcome)
     }
 
-    async fn host_charge_readiness(
+    async fn host_charge_cooldown(
         &self,
         account: &GatewayAccountSnapshot,
-        gateway: &syrup_rail::ResolvedGateway,
-        stage: HostChargeReadinessStage<'_>,
-    ) -> Result<HostChargeReadinessOutcome, SubscriptionBillingServiceError> {
+        stage: HostChargePreSubmissionStage<'_>,
+    ) -> Result<HostChargePreSubmissionOutcome, SubscriptionBillingServiceError> {
         if let Some(scope) = self.active_cooldown(account).await? {
             return match stage {
-                HostChargeReadinessStage::Unreserved => {
+                HostChargePreSubmissionStage::Unreserved => {
                     Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope })
                 }
-                HostChargeReadinessStage::Prepared {
+                HostChargePreSubmissionStage::Prepared {
                     targets,
                     reservation,
                 } => self
@@ -284,14 +306,22 @@ impl SubscriptionBillingService {
                         HostChargeBeforeSubmissionResolution::prepared(),
                     )
                     .await
-                    .map(HostChargeReadinessOutcome::resolved),
+                    .map(HostChargePreSubmissionOutcome::resolved),
             };
         }
+        Ok(HostChargePreSubmissionOutcome::Ready)
+    }
 
+    async fn host_charge_gateway_readiness(
+        &self,
+        account: &GatewayAccountSnapshot,
+        gateway: &syrup_rail::ResolvedGateway,
+        stage: HostChargePreSubmissionStage<'_>,
+    ) -> Result<HostChargePreSubmissionOutcome, SubscriptionBillingServiceError> {
         let readiness = gateway.account_mode().await;
         match stage {
-            HostChargeReadinessStage::Unreserved => match readiness {
-                Ok(GatewayAccountMode::Live) => Ok(HostChargeReadinessOutcome::Ready),
+            HostChargePreSubmissionStage::Unreserved => match readiness {
+                Ok(GatewayAccountMode::Live) => Ok(HostChargePreSubmissionOutcome::Ready),
                 Ok(GatewayAccountMode::Test) => Err(
                     SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Configuration(
                         GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
@@ -305,11 +335,11 @@ impl SubscriptionBillingService {
                 }
                 Err(error) => Err(SubscriptionBillingServiceError::GatewayReadiness(error)),
             },
-            HostChargeReadinessStage::Prepared {
+            HostChargePreSubmissionStage::Prepared {
                 targets,
                 reservation,
             } => match readiness {
-                Ok(GatewayAccountMode::Live) => Ok(HostChargeReadinessOutcome::Ready),
+                Ok(GatewayAccountMode::Live) => Ok(HostChargePreSubmissionOutcome::Ready),
                 Ok(GatewayAccountMode::Test) => self
                     .resolve_host_charge_readiness(
                         targets,
@@ -319,7 +349,7 @@ impl SubscriptionBillingService {
                         HostChargeBeforeSubmissionResolution::prepared(),
                     )
                     .await
-                    .map(HostChargeReadinessOutcome::resolved),
+                    .map(HostChargePreSubmissionOutcome::resolved),
                 Err(GatewayError::RateLimited(detail)) => self
                     .resolve_host_charge_cooldown_with_detail(
                         targets,
@@ -329,7 +359,7 @@ impl SubscriptionBillingService {
                         HostChargeBeforeSubmissionResolution::prepared_provider_rate_limited(),
                     )
                     .await
-                    .map(HostChargeReadinessOutcome::resolved),
+                    .map(HostChargePreSubmissionOutcome::resolved),
                 Err(error) if preserves_prepared_attempt_for_retry(&error) => {
                     Err(SubscriptionBillingServiceError::GatewayReadiness(error))
                 }
@@ -347,7 +377,7 @@ impl SubscriptionBillingService {
                     if payment.attempt().state().resolution_code() == Some(code) {
                         Err(SubscriptionBillingServiceError::GatewayReadiness(error))
                     } else {
-                        Ok(HostChargeReadinessOutcome::resolved(payment))
+                        Ok(HostChargePreSubmissionOutcome::resolved(payment))
                     }
                 }
             },
