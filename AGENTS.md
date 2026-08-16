@@ -92,8 +92,8 @@ When a backend crate has a crate-level `AGENTS.md`, use these sections:
 ## Repository-specific schema workflow
 
 The PostgreSQL distribution schema uses complete versioned artifacts, not a
-flat SQLx migration directory. Schema v2 is current and `schema/v1/**` is
-immutable. Do not use `scripts/jig migration-add` for these artifacts; edit the
-current version only when it has not shipped, and otherwise add the next
-forward-only version and cutover artifact as directed by the PostgreSQL crate
-guide.
+flat SQLx migration directory. Schema v3 is current and `schema/v1/**` plus
+`schema/v2/**` are immutable. Do not use `scripts/jig migration-add` for these
+artifacts; edit the current version only when it has not shipped, and otherwise
+add the next forward-only version and cutover artifact as directed by the
+PostgreSQL crate guide.

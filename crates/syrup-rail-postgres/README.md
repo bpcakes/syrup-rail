@@ -2,7 +2,7 @@
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
 SQLx operations, and high-level subscription billing service. Version 0.3
-supports PostgreSQL 18 only and uses schema v2.
+supports PostgreSQL 18 only and uses schema v3.
 
 ```toml
 [dependencies]
@@ -10,20 +10,19 @@ syrup-rail = "0.3.0"
 syrup-rail-postgres = "0.3.0"
 ```
 
-New hosts install `schema/v2/install.sql` through their normal migration
-system. Hosts upgrading from 0.1 must stop every 0.1 billing writer, run the
-checked-in v1 preflight and retry-reclassification audit, apply
-`schema/v2/upgrade_from_v1.sql` transactionally, and roll forward with 0.3.
-Schema v1 is immutable. Budget the stopped-writer maintenance window for a
-full payment-attempt heap scan and transactional partial-index construction;
-the detailed cutover guide explains the lock and rehearsal requirements.
+New hosts install `schema/v3/install.sql` through their normal migration
+system. Existing hosts reach schema v2 using its immutable artifacts when
+necessary, then stop every schema-v2 billing writer and apply
+`schema/v3/upgrade_from_v2.sql` transactionally before rolling forward with
+0.3. Schemas v1 and v2 are immutable. The detailed versioned guides explain the
+required lock, maintenance, and rehearsal boundaries.
 
 After the host applies its migration and before it serves billing traffic,
 verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v2_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v3_compatible(pool).await?;
 # Ok(())
 # }
 ```
@@ -99,7 +98,9 @@ when upgrading to 0.3.0. Omitting them leaves abandoned local
 rows for foreground reads or later cleanup even though exact reconciliation
 correctly excludes never-submitted attempts. The existing enrollment phase also
 repairs never-submitted initial attempts that 0.2.0 may already have parked as
-`review_required`; no schema migration or manual backfill is required.
+`review_required`. The schema-v3 cutover separately preserves historical
+combined attempt names as canonical first-name values and adds lossless
+last-name persistence for new attempts.
 
 Customer billing portal/history queries, stable due-renewal pagination, and
 other lower-level transaction-local operations remain available for hosts that

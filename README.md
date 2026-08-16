@@ -97,11 +97,11 @@ subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
 at that boundary. Hosts that mirror access outside Syrup Rail must consume the
 event's `access` outcome from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v2 is the
+PostgreSQL 18 is the only supported database major, and schema v3 is the
 current contract. New hosts install
-[`schema/v2/install.sql`](crates/syrup-rail-postgres/schema/v2/install.sql),
-while v1 hosts follow the checked-in
-[`v1` to `v2` cutover guide](crates/syrup-rail-postgres/schema/v2/README.md).
+[`schema/v3/install.sql`](crates/syrup-rail-postgres/schema/v3/install.sql).
+Existing hosts first reach schema v2 when necessary, then follow the checked-in
+[`v2` to `v3` cutover guide](crates/syrup-rail-postgres/schema/v3/README.md).
 
 ## PostgreSQL host integration
 
@@ -123,20 +123,20 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v2 install or forward-only v1-to-v2
+After the host has applied its immutable v3 install or forward-only v2-to-v3
 upgrade migration, call
-`assert_runtime_schema_v2_compatible(&pool).await` during process startup and
+`assert_runtime_schema_v3_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v2 catalog and fingerprint inside one repeatable-read, read-only transaction.
+v3 catalog and fingerprint inside one repeatable-read, read-only transaction.
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even
 a host-prefixed column to a canonical relation is unsupported and fails the
-fingerprint check. The assertion also fails closed for v1 or other canonical
-drift. It never executes install, upgrade, preflight, or audit SQL. Hosts remain
-responsible for applying and coordinating their own migrations. The compiled
-host integration example includes a default-feature helper for this startup
-check.
+fingerprint check. The assertion also fails closed for v1, v2, or other
+canonical drift. It never executes install, upgrade, preflight, or audit SQL.
+Hosts remain responsible for applying and coordinating their own migrations.
+The compiled host integration example includes a default-feature helper for
+this startup check.
 
 An active `REINDEX CONCURRENTLY` may temporarily create invalid `_ccnew` or
 `_ccold` indexes. The assertion tolerates only shadows whose lock owner is also

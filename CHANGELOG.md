@@ -29,11 +29,20 @@ All notable changes to the Syrup Rail crates are documented in this file.
   for every token-bearing foreground payment command. A same-key retry can
   refresh its memory-only token and candidate attempt ID, but changed contact
   now returns an idempotency conflict before provider submission.
+- Preserve billing-contact first and last names separately in durable attempt
+  identity, so distinct structured contacts cannot collide merely because they
+  produce the same receipt display name.
 - Reject structurally incoherent payment results, including host attempts in
   subscription results, mismatched applied subscriptions, and confirmation-
   pending results without an authoritative approved gateway outcome.
 
 ### Migration
+
+- PostgreSQL schema v3 is now required. Stop all schema-v2 billing writers and
+  apply `schema/v3/upgrade_from_v2.sql` transactionally before starting 0.3.
+  Historical combined attempt names become canonical first-name values with no
+  last-name component; new attempts retain both normalized components. Do not
+  restart a v2 writer after the cutover.
 
 - Hosts upgrading an existing 0.2.0 deployment must extend each gateway
   account's reconciliation pass with the local payment-method replacement,

@@ -59,8 +59,8 @@ phases continue. Exact provider queries are reserved for attempts with
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v2_compatible` after host migrations and before
-serving billing traffic. Version 0.3 supports PostgreSQL 18 and schema v2 only;
+Use `assert_runtime_schema_v3_compatible` after host migrations and before
+serving billing traffic. Version 0.3 supports PostgreSQL 18 and schema v3 only;
 the assertion is read-only and does not install or upgrade a schema. It
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is
