@@ -202,6 +202,7 @@ pub(super) fn replay_matches_reservation(
         && identity.gateway_account_id() == reservation.identity().gateway_account_id()
         && identity.gateway_configuration_id() == reservation.identity().gateway_configuration_id()
         && attempt.kind() == PaymentAttemptKind::SubscriptionInitial
+        && attempt.request().billing_contact() == reservation.billing_contact()
         && initial_attempt_matches_expected(attempt, reservation.expected_terms())
 }
 
@@ -214,6 +215,8 @@ pub(super) fn replay_matches_command(
         && identity.subscriber_id() == command.subscriber_id()
         && identity.gateway_configuration_id() == command.gateway_configuration_id()
         && attempt.kind() == PaymentAttemptKind::SubscriptionInitial
+        && attempt.request().billing_contact()
+            == &BillingContactSnapshot::from_billing_contact(command.billing_contact())
         && initial_attempt_matches_expected(attempt, command.expected_terms())
 }
 
@@ -267,6 +270,7 @@ pub(super) fn pending_attempt_matches_request(
         && attempt.request().target() == requested.target()
         && attempt.request().fingerprint() == requested.fingerprint()
         && attempt.request().amount() == requested.amount()
+        && attempt.request().billing_contact() == requested.billing_contact()
 }
 
 pub(super) fn attempt_identity_matches_requested_gateway(

@@ -107,6 +107,36 @@ async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
     ));
     transaction.commit().await?;
 
+    let changed_contact_command = syrup_rail::EnrollSubscription::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            BillingScopeId::new(account.billing_scope_id),
+            SubscriberId::new(subscriber_id),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            IdempotencyKey::new("same-key")?,
+            syrup_rail::PaymentToken::new("refreshed-token")?,
+            syrup_rail::BillingContact::new(
+                Some("Changed".to_owned()),
+                Some("Contact".to_owned()),
+                Some("changed@example.test".to_owned()),
+            )?,
+        ),
+        full_price("base_subscription", 1_000),
+    );
+    let changed_contact_reservation =
+        SubscriptionEnrollmentReservation::from_command(&changed_contact_command, &gateway)?;
+    let mut transaction = database.pool.begin().await?;
+    assert_eq!(
+        reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &changed_contact_reservation,
+        )
+        .await?,
+        SubscriptionEnrollmentReservationOutcome::IdempotencyConflict,
+    );
+    transaction.rollback().await?;
+
     let changed_plan_command = enrollment_command(
         account,
         subscriber_id,

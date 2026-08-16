@@ -17,6 +17,8 @@ fn payment_method_replacement_attempt_matches_command(
         && identity.subscriber_id() == command.subscriber_id()
         && identity.gateway_configuration_id() == command.gateway_configuration_id()
         && plan_key == command.plan_key()
+        && attempt.request().billing_contact()
+            == &BillingContactSnapshot::from_billing_contact(command.billing_contact())
         && attempt
             .request()
             .fingerprint()

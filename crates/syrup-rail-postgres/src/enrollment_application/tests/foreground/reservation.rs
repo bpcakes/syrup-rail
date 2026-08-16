@@ -77,7 +77,7 @@ async fn foreground_service_resumes_the_durable_attempt_not_the_retry_candidate_
             fixture.command.subscriber_id(),
             fixture.command.gateway_configuration_id(),
             fixture.command.idempotency_key().clone(),
-            fixture.command.payment_token().clone(),
+            PaymentToken::new("refreshed-enrollment-token")?,
             fixture.command.billing_contact().clone(),
         ),
         fixture.command.expected_terms().clone(),
@@ -96,10 +96,37 @@ async fn foreground_service_resumes_the_durable_attempt_not_the_retry_candidate_
     let service = SubscriptionBillingService::new(
         fixture.database.pool.clone(),
         Arc::new(TestOfferStore),
-        resolver,
+        resolver.clone(),
         admission.clone(),
         Arc::new(fixture.coordinator.clone()),
     );
+
+    let changed_contact_retry = EnrollSubscription::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            fixture.command.idempotency_key().clone(),
+            PaymentToken::new("refreshed-token")?,
+            BillingContact::new(
+                Some("Changed".to_owned()),
+                Some("Contact".to_owned()),
+                Some("changed@example.test".to_owned()),
+            )?,
+        ),
+        fixture.command.expected_terms().clone(),
+    );
+    assert!(matches!(
+        service
+            .enroll(changed_contact_retry)
+            .await
+            .expect_err("changed durable contact must conflict"),
+        SubscriptionBillingServiceError::IdempotencyConflict,
+    ));
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
 
     let result = service.enroll(retry).await?;
     assert_eq!(

@@ -301,12 +301,39 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             fixture.command.subscriber_id(),
             fixture.command.gateway_configuration_id(),
             prepared_command.idempotency_key().clone(),
-            prepared_command.payment_token().clone(),
+            PaymentToken::new("refreshed-recovery-success-token")?,
             prepared_command.billing_contact().clone(),
         ),
         fixture.command.plan_key().clone(),
     );
     assert_ne!(command.attempt_id(), original_attempt_id);
+
+    let changed_contact_command = RecoverSubscriptionPayment::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            prepared_command.idempotency_key().clone(),
+            PaymentToken::new("refreshed-recovery-token")?,
+            BillingContact::new(
+                Some("Changed".to_owned()),
+                Some("Recovery".to_owned()),
+                Some("changed-recovery@example.test".to_owned()),
+            )?,
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    assert!(matches!(
+        service
+            .recover(changed_contact_command)
+            .await
+            .expect_err("changed durable contact must conflict"),
+        SubscriptionBillingServiceError::IdempotencyConflict,
+    ));
+    assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
 
     let result = service.recover(command.clone()).await?;
     assert_eq!(
@@ -556,12 +583,40 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             fixture.command.subscriber_id(),
             fixture.command.gateway_configuration_id(),
             prepared_command.idempotency_key().clone(),
-            prepared_command.payment_token().clone(),
+            PaymentToken::new("refreshed-replacement-success-token")?,
             prepared_command.billing_contact().clone(),
         ),
         fixture.command.plan_key().clone(),
     );
     assert_ne!(command.attempt_id(), original_attempt_id);
+
+    let changed_contact_command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            prepared_command.idempotency_key().clone(),
+            PaymentToken::new("refreshed-replacement-token")?,
+            BillingContact::new(
+                Some("Changed".to_owned()),
+                Some("Replacement".to_owned()),
+                Some("changed-replacement@example.test".to_owned()),
+            )?,
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    assert!(matches!(
+        service
+            .replace_payment_method(changed_contact_command)
+            .await
+            .expect_err("changed durable contact must conflict"),
+        SubscriptionBillingServiceError::IdempotencyConflict,
+    ));
+    assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
 
     let result = service.replace_payment_method(command.clone()).await?;
     assert_eq!(

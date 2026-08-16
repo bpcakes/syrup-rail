@@ -261,6 +261,7 @@ fn host_charge_submission_matches_reservation(
         && request.fingerprint() == durable_request.fingerprint()
         && request.amount() == durable_request.amount()
         && request.gateway_order_id() == durable_request.gateway_order_id()
+        && request.billing_contact() == durable_request.billing_contact()
 }
 
 pub async fn apply_host_charge_gateway_outcome(
@@ -1598,7 +1599,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reservation_race_replays_durable_winner_request() -> Result<(), Box<dyn Error>> {
+    async fn reservation_race_replays_equivalent_contact_and_rejects_changed_contact()
+    -> Result<(), Box<dyn Error>> {
         let database = TestDatabase::start("rail_host_race").await?;
         let result = async {
             sqlx::query(
@@ -1667,11 +1669,7 @@ mod tests {
                 command.gateway_configuration_id(),
                 PaymentToken::new("tok_host_retry")?,
                 command.idempotency_key().clone(),
-                Some(BillingContact::new(
-                    None,
-                    None,
-                    Some("retry@example.test".into()),
-                )?),
+                command.billing_contact().cloned(),
             );
             let contender = HostChargeReservation::from_command(
                 &retry,
@@ -1692,6 +1690,35 @@ mod tests {
                 attempt.request().billing_contact().email(),
                 Some("winner@example.test")
             );
+
+            let changed_contact_retry = ChargeHostTarget::new(
+                command.billing_scope_id(),
+                command.subscriber_id(),
+                command.target_id(),
+                command.gateway_configuration_id(),
+                PaymentToken::new("tok_host_changed_contact")?,
+                command.idempotency_key().clone(),
+                Some(BillingContact::new(
+                    None,
+                    None,
+                    Some("changed@example.test".into()),
+                )?),
+            );
+            let changed_contact_contender = HostChargeReservation::from_command(
+                &changed_contact_retry,
+                snapshot,
+                &gateway,
+                PaymentAttemptId::new(Uuid::now_v7()),
+            )?;
+            let mut transaction = database.pool.begin().await?;
+            let outcome = reserve_host_charge_in_transaction(
+                &mut transaction,
+                &TestTargets,
+                &changed_contact_contender,
+            )
+            .await?;
+            transaction.rollback().await?;
+            assert_eq!(outcome, HostChargeReservationOutcome::IdempotencyConflict);
             Ok::<_, Box<dyn Error>>(())
         }
         .await;

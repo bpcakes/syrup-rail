@@ -3,10 +3,10 @@ use std::{error::Error, fmt};
 use async_trait::async_trait;
 use sqlx::{PgConnection, Postgres, Transaction};
 use syrup_rail::{
-    BillingScopeId, ChargeAmount, ChargeHostTarget, HostChargeReservation, HostChargeTargetId,
-    HostChargeTargetRejection, HostChargeTargetSnapshot, HostChargeTargetTransition,
-    HostChargeTargetTransitionOutcome, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
-    PaymentAttemptId, PaymentAttemptKind, SubscriberId,
+    BillingContactSnapshot, BillingScopeId, ChargeAmount, ChargeHostTarget, HostChargeReservation,
+    HostChargeTargetId, HostChargeTargetRejection, HostChargeTargetSnapshot,
+    HostChargeTargetTransition, HostChargeTargetTransitionOutcome, IdempotencyKey, PaymentAttempt,
+    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptKind, SubscriberId,
 };
 use thiserror::Error;
 
@@ -477,12 +477,17 @@ fn host_charge_attempt_matches_command(
     let request = attempt.request();
     let canonical_fingerprint =
         PaymentAttemptFingerprint::for_host_charge(command.target_id(), request.amount());
+    let billing_contact = command
+        .billing_contact()
+        .map(BillingContactSnapshot::from_billing_contact)
+        .unwrap_or_else(|| BillingContactSnapshot::new(None, None));
     attempt.kind() == PaymentAttemptKind::HostCharge
         && identity.billing_scope_id() == command.billing_scope_id()
         && identity.subscriber_id() == command.subscriber_id()
         && identity.gateway_configuration_id() == command.gateway_configuration_id()
         && request.target().host_charge_target_id() == Some(command.target_id())
         && request.fingerprint() == &canonical_fingerprint
+        && request.billing_contact() == &billing_contact
         && snapshot.is_none_or(|snapshot| {
             request.amount() == snapshot.charge().money()
                 && request.fingerprint()
@@ -510,6 +515,7 @@ fn host_charge_attempt_matches_reservation(
         && request.idempotency_key() == requested.idempotency_key()
         && request.fingerprint() == requested.fingerprint()
         && request.amount() == requested.amount()
+        && request.billing_contact() == requested.billing_contact()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
