@@ -40,6 +40,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 - PostgreSQL schema v3 is now required. Stop all schema-v2 billing writers and
   apply `schema/v3/upgrade_from_v2.sql` transactionally before starting 0.3.
+  Update host startup checks from `assert_runtime_schema_v2_compatible` to
+  `assert_runtime_schema_v3_compatible` before restarting against schema v3.
   Historical combined attempt names become canonical first-name values with no
   last-name component; new attempts retain both normalized components. Do not
   restart a v2 writer after the cutover.
