@@ -34,6 +34,11 @@ All notable changes to the Syrup Rail crates are documented in this file.
   terminal result first. Hosts must not infer that `Err` means no durable
   attempt exists and must reuse the same idempotency key to recover or resume
   that canonical result.
+- Replace `SubscriptionEnrollmentPaymentResult::new` and the optional
+  subscription argument to `confirmation_pending` with the checked `applied`,
+  `not_applied`, and `confirmation_pending` constructors. This prevents an
+  approved result without an applied subscription and prevents non-applied or
+  confirmation-pending results from carrying one.
 
 ## [0.2.0] - 2026-08-13
 

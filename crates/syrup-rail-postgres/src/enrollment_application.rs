@@ -7,9 +7,9 @@ use syrup_rail::{
     GatewayProviderKey, PaymentAttempt, PaymentAttemptIdentity, PaymentAttemptKind,
     PaymentAttemptRequest, PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey,
     ProcessorChargeProgression, ProcessorEvidence, SubscriberId, Subscription,
-    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentReservation, SubscriptionId,
-    SubscriptionPaymentMethodReplacement, SubscriptionRecoveryReservation,
-    SubscriptionRenewalReservation,
+    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPaymentResultBuildError,
+    SubscriptionEnrollmentReservation, SubscriptionId, SubscriptionPaymentMethodReplacement,
+    SubscriptionRecoveryReservation, SubscriptionRenewalReservation,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -143,6 +143,14 @@ impl From<RenewalFailureStoreError> for SubscriptionEnrollmentApplicationError {
             RenewalFailureStoreError::Attempt(error) => Self::Attempt(error),
             RenewalFailureStoreError::InvalidState(message) => Self::InvalidState(message),
         }
+    }
+}
+
+impl From<SubscriptionEnrollmentPaymentResultBuildError>
+    for SubscriptionEnrollmentApplicationError
+{
+    fn from(_: SubscriptionEnrollmentPaymentResultBuildError) -> Self {
+        Self::InvalidState(INVALID_APPLICATION_STATE)
     }
 }
 
@@ -1035,15 +1043,19 @@ pub(crate) async fn payment_result_for_attempt(
     connection: &mut PgConnection,
     attempt: PaymentAttempt,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let subscription = if attempt.status() == PaymentAttemptStatus::Approved {
-        load_applied_subscription(connection, &attempt).await?
+    if attempt.status() == PaymentAttemptStatus::Approved {
+        let subscription = load_applied_subscription(connection, &attempt)
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+        Ok(SubscriptionEnrollmentPaymentResult::applied(
+            attempt,
+            subscription,
+        )?)
     } else {
-        None
-    };
-    Ok(SubscriptionEnrollmentPaymentResult::new(
-        attempt,
-        subscription,
-    ))
+        Ok(SubscriptionEnrollmentPaymentResult::not_applied(attempt)?)
+    }
 }
 
 async fn load_applied_subscription(

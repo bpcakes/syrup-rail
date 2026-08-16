@@ -1,12 +1,152 @@
+use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
 
 use super::*;
 use crate::{
-    CurrencyCode, DunningExhaustion, DunningSchedule, LimitedDiscountMonths, PaidTrialTerms,
-    PastDueAccessPolicy, PercentOffBasisPoints, RecurringSubscriptionTerms, RenewalFailurePolicy,
-    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
-    SubscriptionPeriodRule, SubscriptionPhase, SubscriptionStart,
+    BillingPeriod, CurrencyCode, DunningExhaustion, DunningSchedule, GatewayAccountId,
+    GatewayPaymentDescriptor, GatewayTransactionId, LimitedDiscountMonths, Money, PaidTrialTerms,
+    PastDueAccessPolicy, PaymentAttemptFingerprint, PaymentAttemptLifecycle, PaymentAttemptRequest,
+    PaymentAttemptState, PaymentAttemptTimestamps, PaymentMethodId, PercentOffBasisPoints,
+    RecurringSubscriptionTerms, RenewalFailurePolicy, SubscriptionDiscountCode,
+    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionId,
+    SubscriptionPaymentStateSnapshot, SubscriptionPeriodRule, SubscriptionPhase, SubscriptionStart,
+    SubscriptionStatus,
 };
+
+fn result_test_instant(second: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, second).unwrap()
+}
+
+fn result_test_attempt(status: PaymentAttemptStatus) -> PaymentAttempt {
+    let period = BillingPeriod::new(result_test_instant(0), result_test_instant(10)).unwrap();
+    let payment_method_id = PaymentMethodId::new(Uuid::from_u128(7));
+    let expected_state = SubscriptionPaymentStateSnapshot::new(
+        SubscriptionId::new(Uuid::from_u128(6)),
+        payment_method_id,
+        GatewayTransactionId::new("original-transaction").unwrap(),
+        SubscriptionStatus::Active,
+    )
+    .unwrap();
+    PaymentAttempt::new(
+        PaymentAttemptIdentity::new(
+            PaymentAttemptId::new(Uuid::from_u128(1)),
+            BillingScopeId::new(Uuid::from_u128(2)),
+            SubscriberId::new(Uuid::from_u128(3)),
+            GatewayAccountId::new(Uuid::from_u128(4)),
+            GatewayConfigurationId::new(Uuid::from_u128(5)),
+        ),
+        PaymentAttemptRequest::new(
+            PaymentAttemptTarget::SubscriptionRenewal {
+                plan_key: plan("result-plan"),
+                payment_method_id,
+                period,
+                expected_state,
+            },
+            IdempotencyKey::new("result-idempotency").unwrap(),
+            PaymentAttemptFingerprint::new("result-fingerprint").unwrap(),
+            Money::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+            GatewayOrderId::from_correlation("result-order").unwrap(),
+            BillingContactSnapshot::new(None, None),
+        ),
+        PaymentAttemptState::new(
+            status,
+            None,
+            ProcessorEvidence::default(),
+            PaymentAttemptLifecycle::default(),
+            PaymentAttemptTimestamps::new(
+                None,
+                (status == PaymentAttemptStatus::Approved).then(|| result_test_instant(2)),
+                None,
+                result_test_instant(0),
+                result_test_instant(2),
+            ),
+        ),
+    )
+    .unwrap()
+}
+
+fn result_test_subscription() -> Subscription {
+    let starts_at = result_test_instant(0);
+    let renews_at = result_test_instant(10);
+    Subscription::new(
+        SubscriptionId::new(Uuid::from_u128(6)),
+        plan("result-plan"),
+        SubscriptionStatus::Active,
+        SubscriptionPhase::Recurring,
+        PaymentMethodId::new(Uuid::from_u128(7)),
+        ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+        SubscriptionPeriodRule::calendar_months(1).unwrap(),
+        RenewalFailurePolicy::new(
+            DunningSchedule::default(),
+            DunningExhaustion::RemainPastDue,
+            PastDueAccessPolicy::SuspendImmediately,
+        ),
+        BillingPeriod::new(starts_at, renews_at).unwrap(),
+        renews_at,
+        Some(renews_at),
+    )
+}
+
+#[test]
+fn payment_result_constructors_reject_crossed_state_invariants() {
+    let approved = result_test_attempt(PaymentAttemptStatus::Approved);
+    let pending = result_test_attempt(PaymentAttemptStatus::Pending);
+    let subscription = result_test_subscription();
+    let confirmation_evidence = ProcessorEvidence::new(
+        Some(GatewayTransactionId::new("pending-confirmation").unwrap()),
+        None,
+        None,
+        None,
+        None,
+        None,
+        GatewayPaymentDescriptor::default(),
+    );
+
+    assert_eq!(
+        SubscriptionEnrollmentPaymentResult::applied(pending.clone(), subscription.clone())
+            .unwrap_err(),
+        SubscriptionEnrollmentPaymentResultBuildError::AppliedAttemptNotApproved,
+    );
+    assert_eq!(
+        SubscriptionEnrollmentPaymentResult::not_applied(approved.clone()).unwrap_err(),
+        SubscriptionEnrollmentPaymentResultBuildError::NotAppliedAttemptApproved,
+    );
+    assert_eq!(
+        SubscriptionEnrollmentPaymentResult::confirmation_pending(
+            approved.clone(),
+            confirmation_evidence.clone(),
+        )
+        .unwrap_err(),
+        SubscriptionEnrollmentPaymentResultBuildError::ConfirmationPendingAttemptApproved,
+    );
+
+    let applied =
+        SubscriptionEnrollmentPaymentResult::applied(approved, subscription.clone()).unwrap();
+    assert_eq!(applied.status(), PaymentAttemptStatus::Approved);
+    assert_eq!(applied.subscription(), Some(&subscription));
+    assert!(!applied.is_confirmation_pending());
+    let (_, applied_subscription, applied_confirmation) = applied.into_parts();
+    assert_eq!(applied_subscription, Some(subscription));
+    assert_eq!(applied_confirmation, None);
+
+    let not_applied = SubscriptionEnrollmentPaymentResult::not_applied(pending.clone()).unwrap();
+    assert_eq!(not_applied.status(), PaymentAttemptStatus::Pending);
+    assert_eq!(not_applied.subscription(), None);
+    assert!(!not_applied.is_confirmation_pending());
+
+    let confirmation_pending = SubscriptionEnrollmentPaymentResult::confirmation_pending(
+        pending,
+        confirmation_evidence.clone(),
+    )
+    .unwrap();
+    assert_eq!(confirmation_pending.status(), PaymentAttemptStatus::Unknown);
+    assert_eq!(confirmation_pending.subscription(), None);
+    assert_eq!(
+        confirmation_pending.processor_evidence(),
+        &confirmation_evidence
+    );
+    assert!(confirmation_pending.is_confirmation_pending());
+}
 
 fn plan(value: &str) -> PlanKey {
     PlanKey::new(value).unwrap()

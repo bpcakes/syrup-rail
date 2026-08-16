@@ -60,10 +60,11 @@ pub use discount::{
 pub use enrollment::{
     EnrollSubscription, SubscriptionActivationProjection, SubscriptionEnrollmentDiscountSnapshot,
     SubscriptionEnrollmentExpectedTerms, SubscriptionEnrollmentPaymentResult,
-    SubscriptionEnrollmentPreflightOutcome, SubscriptionEnrollmentReservation,
-    SubscriptionEnrollmentReservationBuildError, SubscriptionEnrollmentReservationOutcome,
-    SubscriptionEnrollmentReservationRejection, SubscriptionEnrollmentSubmissionOutcome,
-    SubscriptionEnrollmentSubmissionRejection, SubscriptionEnrollmentTermsError,
+    SubscriptionEnrollmentPaymentResultBuildError, SubscriptionEnrollmentPreflightOutcome,
+    SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationBuildError,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
+    SubscriptionEnrollmentSubmissionOutcome, SubscriptionEnrollmentSubmissionRejection,
+    SubscriptionEnrollmentTermsError,
 };
 pub use event::{
     BillingEvent, BillingEventKey, BillingEventSubject, PaymentCardDisplay, SubscriptionEndReason,

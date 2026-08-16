@@ -468,9 +468,8 @@ async fn park_payment_method_replacement_approved_outcome(
             } else {
                 SubscriptionEnrollmentPaymentResult::confirmation_pending(
                     attempt,
-                    None,
                     evidence.clone(),
-                )
+                )?
             };
             transaction.commit().await?;
             Ok(result)

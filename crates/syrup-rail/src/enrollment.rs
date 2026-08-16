@@ -570,40 +570,80 @@ pub enum SubscriptionEnrollmentSubmissionOutcome {
 
 /// Durable result of applying one initial-enrollment provider outcome.
 ///
-/// `subscription` is present only after the approval, payment method, recurring
-/// economics, discount, processor charge, and host event have committed in one
-/// transaction. A review-required or unknown attempt therefore cannot be
-/// mistaken for locally applied subscription access.
+/// Construction distinguishes an applied approval, a result that was not
+/// applied, and approved evidence whose confirmation is still pending. A
+/// subscription is therefore present only after the approval, payment method,
+/// recurring economics, discount, processor charge, and host event have
+/// committed in one transaction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionEnrollmentPaymentResult {
     attempt: PaymentAttempt,
-    subscription: Option<Subscription>,
-    pending_confirmation_evidence: Option<ProcessorEvidence>,
+    state: SubscriptionEnrollmentPaymentResultState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SubscriptionEnrollmentPaymentResultState {
+    Applied(Subscription),
+    NotApplied,
+    ConfirmationPending(ProcessorEvidence),
+}
+
+/// Invalid attempt state supplied to a payment-result constructor.
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+pub enum SubscriptionEnrollmentPaymentResultBuildError {
+    #[error("an applied payment result requires an approved attempt")]
+    AppliedAttemptNotApproved,
+    #[error("an approved attempt cannot produce a not-applied payment result")]
+    NotAppliedAttemptApproved,
+    #[error("an approved attempt cannot produce a confirmation-pending payment result")]
+    ConfirmationPendingAttemptApproved,
 }
 
 impl SubscriptionEnrollmentPaymentResult {
-    pub const fn new(attempt: PaymentAttempt, subscription: Option<Subscription>) -> Self {
-        Self {
-            attempt,
-            subscription,
-            pending_confirmation_evidence: None,
+    /// Builds a result whose approved outcome was applied atomically.
+    pub fn applied(
+        attempt: PaymentAttempt,
+        subscription: Subscription,
+    ) -> Result<Self, SubscriptionEnrollmentPaymentResultBuildError> {
+        if attempt.status() != PaymentAttemptStatus::Approved {
+            return Err(SubscriptionEnrollmentPaymentResultBuildError::AppliedAttemptNotApproved);
         }
+        Ok(Self {
+            attempt,
+            state: SubscriptionEnrollmentPaymentResultState::Applied(subscription),
+        })
+    }
+
+    /// Builds a canonical result that did not apply subscription state.
+    pub fn not_applied(
+        attempt: PaymentAttempt,
+    ) -> Result<Self, SubscriptionEnrollmentPaymentResultBuildError> {
+        if attempt.status() == PaymentAttemptStatus::Approved {
+            return Err(SubscriptionEnrollmentPaymentResultBuildError::NotAppliedAttemptApproved);
+        }
+        Ok(Self {
+            attempt,
+            state: SubscriptionEnrollmentPaymentResultState::NotApplied,
+        })
     }
 
     /// Returns a result for approved evidence that is durable but could not be
     /// attached to the locked attempt in this call. The durable attempt remains
     /// authoritative; callers must present this observation as confirmation
     /// pending rather than as the attempt's older status.
-    pub const fn confirmation_pending(
+    pub fn confirmation_pending(
         attempt: PaymentAttempt,
-        subscription: Option<Subscription>,
         evidence: ProcessorEvidence,
-    ) -> Self {
-        Self {
-            attempt,
-            subscription,
-            pending_confirmation_evidence: Some(evidence),
+    ) -> Result<Self, SubscriptionEnrollmentPaymentResultBuildError> {
+        if attempt.status() == PaymentAttemptStatus::Approved {
+            return Err(
+                SubscriptionEnrollmentPaymentResultBuildError::ConfirmationPendingAttemptApproved,
+            );
         }
+        Ok(Self {
+            attempt,
+            state: SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence),
+        })
     }
 
     pub const fn attempt(&self) -> &PaymentAttempt {
@@ -611,25 +651,38 @@ impl SubscriptionEnrollmentPaymentResult {
     }
 
     pub const fn subscription(&self) -> Option<&Subscription> {
-        self.subscription.as_ref()
+        match &self.state {
+            SubscriptionEnrollmentPaymentResultState::Applied(subscription) => Some(subscription),
+            SubscriptionEnrollmentPaymentResultState::NotApplied
+            | SubscriptionEnrollmentPaymentResultState::ConfirmationPending(_) => None,
+        }
     }
 
     pub const fn status(&self) -> PaymentAttemptStatus {
-        if self.pending_confirmation_evidence.is_some() {
-            PaymentAttemptStatus::Unknown
-        } else {
-            self.attempt.status()
+        match &self.state {
+            SubscriptionEnrollmentPaymentResultState::ConfirmationPending(_) => {
+                PaymentAttemptStatus::Unknown
+            }
+            SubscriptionEnrollmentPaymentResultState::Applied(_)
+            | SubscriptionEnrollmentPaymentResultState::NotApplied => self.attempt.status(),
         }
     }
 
     pub fn processor_evidence(&self) -> &ProcessorEvidence {
-        self.pending_confirmation_evidence
-            .as_ref()
-            .unwrap_or_else(|| self.attempt.state().processor_evidence())
+        match &self.state {
+            SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence) => evidence,
+            SubscriptionEnrollmentPaymentResultState::Applied(_)
+            | SubscriptionEnrollmentPaymentResultState::NotApplied => {
+                self.attempt.state().processor_evidence()
+            }
+        }
     }
 
     pub const fn is_confirmation_pending(&self) -> bool {
-        self.pending_confirmation_evidence.is_some()
+        matches!(
+            &self.state,
+            SubscriptionEnrollmentPaymentResultState::ConfirmationPending(_)
+        )
     }
 
     pub fn into_parts(
@@ -639,11 +692,15 @@ impl SubscriptionEnrollmentPaymentResult {
         Option<Subscription>,
         Option<ProcessorEvidence>,
     ) {
-        (
-            self.attempt,
-            self.subscription,
-            self.pending_confirmation_evidence,
-        )
+        match self.state {
+            SubscriptionEnrollmentPaymentResultState::Applied(subscription) => {
+                (self.attempt, Some(subscription), None)
+            }
+            SubscriptionEnrollmentPaymentResultState::NotApplied => (self.attempt, None, None),
+            SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence) => {
+                (self.attempt, None, Some(evidence))
+            }
+        }
     }
 }
 

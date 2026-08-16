@@ -62,7 +62,7 @@ async fn apply_approved_on_connection(
         )
         .await?;
         return Ok((
-            SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+            SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
             None,
         ));
     }
@@ -98,7 +98,10 @@ async fn apply_approved_on_connection(
             )
             .await?;
         }
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     }
 
     let observation = observe_processor_charge(
@@ -117,7 +120,10 @@ async fn apply_approved_on_connection(
             "The approved gateway transaction is already owned by another payment attempt.",
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     };
     if charge.role == ProcessorChargeRole::Additional {
         transition_charge(
@@ -135,7 +141,10 @@ async fn apply_approved_on_connection(
             "An additional approved charge requires manual reversal review.",
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     }
 
     if current_subscription_exists(connection, reservation).await? {
@@ -154,7 +163,10 @@ async fn apply_approved_on_connection(
             CURRENT_SUBSCRIPTION_CONFLICT_TEXT,
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     }
     if active_grant_exists(connection, reservation).await? {
         transition_charge(
@@ -172,7 +184,10 @@ async fn apply_approved_on_connection(
             CURRENT_GRANT_CONFLICT_TEXT,
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     }
 
     let transaction_id =
@@ -254,7 +269,7 @@ async fn apply_approved_on_connection(
         phase: activation.phase(),
     };
     Ok((
-        SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+        SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
         Some(event),
     ))
 }

@@ -48,7 +48,11 @@ async fn apply_payment_method_replacement_approved_on_connection(
     )
     .await?;
     if attempt.status() == PaymentAttemptStatus::Approved {
-        let subscription = load_applied_subscription(connection, &attempt).await?;
+        let subscription = load_applied_subscription(connection, &attempt)
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
         let progression =
             if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
                 ProcessorChargeProgression::Applied
@@ -57,7 +61,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
             };
         observe_processor_charge(connection, &attempt, evidence, progression).await?;
         return Ok((
-            SubscriptionEnrollmentPaymentResult::new(attempt, subscription),
+            SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
             None,
         ));
     }
@@ -75,11 +79,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
         )
         .await?;
         return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(
-                attempt,
-                None,
-                evidence.clone(),
-            ),
+            SubscriptionEnrollmentPaymentResult::confirmation_pending(attempt, evidence.clone())?,
             None,
         ));
     }
@@ -99,7 +99,10 @@ async fn apply_payment_method_replacement_approved_on_connection(
             "The approved gateway transaction is already owned by another payment attempt.",
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     };
     if charge.role == ProcessorChargeRole::Additional {
         transition_charge(
@@ -117,7 +120,10 @@ async fn apply_payment_method_replacement_approved_on_connection(
             "An additional approved stored-method result requires manual review.",
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     }
     let transaction_id =
         evidence
@@ -159,7 +165,10 @@ async fn apply_payment_method_replacement_approved_on_connection(
             PAYMENT_METHOD_REPLACEMENT_STALE_STATE_TEXT,
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     };
     let status: String = row.try_get("status")?;
     let current_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
@@ -190,14 +199,8 @@ async fn apply_payment_method_replacement_approved_on_connection(
             PAYMENT_METHOD_REPLACEMENT_STALE_STATE_TEXT,
         )
         .await?;
-        let subscription = load_subscription(
-            connection,
-            identity.billing_scope_id(),
-            reservation.subscription_id(),
-        )
-        .await?;
         return Ok((
-            SubscriptionEnrollmentPaymentResult::new(parked, subscription),
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
             None,
         ));
     }
@@ -276,7 +279,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
         card,
     };
     Ok((
-        SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+        SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
         Some(event),
     ))
 }

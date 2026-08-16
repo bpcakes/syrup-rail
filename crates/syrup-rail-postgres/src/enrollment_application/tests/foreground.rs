@@ -93,8 +93,9 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
     let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
         "txn_renewal_recurring",
     ))));
+    let resolved_gateway = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
     let resolver = Arc::new(StaticResolver {
-        gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway)),
+        gateway: resolved_gateway.clone(),
         calls: AtomicUsize::new(0),
     });
     let admission = Arc::new(PermitAdmission {
@@ -112,6 +113,45 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
         subscription_id,
         period_start_at,
     );
+    let stale_update_command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("renewal-stale-review-update")?,
+            PaymentToken::new("opaque-renewal-stale-review-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let stale_update_id = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &stale_update_command,
+        &resolved_gateway,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(_, attempt) => {
+            attempt.identity().attempt_id()
+        }
+        other => return Err(format!("unexpected stale update reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'review_required',
+            created_at = clock_timestamp() - interval '4 minutes',
+            updated_at = clock_timestamp()
+        WHERE id = $1
+        "#,
+    )
+    .bind(stale_update_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+
     let result = service.renew(command).await?;
     let SubscriptionRenewalOutcome::Payment(payment) = result else {
         panic!("due renewal must return its applied payment");
@@ -132,6 +172,12 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
+    let stale_update_status: String =
+        sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+            .bind(stale_update_id.as_uuid())
+            .fetch_one(&fixture.database.pool)
+            .await?;
+    assert_eq!(stale_update_status, "failed");
 
     assert!(matches!(
         service.renew(command).await?,
@@ -647,6 +693,91 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     transaction.commit().await?;
     assert_eq!(stale_result.status(), PaymentAttemptStatus::Failed);
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
+
+    let parked_outcome =
+        approved_outcome_with_reference(Some("txn_method_parked"), "vault_method_parked");
+    let parked_gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
+        parked_outcome.clone()
+    )));
+    let parked_resolved_gateway =
+        scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&parked_gateway));
+    let parked_resolver = Arc::new(StaticResolver {
+        gateway: parked_resolved_gateway.clone(),
+        calls: AtomicUsize::new(0),
+    });
+    let parked_admission = Arc::new(PermitAdmission {
+        calls: AtomicUsize::new(0),
+    });
+    let parked_service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        parked_resolver.clone(),
+        parked_admission.clone(),
+        Arc::new(fixture.coordinator.clone()),
+    );
+    let parked_command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("parked-replace-method-key")?,
+            PaymentToken::new("opaque-parked-replacement-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let parked_reservation = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &parked_command,
+        &parked_resolved_gateway,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(reservation, _) => {
+            *reservation
+        }
+        other => {
+            return Err(format!("unexpected parked replacement reservation: {other:?}").into());
+        }
+    };
+    transaction.commit().await?;
+    match admit_subscription_payment_method_replacement(&fixture.database.pool, &parked_reservation)
+        .await?
+    {
+        SubscriptionPaymentMethodReplacementAdmissionOutcome::Admitted(_) => {}
+        other => return Err(format!("unexpected parked replacement admission: {other:?}").into()),
+    }
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET initial_transaction_id = 'txn_external_before_park', updated_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+
+    let parked = apply_subscription_payment_method_replacement_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &parked_reservation,
+        &parked_outcome,
+    )
+    .await?;
+    assert_eq!(
+        parked.attempt().status(),
+        PaymentAttemptStatus::ReviewRequired
+    );
+    assert!(parked.subscription().is_none());
+    let parked_replay = parked_service
+        .replace_payment_method(parked_command)
+        .await?;
+    assert_eq!(parked_replay, parked);
+    assert!(parked_replay.subscription().is_none());
+    assert_eq!(parked_gateway.store_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
 
     let additional_transaction_id = "txn_method_unexpected_additional";
     let reconciled = service

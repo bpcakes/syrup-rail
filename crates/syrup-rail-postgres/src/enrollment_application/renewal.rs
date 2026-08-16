@@ -382,7 +382,7 @@ async fn apply_renewal_approved_on_connection(
         )
         .await?;
         return Ok((
-            SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+            SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
             None,
         ));
     }
@@ -409,11 +409,7 @@ async fn apply_renewal_approved_on_connection(
             .await?;
         }
         return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(
-                attempt,
-                None,
-                evidence.clone(),
-            ),
+            SubscriptionEnrollmentPaymentResult::confirmation_pending(attempt, evidence.clone())?,
             None,
         ));
     }
@@ -433,7 +429,10 @@ async fn apply_renewal_approved_on_connection(
             "The approved gateway transaction is already owned by another payment attempt.",
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     };
     if charge.role == ProcessorChargeRole::Additional {
         transition_charge(
@@ -451,7 +450,10 @@ async fn apply_renewal_approved_on_connection(
             "An additional approved charge requires manual reversal review.",
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     }
     if !renewal_subscription_matches(connection, reservation).await? {
         transition_charge(
@@ -469,7 +471,10 @@ async fn apply_renewal_approved_on_connection(
             RENEWAL_STALE_STATE_TEXT,
         )
         .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return Ok((
+            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+            None,
+        ));
     }
     let expected = reservation.expected_state();
     let updated = sqlx::query(
@@ -555,7 +560,7 @@ async fn apply_renewal_approved_on_connection(
         period: reservation.period().clone(),
     };
     Ok((
-        SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
+        SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
         Some(event),
     ))
 }
@@ -692,9 +697,8 @@ async fn park_renewal_approved_outcome(
             } else {
                 SubscriptionEnrollmentPaymentResult::confirmation_pending(
                     attempt,
-                    None,
                     evidence.clone(),
-                )
+                )?
             };
             transaction.commit().await?;
             Ok(result)
