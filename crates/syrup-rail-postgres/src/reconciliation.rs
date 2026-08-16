@@ -406,7 +406,7 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
         WHERE attempts.id = stale_attempts.id
         "#,
     )
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .bind(gateway_account_id.as_uuid())
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)
@@ -459,7 +459,7 @@ pub async fn fail_stale_unsubmitted_subscription_charges(
         WHERE attempts.id = stale_attempts.id
         "#,
     )
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .bind(gateway_account_id.as_uuid())
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)
@@ -495,7 +495,7 @@ pub async fn fail_stale_unsubmitted_subscription_enrollments(
         "#,
     )
     .bind(gateway_account_id.as_uuid())
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .fetch_all(pool)
     .await?;

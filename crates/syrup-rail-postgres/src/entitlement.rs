@@ -533,7 +533,7 @@ where
     .bind(query.plan_key().as_str())
     .bind(initial_policy.stale_after_seconds())
     .bind(subscription_charge_policy.stale_after_seconds())
-    .bind(initial_policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .fetch_one(executor)
     .await?;
 

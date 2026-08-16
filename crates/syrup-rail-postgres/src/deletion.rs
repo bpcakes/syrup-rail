@@ -75,7 +75,7 @@ pub async fn billing_deletion_blockers(
         initial_policy.stale_after_seconds(),
         subscription_charge_policy.stale_after_seconds(),
         host_charge_policy.stale_after_seconds(),
-        initial_policy.expirable_status_values(),
+        LocalAttemptPolicy::expirable_status_values(),
     )
     .fetch_one(connection)
     .await?;

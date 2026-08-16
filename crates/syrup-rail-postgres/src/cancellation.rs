@@ -340,7 +340,7 @@ async fn expire_stale_payment_method_updates(
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .bind(UNSUBMITTED_PAYMENT_METHOD_UPDATE_FAILED_RESPONSE_TEXT)
     .execute(connection)

@@ -17,7 +17,7 @@ pub(super) async fn initial_attempt_is_stale(
         "#,
     )
     .bind(attempt_id.as_uuid())
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .fetch_one(&mut **transaction)
     .await

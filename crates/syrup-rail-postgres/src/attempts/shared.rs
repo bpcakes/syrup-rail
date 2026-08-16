@@ -46,30 +46,22 @@ pub(crate) enum AttemptReplayDisposition {
 
 /// The database policy for attempts that are still wholly local.
 ///
-/// Every cleanup and stale-aware blocker query binds both its timeout and its
-/// expirable status values from this type. The status classification
-/// intentionally derives from the replay disposition: only a prepared attempt
-/// or an unsubmitted review repair can expire without provider reconciliation.
+/// The status classification is global because provider submission and replay
+/// disposition do not vary by attempt kind. Only the stale window is
+/// kind-specific. Keeping those dimensions separate prevents callers from
+/// selecting an arbitrary kind merely to obtain the shared status vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LocalAttemptPolicy {
     kind: PaymentAttemptKind,
 }
 
-static LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES: LazyLock<Vec<(PaymentAttemptKind, Vec<String>)>> =
-    LazyLock::new(|| {
-        PaymentAttemptKind::ALL
-            .into_iter()
-            .map(|kind| {
-                let policy = LocalAttemptPolicy::for_kind(kind);
-                let statuses = PaymentAttemptStatus::ALL
-                    .into_iter()
-                    .filter(|status| policy.should_expire(*status, false, true))
-                    .map(|status| status.as_str().to_owned())
-                    .collect();
-                (kind, statuses)
-            })
-            .collect()
-    });
+static LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    PaymentAttemptStatus::ALL
+        .into_iter()
+        .filter(|status| LocalAttemptPolicy::should_expire(*status, false, true))
+        .map(|status| status.as_str().to_owned())
+        .collect()
+});
 
 impl LocalAttemptPolicy {
     pub(crate) const fn for_kind(kind: PaymentAttemptKind) -> Self {
@@ -90,29 +82,16 @@ impl LocalAttemptPolicy {
         }
     }
 
-    pub(crate) fn expirable_status_values(self) -> &'static [String] {
-        LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES
-            .iter()
-            .find(|(kind, _)| *kind == self.kind)
-            .map(|(_, statuses)| statuses.as_slice())
-            .expect("local attempt status policy covers every payment attempt kind")
+    pub(crate) fn expirable_status_values() -> &'static [String] {
+        LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES.as_slice()
     }
 
     pub(crate) const fn should_expire(
-        self,
         status: PaymentAttemptStatus,
         was_submitted: bool,
         is_stale: bool,
     ) -> bool {
-        let kind_has_local_expiry = match self.kind {
-            PaymentAttemptKind::HostCharge
-            | PaymentAttemptKind::SubscriptionInitial
-            | PaymentAttemptKind::SubscriptionRenewal
-            | PaymentAttemptKind::SubscriptionRecovery
-            | PaymentAttemptKind::SubscriptionPaymentMethodUpdate => true,
-        };
-        kind_has_local_expiry
-            && is_stale
+        is_stale
             && matches!(
                 attempt_replay_disposition_for(status, was_submitted),
                 AttemptReplayDisposition::ResumePrepared
@@ -386,7 +365,7 @@ pub(crate) async fn expire_stale_initial_attempts(
     .bind(subscriber_id.as_uuid())
     .bind(plan_key.as_str())
     .bind(INITIAL_PREPARED_EXPIRED_TEXT)
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .execute(&mut **transaction)
     .await?;
@@ -456,7 +435,7 @@ pub(crate) async fn fail_stale_unsubmitted_payment_method_updates(
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .execute(connection)
     .await?;
@@ -497,7 +476,7 @@ pub(crate) async fn fail_stale_unsubmitted_subscription_charges(
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .bind(STALE_UNSUBMITTED_RENEWAL_TEXT)
     .bind(STALE_UNSUBMITTED_RECOVERY_TEXT)
@@ -603,34 +582,33 @@ mod replay_disposition_tests {
     }
 
     #[test]
-    fn local_attempt_policy_covers_the_complete_state_matrix() {
-        for kind in PaymentAttemptKind::ALL {
-            let policy = LocalAttemptPolicy::for_kind(kind);
-            for status in PaymentAttemptStatus::ALL {
-                for was_submitted in [false, true] {
-                    for is_stale in [false, true] {
-                        let expected = is_stale
-                            && !was_submitted
-                            && matches!(
-                                status,
-                                PaymentAttemptStatus::Pending
-                                    | PaymentAttemptStatus::ReviewRequired
-                            );
-                        assert_eq!(
-                            policy.should_expire(status, was_submitted, is_stale),
-                            expected,
-                            "kind={kind:?} status={status:?} submitted={was_submitted} stale={is_stale}",
+    fn local_attempt_state_policy_covers_the_complete_state_matrix() {
+        for status in PaymentAttemptStatus::ALL {
+            for was_submitted in [false, true] {
+                for is_stale in [false, true] {
+                    let expected = is_stale
+                        && !was_submitted
+                        && matches!(
+                            status,
+                            PaymentAttemptStatus::Pending | PaymentAttemptStatus::ReviewRequired
                         );
-                    }
+                    assert_eq!(
+                        LocalAttemptPolicy::should_expire(status, was_submitted, is_stale),
+                        expected,
+                        "status={status:?} submitted={was_submitted} stale={is_stale}",
+                    );
                 }
             }
         }
 
         assert_eq!(
-            LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial)
-                .expirable_status_values(),
+            LocalAttemptPolicy::expirable_status_values(),
             &["pending", "review_required"],
         );
+    }
+
+    #[test]
+    fn local_attempt_policy_defines_each_kind_stale_window() {
         for kind in PaymentAttemptKind::ALL {
             let expected = if kind == PaymentAttemptKind::SubscriptionPaymentMethodUpdate {
                 3 * 60

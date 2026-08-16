@@ -122,7 +122,7 @@ pub async fn fail_stale_unsubmitted_host_charges(
         .bind(candidate.target_id)
         .bind(gateway_account_id.as_uuid())
         .bind(STALE_UNSUBMITTED_HOST_CHARGE_TEXT)
-        .bind(policy.expirable_status_values())
+        .bind(LocalAttemptPolicy::expirable_status_values())
         .bind(policy.stale_after_seconds())
         .execute(&mut *transaction)
         .await;
@@ -194,7 +194,7 @@ async fn claim_stale_host_charge_candidates(
         "#,
     )
     .bind(gateway_account_id.as_uuid())
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .bind(RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS)
     .bind(RECONCILIATION_PHASE_BATCH_SIZE)

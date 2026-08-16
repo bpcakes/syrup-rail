@@ -82,7 +82,7 @@ impl DueRenewalPageQuery {
             .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
             .bind(self.observed_at())
             .bind(subscription_charge_policy.stale_after_seconds())
-            .bind(subscription_charge_policy.expirable_status_values());
+            .bind(LocalAttemptPolicy::expirable_status_values());
         match self {
             Self::First(_) => query.bind(syrup_rail::RENEWAL_DISPATCH_LIMIT + 1),
             Self::Continuation(cursor) => query
@@ -271,7 +271,7 @@ pub async fn renewal_attempt_state(
     .bind(&infrastructure_retry_codes)
     .bind(&infrastructure_pacing_codes)
     .bind(PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission.as_str())
-    .bind(policy.expirable_status_values())
+    .bind(LocalAttemptPolicy::expirable_status_values())
     .bind(policy.stale_after_seconds())
     .fetch_one(&mut **transaction)
     .await?;

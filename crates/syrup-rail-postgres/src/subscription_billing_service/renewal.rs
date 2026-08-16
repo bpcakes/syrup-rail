@@ -226,7 +226,7 @@ impl SubscriptionBillingService {
             "#,
         )
         .bind(command.subscription_id().as_uuid())
-        .bind(payment_method_update_policy.expirable_status_values())
+        .bind(LocalAttemptPolicy::expirable_status_values())
         .bind(payment_method_update_policy.stale_after_seconds())
         .fetch_one(&mut *transaction)
         .await?;
