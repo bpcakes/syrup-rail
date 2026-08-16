@@ -148,6 +148,20 @@ impl SubscriptionPaymentMethodReplacement {
         gateway: &ResolvedGateway,
         terms: SubscriptionPaymentMethodReplacementLockedTerms,
     ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
+        Self::from_locked_subscription_terms_for_attempt(
+            command,
+            gateway,
+            command.attempt_id(),
+            terms,
+        )
+    }
+
+    fn from_locked_subscription_terms_for_attempt(
+        command: &ReplaceSubscriptionPaymentMethod,
+        gateway: &ResolvedGateway,
+        attempt_id: PaymentAttemptId,
+        terms: SubscriptionPaymentMethodReplacementLockedTerms,
+    ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
         let SubscriptionPaymentMethodReplacementLockedTerms {
             gateway_account_id,
             expected_state,
@@ -160,7 +174,7 @@ impl SubscriptionPaymentMethodReplacement {
             return Err(SubscriptionPaymentMethodReplacementBuildError::GatewayIdentityMismatch);
         }
         let identity = PaymentAttemptIdentity::new(
-            command.attempt_id(),
+            attempt_id,
             command.billing_scope_id(),
             command.subscriber_id(),
             gateway_account_id,
@@ -183,7 +197,7 @@ impl SubscriptionPaymentMethodReplacement {
             Money::new(0, currency).expect("zero payment-method replacement amount is valid"),
             gateway.mutation_reference_factory().for_attempt(
                 PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
-                command.attempt_id(),
+                attempt_id,
             ),
             BillingContactSnapshot::from_billing_contact(command.billing_contact()),
         );
@@ -219,6 +233,30 @@ impl SubscriptionPaymentMethodReplacement {
             provider_key,
             request: attempt.request().clone(),
         })
+    }
+
+    /// Returns whether a retry command and resolved gateway reproduce this
+    /// exact durable submission authority.
+    ///
+    /// Retry-only candidate attempt IDs and payment tokens are intentionally
+    /// excluded. Reconstructing the reservation through its canonical builder
+    /// keeps every durable command field and gateway identity equality-bound.
+    pub fn matches_submission(
+        &self,
+        command: &ReplaceSubscriptionPaymentMethod,
+        gateway: &ResolvedGateway,
+    ) -> bool {
+        Self::from_locked_subscription_terms_for_attempt(
+            command,
+            gateway,
+            self.identity.attempt_id(),
+            SubscriptionPaymentMethodReplacementLockedTerms::new(
+                self.identity.gateway_account_id(),
+                self.expected_state().clone(),
+                self.request.amount().currency(),
+            ),
+        )
+        .is_ok_and(|candidate| candidate.eq(self))
     }
 
     pub const fn identity(&self) -> PaymentAttemptIdentity {

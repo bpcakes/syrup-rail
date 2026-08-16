@@ -180,6 +180,193 @@ async fn committed_admission_capability_submits_and_applies_exactly_one_sale()
 }
 
 #[tokio::test]
+async fn recovery_admission_rejects_changed_contact_before_provider_io()
+-> Result<(), Box<dyn Error>> {
+    let fixture = application_fixture("rec_submit_id", false, false).await?;
+    let initial = apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &approved_outcome("txn_recovery_identity_initial"),
+    )
+    .await?;
+    let subscription_id = initial
+        .subscription()
+        .expect("approved enrollment creates a subscription")
+        .id();
+    let due_at = chrono::Utc::now() - ChronoDuration::days(1);
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET status = 'past_due',
+            current_period_start_at = $2,
+            current_period_end_at = $3,
+            next_renewal_at = $3,
+            next_payment_attempt_at = $3,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(due_at - ChronoDuration::days(30))
+    .bind(due_at)
+    .execute(&fixture.database.pool)
+    .await?;
+
+    let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+        "txn_recovery_identity_must_not_submit",
+    ))));
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let command = RecoverSubscriptionPayment::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("recovery-submission-identity")?,
+            PaymentToken::new("recovery-submission-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let reservation =
+        match reserve_subscription_recovery_in_transaction(&mut transaction, &command, &resolved)
+            .await?
+        {
+            SubscriptionRecoveryReservationOutcome::Reserved(reservation, _) => *reservation,
+            other => return Err(format!("unexpected recovery reservation: {other:?}").into()),
+        };
+    transaction.commit().await?;
+    let admission =
+        match admit_subscription_recovery_submission(&fixture.database.pool, &reservation).await? {
+            SubscriptionRecoveryAdmissionOutcome::Admitted(admission) => *admission,
+            other => return Err(format!("unexpected recovery admission: {other:?}").into()),
+        };
+    let changed_contact = RecoverSubscriptionPayment::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            command.gateway_configuration_id(),
+            command.idempotency_key().clone(),
+            PaymentToken::new("refreshed-recovery-submission-token")?,
+            BillingContact::new(
+                Some("Grace".to_owned()),
+                Some("Hopper".to_owned()),
+                Some("grace@example.test".to_owned()),
+            )?,
+        ),
+        command.plan_key().clone(),
+    );
+
+    let error = submit_admitted_subscription_recovery(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        admission,
+        &changed_contact,
+        &resolved,
+    )
+    .await
+    .expect_err("changed durable contact must invalidate admission");
+    assert!(matches!(
+        error,
+        SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch
+    ));
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn payment_method_admission_rejects_changed_idempotency_key_before_provider_io()
+-> Result<(), Box<dyn Error>> {
+    let fixture = application_fixture("replace_submit", false, false).await?;
+    apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &approved_outcome_with_reference(
+            Some("txn_replacement_identity_initial"),
+            "vault_replacement_identity_initial",
+        ),
+    )
+    .await?;
+
+    let gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
+        approved_outcome_with_reference(
+            Some("txn_replacement_identity_must_not_submit"),
+            "vault_replacement_identity_must_not_submit",
+        ),
+    )));
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("replacement-submission-identity")?,
+            PaymentToken::new("replacement-submission-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let reservation = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &command,
+        &resolved,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(reservation, _) => {
+            *reservation
+        }
+        other => {
+            return Err(format!("unexpected payment-method reservation: {other:?}").into());
+        }
+    };
+    transaction.commit().await?;
+    let admission =
+        match admit_subscription_payment_method_replacement(&fixture.database.pool, &reservation)
+            .await?
+        {
+            SubscriptionPaymentMethodReplacementAdmissionOutcome::Admitted(admission) => *admission,
+            other => {
+                return Err(format!("unexpected payment-method admission: {other:?}").into());
+            }
+        };
+    let changed_idempotency = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            command.gateway_configuration_id(),
+            IdempotencyKey::new("replacement-submission-identity-changed")?,
+            PaymentToken::new("refreshed-replacement-submission-token")?,
+            command.billing_contact().clone(),
+        ),
+        command.plan_key().clone(),
+    );
+
+    let error = submit_admitted_subscription_payment_method_replacement(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        admission,
+        &changed_idempotency,
+        &resolved,
+    )
+    .await
+    .expect_err("changed durable idempotency key must invalidate admission");
+    assert!(matches!(
+        error,
+        SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch
+    ));
+    assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 0);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
 async fn provider_not_submitted_error_resolves_the_admitted_attempt_without_resubmission()
 -> Result<(), Box<dyn Error>> {
     let mut fixture = application_fixture("not_submitted", false, false).await?;

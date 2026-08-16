@@ -395,4 +395,150 @@ mod tests {
             .unwrap(),
         );
     }
+
+    #[test]
+    fn retry_submission_matching_binds_durable_fields_but_not_one_shot_inputs() {
+        let gateway = test_gateway(Arc::new(TestReferenceFactory));
+        let subscriber_id = SubscriberId::new(Uuid::from_u128(20));
+        let subscription_id = SubscriptionId::new(Uuid::from_u128(21));
+        let payment_method_id = PaymentMethodId::new(Uuid::from_u128(22));
+        let initial_transaction_id =
+            GatewayTransactionId::new("submission-initial").expect("valid transaction ID");
+        let plan_key = PlanKey::new("submission-plan").expect("valid plan key");
+        let canonical_contact = BillingContact::new(
+            Some("Ada".to_owned()),
+            Some("Lovelace".to_owned()),
+            Some("ada@example.test".to_owned()),
+        )
+        .expect("valid billing contact");
+        let changed_contact = BillingContact::new(
+            Some("Grace".to_owned()),
+            Some("Hopper".to_owned()),
+            Some("grace@example.test".to_owned()),
+        )
+        .expect("valid billing contact");
+        let context = |attempt_id, key: &str, token: &str, contact| {
+            crate::SubscriptionPaymentContext::new(
+                PaymentAttemptId::new(Uuid::from_u128(attempt_id)),
+                gateway.billing_scope_id(),
+                subscriber_id,
+                gateway.gateway_configuration_id(),
+                IdempotencyKey::new(key).expect("valid idempotency key"),
+                PaymentToken::new(token).expect("valid payment token"),
+                contact,
+            )
+        };
+
+        let recovery_command = crate::RecoverSubscriptionPayment::new(
+            context(
+                23,
+                "recovery-submission-key",
+                "recovery-token",
+                canonical_contact.clone(),
+            ),
+            plan_key.clone(),
+        );
+        let start_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let recovery_reservation =
+            crate::SubscriptionRecoveryReservation::from_locked_subscription(
+                &recovery_command,
+                &gateway,
+                recovery_command.attempt_id(),
+                subscription_id,
+                payment_method_id,
+                initial_transaction_id.clone(),
+                SubscriptionStatus::PastDue,
+                BillingPeriod::new(start_at, start_at + Duration::days(30)).unwrap(),
+                ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+            )
+            .unwrap();
+        let recovery_retry = crate::RecoverSubscriptionPayment::new(
+            context(
+                24,
+                "recovery-submission-key",
+                "refreshed-recovery-token",
+                canonical_contact.clone(),
+            ),
+            plan_key.clone(),
+        );
+        assert!(recovery_reservation.matches_submission(&recovery_retry, &gateway));
+        assert!(!recovery_reservation.matches_submission(
+            &crate::RecoverSubscriptionPayment::new(
+                context(
+                    25,
+                    "changed-recovery-submission-key",
+                    "refreshed-recovery-token",
+                    canonical_contact.clone(),
+                ),
+                plan_key.clone(),
+            ),
+            &gateway,
+        ));
+        assert!(!recovery_reservation.matches_submission(
+            &crate::RecoverSubscriptionPayment::new(
+                context(
+                    26,
+                    "recovery-submission-key",
+                    "refreshed-recovery-token",
+                    changed_contact.clone(),
+                ),
+                plan_key.clone(),
+            ),
+            &gateway,
+        ));
+
+        let replacement_command = crate::ReplaceSubscriptionPaymentMethod::new(
+            context(
+                27,
+                "replacement-submission-key",
+                "replacement-token",
+                canonical_contact.clone(),
+            ),
+            plan_key.clone(),
+        );
+        let replacement_reservation =
+            crate::SubscriptionPaymentMethodReplacement::from_locked_subscription(
+                &replacement_command,
+                &gateway,
+                subscription_id,
+                payment_method_id,
+                initial_transaction_id,
+                CurrencyCode::new("USD").unwrap(),
+            )
+            .unwrap();
+        let replacement_retry = crate::ReplaceSubscriptionPaymentMethod::new(
+            context(
+                28,
+                "replacement-submission-key",
+                "refreshed-replacement-token",
+                canonical_contact.clone(),
+            ),
+            plan_key.clone(),
+        );
+        assert!(replacement_reservation.matches_submission(&replacement_retry, &gateway));
+        assert!(!replacement_reservation.matches_submission(
+            &crate::ReplaceSubscriptionPaymentMethod::new(
+                context(
+                    29,
+                    "changed-replacement-submission-key",
+                    "refreshed-replacement-token",
+                    canonical_contact,
+                ),
+                plan_key.clone(),
+            ),
+            &gateway,
+        ));
+        assert!(!replacement_reservation.matches_submission(
+            &crate::ReplaceSubscriptionPaymentMethod::new(
+                context(
+                    30,
+                    "replacement-submission-key",
+                    "refreshed-replacement-token",
+                    changed_contact,
+                ),
+                plan_key,
+            ),
+            &gateway,
+        ));
+    }
 }

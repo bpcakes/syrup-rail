@@ -142,8 +142,7 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
     SubscriptionPaymentMethodReplacementProviderResult,
     SubscriptionEnrollmentApplicationError,
 > {
-    let identity = admission.reservation.identity();
-    if admission.attempt.identity() != identity
+    if admission.attempt.identity() != admission.reservation.identity()
         || admission.attempt.request() != admission.reservation.request()
         || admission.attempt.status() != PaymentAttemptStatus::Pending
         || admission
@@ -152,14 +151,7 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
             .timestamps()
             .submitted_at()
             .is_none()
-        || command.billing_scope_id() != identity.billing_scope_id()
-        || command.subscriber_id() != identity.subscriber_id()
-        || command.plan_key() != admission.reservation.plan_key()
-        || command.gateway_configuration_id() != identity.gateway_configuration_id()
-        || gateway.billing_scope_id() != identity.billing_scope_id()
-        || gateway.gateway_account_id() != identity.gateway_account_id()
-        || gateway.gateway_configuration_id() != identity.gateway_configuration_id()
-        || gateway.provider_key() != admission.reservation.provider_key()
+        || !admission.reservation.matches_submission(command, gateway)
     {
         return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
     }

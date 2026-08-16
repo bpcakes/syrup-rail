@@ -257,6 +257,34 @@ impl SubscriptionRecoveryReservation {
         })
     }
 
+    /// Returns whether a retry command and resolved gateway reproduce this
+    /// exact durable submission authority.
+    ///
+    /// Retry-only candidate attempt IDs and payment tokens are intentionally
+    /// excluded. Reconstructing the reservation through its canonical builder
+    /// keeps every durable command field and gateway identity equality-bound.
+    pub fn matches_submission(
+        &self,
+        command: &RecoverSubscriptionPayment,
+        gateway: &ResolvedGateway,
+    ) -> bool {
+        let Ok(charge) = ChargeAmount::try_from(self.request.amount()) else {
+            return false;
+        };
+        Self::from_locked_subscription_terms(
+            command,
+            gateway,
+            self.identity.attempt_id(),
+            SubscriptionRecoveryLockedTerms::new(
+                self.identity.gateway_account_id(),
+                self.expected_state().clone(),
+                self.period().clone(),
+                charge,
+            ),
+        )
+        .is_ok_and(|candidate| candidate.eq(self))
+    }
+
     pub const fn identity(&self) -> PaymentAttemptIdentity {
         self.identity
     }
