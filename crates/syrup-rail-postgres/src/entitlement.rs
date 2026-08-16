@@ -451,7 +451,7 @@ where
                     AND NOT (
                         attempts.status = ANY($6::text[])
                         AND attempts.submitted_at IS NULL
-                        AND attempts.created_at <= clock_timestamp()
+                        AND attempts.created_at <= clock.observed_at
                             - ($4::bigint * interval '1 second')
                     )
                     AND NOT EXISTS (
@@ -475,7 +475,7 @@ where
                     AND NOT (
                         attempts.status = ANY($6::text[])
                         AND attempts.submitted_at IS NULL
-                        AND attempts.created_at <= clock_timestamp()
+                        AND attempts.created_at <= clock.observed_at
                             - ($5::bigint * interval '1 second')
                     )
             ) AS pending_recovery_confirmation,
@@ -503,7 +503,7 @@ where
             applied.discounted_amount_cents AS applied_discounted_amount_cents,
             applied.periods_total AS applied_periods_total,
             applied.periods_applied AS applied_periods_applied
-        FROM (SELECT 1) seed
+        FROM clock
         LEFT JOIN paid ON true
         LEFT JOIN active_grant ON true
         LEFT JOIN LATERAL (
