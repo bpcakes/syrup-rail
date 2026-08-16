@@ -217,14 +217,14 @@ async fn insert_recovery_attempt(
             request_fingerprint, amount_cents, currency,
             billing_period_start_at, billing_period_end_at,
             gateway_account_id, gateway_configuration_id, gateway_order_id,
-            billing_name, billing_email,
+            billing_first_name, billing_last_name, billing_email,
             subscription_expected_payment_method_id,
             subscription_expected_initial_transaction_id,
             subscription_expected_status
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'subscription_recovery', 'pending',
             $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-            $18, $19, $20
+            $18, $19, $20, $21
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -244,7 +244,8 @@ async fn insert_recovery_attempt(
     .bind(identity.gateway_account_id().as_uuid())
     .bind(identity.gateway_configuration_id().as_uuid())
     .bind(request.gateway_order_id().expose())
-    .bind(request.billing_contact().name())
+    .bind(request.billing_contact().first_name())
+    .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
     .bind(expected.payment_method_id().as_uuid())
     .bind(expected.initial_transaction_id().expose())

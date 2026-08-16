@@ -330,10 +330,11 @@ pub async fn reserve_host_charge_in_transaction(
             id, billing_scope_id, subscriber_id, host_charge_target_id,
             attempt_kind, status, idempotency_key, request_fingerprint,
             amount_cents, currency, gateway_account_id,
-            gateway_configuration_id, gateway_order_id, billing_name, billing_email
+            gateway_configuration_id, gateway_order_id,
+            billing_first_name, billing_last_name, billing_email
         ) VALUES (
             $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
-            $7, $8, $9, $10, $11, $12, $13
+            $7, $8, $9, $10, $11, $12, $13, $14
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
@@ -349,7 +350,8 @@ pub async fn reserve_host_charge_in_transaction(
     .bind(identity.gateway_account_id().as_uuid())
     .bind(identity.gateway_configuration_id().as_uuid())
     .bind(request.gateway_order_id().expose())
-    .bind(request.billing_contact().name())
+    .bind(request.billing_contact().first_name())
+    .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
     .execute(&mut **transaction)
     .await?;

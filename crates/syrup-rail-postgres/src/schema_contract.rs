@@ -19,6 +19,9 @@ pub const V1_INSTALL_SQL: &str = include_str!("../schema/v1/install.sql");
 /// The immutable version-2 fresh-install artifact.
 pub const V2_INSTALL_SQL: &str = include_str!("../schema/v2/install.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The immutable version-3 fresh-install artifact.
+pub const V3_INSTALL_SQL: &str = include_str!("../schema/v3/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The read-only version-1-to-version-2 upgrade preflight.
 pub const V1_TO_V2_PREFLIGHT_SQL: &str = include_str!("../schema/v2/preflight_from_v1.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -28,12 +31,17 @@ pub const V1_TO_V2_RETRY_RECLASSIFICATION_AUDIT_SQL: &str =
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The immutable forward-only version-1-to-version-2 upgrade artifact.
 pub const V1_TO_V2_UPGRADE_SQL: &str = include_str!("../schema/v2/upgrade_from_v1.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The immutable forward-only version-2-to-version-3 upgrade artifact.
+pub const V2_TO_V3_UPGRADE_SQL: &str = include_str!("../schema/v3/upgrade_from_v2.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
+const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
@@ -259,9 +267,11 @@ const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "unpaid_at",
 ];
 
+const V3_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V2_CURRENT_SUBSCRIPTION_COLUMNS;
+
 /// Why a host database does not satisfy a canonical schema contract.
 ///
-/// [`crate::assert_runtime_schema_v2_compatible`] reports version `2` in its
+/// [`crate::assert_runtime_schema_v3_compatible`] reports version `3` in its
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
 /// or commit the read-only catalog snapshot.
 #[non_exhaustive]
@@ -298,13 +308,13 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
     }
 }
 
-/// Asserts that a host database is compatible with the canonical schema-v2
+/// Asserts that a host database is compatible with the canonical schema-v3
 /// contract before the host accepts billing work.
 ///
 /// Call this after the host has applied its immutable Syrup Rail install or
 /// forward-only upgrade migration through its normal migration deployment.
 /// This function does not install, upgrade, preflight, audit, or otherwise
-/// mutate the schema. It runs the same full canonical v2 catalog conformance
+/// mutate the schema. It runs the same full canonical v3 catalog conformance
 /// and fingerprint check used by the schema-contract tests in one
 /// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
 /// 18 is required; other majors are rejected before catalog comparison.
@@ -318,9 +328,20 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 /// `pg_stat_progress_create_index` and the backend retains the expected table
 /// and index locks. PostgreSQL hides those details from unrelated roles without
 /// statistics privileges, for which this check deliberately fails closed.
-pub async fn assert_runtime_schema_v2_compatible(
+pub async fn assert_runtime_schema_v3_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        3,
+        V3_CURRENT_SUBSCRIPTION_COLUMNS,
+        V3_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+async fn assert_runtime_schema_v2_compatible(pool: &PgPool) -> Result<(), SchemaConformanceError> {
     assert_schema_conforms_in_read_only_snapshot(
         pool,
         2,
@@ -328,6 +349,20 @@ pub async fn assert_runtime_schema_v2_compatible(
         V2_CATALOG_FINGERPRINT,
     )
     .await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v2
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v2_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v2_compatible(pool).await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v3
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v3_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v3_compatible(pool).await
 }
 
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -345,13 +380,6 @@ pub async fn assert_v1_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
         V1_CATALOG_FINGERPRINT,
     )
     .await
-}
-
-#[cfg(any(test, feature = "schema-contract-test-support"))]
-/// Asserts that an already-migrated host database contains the canonical v2
-/// objects without exposing a production runtime migrator.
-pub async fn assert_v2_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
-    assert_runtime_schema_v2_compatible(pool).await
 }
 
 async fn assert_schema_conforms_in_read_only_snapshot(
@@ -469,7 +497,7 @@ async fn assert_schema_conforms(
     require_validated_constraints(connection, version).await?;
     require_ready_canonical_indexes(version, &billing_indexes)?;
     require_index_contract(connection, version, GATEWAY_ORDER_INDEX_CONTRACT).await?;
-    if version == 2 {
+    if version >= 2 {
         require_index_contract(connection, version, RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
         require_index_contract(connection, version, SUBSCRIPTION_HISTORY_INDEX_CONTRACT).await?;
     }

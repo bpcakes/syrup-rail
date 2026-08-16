@@ -14,7 +14,7 @@ pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = r#"
         created_at, updated_at, gateway_lifecycle_status,
         gateway_lifecycle_action, gateway_lifecycle_at,
         gateway_lifecycle_reconciled_at, refunded_amount_cents,
-        billing_name, billing_email, resolution_code, review_required_at,
+        billing_first_name, billing_email, resolution_code, review_required_at,
         payment_method_update_expected_payment_method_id,
         payment_method_update_expected_initial_transaction_id,
         subscription_expected_payment_method_id,
@@ -42,7 +42,7 @@ pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = r#"
         subscription_initial_recurring_period_count,
         subscription_initial_dunning_retry_delays_seconds,
         subscription_initial_dunning_exhaustion,
-        subscription_initial_past_due_access
+        subscription_initial_past_due_access, billing_last_name
     FROM billing_payment_attempts
 "#;
 
@@ -146,7 +146,11 @@ pub(crate) fn payment_attempt_from_row(
             .map_err(|_| invalid_state())?,
         amount,
         gateway_order_id,
-        BillingContactSnapshot::new(row.try_get("billing_name")?, row.try_get("billing_email")?),
+        BillingContactSnapshot::from_parts(
+            row.try_get("billing_first_name")?,
+            row.try_get("billing_last_name")?,
+            row.try_get("billing_email")?,
+        ),
     );
     let state = PaymentAttemptState::new(
         status,

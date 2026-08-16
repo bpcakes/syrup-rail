@@ -317,9 +317,9 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             prepared_command.idempotency_key().clone(),
             PaymentToken::new("refreshed-recovery-token")?,
             BillingContact::new(
-                Some("Changed".to_owned()),
-                Some("Recovery".to_owned()),
-                Some("changed-recovery@example.test".to_owned()),
+                Some("Ada Lovelace".to_owned()),
+                None,
+                Some("ada@example.test".to_owned()),
             )?,
         ),
         fixture.command.plan_key().clone(),
@@ -328,7 +328,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         service
             .recover(changed_contact_command)
             .await
-            .expect_err("changed durable contact must conflict"),
+            .expect_err("repartitioned durable contact must conflict"),
         SubscriptionBillingServiceError::IdempotencyConflict,
     ));
     assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 0);
@@ -599,9 +599,9 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             prepared_command.idempotency_key().clone(),
             PaymentToken::new("refreshed-replacement-token")?,
             BillingContact::new(
-                Some("Changed".to_owned()),
-                Some("Replacement".to_owned()),
-                Some("changed-replacement@example.test".to_owned()),
+                Some("Ada Lovelace".to_owned()),
+                None,
+                Some("ada@example.test".to_owned()),
             )?,
         ),
         fixture.command.plan_key().clone(),
@@ -610,7 +610,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         service
             .replace_payment_method(changed_contact_command)
             .await
-            .expect_err("changed durable contact must conflict"),
+            .expect_err("repartitioned durable contact must conflict"),
         SubscriptionBillingServiceError::IdempotencyConflict,
     ));
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 0);

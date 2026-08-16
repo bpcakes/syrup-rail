@@ -340,12 +340,12 @@ pub(super) async fn insert_initial_attempt(
             subscription_initial_dunning_retry_delays_seconds,
             subscription_initial_dunning_exhaustion,
             subscription_initial_past_due_access,
-            billing_name, billing_email
+            billing_first_name, billing_last_name, billing_email
         ) VALUES (
             $1, $2, $3, $4, 'subscription_initial', 'pending',
             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
             $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-            $28, $29, $30, $31, $32, $33, $34, $35, $36
+            $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
@@ -384,7 +384,8 @@ pub(super) async fn insert_initial_attempt(
     .bind(retry_delays)
     .bind(offer.renewal_failure().exhaustion().as_str())
     .bind(offer.renewal_failure().past_due_access().as_str())
-    .bind(request.billing_contact().name())
+    .bind(request.billing_contact().first_name())
+    .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
     .execute(&mut **transaction)
     .await?;

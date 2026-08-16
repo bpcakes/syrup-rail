@@ -144,11 +144,12 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
                 gateway_configuration_id, gateway_order_id,
                 gateway_transaction_id, gateway_payment_method_reference,
                 gateway_response, gateway_response_code, gateway_response_text,
-                gateway_condition, billing_name, billing_email
+                gateway_condition, billing_first_name, billing_last_name,
+                billing_email
             ) VALUES (
                 $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
                 1000, 'USD', $7, $8, $9, $10, $11, $12, $13, $14,
-                $15, $16, $17
+                $15, $16, $17, $18
             )
             "#,
     )
@@ -167,7 +168,8 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
     .bind("code-secret")
     .bind("text-secret")
     .bind("condition-secret")
-    .bind("Sensitive Name")
+    .bind("Sensitive")
+    .bind("Name")
     .bind("secret@example.test")
     .execute(&database.pool)
     .await?;

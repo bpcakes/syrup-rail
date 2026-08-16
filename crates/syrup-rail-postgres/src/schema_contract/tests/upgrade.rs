@@ -10,8 +10,8 @@ mod retry_reclassification;
 
 #[tokio::test]
 async fn schema_v1_upgrade_matches_fresh_v2() -> Result<(), Box<dyn Error>> {
-    let upgraded = TestDatabase::start_v1_then_upgrade("sr_upgrade_v2").await?;
-    let fresh = TestDatabase::start("sr_fresh_v2").await?;
+    let upgraded = TestDatabase::start_v1_then_upgrade_to_v2("sr_upgrade_v2").await?;
+    let fresh = TestDatabase::start_v2("sr_fresh_v2").await?;
     let result = async {
         assert_v2_conforms(&upgraded.pool).await?;
         assert_v2_conforms(&fresh.pool).await?;

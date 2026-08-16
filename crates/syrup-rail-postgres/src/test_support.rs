@@ -10,7 +10,9 @@ use syrup_rail::{
     SubscriptionStart,
 };
 
-use crate::schema_contract::{V1_INSTALL_SQL, V1_TO_V2_UPGRADE_SQL, V2_INSTALL_SQL};
+use crate::schema_contract::{
+    V1_INSTALL_SQL, V1_TO_V2_UPGRADE_SQL, V2_INSTALL_SQL, V2_TO_V3_UPGRADE_SQL, V3_INSTALL_SQL,
+};
 
 pub(crate) struct TestDatabase {
     harness: PostgresHarness,
@@ -44,14 +46,18 @@ pub(crate) fn immediate_offer(plan_key: PlanKey, charge: ChargeAmount) -> Subscr
 
 impl TestDatabase {
     pub(crate) async fn start(project: &str) -> Result<Self, Box<dyn Error>> {
-        Self::start_with_install(project, V2_INSTALL_SQL).await
+        Self::start_with_install(project, V3_INSTALL_SQL).await
     }
 
     pub(crate) async fn start_v1(project: &str) -> Result<Self, Box<dyn Error>> {
         Self::start_with_install(project, V1_INSTALL_SQL).await
     }
 
-    pub(crate) async fn start_v1_then_upgrade(project: &str) -> Result<Self, Box<dyn Error>> {
+    pub(crate) async fn start_v2(project: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_install(project, V2_INSTALL_SQL).await
+    }
+
+    pub(crate) async fn start_v1_then_upgrade_to_v2(project: &str) -> Result<Self, Box<dyn Error>> {
         let database = Self::start_v1(project).await?;
         {
             let mut transaction = database.pool.begin().await?;
@@ -61,6 +67,27 @@ impl TestDatabase {
             transaction.commit().await?;
         }
         Ok(database)
+    }
+
+    pub(crate) async fn start_v2_then_upgrade(project: &str) -> Result<Self, Box<dyn Error>> {
+        let database = Self::start_v2(project).await?;
+        database.upgrade_v2_to_v3().await?;
+        Ok(database)
+    }
+
+    pub(crate) async fn start_v1_then_upgrade(project: &str) -> Result<Self, Box<dyn Error>> {
+        let database = Self::start_v1_then_upgrade_to_v2(project).await?;
+        database.upgrade_v2_to_v3().await?;
+        Ok(database)
+    }
+
+    async fn upgrade_v2_to_v3(&self) -> Result<(), Box<dyn Error>> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::raw_sql(V2_TO_V3_UPGRADE_SQL)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     async fn start_with_install(project: &str, install_sql: &str) -> Result<Self, Box<dyn Error>> {

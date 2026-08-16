@@ -146,7 +146,8 @@ pub async fn scrub_subscriber_billing_data(
     let payment_attempts = sqlx::query(
         r#"
         UPDATE billing_payment_attempts
-        SET billing_name = NULL,
+        SET billing_first_name = NULL,
+            billing_last_name = NULL,
             billing_email = NULL,
             gateway_response = NULL,
             gateway_response_text = NULL,
@@ -260,7 +261,8 @@ mod tests {
             }
             let attempt_cleared: bool = sqlx::query_scalar(
                 r#"
-                SELECT billing_name IS NULL
+                SELECT billing_first_name IS NULL
+                    AND billing_last_name IS NULL
                     AND billing_email IS NULL
                     AND gateway_response IS NULL
                     AND gateway_response_text IS NULL
@@ -488,7 +490,8 @@ mod tests {
                 gateway_transaction_id, gateway_payment_method_reference,
                 gateway_response, gateway_response_code, gateway_response_text,
                 gateway_condition, payment_type, card_brand, card_last4,
-                card_exp_month, card_exp_year, billing_name, billing_email,
+                card_exp_month, card_exp_year,
+                billing_first_name, billing_last_name, billing_email,
                 submitted_at, resolved_at, gateway_lifecycle_status,
                 gateway_lifecycle_action, gateway_lifecycle_at,
                 gateway_lifecycle_reconciled_at
@@ -497,7 +500,7 @@ mod tests {
                 1200, 'USD', $7, $8, $9, $10, $11,
                 '1', '100', 'approved processor response', 'complete',
                 'card', 'visa', '4242', 12, 2034,
-                'Jordan Lee', 'jordan@example.test', now(), now(), 'settled',
+                'Jordan', 'Lee', 'jordan@example.test', now(), now(), 'settled',
                 'settled transaction', now(), now()
             )
             "#,
@@ -564,7 +567,8 @@ mod tests {
             r#"
             SELECT (
                 to_jsonb(attempts) - ARRAY[
-                    'billing_name', 'billing_email', 'gateway_response',
+                    'billing_first_name', 'billing_last_name', 'billing_email',
+                    'gateway_response',
                     'gateway_response_text', 'gateway_payment_method_reference',
                     'payment_type', 'card_brand', 'card_last4',
                     'card_exp_month', 'card_exp_year', 'updated_at'

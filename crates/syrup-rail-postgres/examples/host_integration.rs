@@ -34,7 +34,7 @@ use syrup_rail_postgres::{
     EntitlementGuardError, EntitlementWriteTransaction, RenewalStoreError, SchemaConformanceError,
     SubscriptionBillingPortalQueryError, SubscriptionBillingService,
     SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
-    SubscriptionOfferStore, assert_runtime_schema_v2_compatible, due_renewals_page,
+    SubscriptionOfferStore, assert_runtime_schema_v3_compatible, due_renewals_page,
     require_entitlement_for_update, subscription_billing_portal, subscription_payment_history_page,
 };
 
@@ -106,7 +106,7 @@ pub fn build_subscription_billing_service(
 pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
-    assert_runtime_schema_v2_compatible(pool).await
+    assert_runtime_schema_v3_compatible(pool).await
 }
 
 /// Admits a host-authorized protected write and returns its only valid transaction.

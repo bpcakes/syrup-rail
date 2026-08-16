@@ -236,13 +236,13 @@ async fn insert_payment_method_replacement_attempt(
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency,
             gateway_account_id, gateway_configuration_id, gateway_order_id,
-            billing_name, billing_email,
+            billing_first_name, billing_last_name, billing_email,
             payment_method_update_expected_payment_method_id,
             payment_method_update_expected_initial_transaction_id
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             'subscription_payment_method_update', 'pending', $7, $8, 0, $9,
-            $10, $11, $12, $13, $14, $15, $16
+            $10, $11, $12, $13, $14, $15, $16, $17
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -259,7 +259,8 @@ async fn insert_payment_method_replacement_attempt(
     .bind(identity.gateway_account_id().as_uuid())
     .bind(identity.gateway_configuration_id().as_uuid())
     .bind(request.gateway_order_id().expose())
-    .bind(request.billing_contact().name())
+    .bind(request.billing_contact().first_name())
+    .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
     .bind(expected.payment_method_id().as_uuid())
     .bind(expected.expected_initial_transaction_id().expose())

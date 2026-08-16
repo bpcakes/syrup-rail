@@ -112,8 +112,8 @@ async fn runtime_schema_v2_compatibility_accepts_a_fresh_v2_install() -> Result<
     if V2_INSTALL_SQL.trim().is_empty() {
         return Err(io::Error::other("version-2 install artifact is empty").into());
     }
-    let database = TestDatabase::start("sr_schema_v2").await?;
-    let result = crate::assert_runtime_schema_v2_compatible(&database.pool).await;
+    let database = TestDatabase::start_v2("sr_schema_v2").await?;
+    let result = assert_v2_conforms(&database.pool).await;
     let cleanup = database.cleanup().await;
     result?;
     cleanup
@@ -122,7 +122,7 @@ async fn runtime_schema_v2_compatibility_accepts_a_fresh_v2_install() -> Result<
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_accepts_host_prefixed_extensions()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_catalog_v2").await?;
+    let database = TestDatabase::start_v2("sr_catalog_v2").await?;
     let result = async {
         sqlx::raw_sql(
             r#"
@@ -157,7 +157,7 @@ async fn runtime_schema_v2_compatibility_accepts_host_prefixed_extensions()
         )
         .execute(&database.pool)
         .await?;
-        crate::assert_runtime_schema_v2_compatible(&database.pool).await?;
+        assert_v2_conforms(&database.pool).await?;
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
@@ -169,7 +169,7 @@ async fn runtime_schema_v2_compatibility_accepts_host_prefixed_extensions()
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_accepts_only_active_reindex_shadow_indexes()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_reindex").await?;
+    let database = TestDatabase::start_v2("sr_v2_reindex").await?;
     let observer_role = format!("syrup_schema_observer_{}", Uuid::now_v7().simple());
     let result = async {
         sqlx::query(&format!("CREATE ROLE {observer_role} NOLOGIN"))
@@ -216,7 +216,7 @@ async fn runtime_schema_v2_compatibility_accepts_only_active_reindex_shadow_inde
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_accepts_active_table_reindex_shadows()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_tbl_live").await?;
+    let database = TestDatabase::start_v2("sr_v2_tbl_live").await?;
     let result = exercise_active_table_reindex(&database.pool).await;
     let cleanup = database.cleanup().await;
     result?;
@@ -269,7 +269,7 @@ async fn exercise_active_table_reindex(pool: &PgPool) -> Result<(), Box<dyn Erro
             ))
             .into());
         }
-        crate::assert_runtime_schema_v2_compatible(pool).await?;
+        assert_v2_conforms(pool).await?;
 
         let reader = before_swap_reader
             .as_mut()
@@ -299,14 +299,14 @@ async fn exercise_active_table_reindex(pool: &PgPool) -> Result<(), Box<dyn Erro
 
     assertion_result?;
     reindex_result?;
-    crate::assert_runtime_schema_v2_compatible(pool).await?;
+    assert_v2_conforms(pool).await?;
     Ok(())
 }
 
 #[tokio::test]
 async fn runtime_schema_v2_recheck_detects_a_completed_reindex_transition()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_transition").await?;
+    let database = TestDatabase::start_v2("sr_v2_transition").await?;
     let result = exercise_completed_reindex_transition(&database.pool).await;
     let cleanup = database.cleanup().await;
     result?;
@@ -316,7 +316,7 @@ async fn runtime_schema_v2_recheck_detects_a_completed_reindex_transition()
 #[tokio::test]
 async fn runtime_schema_v2_retries_completion_before_the_first_catalog_load()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_early_tx").await?;
+    let database = TestDatabase::start_v2("sr_v2_early_tx").await?;
     let result = exercise_completion_before_the_first_catalog_load(&database.pool).await;
     let cleanup = database.cleanup().await;
     result?;
@@ -430,7 +430,7 @@ async fn exercise_completion_before_the_first_catalog_load(
             .into());
         }
     }
-    crate::assert_runtime_schema_v2_compatible(pool).await?;
+    assert_v2_conforms(pool).await?;
     Ok(())
 }
 
@@ -525,7 +525,7 @@ async fn exercise_completed_reindex_transition(pool: &PgPool) -> Result<(), Box<
             .into());
         }
     }
-    crate::assert_runtime_schema_v2_compatible(pool).await?;
+    assert_v2_conforms(pool).await?;
     Ok(())
 }
 
@@ -566,7 +566,7 @@ async fn exercise_active_concurrent_reindex(
     let exercise_result = async {
         wait_for_reindex_phase(pool, case.table, "waiting for old snapshots").await?;
         require_only_shadow_index(pool, case.table, case.expected_new_shadow).await?;
-        crate::assert_runtime_schema_v2_compatible(pool).await?;
+        assert_v2_conforms(pool).await?;
         require_hidden_reindex_to_fail_closed(pool, observer_role, case.expected_new_shadow)
             .await?;
 
@@ -587,7 +587,7 @@ async fn exercise_active_concurrent_reindex(
 
         wait_for_reindex_phase(pool, case.table, "waiting for readers before marking dead").await?;
         require_only_shadow_index(pool, case.table, case.expected_old_shadow).await?;
-        crate::assert_runtime_schema_v2_compatible(pool).await?;
+        assert_v2_conforms(pool).await?;
 
         let reader = after_swap_reader
             .as_mut()
@@ -620,7 +620,7 @@ async fn exercise_active_concurrent_reindex(
 
     exercise_result?;
     reindex_result?;
-    crate::assert_runtime_schema_v2_compatible(pool).await?;
+    assert_v2_conforms(pool).await?;
     Ok(())
 }
 
@@ -765,11 +765,11 @@ async fn create_failed_concurrent_index_with_reindex_suffix(
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_rejects_failed_concurrent_index_with_reindex_suffix()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_stale").await?;
+    let database = TestDatabase::start_v2("sr_v2_stale").await?;
     let result = async {
         create_failed_concurrent_index_with_reindex_suffix(&database.pool).await?;
 
-        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+        match assert_v2_conforms(&database.pool).await {
             Err(crate::SchemaConformanceError::Contract { detail, .. })
                 if detail.contains("not planner/write ready")
                     && detail.contains(STALE_REINDEX_SHADOW) =>
@@ -795,7 +795,7 @@ async fn runtime_schema_v2_compatibility_rejects_failed_concurrent_index_with_re
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_rejects_stale_shadow_locked_during_table_reindex_gather()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_tbl_stale").await?;
+    let database = TestDatabase::start_v2("sr_v2_tbl_stale").await?;
     let result = exercise_stale_shadow_during_table_reindex_gather(&database.pool).await;
     let cleanup = database.cleanup().await;
     result?;
@@ -845,7 +845,7 @@ async fn exercise_stale_shadow_during_table_reindex_gather(
 
     let assertion_result = async {
         wait_for_reindex_gather_to_lock_stale_shadow(pool).await?;
-        match crate::assert_runtime_schema_v2_compatible(pool).await {
+        match assert_v2_conforms(pool).await {
             Err(crate::SchemaConformanceError::Contract { detail, .. })
                 if detail.contains("not planner/write ready")
                     && detail.contains(STALE_REINDEX_SHADOW) =>
@@ -966,7 +966,7 @@ async fn wait_for_reindex_gather_to_lock_stale_shadow(pool: &PgPool) -> Result<(
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_rejects_valid_index_with_reindex_suffix()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_named").await?;
+    let database = TestDatabase::start_v2("sr_v2_named").await?;
     let result = async {
         sqlx::query(
             r#"
@@ -977,7 +977,7 @@ async fn runtime_schema_v2_compatibility_rejects_valid_index_with_reindex_suffix
         .execute(&database.pool)
         .await?;
 
-        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+        match assert_v2_conforms(&database.pool).await {
             Err(crate::SchemaConformanceError::Contract { detail, .. })
                 if detail.contains("canonical catalog fingerprint differs") =>
             {
@@ -1002,13 +1002,13 @@ async fn runtime_schema_v2_compatibility_rejects_valid_index_with_reindex_suffix
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_rejects_added_columns_on_canonical_tables()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_host_col").await?;
+    let database = TestDatabase::start_v2("sr_v2_host_col").await?;
     let result = async {
         sqlx::query("ALTER TABLE billing_gateway_accounts ADD COLUMN example_host_note text")
             .execute(&database.pool)
             .await?;
 
-        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+        match assert_v2_conforms(&database.pool).await {
             Err(crate::SchemaConformanceError::Contract { version, detail })
                 if version == 2 && detail.contains("canonical catalog fingerprint differs") =>
             {
@@ -1033,8 +1033,8 @@ async fn runtime_schema_v2_compatibility_rejects_added_columns_on_canonical_tabl
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_accepts_a_checked_in_v1_upgrade()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start_v1_then_upgrade("sr_rt_up_v2").await?;
-    let result = crate::assert_runtime_schema_v2_compatible(&database.pool).await;
+    let database = TestDatabase::start_v1_then_upgrade_to_v2("sr_rt_up_v2").await?;
+    let result = assert_v2_conforms(&database.pool).await;
     let cleanup = database.cleanup().await;
     result?;
     cleanup
@@ -1043,7 +1043,7 @@ async fn runtime_schema_v2_compatibility_accepts_a_checked_in_v1_upgrade()
 #[tokio::test]
 async fn schema_v2_keyset_indexes_match_their_reader_identity_and_order()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_keysets").await?;
+    let database = TestDatabase::start_v2("sr_v2_keysets").await?;
     let result = async {
         let mut connection = database.pool.acquire().await?;
         require_index_contract(&mut connection, 2, RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
@@ -1153,7 +1153,7 @@ fn catalog_shape_for_contract(contract: IndexContract) -> CatalogIndexShape {
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_rejects_wrong_keyset_index_shape()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v2_bad_idx").await?;
+    let database = TestDatabase::start_v2("sr_v2_bad_idx").await?;
     let result = async {
         sqlx::raw_sql(
             r#"
@@ -1173,7 +1173,7 @@ async fn runtime_schema_v2_compatibility_rejects_wrong_keyset_index_shape()
         .execute(&database.pool)
         .await?;
 
-        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+        match assert_v2_conforms(&database.pool).await {
             Err(crate::SchemaConformanceError::Contract { version, detail })
                 if version == 2
                     && detail.contains(
@@ -1202,7 +1202,7 @@ async fn runtime_schema_v2_compatibility_rejects_wrong_keyset_index_shape()
 async fn runtime_schema_v2_compatibility_rejects_an_unchanged_v1_catalog()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start_v1("sr_rt_v1").await?;
-    let result = match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+    let result = match assert_v2_conforms(&database.pool).await {
         Err(crate::SchemaConformanceError::Contract { version, detail })
             if version == 2 && !detail.trim().is_empty() =>
         {
@@ -1222,7 +1222,7 @@ async fn runtime_schema_v2_compatibility_rejects_an_unchanged_v1_catalog()
 
 #[tokio::test]
 async fn runtime_schema_v2_compatibility_rejects_canonical_drift() -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_rt_drift").await?;
+    let database = TestDatabase::start_v2("sr_rt_drift").await?;
     let result = async {
         sqlx::query(
             r#"
@@ -1233,7 +1233,7 @@ async fn runtime_schema_v2_compatibility_rejects_canonical_drift() -> Result<(),
         .execute(&database.pool)
         .await?;
 
-        match crate::assert_runtime_schema_v2_compatible(&database.pool).await {
+        match assert_v2_conforms(&database.pool).await {
             Err(crate::SchemaConformanceError::Contract { version, detail })
                 if version == 2 && detail.contains("canonical catalog fingerprint differs") => {}
             Err(error) => {
@@ -1253,7 +1253,7 @@ async fn runtime_schema_v2_compatibility_rejects_canonical_drift() -> Result<(),
         sqlx::query("DROP INDEX billing_gateway_accounts_runtime_drift_idx")
             .execute(&database.pool)
             .await?;
-        crate::assert_runtime_schema_v2_compatible(&database.pool).await?;
+        assert_v2_conforms(&database.pool).await?;
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
@@ -1265,7 +1265,7 @@ async fn runtime_schema_v2_compatibility_rejects_canonical_drift() -> Result<(),
 #[tokio::test]
 async fn schema_v2_term_schedule_status_and_discount_shapes_are_constrained()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_shapes_v2").await?;
+    let database = TestDatabase::start_v2("sr_shapes_v2").await?;
     let result = async {
         let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
         let subscriber_id = Uuid::now_v7();

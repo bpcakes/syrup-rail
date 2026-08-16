@@ -110,9 +110,9 @@ async fn foreground_service_resumes_the_durable_attempt_not_the_retry_candidate_
             fixture.command.idempotency_key().clone(),
             PaymentToken::new("refreshed-token")?,
             BillingContact::new(
-                Some("Changed".to_owned()),
-                Some("Contact".to_owned()),
-                Some("changed@example.test".to_owned()),
+                Some("Ada Lovelace".to_owned()),
+                None,
+                Some("ada@example.test".to_owned()),
             )?,
         ),
         fixture.command.expected_terms().clone(),
@@ -121,7 +121,7 @@ async fn foreground_service_resumes_the_durable_attempt_not_the_retry_candidate_
         service
             .enroll(changed_contact_retry)
             .await
-            .expect_err("changed durable contact must conflict"),
+            .expect_err("repartitioned durable contact must conflict"),
         SubscriptionBillingServiceError::IdempotencyConflict,
     ));
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);

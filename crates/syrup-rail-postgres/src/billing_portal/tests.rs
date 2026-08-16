@@ -765,7 +765,8 @@ async fn insert_payment_method_update_attempt(
             request_fingerprint, amount_cents, currency, gateway_account_id,
             gateway_configuration_id, gateway_order_id, gateway_transaction_id,
             gateway_payment_method_reference, gateway_response, gateway_response_code,
-            gateway_response_text, gateway_condition, billing_name, billing_email,
+            gateway_response_text, gateway_condition,
+            billing_first_name, billing_last_name, billing_email,
             payment_method_update_expected_payment_method_id,
             payment_method_update_expected_initial_transaction_id, submitted_at,
             resolved_at, created_at, updated_at
@@ -775,7 +776,7 @@ async fn insert_payment_method_update_attempt(
             $9, $10, $11, 'history-transaction-secret-' || $1::text,
             'history-method-reference-secret', 'history-response-secret',
             'history-response-code-secret', 'history-response-text-secret',
-            'history-condition-secret', 'History Private Name',
+            'history-condition-secret', 'History', 'Private Name',
             'history-private@example.test', $6, $12, $13, $13, $13, $13
         )
         "#,

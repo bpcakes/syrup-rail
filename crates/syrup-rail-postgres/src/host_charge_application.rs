@@ -1648,8 +1648,8 @@ mod tests {
                 PaymentToken::new("tok_host_winner")?,
                 IdempotencyKey::new("host-reservation-race")?,
                 Some(BillingContact::new(
-                    None,
-                    None,
+                    Some("Mary Ann".into()),
+                    Some("Smith".into()),
                     Some("winner@example.test".into()),
                 )?),
             );
@@ -1699,9 +1699,9 @@ mod tests {
                 PaymentToken::new("tok_host_changed_contact")?,
                 command.idempotency_key().clone(),
                 Some(BillingContact::new(
-                    None,
-                    None,
-                    Some("changed@example.test".into()),
+                    Some("Mary".into()),
+                    Some("Ann Smith".into()),
+                    Some("winner@example.test".into()),
                 )?),
             );
             let changed_contact_contender = HostChargeReservation::from_command(
