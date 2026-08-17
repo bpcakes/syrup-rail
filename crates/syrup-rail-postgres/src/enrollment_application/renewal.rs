@@ -454,22 +454,7 @@ async fn apply_renewal_approved_on_connection(
         return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
     }
     if !renewal_subscription_matches(connection, reservation).await? {
-        transition_charge(
-            connection,
-            charge.id,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            Some(PaymentResolutionCode::SubscriptionApprovedRenewalStaleState),
-        )
-        .await?;
-        let parked = park_locked_attempt(
-            connection,
-            &attempt,
-            evidence,
-            Some(PaymentResolutionCode::SubscriptionApprovedRenewalStaleState),
-            RENEWAL_STALE_STATE_TEXT,
-        )
-        .await?;
-        return Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None));
+        return park_stale_approved_renewal(connection, &attempt, evidence, charge.id).await;
     }
     let expected = reservation.expected_state();
     let updated = sqlx::query(
@@ -502,9 +487,7 @@ async fn apply_renewal_approved_on_connection(
     .execute(&mut *connection)
     .await?;
     if updated.rows_affected() != 1 {
-        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-            INVALID_APPLICATION_STATE,
-        ));
+        return park_stale_approved_renewal(connection, &attempt, evidence, charge.id).await;
     }
     advance_subscription_discount_after_successful_charge(
         connection,
@@ -558,6 +541,33 @@ async fn apply_renewal_approved_on_connection(
         SubscriptionEnrollmentPaymentResult::new(attempt, Some(subscription)),
         Some(event),
     ))
+}
+
+async fn park_stale_approved_renewal(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    charge_id: uuid::Uuid,
+) -> Result<
+    (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
+    SubscriptionEnrollmentApplicationError,
+> {
+    transition_charge(
+        connection,
+        charge_id,
+        ProcessorChargeProgression::ExternalReversalRequired,
+        Some(PaymentResolutionCode::SubscriptionApprovedRenewalStaleState),
+    )
+    .await?;
+    let parked = park_locked_attempt(
+        connection,
+        attempt,
+        evidence,
+        Some(PaymentResolutionCode::SubscriptionApprovedRenewalStaleState),
+        RENEWAL_STALE_STATE_TEXT,
+    )
+    .await?;
+    Ok((SubscriptionEnrollmentPaymentResult::new(parked, None), None))
 }
 
 pub(crate) async fn resolve_renewal_non_approved_outcome(

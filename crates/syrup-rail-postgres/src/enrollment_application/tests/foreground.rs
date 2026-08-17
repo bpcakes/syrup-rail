@@ -146,6 +146,128 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
 }
 
 #[tokio::test]
+async fn zero_row_renewal_application_atomically_requires_external_reversal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = enrollment_fixture("renewal_zero_row", false, false, false).await?;
+    let initial_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+        "txn_zero_row_initial",
+    ))));
+    let initial_service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        Arc::new(StaticResolver {
+            gateway: scripted_resolved_gateway(
+                fixture.gateway_account,
+                Arc::clone(&initial_gateway),
+            ),
+            calls: AtomicUsize::new(0),
+        }),
+        Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        }),
+        Arc::new(fixture.coordinator.clone()),
+    );
+    let initial = initial_service.enroll(fixture.command.clone()).await?;
+    let subscription_id = initial
+        .subscription()
+        .expect("approved enrollment creates subscription")
+        .id();
+    let requested_period_start_at = Utc::now() - ChronoDuration::hours(1);
+    let period_start_at: DateTime<Utc> = sqlx::query_scalar(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2 - interval '1 month',
+            current_period_end_at = $2, next_renewal_at = $2,
+            next_payment_attempt_at = $2,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+        RETURNING next_renewal_at
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(requested_period_start_at)
+    .fetch_one(&fixture.database.pool)
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE FUNCTION host_suppress_subscription_period_update()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.current_period_start_at IS DISTINCT FROM OLD.current_period_start_at THEN
+                RETURN NULL;
+            END IF;
+            RETURN NEW;
+        END
+        $$;
+        CREATE TRIGGER host_suppress_subscription_period_update
+        BEFORE UPDATE ON billing_subscriptions
+        FOR EACH ROW EXECUTE FUNCTION host_suppress_subscription_period_update();
+        "#,
+    )
+    .execute(&fixture.database.pool)
+    .await?;
+
+    let renewal_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
+        "txn_zero_row_renewal",
+    ))));
+    let service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        Arc::new(StaticResolver {
+            gateway: scripted_resolved_gateway(
+                fixture.gateway_account,
+                Arc::clone(&renewal_gateway),
+            ),
+            calls: AtomicUsize::new(0),
+        }),
+        Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        }),
+        Arc::new(fixture.coordinator.clone()),
+    );
+    let outcome = service
+        .renew(ChargeRenewal::new(
+            fixture.command.billing_scope_id(),
+            subscription_id,
+            period_start_at,
+        ))
+        .await?;
+    let SubscriptionRenewalOutcome::Payment(payment) = outcome else {
+        panic!("approved renewal must retain its unapplied charge");
+    };
+    assert_eq!(
+        payment.attempt().status(),
+        PaymentAttemptStatus::ReviewRequired
+    );
+    assert_eq!(
+        payment.attempt().state().resolution_code(),
+        Some(PaymentResolutionCode::SubscriptionApprovedRenewalStaleState)
+    );
+    assert!(payment.subscription().is_none());
+    let charge: (String, Option<String>) = sqlx::query_as(
+        r#"
+        SELECT progression_state, state_code
+        FROM billing_processor_charges
+        WHERE attempt_id = $1
+        "#,
+    )
+    .bind(payment.attempt().identity().attempt_id().as_uuid())
+    .fetch_one(&fixture.database.pool)
+    .await?;
+    let stale_code = PaymentResolutionCode::SubscriptionApprovedRenewalStaleState.as_str();
+    assert_eq!(
+        charge,
+        (
+            "external_reversal_required".to_owned(),
+            Some(stale_code.to_owned())
+        )
+    );
+    assert_eq!(renewal_gateway.sale_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
 async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
 -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("service_recovery", true, false, false).await?;
