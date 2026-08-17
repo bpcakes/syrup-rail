@@ -4,6 +4,14 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-17
+
+### Fixed
+
+- Preserve an approved renewal charge as review-required and mark it for
+  external reversal when the guarded subscription update affects no row,
+  instead of returning an internal invalid-state error after gateway approval.
+
 ## [0.2.0] - 2026-08-13
 
 ### Added
@@ -279,7 +287,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/bpcakes/syrup-rail/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/bpcakes/syrup-rail/tree/v0.1.0
