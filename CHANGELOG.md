@@ -4,6 +4,14 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-17
+
+### Fixed
+
+- Serialize lifecycle-quarantine alert cadence claims inside the canonical
+  PostgreSQL transaction, so concurrent hosts produce one alert without
+  holding a second pool connection in a host-side scheduling lease.
+
 ## [0.2.1] - 2026-08-17
 
 ### Fixed
