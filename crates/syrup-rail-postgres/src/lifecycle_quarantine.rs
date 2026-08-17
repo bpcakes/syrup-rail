@@ -159,6 +159,25 @@ pub async fn claim_gateway_lifecycle_quarantine_alert(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
+    let owns_claim: bool = sqlx::query_scalar(
+        r#"
+        SELECT pg_try_advisory_xact_lock(
+            hashtextextended(
+                'syrup-rail:lifecycle-quarantine-alert:'
+                    || $1::uuid::text || ':' || $2::uuid::text,
+                0
+            )
+        )
+        "#,
+    )
+    .bind(account.billing_scope_id().as_uuid())
+    .bind(account.gateway_account_id().as_uuid())
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !owns_claim {
+        transaction.rollback().await?;
+        return Ok(None);
+    }
     let row = sqlx::query(
         r#"
         WITH due AS MATERIALIZED (
@@ -502,6 +521,35 @@ mod tests {
             std::slice::from_ref(&quarantine),
         )
         .await?;
+
+        let mut blocking_claim = database.pool.begin().await?;
+        sqlx::query(
+            r#"
+            SELECT pg_advisory_xact_lock(
+                hashtextextended(
+                    'syrup-rail:lifecycle-quarantine-alert:'
+                        || $1::uuid::text || ':' || $2::uuid::text,
+                    0
+                )
+            )
+            "#,
+        )
+        .bind(account.billing_scope_id().as_uuid())
+        .bind(account.gateway_account_id().as_uuid())
+        .execute(&mut *blocking_claim)
+        .await?;
+        let contended = tokio::time::timeout(
+            Duration::from_secs(1),
+            claim_gateway_lifecycle_quarantine_alert(
+                &database.pool,
+                &account,
+                Duration::from_secs(3_600),
+            ),
+        )
+        .await
+        .expect("a competing alert claim must not wait")?;
+        assert!(contended.is_none());
+        blocking_claim.rollback().await?;
 
         let alert = claim_gateway_lifecycle_quarantine_alert(
             &database.pool,
