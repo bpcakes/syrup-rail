@@ -407,6 +407,67 @@ async fn established_http1_reset_is_indeterminate_and_never_retried() {
 }
 
 #[tokio::test]
+async fn http2_refused_stream_sale_is_indeterminate_and_never_retried() {
+    // Production does not currently enable reqwest's HTTP/2 feature. This
+    // dev-only transport case preserves mutation certainty if workspace
+    // feature unification or a future production transport enables it.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let endpoint_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener address")
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let server_attempts = attempts.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("client should connect");
+        let mut connection = h2::server::handshake(stream)
+            .await
+            .expect("HTTP/2 handshake should succeed");
+        while let Some(request) = connection.accept().await {
+            let (_request, mut respond) = request.expect("request should be valid HTTP/2");
+            server_attempts.fetch_add(1, Ordering::SeqCst);
+            respond.send_reset(h2::Reason::REFUSED_STREAM);
+        }
+    });
+    let http = configured_http_client(reqwest::Client::builder().http2_prior_knowledge())
+        .expect("HTTP/2 test client should construct");
+    let client = ClientFactory {
+        https: http.clone(),
+        loopback_http: Some(http),
+        report_admission: Arc::new(tokio::sync::Semaphore::new(MAX_NMI_CONCURRENT_REPORTS)),
+    }
+    .client(
+        Endpoint::parse_loopback_http(endpoint_url).expect("test endpoint should validate"),
+        Credentials::new("private_key".to_owned(), "query_key".to_owned())
+            .expect("test credentials should validate"),
+    )
+    .expect("explicit loopback client should construct");
+
+    let error = client
+        .sale(SaleRequest {
+            amount_cents: 100,
+            currency: "USD".to_owned(),
+            order_id: "ck_refused_stream".to_owned(),
+            source: PaymentSource::PaymentToken("tok_refused_stream".to_owned()),
+            vault_action: None,
+            stored_credential: None,
+            billing_contact: None,
+        })
+        .await
+        .expect_err("protocol NACK should make the sale indeterminate");
+    assert!(matches!(error, MutationError::Indeterminate(_)));
+    assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "NMI mutation transport must never replay a protocol NACK"
+    );
+    server.abort();
+}
+
+#[tokio::test]
 async fn successful_oversized_response_is_an_indeterminate_mutation() {
     let (client, _request_receiver, server) = spawn_capturing_server(
         "HTTP/1.1 200 OK",

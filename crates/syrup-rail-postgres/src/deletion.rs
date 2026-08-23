@@ -1,10 +1,10 @@
 use sqlx::PgConnection;
 use syrup_rail::{
-    BillingDeletionBlockers, DeletionBlockerQuery, PaymentAttemptKind, ScrubSubscriberBillingData,
-    ScrubbedBillingRows,
+    BillingDeletionBlockers, DeletionBlockerQuery, GatewayAccountId, PaymentAttemptKind,
+    ScrubSubscriberBillingData, ScrubbedBillingRows,
 };
 
-use crate::attempts::LocalAttemptPolicy;
+use crate::{advisory_locks::lock_payment_method_domains, attempts::LocalAttemptPolicy};
 
 /// Reports the canonical financial rows that prevent host account deletion.
 ///
@@ -95,12 +95,12 @@ pub async fn scrub_subscriber_billing_data(
     connection: &mut PgConnection,
     command: ScrubSubscriberBillingData,
 ) -> Result<ScrubbedBillingRows, sqlx::Error> {
-    let billing_scope_id = command.billing_scope_id().into_uuid();
-    let subscriber_id = command.subscriber_id().into_uuid();
+    let billing_scope_id = command.billing_scope_id();
+    let subscriber_id = command.subscriber_id();
 
-    // Payment methods are shared across plan aggregates. Enter every affected
-    // subscriber/account mutation domain in deterministic account order before
-    // locking either the attempts or methods that carry its mutable projection.
+    // Payment methods are shared across plan aggregates. Collect every affected
+    // subscriber/account mutation domain before the shared lock owner
+    // deduplicates and enters them in deterministic account order.
     let gateway_account_ids = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
         SELECT gateway_account_id
@@ -115,33 +115,15 @@ pub async fn scrub_subscriber_billing_data(
             FROM billing_payment_methods
             WHERE billing_scope_id = $1 AND subscriber_id = $2
         ) AS affected_accounts
-        ORDER BY gateway_account_id
         "#,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
     .fetch_all(&mut *connection)
-    .await?;
-    for gateway_account_id in gateway_account_ids {
-        sqlx::query(
-            r#"
-            SELECT pg_advisory_xact_lock(
-                hashtextextended(
-                    'syrup-rail:payment-method:'
-                    || $1::uuid::text || ':'
-                    || $2::uuid::text || ':'
-                    || $3::uuid::text,
-                    0
-                )
-            )
-            "#,
-        )
-        .bind(billing_scope_id)
-        .bind(gateway_account_id)
-        .bind(subscriber_id)
-        .execute(&mut *connection)
-        .await?;
-    }
+    .await?
+    .into_iter()
+    .map(GatewayAccountId::new);
+    lock_payment_method_domains(connection, subscriber_id, gateway_account_ids).await?;
 
     let payment_attempts = sqlx::query(
         r#"
@@ -161,8 +143,8 @@ pub async fn scrub_subscriber_billing_data(
         WHERE billing_scope_id = $1 AND subscriber_id = $2
         "#,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -183,8 +165,8 @@ pub async fn scrub_subscriber_billing_data(
         WHERE billing_scope_id = $1 AND subscriber_id = $2
         "#,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -196,7 +178,7 @@ pub async fn scrub_subscriber_billing_data(
 mod tests {
     use std::{error::Error, io};
 
-    use sqlx::{PgPool, Postgres, Transaction};
+    use sqlx::PgPool;
     use syrup_rail::{BillingScopeId, ScrubSubscriberBillingData, SubscriberId};
     use uuid::Uuid;
 
@@ -395,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn billing_scrub_enters_the_subscriber_account_method_domain_before_rows()
+    async fn billing_scrub_contends_with_the_deployed_writer_domain_before_rows()
     -> Result<(), Box<dyn Error>> {
         let database = TestDatabase::start("sr_scrub_lock").await?;
         let result = async {
@@ -407,7 +389,13 @@ mod tests {
             )
             .await?;
             let mut held = database.pool.begin().await?;
-            lock_payment_method_domain(&mut held, &fixture).await?;
+            sqlx::query(
+                "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",
+            )
+            .bind(fixture.account.gateway_account_id)
+            .bind(fixture.subscriber_id)
+            .execute(&mut *held)
+            .await?;
 
             let mut blocked = database.pool.begin().await?;
             sqlx::query("SET LOCAL lock_timeout = '100ms'")
@@ -629,30 +617,5 @@ mod tests {
             _ => unreachable!("test snapshot table is fixed"),
         };
         sqlx::query_scalar(query).bind(id).fetch_one(pool).await
-    }
-
-    async fn lock_payment_method_domain(
-        transaction: &mut Transaction<'_, Postgres>,
-        fixture: &ScrubFixture,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            r#"
-            SELECT pg_advisory_xact_lock(
-                hashtextextended(
-                    'syrup-rail:payment-method:'
-                    || $1::uuid::text || ':'
-                    || $2::uuid::text || ':'
-                    || $3::uuid::text,
-                    0
-                )
-            )
-            "#,
-        )
-        .bind(fixture.account.billing_scope_id)
-        .bind(fixture.account.gateway_account_id)
-        .bind(fixture.subscriber_id)
-        .execute(&mut **transaction)
-        .await?;
-        Ok(())
     }
 }

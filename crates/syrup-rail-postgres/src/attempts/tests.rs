@@ -6,6 +6,48 @@ use chrono::Duration;
 use super::*;
 use crate::test_support::{TestDatabase, create_gateway_account};
 
+#[tokio::test]
+async fn subscription_aggregate_lock_preserves_the_deployed_key_bytes() -> Result<(), Box<dyn Error>>
+{
+    let database = TestDatabase::start("sr_sub_lock_key").await?;
+    let result = async {
+        let subscriber_id =
+            SubscriberId::new(Uuid::parse_str("01234567-89ab-cdef-0123-456789abcdef")?);
+        let plan_key = PlanKey::new("base_subscription")?;
+        let deployed_identity = "01234567-89ab-cdef-0123-456789abcdef:base_subscription";
+        let encoded_identity: String = sqlx::query_scalar("SELECT $1::uuid::text || ':' || $2")
+            .bind(subscriber_id.as_uuid())
+            .bind(plan_key.as_str())
+            .fetch_one(&database.pool)
+            .await?;
+        if encoded_identity.as_bytes() != deployed_identity.as_bytes() {
+            return Err(format!(
+                "subscription aggregate lock identity changed: {encoded_identity:?}"
+            )
+            .into());
+        }
+
+        let mut holder = database.pool.begin().await?;
+        lock_subscription_aggregate(&mut holder, subscriber_id, &plan_key).await?;
+        let mut legacy_contender = database.pool.begin().await?;
+        let acquired: bool =
+            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(deployed_identity)
+                .fetch_one(&mut *legacy_contender)
+                .await?;
+        legacy_contender.rollback().await?;
+        holder.rollback().await?;
+        if acquired {
+            return Err("canonical helper no longer contends with the deployed lock key".into());
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
 struct TestOfferStore;
 
 #[async_trait]

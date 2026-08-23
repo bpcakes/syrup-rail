@@ -6,7 +6,7 @@ use syrup_rail::{
     BillingEvent, BillingScopeId, GatewayDiagnostic, GatewayNotSubmittedError, GatewayOrderId,
     GatewayProviderKey, PaymentAttempt, PaymentAttemptIdentity, PaymentAttemptKind,
     PaymentAttemptRequest, PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey,
-    ProcessorChargeProgression, ProcessorEvidence, SubscriberId, Subscription,
+    ProcessorChargeProgression, ProcessorEvidence, Subscription,
     SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPaymentResultBuildError,
     SubscriptionEnrollmentReservation, SubscriptionId, SubscriptionPaymentMethodReplacement,
     SubscriptionRecoveryReservation, SubscriptionRenewalReservation,
@@ -16,10 +16,11 @@ use uuid::Uuid;
 
 use crate::{
     BillingTransaction, BillingTransactionError,
+    advisory_locks::lock_payment_method_domain,
     attempts::{
         AttemptApproval, AttemptResolutionStatus, AttemptTransition, PaymentAttemptStoreError,
         find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
-        persist_attempt_transition,
+        lock_subscription_aggregate, persist_attempt_transition,
     },
     processor_charges::{
         LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, observe_processor_charge,
@@ -904,34 +905,6 @@ pub(crate) async fn set_application_timeouts(
     .bind(BILLING_OPERATION_TIMEOUT)
     .execute(connection)
     .await?;
-    Ok(())
-}
-
-async fn lock_payment_method_domain(
-    connection: &mut PgConnection,
-    subscriber_id: SubscriberId,
-    gateway_account_id: &Uuid,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",
-    )
-    .bind(gateway_account_id)
-    .bind(subscriber_id.as_uuid())
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
-async fn lock_subscription_aggregate(
-    connection: &mut PgConnection,
-    subscriber_id: SubscriberId,
-    plan_key: &PlanKey,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id.as_uuid())
-        .bind(plan_key.as_str())
-        .execute(connection)
-        .await?;
     Ok(())
 }
 

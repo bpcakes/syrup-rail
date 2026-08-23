@@ -1,0 +1,1 @@
+Replace the optional empty cargo-package argument array with positional parameters reset after CLI parsing. Add a focused release-wrapper regression harness with mocked git and cargo: clean mode sends zero extra package args, dirty mode sends exactly --allow-dirty, and clean mode runs successfully under both current Bash and macOS /bin/bash 3.2.

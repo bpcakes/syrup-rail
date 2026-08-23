@@ -503,16 +503,47 @@ impl SubscriberInitiatedReservation<'_> {
     }
 }
 
-/// A closed representation of the only pre-submission readiness failures
-/// shared by subscriber-initiated mutations.
-enum SubscriberReadinessFailure {
-    Cooldown(GatewayMutationCooldownScope),
+/// A closed representation of the provider-neutral facts that can stop a
+/// gateway mutation before submission.
+enum GatewayReadinessFailure {
+    Cooldown {
+        scope: GatewayMutationCooldownScope,
+        detail: GatewayDiagnostic,
+    },
     ProviderRateLimited(GatewayDiagnostic),
     Gateway(GatewayError),
     LiveModeUnavailable,
 }
 
-impl SubscriberReadinessFailure {
+impl GatewayReadinessFailure {
+    fn for_cooldown(scope: GatewayMutationCooldownScope) -> Self {
+        let detail = match scope {
+            GatewayMutationCooldownScope::Account => {
+                GatewayDiagnostic::new("gateway account mutation cooldown is active")
+            }
+            GatewayMutationCooldownScope::Provider => {
+                GatewayDiagnostic::new("gateway provider cooldown is active")
+            }
+        };
+        Self::Cooldown { scope, detail }
+    }
+
+    const fn cooldown_with_detail(
+        scope: GatewayMutationCooldownScope,
+        detail: GatewayDiagnostic,
+    ) -> Self {
+        Self::Cooldown { scope, detail }
+    }
+
+    fn from_account_mode(result: Result<GatewayAccountMode, GatewayError>) -> Option<Self> {
+        match result {
+            Ok(GatewayAccountMode::Live) => None,
+            Ok(GatewayAccountMode::Test) => Some(Self::LiveModeUnavailable),
+            Err(GatewayError::RateLimited(detail)) => Some(Self::ProviderRateLimited(detail)),
+            Err(error) => Some(Self::Gateway(error)),
+        }
+    }
+
     fn gateway_error(&self) -> Option<GatewayError> {
         let Self::Gateway(error) = self else {
             return None;
@@ -520,14 +551,19 @@ impl SubscriberReadinessFailure {
         Some(clone_gateway_error(error))
     }
 
+    fn unreserved_gateway_error(&self) -> Option<GatewayError> {
+        match self {
+            Self::Gateway(error) => Some(clone_gateway_error(error)),
+            Self::LiveModeUnavailable => Some(GatewayError::Configuration(GatewayDiagnostic::new(
+                LIVE_READINESS_FAILED_TEXT,
+            ))),
+            Self::Cooldown { .. } | Self::ProviderRateLimited(_) => None,
+        }
+    }
+
     fn into_detail(self) -> GatewayDiagnostic {
         match self {
-            Self::Cooldown(GatewayMutationCooldownScope::Account) => {
-                GatewayDiagnostic::new("gateway account mutation cooldown is active")
-            }
-            Self::Cooldown(GatewayMutationCooldownScope::Provider) => {
-                GatewayDiagnostic::new("gateway provider cooldown is active")
-            }
+            Self::Cooldown { detail, .. } => detail,
             Self::ProviderRateLimited(detail) => detail,
             Self::Gateway(error) => error.detail().clone(),
             Self::LiveModeUnavailable => GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
@@ -536,14 +572,32 @@ impl SubscriberReadinessFailure {
 
     const fn resolution_code(&self) -> PaymentResolutionCode {
         match self {
-            Self::Cooldown(GatewayMutationCooldownScope::Account) => {
-                PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission
+            Self::Cooldown {
+                scope: GatewayMutationCooldownScope::Account,
+                ..
+            } => PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission,
+            Self::Cooldown {
+                scope: GatewayMutationCooldownScope::Provider,
+                ..
             }
-            Self::Cooldown(GatewayMutationCooldownScope::Provider)
             | Self::ProviderRateLimited(_) => {
                 PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
             }
-            Self::Gateway(error) => gateway_readiness_resolution_code(error),
+            Self::Gateway(GatewayError::RequestRejected(_)) => {
+                PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission
+            }
+            Self::Gateway(GatewayError::Malformed(_)) => {
+                PaymentResolutionCode::GatewayMalformedBeforeSubmission
+            }
+            Self::Gateway(GatewayError::Configuration(_)) => {
+                PaymentResolutionCode::GatewayConfigurationBeforeSubmission
+            }
+            Self::Gateway(GatewayError::Unavailable(_)) => {
+                PaymentResolutionCode::GatewayUnavailableBeforeSubmission
+            }
+            Self::Gateway(GatewayError::RateLimited(_)) => {
+                PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
+            }
             Self::LiveModeUnavailable => {
                 PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
             }
@@ -553,37 +607,27 @@ impl SubscriberReadinessFailure {
     const fn cooldown(&self) -> Option<RateLimitCooldown> {
         match self {
             Self::ProviderRateLimited(_) => Some(RateLimitCooldown::Provider),
-            Self::Cooldown(_) | Self::Gateway(_) | Self::LiveModeUnavailable => None,
+            Self::Cooldown { .. } | Self::Gateway(_) | Self::LiveModeUnavailable => None,
         }
     }
 
     const fn cooldown_error_scope(&self) -> Option<GatewayMutationCooldownScope> {
         match self {
-            Self::Cooldown(scope) => Some(*scope),
+            Self::Cooldown { scope, .. } => Some(*scope),
             Self::ProviderRateLimited(_) => Some(GatewayMutationCooldownScope::Provider),
             Self::Gateway(_) | Self::LiveModeUnavailable => None,
         }
     }
-}
 
-const fn gateway_readiness_resolution_code(error: &GatewayError) -> PaymentResolutionCode {
-    match error {
-        GatewayError::RequestRejected(_) => {
-            PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission
-        }
-        GatewayError::Malformed(_) => PaymentResolutionCode::GatewayMalformedBeforeSubmission,
-        GatewayError::Configuration(_) => {
-            PaymentResolutionCode::GatewayConfigurationBeforeSubmission
-        }
-        GatewayError::Unavailable(_) => PaymentResolutionCode::GatewayUnavailableBeforeSubmission,
-        GatewayError::RateLimited(_) => {
-            PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
-        }
+    fn condition(&self) -> Option<GatewayDiagnostic> {
+        (self.resolution_code()
+            != PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
+            .then(|| GatewayDiagnostic::new("failed"))
     }
-}
 
-const fn preserves_prepared_attempt_for_retry(error: &GatewayError) -> bool {
-    matches!(error, GatewayError::Unavailable(_))
+    const fn preserves_prepared_attempt_for_retry(&self) -> bool {
+        matches!(self, Self::Gateway(GatewayError::Unavailable(_)))
+    }
 }
 
 fn clone_gateway_error(error: &GatewayError) -> GatewayError {
@@ -615,17 +659,10 @@ fn map_subscriber_mutation_admission(
     }
 }
 
-async fn subscriber_gateway_readiness_failure(
+async fn gateway_readiness_failure(
     gateway: &syrup_rail::ResolvedGateway,
-) -> Option<SubscriberReadinessFailure> {
-    match gateway.account_mode().await {
-        Ok(GatewayAccountMode::Live) => None,
-        Ok(GatewayAccountMode::Test) => Some(SubscriberReadinessFailure::LiveModeUnavailable),
-        Err(GatewayError::RateLimited(detail)) => {
-            Some(SubscriberReadinessFailure::ProviderRateLimited(detail))
-        }
-        Err(error) => Some(SubscriberReadinessFailure::Gateway(error)),
-    }
+) -> Option<GatewayReadinessFailure> {
+    GatewayReadinessFailure::from_account_mode(gateway.account_mode().await)
 }
 
 fn preserve_concurrent_terminal_payment(

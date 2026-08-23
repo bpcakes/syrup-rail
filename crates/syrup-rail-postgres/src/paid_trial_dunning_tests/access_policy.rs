@@ -79,7 +79,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
     )
     .await?;
     assert!(events.lock().await.iter().any(|event| matches!(
-        event,
+        &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
             disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
@@ -121,7 +121,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
     assert_eq!(status, "unpaid");
     let emitted = events.lock().await.clone();
     assert!(emitted.iter().any(|event| matches!(
-        event,
+        &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
             disposition: SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
@@ -132,7 +132,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
             && *access_ended_at == first_suspended_at
     )));
     assert!(emitted.iter().any(|event| matches!(
-        event,
+        &event.event,
         BillingEvent::SubscriptionEnded {
             subscription_id,
             reason: SubscriptionEndReason::NonPayment,
@@ -169,7 +169,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
     )
     .await?;
     assert!(events.lock().await.iter().any(|event| matches!(
-        event,
+        &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
             disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
@@ -210,7 +210,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         }
     ));
     assert!(events.lock().await.iter().any(|event| matches!(
-        event,
+        &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
             disposition: SubscriptionPaymentFailureDisposition::DunningExhausted {

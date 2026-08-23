@@ -112,13 +112,13 @@ impl SubscriptionBillingService {
     pub(super) async fn resolve_subscriber_readiness_failure(
         &self,
         reservation: SubscriberInitiatedReservation<'_>,
-        failure: SubscriberReadinessFailure,
+        failure: GatewayReadinessFailure,
         boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let gateway_error = failure.gateway_error();
         if boundary == OutcomeResolutionBoundary::Prepared
+            && failure.preserves_prepared_attempt_for_retry()
             && let Some(error) = gateway_error.as_ref()
-            && preserves_prepared_attempt_for_retry(error)
         {
             return Err(SubscriptionBillingServiceError::GatewayReadiness(
                 clone_gateway_error(error),
@@ -127,6 +127,7 @@ impl SubscriptionBillingService {
         let code = failure.resolution_code();
         let cooldown = failure.cooldown();
         let cooldown_error_scope = failure.cooldown_error_scope();
+        let condition = failure.condition();
         let detail = failure.into_detail();
         let evidence = ProcessorEvidence::new(
             None,
@@ -134,7 +135,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            Some(GatewayDiagnostic::new("failed")),
+            condition,
             GatewayPaymentDescriptor::default(),
         );
         let payment = reservation

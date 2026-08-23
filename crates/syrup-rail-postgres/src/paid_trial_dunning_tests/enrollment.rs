@@ -337,7 +337,7 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         )?
     );
     assert!(matches!(
-        &events.lock().await[0],
+        &events.lock().await[0].event,
         BillingEvent::SubscriptionStarted {
             charge,
             phase: SubscriptionPhase::Recurring,
@@ -618,7 +618,7 @@ async fn indefinite_discounted_paid_trial_starts_with_zero_recurring_periods_app
     .await?;
     assert_eq!(discount_state, (0, None, "active".to_owned()));
     assert!(matches!(
-        &events.lock().await[0],
+        &events.lock().await[0].event,
         BillingEvent::SubscriptionStarted { charge, .. } if charge.cents() == 100
     ));
 

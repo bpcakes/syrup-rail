@@ -322,7 +322,7 @@ async fn final_form_budget_is_a_local_invalid_query_without_network_io() {
         spawn_capturing_server("HTTP/1.1 200 OK", "text/plain", b"unexpected".to_vec()).await;
     client.credentials = Credentials::new(
         "private_key".to_owned(),
-        "%".repeat(crate::MAX_CREDENTIAL_BYTES),
+        "%".repeat(crate::configuration::MAX_CREDENTIAL_BYTES),
     )
     .expect("maximum-size query credential should construct");
 

@@ -290,7 +290,7 @@ fn subscriber_admission_mapping_preserves_each_error_variant() {
 }
 
 #[test]
-fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
+fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
     for (scope, code, detail) in [
         (
             GatewayMutationCooldownScope::Account,
@@ -303,14 +303,18 @@ fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
             "gateway provider cooldown is active",
         ),
     ] {
-        let failure = SubscriberReadinessFailure::Cooldown(scope);
+        let failure = GatewayReadinessFailure::for_cooldown(scope);
         assert_eq!(failure.resolution_code(), code);
         assert!(failure.cooldown().is_none());
         assert_eq!(failure.cooldown_error_scope(), Some(scope));
+        assert_eq!(
+            failure.condition().is_none(),
+            scope == GatewayMutationCooldownScope::Provider
+        );
         assert_eq!(failure.into_detail().expose(), detail);
     }
 
-    let provider = SubscriberReadinessFailure::ProviderRateLimited(GatewayDiagnostic::new(
+    let provider = GatewayReadinessFailure::ProviderRateLimited(GatewayDiagnostic::new(
         "provider asked to retry later",
     ));
     assert_eq!(
@@ -325,6 +329,7 @@ fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         provider.cooldown_error_scope(),
         Some(GatewayMutationCooldownScope::Provider)
     );
+    assert!(provider.condition().is_none());
     assert_eq!(
         provider.into_detail().expose(),
         "provider asked to retry later"
@@ -349,33 +354,99 @@ fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         ),
     ] {
         let detail = error.detail().clone();
-        let failure = SubscriberReadinessFailure::Gateway(error);
+        let failure = GatewayReadinessFailure::Gateway(error);
         assert_eq!(failure.resolution_code(), code);
-        assert_eq!(
-            gateway_readiness_resolution_code(
-                &failure.gateway_error().expect("gateway error is retained")
-            ),
-            code
-        );
+        assert!(failure.gateway_error().is_some());
         assert!(failure.cooldown().is_none());
         assert!(failure.cooldown_error_scope().is_none());
+        assert!(failure.condition().is_some());
         assert_eq!(
-            preserves_prepared_attempt_for_retry(
-                &failure.gateway_error().expect("gateway error is retained")
-            ),
+            failure.preserves_prepared_attempt_for_retry(),
             code == PaymentResolutionCode::GatewayUnavailableBeforeSubmission
         );
         assert_eq!(failure.into_detail().expose(), detail.expose());
     }
 
-    let readiness = SubscriberReadinessFailure::LiveModeUnavailable;
+    let readiness = GatewayReadinessFailure::LiveModeUnavailable;
     assert_eq!(
         readiness.resolution_code(),
         PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
     );
     assert!(readiness.cooldown().is_none());
     assert!(readiness.cooldown_error_scope().is_none());
+    assert!(readiness.condition().is_some());
     assert_eq!(readiness.into_detail().expose(), LIVE_READINESS_FAILED_TEXT);
+}
+
+#[test]
+fn gateway_readiness_classifier_covers_account_modes_and_every_gateway_error() {
+    assert!(GatewayReadinessFailure::from_account_mode(Ok(GatewayAccountMode::Live)).is_none());
+
+    let test_mode = GatewayReadinessFailure::from_account_mode(Ok(GatewayAccountMode::Test))
+        .expect("test mode is not ready for a live mutation");
+    assert_eq!(
+        test_mode.resolution_code(),
+        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
+    );
+    assert!(test_mode.gateway_error().is_none());
+    assert!(matches!(
+        test_mode.unreserved_gateway_error(),
+        Some(GatewayError::Configuration(_))
+    ));
+
+    for (result, code, retryable, cooldown_scope) in [
+        (
+            Err(GatewayError::RequestRejected(GatewayDiagnostic::new(
+                "request rejected",
+            ))),
+            PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission,
+            false,
+            None,
+        ),
+        (
+            Err(GatewayError::Malformed(GatewayDiagnostic::new(
+                "malformed response",
+            ))),
+            PaymentResolutionCode::GatewayMalformedBeforeSubmission,
+            false,
+            None,
+        ),
+        (
+            Err(GatewayError::Configuration(GatewayDiagnostic::new(
+                "bad configuration",
+            ))),
+            PaymentResolutionCode::GatewayConfigurationBeforeSubmission,
+            false,
+            None,
+        ),
+        (
+            Err(GatewayError::Unavailable(GatewayDiagnostic::new(
+                "transport unavailable",
+            ))),
+            PaymentResolutionCode::GatewayUnavailableBeforeSubmission,
+            true,
+            None,
+        ),
+        (
+            Err(GatewayError::RateLimited(GatewayDiagnostic::new(
+                "provider asked to retry later",
+            ))),
+            PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
+            false,
+            Some(GatewayMutationCooldownScope::Provider),
+        ),
+    ] {
+        let failure = GatewayReadinessFailure::from_account_mode(result)
+            .expect("every gateway error is a readiness failure");
+        assert_eq!(failure.resolution_code(), code);
+        assert_eq!(failure.preserves_prepared_attempt_for_retry(), retryable);
+        assert_eq!(failure.cooldown_error_scope(), cooldown_scope);
+        assert_eq!(
+            failure.cooldown().is_some(),
+            cooldown_scope == Some(GatewayMutationCooldownScope::Provider)
+        );
+        assert_eq!(failure.gateway_error().is_some(), cooldown_scope.is_none());
+    }
 }
 
 #[test]

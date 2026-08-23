@@ -365,7 +365,7 @@ async fn apply_renewal_approved_on_connection(
     lock_payment_method_domain(
         connection,
         identity.subscriber_id(),
-        identity.gateway_account_id().as_uuid(),
+        identity.gateway_account_id(),
     )
     .await?;
     lock_subscription_aggregate(connection, identity.subscriber_id(), reservation.plan_key())

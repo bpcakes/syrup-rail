@@ -72,12 +72,12 @@ impl SubscriptionBillingService {
             return self
                 .resolve_subscriber_readiness_failure(
                     SubscriberInitiatedReservation::Initial(&reservation),
-                    SubscriberReadinessFailure::Cooldown(scope),
+                    GatewayReadinessFailure::for_cooldown(scope),
                     OutcomeResolutionBoundary::Prepared,
                 )
                 .await;
         }
-        if let Some(failure) = subscriber_gateway_readiness_failure(&gateway).await {
+        if let Some(failure) = gateway_readiness_failure(&gateway).await {
             return self
                 .resolve_subscriber_readiness_failure(
                     SubscriberInitiatedReservation::Initial(&reservation),
@@ -107,7 +107,7 @@ impl SubscriptionBillingService {
             return self
                 .resolve_subscriber_readiness_failure(
                     SubscriberInitiatedReservation::Initial(&reservation),
-                    SubscriberReadinessFailure::Cooldown(scope),
+                    GatewayReadinessFailure::for_cooldown(scope),
                     OutcomeResolutionBoundary::AdmittedNotSubmitted,
                 )
                 .await;

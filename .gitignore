@@ -49,3 +49,6 @@ temp/
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Local agent-instruction backups
+/AGENTS.md.bak

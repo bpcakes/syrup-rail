@@ -16,8 +16,6 @@ mod requests;
 mod responses;
 
 pub use client::{Client, ClientFactory};
-#[cfg(test)]
-pub(crate) use configuration::MAX_CREDENTIAL_BYTES;
 pub use configuration::{ConfigurationError, Credentials, Endpoint};
 pub use errors::{MutationCertainty, MutationError, QueryError};
 pub use requests::{
@@ -29,6 +27,3 @@ pub use responses::{
     PaymentOutcomeDiagnostic, PaymentOutcomeParts, PaymentStatus, SensitiveText, TransactionAction,
     TransactionActionParts, TransactionReport, TransactionReportDiagnostic, TransactionReportParts,
 };
-
-#[cfg(test)]
-mod public_api_tests;

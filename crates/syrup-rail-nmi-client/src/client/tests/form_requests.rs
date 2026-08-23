@@ -239,7 +239,7 @@ fn query_forms_share_borrowing_serializer_and_wire_contract() {
 
 #[test]
 fn account_mode_request_is_bounded_by_the_credential_contract() {
-    let query_key = "%".repeat(crate::MAX_CREDENTIAL_BYTES);
+    let query_key = "%".repeat(crate::configuration::MAX_CREDENTIAL_BYTES);
     let client = Client::new("http://127.0.0.1", "private_key", query_key.clone())
         .expect("maximum-size credential should construct");
     let params = query_account_mode_params(client.credentials.query_security_key.as_str());
@@ -252,7 +252,7 @@ fn account_mode_request_is_bounded_by_the_credential_contract() {
     assert!(matches!(
         Credentials::new(
             "private_key".to_owned(),
-            "%".repeat(crate::MAX_CREDENTIAL_BYTES + 1)
+            "%".repeat(crate::configuration::MAX_CREDENTIAL_BYTES + 1)
         ),
         Err(ConfigurationError::CredentialTooLong)
     ));

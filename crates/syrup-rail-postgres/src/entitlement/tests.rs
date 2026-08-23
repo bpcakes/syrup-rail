@@ -12,7 +12,10 @@ use super::{
     classify_guard_access, entitlement, require_entitlement_for_update,
     require_entitlement_for_update_with_lock_timeout,
 };
-use crate::test_support::{TestDatabase, create_gateway_account};
+use crate::{
+    attempts::{lock_subscription_aggregate, try_lock_subscription_aggregate},
+    test_support::{TestDatabase, create_gateway_account},
+};
 
 mod projection;
 mod stale_attempts;
@@ -316,7 +319,7 @@ async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Resul
 }
 
 #[tokio::test]
-async fn protected_write_guard_rolls_back_after_a_database_lock_timeout()
+async fn discount_and_entitlement_workflows_contend_on_the_canonical_subscription_aggregate()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_guard_timeout").await?;
     let result = async {
@@ -327,7 +330,20 @@ async fn protected_write_guard_rolls_back_after_a_database_lock_timeout()
         let probe_id = Uuid::now_v7();
 
         let mut holder = database.pool.begin().await?;
-        lock_entitlement_aggregate(&mut holder, subscriber).await?;
+        let plan_key = PlanKey::new("base_subscription")?;
+        let held = crate::clear_subscription_discount_in_transaction(
+            &mut holder,
+            BillingScopeId::new(scope),
+            SubscriberId::new(subscriber),
+            &plan_key,
+        )
+        .await?;
+        if held != syrup_rail::SubscriptionDiscountClearOutcome::NotFound {
+            return Err(io::Error::other(
+                "discount workflow did not retain its empty aggregate transaction",
+            )
+            .into());
+        }
 
         let mut caller = EntitlementWriteTransaction::begin(&database.pool).await?;
         let caller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -421,12 +437,12 @@ async fn canceling_a_blocked_protected_write_guard_rolls_back_the_transaction()
         assert_backend_transaction_ended(&mut observer, caller_pid).await?;
 
         let mut contender = database.pool.begin().await?;
-        let aggregate_unlocked: bool = sqlx::query_scalar(
-            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        let plan_key = PlanKey::new("base_subscription")?;
+        let aggregate_unlocked = try_lock_subscription_aggregate(
+            &mut contender,
+            SubscriberId::new(subscriber),
+            &plan_key,
         )
-        .bind(subscriber)
-        .bind("base_subscription")
-        .fetch_one(&mut *contender)
         .await?;
         if !aggregate_unlocked {
             return Err(
@@ -459,12 +475,12 @@ async fn protected_write_guard_holds_the_aggregate_and_entitlement_rows_until_ca
         sqlx::query("SET LOCAL lock_timeout = '100ms'")
             .execute(&mut *aggregate_contender)
             .await?;
-        let aggregate_error = sqlx::query(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        let plan_key = PlanKey::new("base_subscription")?;
+        let aggregate_error = lock_subscription_aggregate(
+            &mut aggregate_contender,
+            SubscriberId::new(subscriber),
+            &plan_key,
         )
-        .bind(subscriber)
-        .bind("base_subscription")
-        .execute(&mut *aggregate_contender)
         .await
         .expect_err("guard must hold the shared subscription aggregate domain");
         assert_lock_timeout(&aggregate_error)?;
@@ -683,12 +699,9 @@ async fn lock_entitlement_aggregate(
     transaction: &mut Transaction<'_, Postgres>,
     subscriber: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber)
-        .bind("base_subscription")
-        .execute(&mut **transaction)
-        .await?;
-    Ok(())
+    let plan_key =
+        PlanKey::new("base_subscription").expect("test subscription plan key must be valid");
+    lock_subscription_aggregate(transaction, SubscriberId::new(subscriber), &plan_key).await
 }
 
 fn assert_lock_timeout(error: &sqlx::Error) -> Result<(), io::Error> {

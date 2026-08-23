@@ -1,4 +1,146 @@
+use std::io;
+
 use super::*;
+
+#[tokio::test]
+async fn cancellation_and_enrollment_workflows_contend_on_the_canonical_subscription_aggregate()
+-> Result<(), Box<dyn Error>> {
+    let fixture = application_fixture("enroll_agg_lock", false, false).await?;
+    let result = async {
+        let mut aggregate_lock = fixture.database.pool.begin().await?;
+        let cancellation = syrup_rail::CancelSubscription::new(
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.plan_key().clone(),
+        );
+        let held =
+            crate::cancel_subscription_in_transaction(&mut aggregate_lock, &cancellation).await?;
+        if held != syrup_rail::CancelSubscriptionOutcome::NotFound {
+            return Err(
+                "cancellation workflow did not retain its empty aggregate transaction".into(),
+            );
+        }
+        let approved = approved_outcome("txn_aggregate_contention");
+        let declined =
+            GatewayPaymentOutcome::new(GatewayPaymentStatus::Declined, approved.evidence().clone());
+        let error = apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &declined,
+        )
+        .await
+        .expect_err("canonical aggregate holder must block enrollment application");
+        aggregate_lock.rollback().await?;
+        let SubscriptionEnrollmentApplicationError::Sql(sqlx::Error::Database(error)) = error
+        else {
+            return Err(format!("expected enrollment lock timeout, got {error:?}").into());
+        };
+        if error.code().as_deref() != Some("55P03") {
+            return Err(format!(
+                "expected enrollment lock timeout SQLSTATE 55P03, got {:?}",
+                error.code()
+            )
+            .into());
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn approved_payment_method_writer_blocks_scrub_before_any_row_change()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = application_fixture("wr_scrub_lock", false, false).await?;
+    let pause = Arc::new(AppendPause::new());
+    fixture.coordinator.append_pause = Some(Arc::clone(&pause));
+    let result = async {
+        let attempt_id = fixture.reservation.identity().attempt_id();
+        let attempt_before: String = sqlx::query_scalar(
+            "SELECT to_jsonb(attempts)::text FROM billing_payment_attempts AS attempts WHERE id = $1",
+        )
+        .bind(attempt_id.as_uuid())
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        let outcome = approved_outcome("txn_writer_scrub_contention");
+        let mut application = Box::pin(apply_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            &fixture.reservation,
+            &outcome,
+        ));
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                result = &mut application => Err(io::Error::other(format!(
+                    "approved writer completed before contention probe: {result:?}"
+                ))),
+                permit = pause.reached.acquire() => {
+                    permit
+                        .map_err(|_| io::Error::other("append pause closed before writer arrived"))?
+                        .forget();
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("approved writer did not reach its held transaction"))??;
+
+        let mut scrub = fixture.database.pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            .execute(&mut *scrub)
+            .await?;
+        let error = crate::scrub_subscriber_billing_data(
+            &mut scrub,
+            syrup_rail::ScrubSubscriberBillingData::new(
+                fixture.command.billing_scope_id(),
+                fixture.command.subscriber_id(),
+            ),
+        )
+        .await
+        .expect_err("approved writer must block subscriber scrub on the shared method domain");
+        let sqlstate = error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .map(|code| code.into_owned());
+        scrub.rollback().await?;
+        if sqlstate.as_deref() != Some("55P03") {
+            pause.release.add_permits(1);
+            return Err(io::Error::other(format!(
+                "expected scrub lock timeout SQLSTATE 55P03, got {sqlstate:?}"
+            ))
+            .into());
+        }
+        let attempt_after: String = sqlx::query_scalar(
+            "SELECT to_jsonb(attempts)::text FROM billing_payment_attempts AS attempts WHERE id = $1",
+        )
+        .bind(attempt_id.as_uuid())
+        .fetch_one(&fixture.database.pool)
+        .await?;
+        if attempt_after != attempt_before {
+            pause.release.add_permits(1);
+            return Err(
+                io::Error::other("scrub changed rows before acquiring the method domain").into(),
+            );
+        }
+
+        pause.release.add_permits(1);
+        let applied = application.await?;
+        if applied.attempt().status() != PaymentAttemptStatus::Approved {
+            return Err(
+                io::Error::other("approved writer did not resume after scrub rollback").into(),
+            );
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = fixture.cleanup().await;
+    result?;
+    cleanup
+}
 
 #[tokio::test]
 async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()

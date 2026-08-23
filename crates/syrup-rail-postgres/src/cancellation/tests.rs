@@ -33,6 +33,57 @@ impl SubscriptionFixture {
 }
 
 #[tokio::test]
+async fn discount_and_cancellation_workflows_contend_on_the_canonical_subscription_aggregate()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_can_agg_lock").await?;
+    let result = async {
+        let subscriber_id = SubscriberId::new(Uuid::now_v7());
+        let plan_key = PlanKey::new("base_subscription")?;
+        let mut holder = database.pool.begin().await?;
+        let held = crate::clear_subscription_discount_in_transaction(
+            &mut holder,
+            BillingScopeId::new(Uuid::now_v7()),
+            subscriber_id,
+            &plan_key,
+        )
+        .await?;
+        if held != syrup_rail::SubscriptionDiscountClearOutcome::NotFound {
+            return Err(io::Error::other(
+                "discount workflow did not retain its empty aggregate transaction",
+            )
+            .into());
+        }
+
+        let command =
+            CancelSubscription::new(BillingScopeId::new(Uuid::now_v7()), subscriber_id, plan_key);
+        let mut contender = database.pool.begin().await?;
+        let error = cancel_subscription_in_transaction(&mut contender, &command)
+            .await
+            .expect_err("canonical aggregate holder must block cancellation");
+        contender.rollback().await?;
+        holder.rollback().await?;
+        let SubscriptionCancellationError::Sql(sqlx::Error::Database(error)) = error else {
+            return Err(io::Error::other(format!(
+                "expected cancellation lock timeout, got {error:?}"
+            ))
+            .into());
+        };
+        if error.code().as_deref() != Some("55P03") {
+            return Err(io::Error::other(format!(
+                "expected cancellation lock timeout SQLSTATE 55P03, got {:?}",
+                error.code()
+            ))
+            .into());
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn cancellation_is_exact_idempotent_and_preserves_the_payment_method()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_cancel_exact").await?;

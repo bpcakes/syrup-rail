@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use syrup_rail::{
     BillingEvent, CancelSubscription, CancelSubscriptionOutcome, PastDueAccessPolicy,
-    PaymentAttemptKind, PlanKey, Subscription, SubscriptionId, SubscriptionStatus,
+    PaymentAttemptKind, Subscription, SubscriptionId, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
     attempts::{
         LocalAttemptPolicy, blocking_payment_method_update_exists,
-        fail_stale_unsubmitted_subscription_charges,
+        fail_stale_unsubmitted_subscription_charges, lock_subscription_aggregate,
     },
     renewal_failure::{RenewalFailureStoreError, past_due_causal_history},
     subscription_persistence::{
@@ -88,12 +88,7 @@ pub(crate) async fn cancel_subscription_on_connection(
     command: &CancelSubscription,
 ) -> Result<CancelSubscriptionOutcome, SubscriptionCancellationError> {
     set_lock_timeout(connection).await?;
-    lock_subscription_aggregate(
-        connection,
-        command.subscriber_id().as_uuid(),
-        command.plan_key(),
-    )
-    .await?;
+    lock_subscription_aggregate(connection, command.subscriber_id(), command.plan_key()).await?;
 
     let Some(subscription) = current_subscription(connection, command).await? else {
         return Ok(CancelSubscriptionOutcome::NotFound);
@@ -167,19 +162,6 @@ pub(crate) async fn cancel_subscription_on_connection(
 async fn set_lock_timeout(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query("SELECT set_config('lock_timeout', $1, true)")
         .bind(BILLING_ROW_LOCK_TIMEOUT)
-        .execute(connection)
-        .await?;
-    Ok(())
-}
-
-async fn lock_subscription_aggregate(
-    connection: &mut PgConnection,
-    subscriber_id: &Uuid,
-    plan_key: &PlanKey,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id)
-        .bind(plan_key.as_str())
         .execute(connection)
         .await?;
     Ok(())

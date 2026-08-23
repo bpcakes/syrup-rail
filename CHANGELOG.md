@@ -4,6 +4,31 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Coordinate subscriber billing-data scrubbing with approved payment-method
+  writers through the deployed payment-method advisory-lock identity. A
+  concurrent approval can no longer restore mutable attempt or payment-method
+  data while the scrub runs.
+
+### Changed
+
+- Record provider-rate-limit readiness failures without inventing a
+  `gateway_condition` of `failed`. The typed provider-rate-limit resolution
+  code remains the durable reason for the failed attempt.
+- Interpret each NMI transaction report's lifecycle actions in one bounded
+  pass while preserving action precedence, success handling, refund economics,
+  and diagnostic provenance.
+- Use `expires_at` as the sole pending lifecycle-evidence clock. Reconciliation
+  no longer repeats the unactionable-candidate query or writes inert check
+  counters; the existing bounded expiry cleanup behavior remains unchanged.
+
+### Developer experience
+
+- Make clean release preflight work under Bash 3.2 through 4.3 by avoiding
+  nounset expansion of an empty optional-argument array. CI now exercises clean
+  and `--allow-dirty` packaging under both current Bash and macOS Bash 3.2.
+
 ## [0.3.0] - 2026-08-16
 
 ### Fixed

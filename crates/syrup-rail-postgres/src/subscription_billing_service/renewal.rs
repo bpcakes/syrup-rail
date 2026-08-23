@@ -36,18 +36,15 @@ impl SubscriptionBillingService {
         {
             return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
-        match gateway.account_mode().await {
-            Ok(GatewayAccountMode::Live) => {}
-            Ok(GatewayAccountMode::Test) => {
-                return Err(SubscriptionBillingServiceError::GatewayReadiness(
-                    GatewayError::Configuration(GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT)),
-                ));
-            }
-            Err(GatewayError::RateLimited(_)) => {
+        if let Some(failure) = gateway_readiness_failure(&gateway).await {
+            if matches!(failure, GatewayReadinessFailure::ProviderRateLimited(_)) {
                 self.extend_provider_cooldown(&account.provider_key).await?;
                 return Ok(SubscriptionRenewalOutcome::Noop);
             }
-            Err(error) => return Err(SubscriptionBillingServiceError::GatewayReadiness(error)),
+            let error = failure.unreserved_gateway_error().ok_or(
+                SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE),
+            )?;
+            return Err(SubscriptionBillingServiceError::GatewayReadiness(error));
         }
 
         let (reservation, attempt) = match self.reserve_renewal(command, &gateway).await? {
@@ -93,12 +90,13 @@ impl SubscriptionBillingService {
         let admission = match admit_subscription_renewal_submission(&self.pool, &reservation).await
         {
             Err(error) if is_retryable_renewal_admission_error(&error) => {
-                self.resolve_renewal_readiness_failure(
+                self.resolve_renewal_non_approved(
                     &reservation,
                     GatewayDiagnostic::new(
                         "subscription billing state could not be locked for final admission",
                     ),
                     PaymentResolutionCode::SubscriptionRenewalRetryStateChangedBeforeCharge,
+                    Some(GatewayDiagnostic::new("failed")),
                     None,
                     OutcomeResolutionBoundary::Prepared,
                 )
@@ -284,21 +282,9 @@ impl SubscriptionBillingService {
         scope: GatewayMutationCooldownScope,
         boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
-        let (message, code) = match scope {
-            GatewayMutationCooldownScope::Account => (
-                "gateway account mutation cooldown is active",
-                PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission,
-            ),
-            GatewayMutationCooldownScope::Provider => (
-                "gateway provider cooldown is active",
-                PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
-            ),
-        };
         self.resolve_renewal_readiness_failure(
             reservation,
-            GatewayDiagnostic::new(message),
-            code,
-            None,
+            GatewayReadinessFailure::for_cooldown(scope),
             boundary,
         )
         .await
@@ -310,55 +296,43 @@ impl SubscriptionBillingService {
         gateway: &syrup_rail::ResolvedGateway,
         boundary: OutcomeResolutionBoundary,
     ) -> Result<bool, SubscriptionBillingServiceError> {
-        match gateway.account_mode().await {
-            Ok(GatewayAccountMode::Live) => Ok(true),
-            Ok(GatewayAccountMode::Test) => {
-                self.resolve_renewal_readiness_failure(
-                    reservation,
-                    GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
-                    PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
-                    None,
-                    boundary,
-                )
-                .await?;
-                Ok(false)
-            }
-            Err(GatewayError::RateLimited(detail)) => {
-                self.resolve_renewal_readiness_failure(
-                    reservation,
-                    detail,
-                    PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
-                    Some(RateLimitCooldown::Provider),
-                    boundary,
-                )
-                .await?;
-                Ok(false)
-            }
-            Err(error) => {
-                let code = gateway_readiness_resolution_code(&error);
-                self.resolve_renewal_readiness_failure(
-                    reservation,
-                    error.detail().clone(),
-                    code,
-                    None,
-                    boundary,
-                )
-                .await?;
-                Ok(false)
-            }
-        }
+        let Some(failure) = gateway_readiness_failure(gateway).await else {
+            return Ok(true);
+        };
+        self.resolve_renewal_readiness_failure(reservation, failure, boundary)
+            .await?;
+        Ok(false)
     }
 
     pub(super) async fn resolve_renewal_readiness_failure(
         &self,
         reservation: &SubscriptionRenewalReservation,
+        failure: GatewayReadinessFailure,
+        boundary: OutcomeResolutionBoundary,
+    ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
+        let code = failure.resolution_code();
+        let cooldown = failure.cooldown();
+        let condition = failure.condition();
+        self.resolve_renewal_non_approved(
+            reservation,
+            failure.into_detail(),
+            code,
+            condition,
+            cooldown,
+            boundary,
+        )
+        .await
+    }
+
+    pub(super) async fn resolve_renewal_non_approved(
+        &self,
+        reservation: &SubscriptionRenewalReservation,
         detail: GatewayDiagnostic,
         code: PaymentResolutionCode,
+        condition: Option<GatewayDiagnostic>,
         cooldown: Option<RateLimitCooldown>,
         boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
-        let condition = (code != PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
-            .then(|| GatewayDiagnostic::new("failed"));
         let evidence = ProcessorEvidence::new(
             None,
             None,

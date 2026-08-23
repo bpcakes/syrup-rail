@@ -320,15 +320,15 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     let emitted = events.lock().await.clone();
     assert_eq!(emitted.len(), 3);
     assert!(matches!(
-        emitted[0],
+        &emitted[0].event,
         BillingEvent::SubscriptionStarted { .. }
     ));
     assert!(matches!(
-        emitted[1],
+        &emitted[1].event,
         BillingEvent::SubscriptionPaymentFailed { .. }
     ));
     assert!(matches!(
-        emitted[2],
+        &emitted[2].event,
         BillingEvent::SubscriptionRenewed { .. }
     ));
 

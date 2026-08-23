@@ -39,19 +39,6 @@ pub(super) async fn set_lock_timeout(connection: &mut PgConnection) -> Result<()
     Ok(())
 }
 
-pub(super) async fn lock_subscription_aggregate(
-    connection: &mut PgConnection,
-    subscriber_id: SubscriberId,
-    plan_key: &PlanKey,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id.as_uuid())
-        .bind(plan_key.as_str())
-        .execute(connection)
-        .await?;
-    Ok(())
-}
-
 pub(super) async fn current_subscription_exists(
     connection: &mut PgConnection,
     claim: &SubscriptionDiscountClaim,

@@ -168,14 +168,20 @@ impl SubscriptionOfferStore for StaticOfferStore {
 #[derive(Clone)]
 struct TestCoordinator {
     pool: PgPool,
-    events: Arc<Mutex<Vec<BillingEvent>>>,
+    events: Arc<Mutex<Vec<RecordedBillingEvent>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedBillingEvent {
+    subject: BillingEventSubject,
+    event: BillingEvent,
 }
 
 #[async_trait]
 impl BillingTransactionCoordinator for TestCoordinator {
     async fn begin(
         &self,
-        _subject: BillingEventSubject,
+        subject: BillingEventSubject,
         _lock_timeout: Duration,
     ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError> {
         Ok(Box::new(TestTransaction {
@@ -185,14 +191,18 @@ impl BillingTransactionCoordinator for TestCoordinator {
                     .await
                     .map_err(BillingTransactionError::new)?,
             ),
-            events: Arc::clone(&self.events),
+            subject,
+            pending_events: Vec::new(),
+            committed_events: Arc::clone(&self.events),
         }))
     }
 }
 
 struct TestTransaction {
     transaction: Option<Transaction<'static, Postgres>>,
-    events: Arc<Mutex<Vec<BillingEvent>>>,
+    subject: BillingEventSubject,
+    pending_events: Vec<RecordedBillingEvent>,
+    committed_events: Arc<Mutex<Vec<RecordedBillingEvent>>>,
 }
 
 #[async_trait]
@@ -206,7 +216,10 @@ impl BillingTransaction for TestTransaction {
     }
 
     async fn append_event(&mut self, event: &BillingEvent) -> Result<(), BillingEventWriteError> {
-        self.events.lock().await.push(event.clone());
+        self.pending_events.push(RecordedBillingEvent {
+            subject: self.subject,
+            event: event.clone(),
+        });
         Ok(())
     }
 
@@ -216,7 +229,12 @@ impl BillingTransaction for TestTransaction {
             .expect("active test transaction")
             .commit()
             .await
-            .map_err(BillingTransactionError::new)
+            .map_err(BillingTransactionError::new)?;
+        self.committed_events
+            .lock()
+            .await
+            .append(&mut self.pending_events);
+        Ok(())
     }
 
     async fn rollback(mut self: Box<Self>) -> Result<(), BillingTransactionError> {
@@ -227,6 +245,126 @@ impl BillingTransaction for TestTransaction {
             .await
             .map_err(BillingTransactionError::new)
     }
+}
+
+fn outbox_test_event(value: u128) -> BillingEvent {
+    BillingEvent::PaymentMethodChanged {
+        attempt_id: PaymentAttemptId::new(Uuid::from_u128(value)),
+        subscription_id: syrup_rail::SubscriptionId::new(Uuid::from_u128(value + 100)),
+        plan_key: PlanKey::new("outbox_test").expect("valid test plan key"),
+        card: None,
+    }
+}
+
+fn outbox_test_subject(value: u128) -> BillingEventSubject {
+    BillingEventSubject::new(
+        BillingScopeId::new(Uuid::from_u128(value)),
+        SubscriberId::new(Uuid::from_u128(value + 100)),
+    )
+}
+
+#[tokio::test]
+async fn test_outbox_promotes_exact_subject_payload_and_local_order_after_commit()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_outbox_commit").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let subject = outbox_test_subject(1);
+    let first = outbox_test_event(10);
+    let second = outbox_test_event(20);
+    let mut transaction = coordinator.begin(subject, Duration::from_secs(1)).await?;
+
+    transaction.append_event(&first).await?;
+    transaction.append_event(&second).await?;
+    assert!(events.lock().await.is_empty());
+    transaction.commit().await?;
+
+    assert_eq!(
+        *events.lock().await,
+        vec![
+            RecordedBillingEvent {
+                subject,
+                event: first,
+            },
+            RecordedBillingEvent {
+                subject,
+                event: second,
+            },
+        ]
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn test_outbox_discards_pending_events_after_rollback() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_ob_rollback").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let mut transaction = coordinator
+        .begin(outbox_test_subject(2), Duration::from_secs(1))
+        .await?;
+
+    transaction.append_event(&outbox_test_event(30)).await?;
+    transaction.rollback().await?;
+
+    assert!(events.lock().await.is_empty());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn test_outbox_discards_pending_events_when_transaction_is_dropped()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_outbox_drop").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let mut transaction = coordinator
+        .begin(outbox_test_subject(3), Duration::from_secs(1))
+        .await?;
+
+    transaction.append_event(&outbox_test_event(40)).await?;
+    drop(transaction);
+
+    assert!(events.lock().await.is_empty());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn test_outbox_discards_pending_events_when_sql_commit_fails() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_ob_failure").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let mut transaction = coordinator
+        .begin(outbox_test_subject(4), Duration::from_secs(1))
+        .await?;
+    sqlx::query(
+        "CREATE TEMP TABLE deferred_duplicate (value integer UNIQUE DEFERRABLE INITIALLY DEFERRED)",
+    )
+    .execute(transaction.connection())
+    .await?;
+    sqlx::query("INSERT INTO deferred_duplicate (value) VALUES (1), (1)")
+        .execute(transaction.connection())
+        .await?;
+    transaction.append_event(&outbox_test_event(50)).await?;
+
+    transaction
+        .commit()
+        .await
+        .expect_err("deferred uniqueness violation must fail commit");
+
+    assert!(events.lock().await.is_empty());
+    database.cleanup().await
 }
 
 fn paid_trial_offer() -> Result<syrup_rail::SubscriptionOffer, Box<dyn Error>> {

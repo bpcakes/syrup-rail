@@ -6,6 +6,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod advisory_locks;
 mod attempts;
 mod billing_portal;
 mod cancellation;

@@ -132,6 +132,58 @@ impl SubscriptionOfferStore for TestOfferStore {
 }
 
 #[tokio::test]
+async fn cancellation_and_discount_workflows_contend_on_the_canonical_subscription_aggregate()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_disc_agg_lock").await?;
+    let result = async {
+        let subscriber_id = SubscriberId::new(Uuid::now_v7());
+        let plan_key = PlanKey::new("base_subscription")?;
+        let mut holder = database.pool.begin().await?;
+        let cancellation = syrup_rail::CancelSubscription::new(
+            BillingScopeId::new(Uuid::now_v7()),
+            subscriber_id,
+            plan_key.clone(),
+        );
+        let held = crate::cancel_subscription_in_transaction(&mut holder, &cancellation).await?;
+        if held != syrup_rail::CancelSubscriptionOutcome::NotFound {
+            return Err(io::Error::other(
+                "cancellation workflow did not retain its empty aggregate transaction",
+            )
+            .into());
+        }
+
+        let mut contender = database.pool.begin().await?;
+        let error = clear_subscription_discount_in_transaction(
+            &mut contender,
+            BillingScopeId::new(Uuid::now_v7()),
+            subscriber_id,
+            &plan_key,
+        )
+        .await
+        .expect_err("canonical aggregate holder must block discount clearing");
+        contender.rollback().await?;
+        holder.rollback().await?;
+        let SubscriptionDiscountOperationError::Sql(sqlx::Error::Database(error)) = error else {
+            return Err(
+                io::Error::other(format!("expected discount lock timeout, got {error:?}")).into(),
+            );
+        };
+        if error.code().as_deref() != Some("55P03") {
+            return Err(io::Error::other(format!(
+                "expected discount lock timeout SQLSTATE 55P03, got {:?}",
+                error.code()
+            ))
+            .into());
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn quote_validation_uses_the_callers_connection_and_blocks_price_updates()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_disc_lock").await?;

@@ -13,7 +13,6 @@ use uuid::Uuid;
 const ROW_LOCK_TIMEOUT: &str = "250ms";
 const OPERATION_TIMEOUT: &str = "5s";
 const PENDING_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
-const PENDING_MAX_CHECKS: i32 = 24;
 const PENDING_CLEANUP_BATCH_SIZE: i64 = 500;
 const STAGED_APPLICATION_BATCH_SIZE: i64 = 100;
 const INVALID_STORED_STATE: &str = "canonical gateway lifecycle state is invalid";
@@ -322,7 +321,8 @@ pub async fn apply_staged_gateway_lifecycle_evidence(
 ) -> Result<GatewayLifecycleReconciliationSummary, GatewayLifecycleReconciliationError> {
     let mut summary = GatewayLifecycleReconciliationSummary::default();
     summary.cleaned += cleanup_pending(pool, account).await?;
-    record_unactionable_checks(pool, account).await?;
+    // Preserve the established two bounded cleanup passes and their public
+    // cleaned count while expiry becomes the only pending-evidence clock.
     summary.cleaned += cleanup_pending(pool, account).await?;
 
     for (pending_id, evidence) in actionable_pending(pool, account).await? {
@@ -922,101 +922,32 @@ async fn cleanup_pending(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    let result = sqlx::query(
-        r#"
-        WITH stale AS MATERIALIZED (
-            SELECT pending.id
-            FROM billing_gateway_lifecycle_pending_updates pending
-            WHERE pending.billing_scope_id = $1
-                AND pending.gateway_account_id = $2
-                AND pending.expires_at <= now()
-            ORDER BY pending.expires_at, pending.first_seen_at, pending.id
-            LIMIT $3
-            FOR UPDATE SKIP LOCKED
-        )
-        DELETE FROM billing_gateway_lifecycle_pending_updates pending
-        USING stale
-        WHERE pending.id = stale.id
-        "#,
-    )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(PENDING_CLEANUP_BATCH_SIZE)
-    .execute(&mut *transaction)
-    .await?;
+    let result = sqlx::query(cleanup_pending_sql())
+        .bind(account.billing_scope_id().as_uuid())
+        .bind(account.gateway_account_id().as_uuid())
+        .bind(PENDING_CLEANUP_BATCH_SIZE)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
     Ok(result.rows_affected())
 }
 
-async fn record_unactionable_checks(
-    pool: &PgPool,
-    account: &GatewayLifecycleAccount,
-) -> Result<(), GatewayLifecycleReconciliationError> {
-    let mut transaction = pool.begin().await?;
-    set_timeouts(&mut transaction).await?;
-    ensure_account(&mut transaction, account).await?;
-    sqlx::query(
-        r#"
-        WITH unactionable AS MATERIALIZED (
-            SELECT pending.id
-            FROM billing_gateway_lifecycle_pending_updates pending
-            CROSS JOIN LATERAL (
-                SELECT COUNT(*)::bigint AS candidate_count,
-                    COALESCE(BOOL_OR(
-                        pending.gateway_transaction_id IS NOT NULL
-                        AND public.billing_canonical_gateway_transaction_id(
-                            attempts.gateway_transaction_id
-                        ) = pending.gateway_transaction_id
-                    ), false) AS has_transaction_match
-                FROM billing_payment_attempts attempts
-                WHERE attempts.billing_scope_id = $1
-                    AND attempts.gateway_account_id = $2
-                    AND attempts.status = 'approved'
-                    AND (
-                        (
-                            pending.gateway_transaction_id IS NOT NULL
-                            AND public.billing_canonical_gateway_transaction_id(
-                                attempts.gateway_transaction_id
-                            ) = pending.gateway_transaction_id
-                        )
-                        OR (
-                            pending.gateway_order_id IS NOT NULL
-                            AND (
-                                pending.gateway_transaction_id IS NULL
-                                OR public.billing_canonical_gateway_transaction_id(
-                                    attempts.gateway_transaction_id
-                                ) IS NULL
-                            )
-                            AND attempts.gateway_order_id = pending.gateway_order_id
-                        )
-                    )
-            ) matches
-            WHERE pending.billing_scope_id = $1
-                AND pending.gateway_account_id = $2
-                AND pending.expires_at > now()
-                AND pending.check_count < $3
-                AND NOT (matches.has_transaction_match OR matches.candidate_count = 1)
-            ORDER BY pending.last_checked_at NULLS FIRST,
-                pending.first_seen_at,
-                pending.id
-            LIMIT $4
-            FOR UPDATE OF pending SKIP LOCKED
-        )
-        UPDATE billing_gateway_lifecycle_pending_updates pending
-        SET last_checked_at = now(),
-            check_count = pending.check_count + 1
-        FROM unactionable
-        WHERE pending.id = unactionable.id
-        "#,
+fn cleanup_pending_sql() -> &'static str {
+    r#"
+    WITH stale AS MATERIALIZED (
+        SELECT pending.id
+        FROM billing_gateway_lifecycle_pending_updates pending
+        WHERE pending.billing_scope_id = $1
+            AND pending.gateway_account_id = $2
+            AND pending.expires_at <= now()
+        ORDER BY pending.expires_at, pending.first_seen_at, pending.id
+        LIMIT $3
+        FOR UPDATE SKIP LOCKED
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(PENDING_MAX_CHECKS)
-    .bind(PENDING_CLEANUP_BATCH_SIZE)
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
-    Ok(())
+    DELETE FROM billing_gateway_lifecycle_pending_updates pending
+    USING stale
+    WHERE pending.id = stale.id
+    "#
 }
 
 async fn actionable_pending(
@@ -1026,62 +957,12 @@ async fn actionable_pending(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    let rows = sqlx::query(
-        r#"
-        SELECT pending.id,
-            pending.gateway_transaction_id,
-            pending.gateway_order_id,
-            pending.gateway_condition,
-            pending.gateway_lifecycle_status,
-            pending.gateway_lifecycle_action,
-            pending.gateway_lifecycle_at,
-            pending.refunded_amount_cents
-        FROM billing_gateway_lifecycle_pending_updates pending
-        CROSS JOIN LATERAL (
-            SELECT COUNT(*)::bigint AS candidate_count,
-                COALESCE(BOOL_OR(
-                    pending.gateway_transaction_id IS NOT NULL
-                    AND public.billing_canonical_gateway_transaction_id(
-                        attempts.gateway_transaction_id
-                    ) = pending.gateway_transaction_id
-                ), false) AS has_transaction_match
-            FROM billing_payment_attempts attempts
-            WHERE attempts.billing_scope_id = $1
-                AND attempts.gateway_account_id = $2
-                AND attempts.status = 'approved'
-                AND (
-                    (
-                        pending.gateway_transaction_id IS NOT NULL
-                        AND public.billing_canonical_gateway_transaction_id(
-                            attempts.gateway_transaction_id
-                        ) = pending.gateway_transaction_id
-                    )
-                    OR (
-                        pending.gateway_order_id IS NOT NULL
-                        AND (
-                            pending.gateway_transaction_id IS NULL
-                            OR public.billing_canonical_gateway_transaction_id(
-                                attempts.gateway_transaction_id
-                            ) IS NULL
-                        )
-                        AND attempts.gateway_order_id = pending.gateway_order_id
-                    )
-                )
-        ) matches
-        WHERE pending.billing_scope_id = $1
-            AND pending.gateway_account_id = $2
-            AND pending.expires_at > now()
-            AND (matches.has_transaction_match OR matches.candidate_count = 1)
-        ORDER BY pending.first_seen_at, pending.id
-        LIMIT $3
-        FOR UPDATE OF pending SKIP LOCKED
-        "#,
-    )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(STAGED_APPLICATION_BATCH_SIZE)
-    .fetch_all(&mut *transaction)
-    .await?;
+    let rows = sqlx::query(actionable_pending_sql())
+        .bind(account.billing_scope_id().as_uuid())
+        .bind(account.gateway_account_id().as_uuid())
+        .bind(STAGED_APPLICATION_BATCH_SIZE)
+        .fetch_all(&mut *transaction)
+        .await?;
     let pending = rows
         .into_iter()
         .map(|row| {
@@ -1102,6 +983,58 @@ async fn actionable_pending(
         .collect::<Result<Vec<_>, GatewayLifecycleReconciliationError>>()?;
     transaction.commit().await?;
     Ok(pending)
+}
+
+fn actionable_pending_sql() -> &'static str {
+    r#"
+    SELECT pending.id,
+        pending.gateway_transaction_id,
+        pending.gateway_order_id,
+        pending.gateway_condition,
+        pending.gateway_lifecycle_status,
+        pending.gateway_lifecycle_action,
+        pending.gateway_lifecycle_at,
+        pending.refunded_amount_cents
+    FROM billing_gateway_lifecycle_pending_updates pending
+    CROSS JOIN LATERAL (
+        SELECT COUNT(*)::bigint AS candidate_count,
+            COALESCE(BOOL_OR(
+                pending.gateway_transaction_id IS NOT NULL
+                AND public.billing_canonical_gateway_transaction_id(
+                    attempts.gateway_transaction_id
+                ) = pending.gateway_transaction_id
+            ), false) AS has_transaction_match
+        FROM billing_payment_attempts attempts
+        WHERE attempts.billing_scope_id = $1
+            AND attempts.gateway_account_id = $2
+            AND attempts.status = 'approved'
+            AND (
+                (
+                    pending.gateway_transaction_id IS NOT NULL
+                    AND public.billing_canonical_gateway_transaction_id(
+                        attempts.gateway_transaction_id
+                    ) = pending.gateway_transaction_id
+                )
+                OR (
+                    pending.gateway_order_id IS NOT NULL
+                    AND (
+                        pending.gateway_transaction_id IS NULL
+                        OR public.billing_canonical_gateway_transaction_id(
+                            attempts.gateway_transaction_id
+                        ) IS NULL
+                    )
+                    AND attempts.gateway_order_id = pending.gateway_order_id
+                )
+            )
+    ) matches
+    WHERE pending.billing_scope_id = $1
+        AND pending.gateway_account_id = $2
+        AND pending.expires_at > now()
+        AND (matches.has_transaction_match OR matches.candidate_count = 1)
+    ORDER BY pending.first_seen_at, pending.id
+    LIMIT $3
+    FOR UPDATE OF pending SKIP LOCKED
+    "#
 }
 
 pub(crate) async fn ensure_account(
@@ -1157,11 +1090,14 @@ fn latest_time(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Opt
 mod tests {
     use std::{
         error::Error,
+        io,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     use super::*;
-    use crate::test_support::{TestDatabase, create_gateway_account};
+    use crate::test_support::{
+        TestDatabase, create_gateway_account, explain_plan_root, plan_has_node_type,
+    };
     use async_trait::async_trait;
     use sqlx::PgConnection;
     use syrup_rail::{
@@ -1335,6 +1271,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expiry_cleanup_preserves_bounded_pass_counts_and_backlog_query_limits()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("life_pending").await?;
+        let fixture = create_gateway_account(&database.pool, "nmi").await?;
+        let account = lifecycle_account(fixture, "nmi");
+        let host_targets = ExactHostTargets::default();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_gateway_lifecycle_pending_updates (
+                billing_scope_id,
+                gateway_account_id,
+                gateway_transaction_id,
+                gateway_lifecycle_status,
+                first_seen_at,
+                updated_at,
+                expires_at
+            )
+            SELECT $1,
+                $2,
+                'expired-' || value::text,
+                'unknown',
+                now() - interval '8 days',
+                now() - interval '8 days',
+                now() - interval '1 day'
+            FROM generate_series(1, 1001) value
+            "#,
+        )
+        .bind(fixture.billing_scope_id)
+        .bind(fixture.gateway_account_id)
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO billing_gateway_lifecycle_pending_updates (
+                billing_scope_id,
+                gateway_account_id,
+                gateway_transaction_id,
+                gateway_lifecycle_status
+            )
+            SELECT $1, $2, 'live-' || value::text, 'unknown'
+            FROM generate_series(1, 4096) value
+            "#,
+        )
+        .bind(fixture.billing_scope_id)
+        .bind(fixture.gateway_account_id)
+        .execute(&database.pool)
+        .await?;
+        sqlx::raw_sql(
+            "ANALYZE billing_gateway_lifecycle_pending_updates; ANALYZE billing_payment_attempts;",
+        )
+        .execute(&database.pool)
+        .await?;
+
+        for (name, sql, limit) in [
+            ("cleanup", cleanup_pending_sql(), PENDING_CLEANUP_BATCH_SIZE),
+            (
+                "actionable",
+                actionable_pending_sql(),
+                STAGED_APPLICATION_BATCH_SIZE,
+            ),
+        ] {
+            let explain_sql = format!("EXPLAIN (FORMAT JSON, COSTS OFF) {sql}");
+            let plan: serde_json::Value = sqlx::query_scalar(&explain_sql)
+                .bind(fixture.billing_scope_id)
+                .bind(fixture.gateway_account_id)
+                .bind(limit)
+                .fetch_one(&database.pool)
+                .await?;
+            let root = explain_plan_root(&plan)?;
+            if !plan_has_node_type(root, "Limit") {
+                return Err(io::Error::other(format!(
+                    "representative lifecycle {name} plan lost its bounded candidate limit:\n{}",
+                    serde_json::to_string_pretty(root)?
+                ))
+                .into());
+            }
+        }
+
+        let first =
+            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
+                .await?;
+        assert_eq!(first.cleaned(), 1_000);
+        assert_eq!(first.applied(), 0);
+        let second =
+            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
+                .await?;
+        assert_eq!(second.cleaned(), 1);
+        let third =
+            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
+                .await?;
+        assert_eq!(third.cleaned(), 0);
+        let remaining: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_gateway_lifecycle_pending_updates WHERE gateway_account_id = $1",
+        )
+        .bind(fixture.gateway_account_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(remaining, 4_096);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
     async fn report_lifecycle_is_crash_safe_monotonic_and_exact_targeted()
     -> Result<(), Box<dyn Error>> {
         let database = TestDatabase::start("rail_lifecycle").await?;
@@ -1391,6 +1430,24 @@ mod tests {
                 "diagnostic action".to_owned()
             )
         );
+
+        for _ in 0..25 {
+            let no_match =
+                apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
+                    .await?;
+            assert_eq!(no_match, GatewayLifecycleReconciliationSummary::default());
+        }
+        let inert_check_state: (i32, Option<DateTime<Utc>>) = sqlx::query_as(
+            r#"
+            SELECT check_count, last_checked_at
+            FROM billing_gateway_lifecycle_pending_updates
+            WHERE gateway_account_id = $1
+            "#,
+        )
+        .bind(fixture.gateway_account_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(inert_check_state, (0, None));
 
         let late_subscriber = Uuid::now_v7();
         let late_target = Uuid::now_v7();

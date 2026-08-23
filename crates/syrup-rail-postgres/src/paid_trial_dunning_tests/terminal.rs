@@ -69,7 +69,7 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     let started_events = events.lock().await.clone();
     assert_eq!(started_events.len(), 1);
     assert!(matches!(
-        &started_events[0],
+        &started_events[0].event,
         BillingEvent::SubscriptionStarted {
             charge,
             period,
@@ -233,28 +233,28 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     let final_events = events.lock().await.clone();
     assert_eq!(final_events.len(), 5);
     assert!(matches!(
-        &final_events[1],
+        &final_events[1].event,
         BillingEvent::SubscriptionPaymentFailed {
             disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
             ..
         } if *retry_at == failure_one_at + ChronoDuration::days(1)
     ));
     assert!(matches!(
-        &final_events[2],
+        &final_events[2].event,
         BillingEvent::SubscriptionPaymentFailed {
             disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
             ..
         } if *retry_at == failure_two_at + ChronoDuration::days(3)
     ));
     assert!(matches!(
-        &final_events[3],
+        &final_events[3].event,
         BillingEvent::SubscriptionPaymentFailed {
             disposition: SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
             ..
         } if *ended_at == failure_three_at
     ));
     assert!(matches!(
-        &final_events[4],
+        &final_events[4].event,
         BillingEvent::SubscriptionEnded {
             reason: SubscriptionEndReason::NonPayment,
             ended_at,

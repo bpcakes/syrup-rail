@@ -911,9 +911,9 @@ async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_at
     ));
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
-    let state: (String, Option<String>, bool, bool) = sqlx::query_as(
+    let state: (String, Option<String>, Option<String>, bool, bool) = sqlx::query_as(
         r#"
-        SELECT attempt.status, attempt.resolution_code,
+        SELECT attempt.status, attempt.resolution_code, attempt.gateway_condition,
             COALESCE(account.mutation_rate_limited_until > clock_timestamp(), false),
             provider.rate_limited_until > clock_timestamp()
         FROM billing_payment_attempts AS attempt
@@ -932,8 +932,9 @@ async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_at
         state.1.as_deref(),
         Some("gateway_provider_rate_limited_before_submission")
     );
-    assert!(!state.2);
-    assert!(state.3);
+    assert!(state.2.is_none());
+    assert!(!state.3);
+    assert!(state.4);
     fixture.cleanup().await
 }
 

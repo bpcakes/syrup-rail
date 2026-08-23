@@ -6,7 +6,7 @@ use syrup_rail::{
     GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
     GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
     GatewayTransactionId, GatewayTransactionReport, GatewayTransactionReportRequest,
-    PaymentAttemptId, PaymentGateway, ProcessorEvidence,
+    PaymentGateway, ProcessorEvidence,
 };
 use syrup_rail_nmi_client::{
     AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeParts, PaymentSource,
@@ -15,7 +15,10 @@ use syrup_rail_nmi_client::{
     TransactionReportParts, VaultAction,
 };
 
-use crate::lifecycle::{NmiAction, NmiReport, admit_report};
+use crate::{
+    lifecycle::{NmiAction, NmiReport, admit_report},
+    reference::nmi_mutation_reference_attempt_id,
+};
 
 pub struct NmiPaymentGateway {
     client: Client,
@@ -346,27 +349,6 @@ fn validated_report_order_id(value: Option<SensitiveText>) -> Option<GatewayOrde
     }
 }
 
-fn nmi_mutation_reference_attempt_id(value: &str) -> Option<PaymentAttemptId> {
-    let mut parts = value.split('_');
-    let namespace = parts.next()?;
-    let kind = parts.next()?;
-    let attempt_id = parts.next()?;
-    let has_canonical_shape = parts.next().is_none()
-        && namespace.len() == 2
-        && namespace.bytes().all(|byte| byte.is_ascii_lowercase())
-        && matches!(
-            kind,
-            "order" | "base-sub" | "renewal" | "recovery" | "payment-method"
-        )
-        && attempt_id.len() == 32
-        && attempt_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
-    has_canonical_shape
-        .then(|| attempt_id.parse::<PaymentAttemptId>().ok())
-        .flatten()
-}
-
 fn map_transaction_action_parts(parts: TransactionActionParts) -> NmiAction {
     NmiAction {
         action_type: sanitized_text(parts.action_type),
@@ -419,8 +401,8 @@ fn map_query_error(error: QueryError) -> GatewayError {
 #[cfg(test)]
 mod tests {
     use syrup_rail::{
-        ChargeAmount, CurrencyCode, GatewayLifecycleQuarantineReason, PaymentCardBrand,
-        PaymentToken,
+        ChargeAmount, CurrencyCode, GatewayLifecycleQuarantineReason, PaymentAttemptId,
+        PaymentCardBrand, PaymentToken,
     };
     use syrup_rail_nmi_client::{PaymentDescriptor, PaymentOutcomeParts, TransactionReportParts};
 
@@ -542,6 +524,7 @@ mod tests {
 
     #[test]
     fn invalid_optional_locator_does_not_discard_safe_sibling() {
+        assert_eq!(nmi_mutation_reference_attempt_id("ck_order_safe"), None);
         let report = map_transaction_report_parts(TransactionReportParts {
             transaction_id: Some(text("bad transaction")),
             order_id: Some(text("ck_order_safe")),
@@ -580,7 +563,7 @@ mod tests {
         assert!(syrup_rail::string_contains_raw_card_data(value));
         let report = map_transaction_report_parts(TransactionReportParts {
             transaction_id: None,
-            order_id: Some(text(value)),
+            order_id: Some(text("  ck_renewal_00000000000000000000000000000000  ")),
             condition: Some(text("complete")),
             actions: Vec::new(),
             diagnostics: Vec::new(),

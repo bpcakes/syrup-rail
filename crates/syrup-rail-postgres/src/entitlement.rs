@@ -15,7 +15,7 @@ use syrup_rail::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::attempts::LocalAttemptPolicy;
+use crate::attempts::{LocalAttemptPolicy, lock_subscription_aggregate};
 use crate::subscription_persistence::{
     RenewalFailurePolicyScalars, SubscriptionPeriodRuleScalars, SubscriptionPersistenceCodecError,
     renewal_failure_policy_from_scalars, subscription_period_rule_from_scalars,
@@ -239,11 +239,7 @@ async fn lock_and_classify_entitlement(
     connection: &mut PgConnection,
     guard: &EntitlementGuard,
 ) -> Result<GuardAccess, sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(guard.subscriber_id().as_uuid())
-        .bind(guard.plan_key().as_str())
-        .execute(&mut *connection)
-        .await?;
+    lock_subscription_aggregate(connection, guard.subscriber_id(), guard.plan_key()).await?;
 
     let subscriptions = sqlx::query_as::<_, GuardSubscriptionState>(
         r#"
