@@ -100,9 +100,10 @@ pub fn build_subscription_billing_service(
 ///
 /// Run the host's immutable Syrup Rail install or forward-only upgrade
 /// migration through its normal deployment workflow first. This assertion uses
-/// one repeatable-read, read-only catalog snapshot; it never installs,
-/// upgrades, preflights, audits, or otherwise changes the schema. It requires
-/// PostgreSQL 18 and rejects host-specific columns on canonical relations.
+/// one repeatable-read, read-only runtime-contract snapshot; it never installs,
+/// upgrades, audits, or otherwise changes the database. It requires PostgreSQL
+/// 18 and rejects host-specific columns on canonical relations or incompatible
+/// live external-reversal resolution tuples.
 pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {

@@ -145,8 +145,7 @@ pub async fn attest_external_reversal(
         return Ok(ExternalReversalAttestationOutcome::Ineligible);
     }
 
-    let prior = expected_prior_resolution_code(&attempt, &charge).to_owned();
-    let final_code = expected_final_resolution_code(attempt.kind(), kind);
+    let resolution = expected_reversal_resolution(&attempt, &charge, kind);
     let attested_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *transaction)
         .await?;
@@ -155,10 +154,8 @@ pub async fn attest_external_reversal(
         &attempt,
         &charge,
         actor_id,
-        kind,
         reason,
-        &prior,
-        final_code,
+        resolution,
         attested_at,
     )
     .await?;
@@ -173,7 +170,7 @@ pub async fn attest_external_reversal(
         "#,
     )
     .bind(processor_charge_id.as_uuid())
-    .bind(&prior)
+    .bind(resolution.prior_resolution_code())
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() != 1 {
@@ -191,7 +188,7 @@ pub async fn attest_external_reversal(
             "#,
         )
         .bind(attempt.identity().attempt_id().as_uuid())
-        .bind(final_code.as_str())
+        .bind(resolution.final_resolution_code().as_str())
         .bind(attested_at)
         .bind(attempt.status().as_str())
         .execute(&mut *transaction)
@@ -295,10 +292,8 @@ async fn insert_attestation(
     attempt: &PaymentAttempt,
     charge: &ProcessorCharge,
     actor_id: ActorId,
-    kind: ExternalReversalKind,
     reason: &ExternalReversalReason,
-    prior: &str,
-    final_code: PaymentResolutionCode,
+    resolution: ExternalReversalResolution,
     attested_at: DateTime<Utc>,
 ) -> Result<(), OperatorReviewError> {
     let identity = attempt.identity();
@@ -328,10 +323,10 @@ async fn insert_attestation(
     .bind(charge.id().as_uuid())
     .bind(identity.attempt_id().as_uuid())
     .bind(actor_id.as_uuid())
-    .bind(kind.as_str())
+    .bind(resolution.kind().as_str())
     .bind(reason.expose())
-    .bind(prior)
-    .bind(final_code.as_str())
+    .bind(resolution.prior_resolution_code())
+    .bind(resolution.final_resolution_code().as_str())
     .bind(identity.gateway_account_id().as_uuid())
     .bind(identity.gateway_configuration_id().as_uuid())
     .bind(charge.gateway_order_id().expose())

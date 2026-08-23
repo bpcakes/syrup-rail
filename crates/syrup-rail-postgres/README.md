@@ -18,7 +18,7 @@ necessary, then stop every schema-v2 billing writer and apply
 required lock, maintenance, and rehearsal boundaries.
 
 After the host applies its migration and before it serves billing traffic,
-verify the runtime catalog:
+verify the runtime contract:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
@@ -26,6 +26,13 @@ syrup_rail_postgres::assert_runtime_schema_v3_compatible(pool).await?;
 # Ok(())
 # }
 ```
+
+The assertion checks both the canonical catalog and live data assumptions that
+cannot be expressed by the immutable schema-v3 constraints. In particular, it
+fails closed when an external-reversal attestation contains a resolution tuple
+that the typed runtime model cannot represent. Keep the prior application
+version serving while investigating such a failure; do not bypass startup
+validation or rewrite financial evidence without an audited data-repair plan.
 
 During `REINDEX CONCURRENTLY`, PostgreSQL exposes the command, phase, and
 target details only to the maintenance role and statistics-privileged roles.

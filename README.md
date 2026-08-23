@@ -127,16 +127,17 @@ After the host has applied its immutable v3 install or forward-only v2-to-v3
 upgrade migration, call
 `assert_runtime_schema_v3_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v3 catalog and fingerprint inside one repeatable-read, read-only transaction.
-It first rejects every PostgreSQL major other than 18. Separately named
-host-prefixed tables, constraints, indexes, functions, and triggers are valid
-extension points, but canonical table and view columns are closed: adding even
-a host-prefixed column to a canonical relation is unsupported and fails the
-fingerprint check. The assertion also fails closed for v1, v2, or other
-canonical drift. It never executes install, upgrade, preflight, or audit SQL.
-Hosts remain responsible for applying and coordinating their own migrations.
-The compiled host integration example includes a default-feature helper for
-this startup check.
+v3 catalog, fingerprint, and live data invariants required by the typed runtime
+inside one repeatable-read, read-only transaction. It first rejects every
+PostgreSQL major other than 18. Separately named host-prefixed tables,
+constraints, indexes, functions, and triggers are valid extension points, but
+canonical table and view columns are closed: adding even a host-prefixed column
+to a canonical relation is unsupported and fails the fingerprint check. The
+assertion also fails closed for v1, v2, other canonical drift, or an external-
+reversal resolution tuple that the typed runtime cannot represent. It never
+installs, upgrades, audits, or mutates the database. Hosts remain responsible
+for applying and coordinating their own migrations. The compiled host
+integration example includes a default-feature helper for this startup check.
 
 An active `REINDEX CONCURRENTLY` may temporarily create invalid `_ccnew` or
 `_ccold` indexes. The assertion tolerates only shadows whose lock owner is also

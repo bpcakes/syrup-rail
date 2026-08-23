@@ -6,6 +6,9 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Fixed
 
+- Make the required runtime schema-v3 assertion reject incompatible live
+  external-reversal resolution tuples in the same read-only snapshot as the
+  catalog check, removing a separate opt-in deployment preflight.
 - Coordinate subscriber billing-data scrubbing with approved payment-method
   writers through the deployed payment-method advisory-lock identity. A
   concurrent approval can no longer restore mutable attempt or payment-method

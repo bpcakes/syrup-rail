@@ -44,6 +44,8 @@ const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
 const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
+pub(crate) const INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL: &str =
+    "external reversal attestations contain an incompatible resolution tuple";
 const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -313,11 +315,13 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 ///
 /// Call this after the host has applied its immutable Syrup Rail install or
 /// forward-only upgrade migration through its normal migration deployment.
-/// This function does not install, upgrade, preflight, audit, or otherwise
-/// mutate the schema. It runs the same full canonical v3 catalog conformance
-/// and fingerprint check used by the schema-contract tests in one
-/// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
-/// 18 is required; other majors are rejected before catalog comparison.
+/// This function does not install, upgrade, audit, or otherwise mutate the
+/// database. It runs the same full canonical v3 catalog conformance and
+/// fingerprint check used by the schema-contract tests, then verifies that
+/// every live external-reversal attestation can be represented by the typed
+/// runtime model. Both checks share one `REPEATABLE READ READ ONLY` PostgreSQL
+/// transaction. PostgreSQL major version 18 is required; other majors are
+/// rejected before catalog comparison.
 /// A concurrent-reindex transition mismatch is retried once in a fresh
 /// transaction so a reindex that commits between catalog and live-operation
 /// observations cannot cause a stale result. Other contract failures are not
@@ -503,7 +507,70 @@ async fn assert_schema_conforms(
     }
     require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
         .await?;
+    if version >= 3 {
+        require_compatible_external_reversal_attestations(connection, version).await?;
+    }
     require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await
+}
+
+async fn require_compatible_external_reversal_attestations(
+    connection: &mut PgConnection,
+    version: u16,
+) -> Result<(), SchemaConformanceError> {
+    let incompatible_tuple_exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM billing_external_reversal_attestations
+            WHERE NOT (
+                (
+                    prior_resolution_code = 'subscription_initial_current_grant_conflict'
+                    AND (
+                        (
+                            reversal_kind = 'refund'
+                            AND final_resolution_code =
+                                'subscription_initial_externally_refunded'
+                        )
+                        OR (
+                            reversal_kind = 'void'
+                            AND final_resolution_code =
+                                'subscription_initial_externally_voided'
+                        )
+                    )
+                )
+                OR (
+                    prior_resolution_code = 'processor_charge_external_reversal_required'
+                    AND (
+                        (
+                            reversal_kind = 'refund'
+                            AND final_resolution_code IN (
+                                'subscription_initial_externally_refunded',
+                                'processor_charge_externally_refunded'
+                            )
+                        )
+                        OR (
+                            reversal_kind = 'void'
+                            AND final_resolution_code IN (
+                                'subscription_initial_externally_voided',
+                                'processor_charge_externally_voided'
+                            )
+                        )
+                    )
+                )
+            )
+        )
+        "#,
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if incompatible_tuple_exists {
+        Err(contract_error(
+            version,
+            INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL,
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 async fn require_unchanged_active_reindex_shadows(

@@ -960,7 +960,7 @@ mod tests {
             ActorId::new(Uuid::from_u128(12)),
             ExternalReversalKind::Refund,
             ExternalReversalReason::new("processor refund verified").unwrap(),
-            "processor_charge_external_reversal_required".to_owned(),
+            "processor_charge_external_reversal_required",
             PaymentResolutionCode::ProcessorChargeExternallyRefunded,
             GatewayAccountId::new(Uuid::from_u128(13)),
             GatewayConfigurationId::new(Uuid::from_u128(14)),

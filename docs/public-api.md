@@ -61,9 +61,11 @@ cleanup phases to their existing loop when applicable.
 
 Use `assert_runtime_schema_v3_compatible` after host migrations and before
 serving billing traffic. Version 0.3 supports PostgreSQL 18 and schema v3 only;
-the assertion is read-only and does not install or upgrade a schema. It
-tolerates concurrent-reindex shadows only when the validating role can observe
-the matching `pg_stat_progress_create_index` details; cross-role maintenance is
+the assertion is read-only and does not install or upgrade a schema. It checks
+the canonical catalog and live data invariants that schema v3 cannot express,
+including typed external-reversal resolution compatibility. It tolerates
+concurrent-reindex shadows only when the validating role can observe the
+matching `pg_stat_progress_create_index` details; cross-role maintenance is
 fail-closed unless the observer has PostgreSQL statistics privileges.
 
 ## Typed domain and advanced transaction-local surface
