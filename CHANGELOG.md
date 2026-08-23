@@ -13,6 +13,11 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Changed
 
+- Replace the raw `ExternalReversalAttestation::new` constructor with a typed
+  `ExternalReversalResolution` input. Code that reconstructs legacy raw tuples
+  must use the fallible `ExternalReversalAttestation::from_legacy_parts` and
+  handle `ExternalReversalResolutionError` instead of relying on unchecked or
+  panicking construction.
 - Record provider-rate-limit readiness failures without inventing a
   `gateway_condition` of `failed`. The typed provider-rate-limit resolution
   code remains the durable reason for the failed attempt.

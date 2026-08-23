@@ -113,13 +113,15 @@ pub use money::{
 };
 pub use operator_review::{
     AttemptReviewCursor, AttemptReviewPage, ExternalReversalAttestation,
-    ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalReason,
-    ExternalReversalReasonError, MANUAL_ATTEMPT_FAILURE_NOTE, ManualAttemptFailureOutcome,
-    ManualFailureHostCharge, OPERATOR_REVIEW_PAGE_LIMIT, OperatorReviewPageLimit,
-    OperatorReviewPageLimitError, PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE, ProcessorCharge,
-    ProcessorChargeProgression, ProcessorChargeReviewCursor, ProcessorChargeReviewItem,
-    ProcessorChargeReviewPage, ProcessorChargeRole, ProcessorChargeStateCode,
-    review_required_attempt_can_be_manually_failed, review_required_manual_failure_evidence,
+    ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalOutcome,
+    ExternalReversalPriorClassification, ExternalReversalReason, ExternalReversalReasonError,
+    ExternalReversalResolution, ExternalReversalResolutionError, MANUAL_ATTEMPT_FAILURE_NOTE,
+    ManualAttemptFailureOutcome, ManualFailureHostCharge, OPERATOR_REVIEW_PAGE_LIMIT,
+    OperatorReviewPageLimit, OperatorReviewPageLimitError,
+    PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE, ProcessorCharge, ProcessorChargeProgression,
+    ProcessorChargeReviewCursor, ProcessorChargeReviewItem, ProcessorChargeReviewPage,
+    ProcessorChargeRole, ProcessorChargeStateCode, review_required_attempt_can_be_manually_failed,
+    review_required_manual_failure_evidence,
 };
 pub use payment_method_update::{
     ReplaceSubscriptionPaymentMethod, SubscriptionPaymentMethodReplacement,
