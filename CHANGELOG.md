@@ -16,6 +16,27 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Changed
 
+- Replace the NMI client's independent sale source, vault action, stored-
+  credential, and currency fields with the closed `SaleIntent` contract.
+  Direct raw-client callers must construct one of the five supported intents;
+  code migrating historical field combinations can use
+  `SaleIntent::from_legacy_parts`. NMI sales remain fixed to USD.
+- Replace the independent `disposition` and `access` fields on
+  `BillingEvent::SubscriptionPaymentFailed` with one
+  `SubscriptionPaymentFailureOutcome`. Consumers can obtain the compatibility
+  projections through `outcome.disposition()` and `outcome.access()`; the host
+  integration example preserves the existing V1 outbox JSON shape.
+- Model subscription discount-claim lifecycle and grant revocation audit facts
+  as closed state values while retaining the legacy constructors and getters as
+  compatibility projections.
+- Add `GatewayAccountIdentity` and the compatible
+  `GatewayResolver::resolve_identity` entry point so account identity travels
+  intact across persistence and resolver boundaries.
+- Separate canonical live payment-attempt request construction from opaque
+  persisted fingerprint rehydration. New requests use
+  `PaymentAttemptRequest::canonical`; persistence codecs use
+  `PaymentAttemptRequest::from_persisted_parts`, while `new` remains available
+  as a compatibility wrapper for callers carrying durable fingerprints.
 - Replace the raw `ExternalReversalAttestation::new` constructor with a typed
   `ExternalReversalResolution` input. Code that reconstructs legacy raw tuples
   must use the fallible `ExternalReversalAttestation::from_legacy_parts` and

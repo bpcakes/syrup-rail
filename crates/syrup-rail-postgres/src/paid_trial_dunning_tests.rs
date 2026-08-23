@@ -29,7 +29,7 @@ use syrup_rail::{
     SubscriptionDiscountSnapshot, SubscriptionEndReason, SubscriptionEnrollmentExpectedTerms,
     SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentReservation,
     SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentFailureAccess,
-    SubscriptionPaymentFailureDisposition, SubscriptionPeriodRule, SubscriptionPhase,
+    SubscriptionPaymentFailureOutcome, SubscriptionPeriodRule, SubscriptionPhase,
     SubscriptionRenewalOutcome, SubscriptionStatus,
 };
 use tokio::sync::Mutex;

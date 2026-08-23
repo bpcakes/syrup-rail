@@ -4,19 +4,16 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{
-    BillingScopeId, GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayError,
-    GatewayLifecycleQueryPolicy, GatewayMutationError, GatewayMutationReferenceFactory,
-    GatewayPaymentOutcome, GatewayProviderKey, GatewayQueryRequest, GatewaySaleRequest,
-    GatewayStorePaymentMethodRequest, GatewayTransactionReport, GatewayTransactionReportRequest,
-    PaymentGateway,
+    BillingScopeId, GatewayAccountId, GatewayAccountIdentity, GatewayAccountMode,
+    GatewayConfigurationId, GatewayError, GatewayLifecycleQueryPolicy, GatewayMutationError,
+    GatewayMutationReferenceFactory, GatewayPaymentOutcome, GatewayProviderKey,
+    GatewayQueryRequest, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
+    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentGateway,
 };
 
 #[derive(Clone)]
 pub struct ResolvedGateway {
-    billing_scope_id: BillingScopeId,
-    gateway_account_id: GatewayAccountId,
-    gateway_configuration_id: GatewayConfigurationId,
-    provider_key: GatewayProviderKey,
+    identity: GatewayAccountIdentity,
     lifecycle_query_policy: GatewayLifecycleQueryPolicy,
     mutation_reference_factory: Arc<dyn GatewayMutationReferenceFactory>,
     gateway: Arc<dyn PaymentGateway>,
@@ -32,11 +29,28 @@ impl ResolvedGateway {
         mutation_reference_factory: Arc<dyn GatewayMutationReferenceFactory>,
         gateway: Arc<dyn PaymentGateway>,
     ) -> Self {
+        Self::from_identity(
+            GatewayAccountIdentity::new(
+                billing_scope_id,
+                gateway_account_id,
+                provider_key,
+                gateway_configuration_id,
+            ),
+            lifecycle_query_policy,
+            mutation_reference_factory,
+            gateway,
+        )
+    }
+
+    /// Builds a resolved gateway around one indivisible account identity.
+    pub fn from_identity(
+        identity: GatewayAccountIdentity,
+        lifecycle_query_policy: GatewayLifecycleQueryPolicy,
+        mutation_reference_factory: Arc<dyn GatewayMutationReferenceFactory>,
+        gateway: Arc<dyn PaymentGateway>,
+    ) -> Self {
         Self {
-            billing_scope_id,
-            gateway_account_id,
-            gateway_configuration_id,
-            provider_key,
+            identity,
             lifecycle_query_policy,
             mutation_reference_factory,
             gateway,
@@ -44,19 +58,24 @@ impl ResolvedGateway {
     }
 
     pub const fn billing_scope_id(&self) -> BillingScopeId {
-        self.billing_scope_id
+        self.identity.billing_scope_id()
     }
 
     pub const fn gateway_account_id(&self) -> GatewayAccountId {
-        self.gateway_account_id
+        self.identity.gateway_account_id()
     }
 
     pub const fn gateway_configuration_id(&self) -> GatewayConfigurationId {
-        self.gateway_configuration_id
+        self.identity.gateway_configuration_id()
     }
 
     pub const fn provider_key(&self) -> &GatewayProviderKey {
-        &self.provider_key
+        self.identity.provider_key()
+    }
+
+    /// Returns the exact identity that was resolved.
+    pub const fn identity(&self) -> &GatewayAccountIdentity {
+        &self.identity
     }
 
     pub const fn lifecycle_query_policy(&self) -> &GatewayLifecycleQueryPolicy {
@@ -104,10 +123,7 @@ impl fmt::Debug for ResolvedGateway {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ResolvedGateway")
-            .field("billing_scope_id", &self.billing_scope_id)
-            .field("gateway_account_id", &self.gateway_account_id)
-            .field("gateway_configuration_id", &self.gateway_configuration_id)
-            .field("provider_key", &self.provider_key)
+            .field("identity", &self.identity)
             .field("lifecycle_query_policy", &self.lifecycle_query_policy)
             .field("has_mutation_reference_factory", &true)
             .field("has_gateway", &true)
@@ -136,6 +152,24 @@ pub trait GatewayResolver: Send + Sync {
         gateway_configuration_id: GatewayConfigurationId,
         provider_key: GatewayProviderKey,
     ) -> Result<ResolvedGateway, GatewayResolutionError>;
+
+    /// Resolves one exact gateway identity.
+    ///
+    /// Existing resolver implementations remain source-compatible through the
+    /// component-based [`Self::resolve`] method while callers can avoid
+    /// transporting the four identity fields independently.
+    async fn resolve_identity(
+        &self,
+        identity: GatewayAccountIdentity,
+    ) -> Result<ResolvedGateway, GatewayResolutionError> {
+        self.resolve(
+            identity.billing_scope_id(),
+            identity.gateway_account_id(),
+            identity.gateway_configuration_id(),
+            identity.provider_key().clone(),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

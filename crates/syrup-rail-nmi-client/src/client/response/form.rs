@@ -9,7 +9,7 @@ use super::super::{
     text::{last4, sensitive_gateway_field},
 };
 use super::common::{
-    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
+    IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
     ScalarOccurrenceCollector, finalize_foreground_identifiers, rate_limited_wire_error,
     resolve_optional_scalar,
 };
@@ -19,14 +19,10 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
 ) -> Result<PaymentOutcome, WireError> {
     let fields: Vec<_> = form_urlencoded::parse(text.as_bytes()).collect();
     let decision = PaymentDecisionFields::new(
-        collect_classic_scalar(&fields, &["response"], false)
-            .finish_decision(DecisionFieldKind::Response),
-        collect_classic_scalar(&fields, &["response_code", "responsecode"], false)
-            .finish_decision(DecisionFieldKind::ResponseCode),
-        collect_classic_scalar(&fields, &["status"], false)
-            .finish_decision(DecisionFieldKind::GatewayState),
-        collect_classic_scalar(&fields, &["condition"], false)
-            .finish_decision(DecisionFieldKind::GatewayState),
+        collect_classic_scalar(&fields, &["response"], false),
+        collect_classic_scalar(&fields, &["response_code", "responsecode"], false),
+        collect_classic_scalar(&fields, &["status"], false),
+        collect_classic_scalar(&fields, &["condition"], false),
     );
     let (transaction_evidence, transaction_identifier) =
         collect_classic_transaction_identifier(&fields);
@@ -88,14 +84,15 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
     let (card_number, _) = resolve_optional_scalar(
         collect_classic_scalar(&fields, &["cc_number", "ccnumber"], true).finish(),
     );
+    let (response, response_code, condition) = decision.into_public_raw_fields();
     Ok(PaymentOutcome {
         status,
         transaction_id,
         customer_vault_id,
-        response: sensitive_gateway_field(decision.response.raw),
-        response_code: sensitive_gateway_field(decision.response_code.raw),
+        response: sensitive_gateway_field(response),
+        response_code: sensitive_gateway_field(response_code),
         response_text: sensitive_gateway_field(response_text),
-        condition: sensitive_gateway_field(decision.condition.raw),
+        condition: sensitive_gateway_field(condition),
         descriptor: PaymentDescriptor {
             payment_type: sensitive_gateway_field(payment_type),
             card_brand: sensitive_gateway_field(card_brand),

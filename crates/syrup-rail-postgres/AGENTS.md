@@ -296,10 +296,10 @@ and transaction orchestration.
   causal-history boundary in `renewal_failure.rs`; it owns admission of the
   first v2 automatic result and access timing for cancellation and terminal
   events.
-- `SubscriptionPaymentFailed.access` is the canonical post-failure access
-  projection. Build it only from the locked subscription's snapshotted policy
-  and causal failure history, and reuse the same projection for any matching
-  terminal event boundary.
+- `SubscriptionPaymentFailed.outcome.access()` is the canonical post-failure
+  access projection. Build the outcome only from the locked subscription's
+  snapshotted policy and causal failure history, and reuse its access projection
+  for any matching terminal event boundary.
 - Discount-code list and disable operations administer durable records without
   consulting the current offer. Only active create/update, validation, and
   claim paths lock the host offer and construct current pricing.

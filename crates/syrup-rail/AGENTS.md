@@ -73,9 +73,10 @@ command/outcome types for application-independent subscription billing.
   `SubscriptionActivationProjection`; do not add context-free pricing helpers
   that collapse those temporal facts.
 - Only submitted determinate automatic-renewal failures consume dunning.
-- `SubscriptionPaymentFailed.access` is the canonical post-failure product
-  access projection. Consumers must not derive it from the disposition or a
-  current offer; it reflects snapshotted policy and causal failure history.
+- `SubscriptionPaymentFailed.outcome.access()` is the canonical post-failure
+  product access projection. Consumers must not reconstruct it from the
+  disposition projection or a current offer; it reflects snapshotted policy
+  and causal failure history.
   Recovery and infrastructure/provider pacing remain distinct, and `Unpaid`
   is terminal collection history with no payment-state authority.
 - Provider identifiers, tokens, contacts, and diagnostics have value-free

@@ -9,10 +9,9 @@ use syrup_rail::{
     PaymentGateway, ProcessorEvidence,
 };
 use syrup_rail_nmi_client::{
-    AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeParts, PaymentSource,
-    PaymentStatus, QueryError, ReportQuery, SaleRequest, SensitiveText, StorePaymentMethodRequest,
-    StoredCredential, TransactionActionParts, TransactionQuery, TransactionReportDiagnostic,
-    TransactionReportParts, VaultAction,
+    AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeParts, PaymentStatus,
+    QueryError, ReportQuery, SaleIntent, SaleRequest, SensitiveText, StorePaymentMethodRequest,
+    TransactionActionParts, TransactionQuery, TransactionReportDiagnostic, TransactionReportParts,
 };
 
 use crate::{
@@ -146,35 +145,27 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
             )),
         ));
     }
-    let (source, vault_action, stored_credential) = match intent {
-        GatewaySaleIntent::OneTime { payment_token } => (
-            PaymentSource::PaymentToken(payment_token.into_inner()),
-            None,
-            None,
-        ),
-        GatewaySaleIntent::InitialStoredCredential { payment_token } => (
-            PaymentSource::PaymentToken(payment_token.into_inner()),
-            Some(VaultAction::AddCustomer),
-            Some(StoredCredential::InitialCustomer),
-        ),
+    let intent = match intent {
+        GatewaySaleIntent::OneTime { payment_token } => {
+            SaleIntent::PaymentToken(payment_token.into_inner())
+        }
+        GatewaySaleIntent::InitialStoredCredential { payment_token } => {
+            SaleIntent::InitialStoredCredential {
+                payment_token: payment_token.into_inner(),
+            }
+        }
         GatewaySaleIntent::RecurringStoredCredential {
             payment_method_reference,
             initial_transaction_id,
-        } => (
-            PaymentSource::CustomerVault(payment_method_reference.into_inner()),
-            None,
-            Some(StoredCredential::RecurringMerchant {
-                initial_transaction_id: initial_transaction_id.into_inner(),
-            }),
-        ),
+        } => SaleIntent::RecurringStoredCredential {
+            customer_vault_id: payment_method_reference.into_inner(),
+            initial_transaction_id: initial_transaction_id.into_inner(),
+        },
     };
     Ok(SaleRequest {
         amount_cents: charge.cents(),
-        currency: charge.currency().as_str().to_owned(),
         order_id: order_id.into_inner(),
-        source,
-        vault_action,
-        stored_credential,
+        intent,
         billing_contact: billing_contact.map(map_billing_contact),
     })
 }

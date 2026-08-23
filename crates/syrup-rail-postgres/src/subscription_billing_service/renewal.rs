@@ -13,32 +13,20 @@ impl SubscriptionBillingService {
         let Some(account) = self.renewal_gateway_account(command).await? else {
             return Ok(SubscriptionRenewalOutcome::Noop);
         };
-        if self
-            .active_cooldown(&account.as_gateway_snapshot())
-            .await?
-            .is_some()
-        {
+        if self.active_cooldown(&account).await?.is_some() {
             return Ok(SubscriptionRenewalOutcome::Noop);
         }
         let gateway = self
             .resolver
-            .resolve(
-                command.billing_scope_id(),
-                account.account_id,
-                account.configuration_id,
-                account.provider_key.clone(),
-            )
+            .resolve_identity(account.identity().clone())
             .await?;
-        if gateway.billing_scope_id() != command.billing_scope_id()
-            || gateway.gateway_account_id() != account.account_id
-            || gateway.gateway_configuration_id() != account.configuration_id
-            || gateway.provider_key() != &account.provider_key
-        {
+        if gateway.identity() != account.identity() {
             return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
         if let Some(failure) = gateway_readiness_failure(&gateway).await {
             if matches!(failure, GatewayReadinessFailure::ProviderRateLimited(_)) {
-                self.extend_provider_cooldown(&account.provider_key).await?;
+                self.extend_provider_cooldown(account.provider_key())
+                    .await?;
                 return Ok(SubscriptionRenewalOutcome::Noop);
             }
             let error = failure.unreserved_gateway_error().ok_or(
@@ -75,7 +63,7 @@ impl SubscriptionBillingService {
                 INVALID_SERVICE_STATE,
             ));
         }
-        if let Some(scope) = self.active_cooldown(&account.as_gateway_snapshot()).await? {
+        if let Some(scope) = self.active_cooldown(&account).await? {
             self.resolve_renewal_cooldown(&reservation, scope, OutcomeResolutionBoundary::Prepared)
                 .await?;
             return Ok(SubscriptionRenewalOutcome::Noop);
@@ -122,7 +110,7 @@ impl SubscriptionBillingService {
                 }
             },
         };
-        if let Some(scope) = self.active_cooldown(&account.as_gateway_snapshot()).await? {
+        if let Some(scope) = self.active_cooldown(&account).await? {
             self.resolve_renewal_cooldown(
                 &reservation,
                 scope,
@@ -166,7 +154,7 @@ impl SubscriptionBillingService {
     pub(super) async fn renewal_gateway_account(
         &self,
         command: ChargeRenewal,
-    ) -> Result<Option<RenewalGatewayAccountSnapshot>, SubscriptionBillingServiceError> {
+    ) -> Result<Option<GatewayAccountSnapshot>, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
         let row = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String)>(
             r#"
@@ -239,12 +227,15 @@ impl SubscriptionBillingService {
         }
         Some((account_id, configuration_id, provider_key))
             .map(|(account_id, configuration_id, provider_key)| {
-                Ok(RenewalGatewayAccountSnapshot {
-                    account_id: GatewayAccountId::new(account_id),
-                    configuration_id: syrup_rail::GatewayConfigurationId::new(configuration_id),
-                    provider_key: GatewayProviderKey::new(provider_key).map_err(|_| {
-                        SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
-                    })?,
+                Ok(GatewayAccountSnapshot {
+                    identity: GatewayAccountIdentity::new(
+                        command.billing_scope_id(),
+                        GatewayAccountId::new(account_id),
+                        GatewayProviderKey::new(provider_key).map_err(|_| {
+                            SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
+                        })?,
+                        syrup_rail::GatewayConfigurationId::new(configuration_id),
+                    ),
                 })
             })
             .transpose()

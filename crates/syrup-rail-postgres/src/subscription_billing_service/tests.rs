@@ -450,46 +450,62 @@ fn gateway_readiness_classifier_covers_account_modes_and_every_gateway_error() {
 }
 
 #[test]
-fn expected_gateway_identity_requires_every_resolved_component() {
+fn gateway_account_identity_requires_every_resolved_component() {
     let provider_key = GatewayProviderKey::new("nmi").expect("valid provider key");
-    let account = GatewayAccountSnapshot {
-        account_id: GatewayAccountId::new(uuid::Uuid::from_u128(1)),
-        provider_key: provider_key.clone(),
-    };
+    let gateway_account_id = GatewayAccountId::new(uuid::Uuid::from_u128(1));
     let billing_scope_id = BillingScopeId::new(uuid::Uuid::from_u128(2));
     let gateway_configuration_id =
         syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(3));
-    let expected =
-        ExpectedGatewayIdentity::for_account(billing_scope_id, gateway_configuration_id, &account);
+    let expected = GatewayAccountIdentity::new(
+        billing_scope_id,
+        gateway_account_id,
+        provider_key.clone(),
+        gateway_configuration_id,
+    );
 
-    assert!(expected.matches_components(
-        billing_scope_id,
-        account.account_id,
-        gateway_configuration_id,
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        BillingScopeId::new(uuid::Uuid::from_u128(4)),
-        account.account_id,
-        gateway_configuration_id,
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        billing_scope_id,
-        GatewayAccountId::new(uuid::Uuid::from_u128(5)),
-        gateway_configuration_id,
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        billing_scope_id,
-        account.account_id,
-        syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(6)),
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        billing_scope_id,
-        account.account_id,
-        gateway_configuration_id,
-        &GatewayProviderKey::new("other_gateway").expect("valid provider key"),
-    ));
+    assert_eq!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            gateway_account_id,
+            provider_key.clone(),
+            gateway_configuration_id,
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            BillingScopeId::new(uuid::Uuid::from_u128(4)),
+            gateway_account_id,
+            provider_key.clone(),
+            gateway_configuration_id,
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            GatewayAccountId::new(uuid::Uuid::from_u128(5)),
+            provider_key.clone(),
+            gateway_configuration_id,
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            gateway_account_id,
+            provider_key.clone(),
+            syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(6)),
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            gateway_account_id,
+            GatewayProviderKey::new("other_gateway").expect("valid provider key"),
+            gateway_configuration_id,
+        )
+    );
 }

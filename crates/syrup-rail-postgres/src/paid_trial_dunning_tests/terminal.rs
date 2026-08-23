@@ -235,21 +235,21 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     assert!(matches!(
         &final_events[1].event,
         BillingEvent::SubscriptionPaymentFailed {
-            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
+            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled { retry_at, .. },
             ..
         } if *retry_at == failure_one_at + ChronoDuration::days(1)
     ));
     assert!(matches!(
         &final_events[2].event,
         BillingEvent::SubscriptionPaymentFailed {
-            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
+            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled { retry_at, .. },
             ..
         } if *retry_at == failure_two_at + ChronoDuration::days(3)
     ));
     assert!(matches!(
         &final_events[3].event,
         BillingEvent::SubscriptionPaymentFailed {
-            disposition: SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
+            outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded { ended_at, .. },
             ..
         } if *ended_at == failure_three_at
     ));

@@ -80,22 +80,22 @@ persist those provider-neutral events in its own transactional outbox and run
 product-specific cleanup asynchronously; Syrup Rail does not call host
 fulfillment integrations.
 
-Every `SubscriptionPaymentFailed` carries a
-`SubscriptionPaymentFailureAccess` outcome. Consume that field as the
-canonical product-access fact immediately after the failure; it already
-accounts for the subscription's snapshotted access policy and causal failure
-history. In particular, an immediate-suspension retry carries the original
-access boundary even though automatic dunning remains open. Hosts must not
-reconstruct this decision from the failure disposition or current offer.
+Every `SubscriptionPaymentFailed` carries one closed
+`SubscriptionPaymentFailureOutcome`. Its `access()` projection is the canonical
+product-access fact immediately after the failure; it already accounts for the
+subscription's snapshotted access policy and causal failure history. In
+particular, an immediate-suspension retry carries the original access boundary
+even though automatic dunning remains open. Hosts must not reconstruct this
+decision from current offer configuration.
 
 `RemainPastDue` instead keeps the financial lifecycle open with no further
 automatic payment scheduled. It does not emit `SubscriptionEnded`. When the
 access policy is `ContinueUntilDunningExhausted`, the final
-`SubscriptionPaymentFailed { disposition: DunningExhausted { exhausted_at } }`
-also carries `access: Ended { access_ended_at: exhausted_at }`: the
-subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
-at that boundary. Hosts that mirror access outside Syrup Rail must consume the
-event's `access` outcome from their transactional outbox.
+`SubscriptionPaymentFailed { outcome: DunningExhausted { exhausted_at,
+access_ended_at } }` records both facts at the same boundary: the subscription
+entitlement changes from `AllowedDuringDunning` to `Suspended`. Hosts that
+mirror access outside Syrup Rail must consume the outcome's access projection
+from their transactional outbox.
 
 PostgreSQL 18 is the only supported database major, and schema v3 is the
 current contract. New hosts install

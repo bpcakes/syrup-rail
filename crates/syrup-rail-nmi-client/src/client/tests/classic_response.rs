@@ -233,6 +233,25 @@ fn classic_301_without_lifecycle_evidence_is_known_not_submitted() {
 }
 
 #[test]
+fn classic_rate_limit_requires_the_exact_preprocessing_decision_tuple() {
+    for response in [
+        "response=03&response_code=301",
+        "response=3&response_code=0301",
+        "response=3&response_code=3010",
+        "response=3&response_code=301.0",
+        "response=3&response_code=301&status=pending",
+    ] {
+        assert!(
+            !matches!(
+                classic_payment_outcome_from_form(response),
+                Err(WireError::RateLimited(_))
+            ),
+            "{response} must not be treated as the documented preprocessing rate limit"
+        );
+    }
+}
+
+#[test]
 fn classic_301_with_lifecycle_evidence_is_never_known_not_submitted() {
     for lifecycle_fields in [
         "customer_vault_id=vault_assigned",

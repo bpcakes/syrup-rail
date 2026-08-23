@@ -1,0 +1,1 @@
+Sequentially implement and validate Beads R-03, R-32, R-23, R-29, and R-26, preserving public contracts, transaction semantics, lock order, and current schema artifacts.

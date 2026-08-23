@@ -25,7 +25,8 @@ pub use grant::{
     SubscriptionGrant, SubscriptionGrantCreation, SubscriptionGrantCreationOutcome,
     SubscriptionGrantError, SubscriptionGrantKind, SubscriptionGrantKindParseError,
     SubscriptionGrantReason, SubscriptionGrantReasonError, SubscriptionGrantRecord,
-    SubscriptionGrantRecordError, SubscriptionGrantRevocation, SubscriptionGrantRevocationOutcome,
+    SubscriptionGrantRecordError, SubscriptionGrantRevocation, SubscriptionGrantRevocationAudit,
+    SubscriptionGrantRevocationOutcome, SubscriptionGrantRevocationState,
 };
 
 mod access;

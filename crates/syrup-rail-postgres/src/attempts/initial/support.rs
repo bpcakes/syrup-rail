@@ -151,12 +151,7 @@ pub(super) fn enrollment_request_from_locked_terms(
     });
     let amount = reservation.expected_terms().initial_charge().money();
     let durable_offer = reservation.expected_terms().durable_offer();
-    let fingerprint = PaymentAttemptFingerprint::for_subscription_initial_v2(
-        &durable_offer,
-        amount,
-        discount.as_ref(),
-    );
-    Some(PaymentAttemptRequest::new(
+    Some(PaymentAttemptRequest::canonical(
         PaymentAttemptTarget::SubscriptionInitial {
             terms_version: SubscriptionEnrollmentTermsVersion::V2,
             offer: durable_offer,
@@ -164,7 +159,6 @@ pub(super) fn enrollment_request_from_locked_terms(
             application: None,
         },
         reservation.idempotency_key().clone(),
-        fingerprint,
         amount,
         reservation.gateway_order_id().clone(),
         reservation.billing_contact().clone(),
@@ -173,7 +167,7 @@ pub(super) fn enrollment_request_from_locked_terms(
 
 pub(super) async fn gateway_identity_matches_scope(
     transaction: &mut Transaction<'_, Postgres>,
-    expected: &ExpectedGatewayIdentity<'_>,
+    expected: &ExpectedGatewayIdentity,
 ) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
@@ -420,12 +414,11 @@ pub(super) async fn reject_prepared_initial(
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentSubmissionOutcome, PaymentAttemptStoreError> {
     let identity = reservation.identity();
-    let attempt = payment_attempt_by_idempotency(
+    let attempt = lock_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
     )
     .await?
     .ok_or_else(invalid_state)?;

@@ -5,12 +5,13 @@ use chrono::{TimeZone, Utc};
 use sqlx::{PgConnection, Row};
 use syrup_rail::{
     BillingScopeId, ChargeAmount, CurrencyCode, DiscountClaimId, DiscountCodeId, DunningExhaustion,
-    DunningSchedule, LimitedDiscountMonths, PastDueAccessPolicy, PercentOffBasisPoints, PlanKey,
-    PositiveDiscountCents, RecurringSubscriptionTerms, RenewalFailurePolicy, SubscriberId,
-    SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome, SubscriptionDiscountCode,
+    DunningSchedule, LimitedDiscountMonths, PastDueAccessPolicy, PaymentAttemptId,
+    PercentOffBasisPoints, PlanKey, PositiveDiscountCents, RecurringSubscriptionTerms,
+    RenewalFailurePolicy, SubscriberId, SubscriptionDiscountClaim,
+    SubscriptionDiscountClaimOutcome, SubscriptionDiscountClaimState, SubscriptionDiscountCode,
     SubscriptionDiscountCodeCreation, SubscriptionDiscountCodeStatus,
     SubscriptionDiscountCodeUpdate, SubscriptionDiscountDuration, SubscriptionDiscountKind,
-    SubscriptionOffer, SubscriptionPeriodRule, SubscriptionStart,
+    SubscriptionId, SubscriptionOffer, SubscriptionPeriodRule, SubscriptionStart,
 };
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
@@ -71,6 +72,129 @@ fn limited_discount_cadence_failure_has_a_dedicated_error() {
         Err(SubscriptionDiscountOperationError::LimitedDiscountCadence)
     ));
     assert!(validate_discount_cadence(SubscriptionDiscountDuration::Indefinite, &offer).is_ok());
+}
+
+#[tokio::test]
+async fn claim_hydrator_maps_every_flat_lifecycle_shape() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_disc_hydrator").await?;
+    let result = async {
+        let applied_at = Utc.with_ymd_and_hms(2026, 8, 2, 0, 0, 0).unwrap();
+        let superseded_at = Utc.with_ymd_and_hms(2026, 8, 3, 0, 0, 0).unwrap();
+        let applied_subscription_id = Uuid::from_u128(105);
+        let applied_payment_attempt_id = Uuid::from_u128(106);
+        let cases = vec![
+            (
+                "saved",
+                "saved",
+                None,
+                None,
+                None,
+                None,
+                SubscriptionDiscountClaimState::Saved,
+            ),
+            (
+                "applied",
+                "applied",
+                Some(applied_at),
+                Some(applied_subscription_id),
+                Some(applied_payment_attempt_id),
+                None,
+                SubscriptionDiscountClaimState::Applied {
+                    applied_at,
+                    subscription_id: SubscriptionId::new(applied_subscription_id),
+                    payment_attempt_id: PaymentAttemptId::new(applied_payment_attempt_id),
+                },
+            ),
+            (
+                "superseded",
+                "superseded",
+                None,
+                None,
+                None,
+                Some(superseded_at),
+                SubscriptionDiscountClaimState::Superseded { superseded_at },
+            ),
+            (
+                "expired",
+                "expired",
+                None,
+                None,
+                None,
+                None,
+                SubscriptionDiscountClaimState::Expired,
+            ),
+        ];
+
+        for (
+            name,
+            status,
+            row_applied_at,
+            row_subscription_id,
+            row_payment_attempt_id,
+            row_superseded_at,
+            expected_state,
+        ) in cases
+        {
+            let row = sqlx::query(
+                r#"
+                SELECT
+                    $1::uuid AS id,
+                    $2::uuid AS billing_scope_id,
+                    $3::uuid AS subscriber_id,
+                    $4::text AS plan_key,
+                    $5::uuid AS discount_code_id,
+                    $6::text AS code_snapshot,
+                    $7::text AS label_snapshot,
+                    $8::text AS discount_kind,
+                    $9::integer AS amount_off_cents,
+                    $10::integer AS percent_off_bps,
+                    $11::text AS currency,
+                    $12::text AS duration,
+                    $13::integer AS duration_months,
+                    $14::integer AS base_amount_cents,
+                    $15::integer AS discounted_amount_cents,
+                    $16::text AS status,
+                    $17::timestamptz AS claimed_at,
+                    $18::timestamptz AS applied_at,
+                    $19::uuid AS applied_subscription_id,
+                    $20::uuid AS applied_payment_attempt_id,
+                    $21::timestamptz AS superseded_at
+                "#,
+            )
+            .bind(Uuid::from_u128(101))
+            .bind(Uuid::from_u128(102))
+            .bind(Uuid::from_u128(103))
+            .bind("base_subscription")
+            .bind(Uuid::from_u128(104))
+            .bind("SAVE10")
+            .bind(Some("Launch offer".to_owned()))
+            .bind("amount_off")
+            .bind(Some(100_i32))
+            .bind(None::<i32>)
+            .bind("USD")
+            .bind("indefinite")
+            .bind(None::<i32>)
+            .bind(1_000_i32)
+            .bind(900_i32)
+            .bind(status)
+            .bind(Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap())
+            .bind(row_applied_at)
+            .bind(row_subscription_id)
+            .bind(row_payment_attempt_id)
+            .bind(row_superseded_at)
+            .fetch_one(&database.pool)
+            .await?;
+            let claim = claim_from_row(&row)?;
+            assert_eq!(claim.state(), &expected_state, "{name}");
+            assert_eq!(claim.status(), expected_state.status(), "{name}");
+        }
+
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
 }
 
 #[async_trait]
@@ -175,6 +299,266 @@ async fn cancellation_and_discount_workflows_contend_on_the_canonical_subscripti
             ))
             .into());
         }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn current_subscription_locking_query_preserves_the_complete_view_matrix_and_scope()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_disc_current").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "test_gateway").await?;
+        let scope = BillingScopeId::new(account.billing_scope_id);
+        let plan = PlanKey::new("matrix_plan")?;
+        let now: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&database.pool)
+            .await?;
+        for (name, status, period_end, expected) in [
+            ("active", "active", now + chrono::Duration::hours(1), true),
+            (
+                "past due",
+                "past_due",
+                now + chrono::Duration::hours(1),
+                true,
+            ),
+            (
+                "paid-through canceled",
+                "canceled",
+                now + chrono::Duration::hours(1),
+                true,
+            ),
+            (
+                "expired canceled",
+                "canceled",
+                now - chrono::Duration::seconds(1),
+                false,
+            ),
+            ("unpaid", "unpaid", now + chrono::Duration::hours(1), false),
+        ] {
+            let subscriber = SubscriberId::new(Uuid::now_v7());
+            insert_discount_subscription(
+                &database.pool,
+                account,
+                subscriber,
+                &plan,
+                status,
+                period_end,
+                now,
+            )
+            .await?;
+            let claim = SubscriptionDiscountClaim::new(
+                DiscountClaimId::new(Uuid::now_v7()),
+                scope,
+                subscriber,
+                plan.clone(),
+                SubscriptionDiscountCode::new("MATRIX10")?,
+            );
+            let mut transaction = database.pool.begin().await?;
+            assert_eq!(
+                current_subscription_exists(&mut transaction, &claim).await?,
+                expected,
+                "{name}"
+            );
+            transaction.rollback().await?;
+        }
+
+        let subscriber = SubscriberId::new(Uuid::now_v7());
+        insert_discount_subscription(
+            &database.pool,
+            account,
+            subscriber,
+            &plan,
+            "active",
+            now + chrono::Duration::hours(1),
+            now,
+        )
+        .await?;
+        for (name, claim_scope, claim_plan) in [
+            (
+                "scope isolation",
+                BillingScopeId::new(Uuid::now_v7()),
+                plan.clone(),
+            ),
+            ("plan isolation", scope, PlanKey::new("other_plan")?),
+        ] {
+            let claim = SubscriptionDiscountClaim::new(
+                DiscountClaimId::new(Uuid::now_v7()),
+                claim_scope,
+                subscriber,
+                claim_plan,
+                SubscriptionDiscountCode::new("MATRIX10")?,
+            );
+            let mut transaction = database.pool.begin().await?;
+            assert!(
+                !current_subscription_exists(&mut transaction, &claim).await?,
+                "{name}"
+            );
+            transaction.rollback().await?;
+        }
+
+        let no_subscription = SubscriptionDiscountClaim::new(
+            DiscountClaimId::new(Uuid::now_v7()),
+            scope,
+            SubscriberId::new(Uuid::now_v7()),
+            plan,
+            SubscriptionDiscountCode::new("MATRIX10")?,
+        );
+        let mut transaction = database.pool.begin().await?;
+        assert!(!current_subscription_exists(&mut transaction, &no_subscription).await?);
+        transaction.rollback().await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn current_subscription_query_locks_only_the_highest_ranked_row() -> Result<(), Box<dyn Error>>
+{
+    let database = TestDatabase::start("sr_disc_lockrow").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "test_gateway").await?;
+        let scope = BillingScopeId::new(account.billing_scope_id);
+        let subscriber = SubscriberId::new(Uuid::now_v7());
+        let plan = PlanKey::new("footprint_plan")?;
+        let now: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&database.pool)
+            .await?;
+        let active_id = insert_discount_subscription(
+            &database.pool,
+            account,
+            subscriber,
+            &plan,
+            "active",
+            now + chrono::Duration::hours(1),
+            now - chrono::Duration::minutes(1),
+        )
+        .await?;
+        let canceled_id = insert_discount_subscription(
+            &database.pool,
+            account,
+            subscriber,
+            &plan,
+            "canceled",
+            now + chrono::Duration::hours(1),
+            now,
+        )
+        .await?;
+        let claim = SubscriptionDiscountClaim::new(
+            DiscountClaimId::new(Uuid::now_v7()),
+            scope,
+            subscriber,
+            plan,
+            SubscriptionDiscountCode::new("LOCK10")?,
+        );
+        let mut selector = database.pool.begin().await?;
+        assert!(current_subscription_exists(&mut selector, &claim).await?);
+
+        let mut unchosen_writer = database.pool.begin().await?;
+        sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            .execute(&mut *unchosen_writer)
+            .await?;
+        sqlx::query(
+            "UPDATE billing_subscriptions SET updated_at = clock_timestamp() WHERE id = $1",
+        )
+        .bind(canceled_id)
+        .execute(&mut *unchosen_writer)
+        .await?;
+        unchosen_writer.rollback().await?;
+
+        assert_row_update_times_out(&database.pool, active_id).await?;
+        selector.rollback().await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn current_subscription_query_rechecks_a_real_concurrent_status_change()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_disc_rankchg").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "test_gateway").await?;
+        let scope = BillingScopeId::new(account.billing_scope_id);
+        let subscriber = SubscriberId::new(Uuid::now_v7());
+        let plan = PlanKey::new("rank_change_plan")?;
+        let now: chrono::DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+            .fetch_one(&database.pool)
+            .await?;
+        let past_due_id = insert_discount_subscription(
+            &database.pool,
+            account,
+            subscriber,
+            &plan,
+            "past_due",
+            now + chrono::Duration::hours(1),
+            now,
+        )
+        .await?;
+        let canceled_id = insert_discount_subscription(
+            &database.pool,
+            account,
+            subscriber,
+            &plan,
+            "canceled",
+            now + chrono::Duration::hours(1),
+            now - chrono::Duration::minutes(1),
+        )
+        .await?;
+        let claim = SubscriptionDiscountClaim::new(
+            DiscountClaimId::new(Uuid::now_v7()),
+            scope,
+            subscriber,
+            plan,
+            SubscriptionDiscountCode::new("RANK10")?,
+        );
+
+        let mut writer = database.pool.begin().await?;
+        sqlx::query(
+            r#"
+            UPDATE billing_subscriptions
+            SET status = 'unpaid', unpaid_at = clock_timestamp(),
+                next_payment_attempt_at = NULL, updated_at = clock_timestamp()
+            WHERE id = $1
+            "#,
+        )
+        .bind(past_due_id)
+        .execute(&mut *writer)
+        .await?;
+
+        let mut selector = database.pool.begin().await?;
+        let selected = {
+            let selection = current_subscription_exists(&mut selector, &claim);
+            tokio::pin!(selection);
+            assert!(
+                timeout(Duration::from_millis(100), &mut selection)
+                    .await
+                    .is_err(),
+                "selection did not wait for the concurrently changing ranked row"
+            );
+            writer.commit().await?;
+            selection.await?
+        };
+        assert!(selected);
+        assert_row_update_times_out(&database.pool, canceled_id).await?;
+        selector.rollback().await?;
+
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
+                .bind(past_due_id)
+                .fetch_one(&database.pool)
+                .await?;
+        assert_eq!(status, "unpaid");
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
@@ -409,6 +793,106 @@ async fn discount_code_and_claim_policy_is_exact_plan_scoped_and_snapshot_preser
 }
 
 #[tokio::test]
+async fn claim_transitions_return_closed_lifecycle_states() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_disc_trans").await?;
+    let result = async {
+        create_offer_table(&database.pool).await?;
+        let scope = BillingScopeId::new(Uuid::now_v7());
+        let subscriber = SubscriberId::new(Uuid::now_v7());
+        let plan = PlanKey::new("plan_a")?;
+        insert_offer(&database.pool, scope, &plan, 5_900).await?;
+        let first_code = SubscriptionDiscountCode::new("FIRST10")?;
+        let second_code = SubscriptionDiscountCode::new("SECOND10")?;
+        for (id, code) in [
+            (DiscountCodeId::new(Uuid::now_v7()), first_code.clone()),
+            (DiscountCodeId::new(Uuid::now_v7()), second_code.clone()),
+        ] {
+            create_subscription_discount_code(
+                &database.pool,
+                &TestOfferStore,
+                &SubscriptionDiscountCodeCreation::new(
+                    id,
+                    scope,
+                    plan.clone(),
+                    code,
+                    None,
+                    SubscriptionDiscountKind::AmountOffCents(PositiveDiscountCents::new(500)?),
+                    CurrencyCode::new("USD")?,
+                    SubscriptionDiscountDuration::Indefinite,
+                )?,
+            )
+            .await?;
+        }
+
+        let first_id = DiscountClaimId::new(Uuid::now_v7());
+        let first = claim_subscription_discount(
+            &database.pool,
+            &TestOfferStore,
+            &SubscriptionDiscountClaim::new(first_id, scope, subscriber, plan.clone(), first_code),
+        )
+        .await?;
+        let SubscriptionDiscountClaimOutcome::Saved(first) = first else {
+            return Err(io::Error::other("first claim was not saved").into());
+        };
+        assert_eq!(first.state(), &SubscriptionDiscountClaimState::Saved);
+
+        let second = claim_subscription_discount(
+            &database.pool,
+            &TestOfferStore,
+            &SubscriptionDiscountClaim::new(
+                DiscountClaimId::new(Uuid::now_v7()),
+                scope,
+                subscriber,
+                plan.clone(),
+                second_code,
+            ),
+        )
+        .await?;
+        let SubscriptionDiscountClaimOutcome::Saved(second) = second else {
+            return Err(io::Error::other("second claim was not saved").into());
+        };
+        assert_eq!(second.state(), &SubscriptionDiscountClaimState::Saved);
+
+        let row = sqlx::query(
+            r#"
+            SELECT id, billing_scope_id, subscriber_id, plan_key,
+                discount_code_id, code_snapshot, label_snapshot, discount_kind,
+                amount_off_cents, percent_off_bps, currency, duration,
+                duration_months, base_amount_cents, discounted_amount_cents,
+                status, claimed_at, applied_at, applied_subscription_id,
+                applied_payment_attempt_id, superseded_at
+            FROM billing_subscription_discount_claims
+            WHERE id = $1
+            "#,
+        )
+        .bind(first_id.as_uuid())
+        .fetch_one(&database.pool)
+        .await?;
+        let superseded = claim_from_row(&row)?;
+        assert!(matches!(
+            superseded.state(),
+            SubscriptionDiscountClaimState::Superseded { .. }
+        ));
+        assert_eq!(
+            superseded.status(),
+            syrup_rail::SubscriptionDiscountClaimStatus::Superseded
+        );
+
+        let cleared = clear_subscription_discount(&database.pool, scope, subscriber, &plan).await?;
+        let SubscriptionDiscountClearOutcome::Cleared(cleared) = cleared else {
+            return Err(io::Error::other("second saved claim was not cleared").into());
+        };
+        assert_eq!(cleared.state(), &SubscriptionDiscountClaimState::Expired);
+
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn historical_code_records_remain_listable_and_disableable_after_cadence_drift()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_disc_drift").await?;
@@ -583,6 +1067,102 @@ async fn insert_offer(
         .bind(amount_cents)
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+async fn insert_discount_subscription(
+    pool: &PgPool,
+    account: crate::test_support::GatewayAccountFixture,
+    subscriber: SubscriberId,
+    plan: &PlanKey,
+    status: &str,
+    period_end: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+) -> Result<Uuid, sqlx::Error> {
+    let payment_method_id = Uuid::now_v7();
+    sqlx::query(
+        r#"
+        INSERT INTO billing_payment_methods (
+            id, billing_scope_id, subscriber_id, gateway_account_id,
+            gateway_payment_method_reference, status
+        ) VALUES ($1, $2, $3, $4, $5, 'active')
+        "#,
+    )
+    .bind(payment_method_id)
+    .bind(account.billing_scope_id)
+    .bind(subscriber.as_uuid())
+    .bind(account.gateway_account_id)
+    .bind(format!("discount-method-{payment_method_id}"))
+    .execute(pool)
+    .await?;
+
+    let subscription_id = Uuid::now_v7();
+    let canceled_at = (status == "canceled").then_some(updated_at);
+    let unpaid_at = (status == "unpaid").then_some(updated_at);
+    let next_payment_attempt_at = matches!(status, "active" | "past_due").then_some(period_end);
+    sqlx::query(
+        r#"
+        INSERT INTO billing_subscriptions (
+            id, billing_scope_id, subscriber_id, plan_key, status,
+            gateway_account_id, payment_method_id, amount_cents, currency,
+            current_period_start_at, current_period_end_at, next_renewal_at,
+            initial_transaction_id, canceled_at, created_at, updated_at,
+            phase, recurring_period_kind, recurring_period_count,
+            dunning_retry_delays_seconds, dunning_exhaustion,
+            past_due_access, next_payment_attempt_at, unpaid_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, 1000, 'USD',
+            $8, $9, $9, $10, $11, $12, $13, 'recurring',
+            'calendar_months', 1, ARRAY[]::bigint[], 'remain_past_due',
+            'suspend_immediately', $14, $15
+        )
+        "#,
+    )
+    .bind(subscription_id)
+    .bind(account.billing_scope_id)
+    .bind(subscriber.as_uuid())
+    .bind(plan.as_str())
+    .bind(status)
+    .bind(account.gateway_account_id)
+    .bind(payment_method_id)
+    .bind(period_end - chrono::Duration::days(30))
+    .bind(period_end)
+    .bind(format!("discount-transaction-{subscription_id}"))
+    .bind(canceled_at)
+    .bind(updated_at - chrono::Duration::days(1))
+    .bind(updated_at)
+    .bind(next_payment_attempt_at)
+    .bind(unpaid_at)
+    .execute(pool)
+    .await?;
+    Ok(subscription_id)
+}
+
+async fn assert_row_update_times_out(
+    pool: &PgPool,
+    subscription_id: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let mut contender = pool.begin().await?;
+    sqlx::query("SET LOCAL lock_timeout = '100ms'")
+        .execute(&mut *contender)
+        .await?;
+    let error = sqlx::query(
+        "UPDATE billing_subscriptions SET updated_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(subscription_id)
+    .execute(&mut *contender)
+    .await
+    .expect_err("selected subscription row must remain locked");
+    let code = error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .map(|code| code.into_owned());
+    contender.rollback().await?;
+    if code.as_deref() != Some("55P03") {
+        return Err(
+            io::Error::other(format!("expected selected-row lock timeout, got {error}")).into(),
+        );
+    }
     Ok(())
 }
 

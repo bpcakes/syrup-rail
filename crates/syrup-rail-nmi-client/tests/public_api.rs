@@ -1,6 +1,6 @@
 use syrup_rail_nmi_client::{
     BillingContact, ClientFactory, ConfigurationError, Credentials, Endpoint, MutationCertainty,
-    MutationError, PaymentSource, SaleRequest, SensitiveText, StoredCredential, VaultAction,
+    MutationError, SaleIntent, SaleRequest, SensitiveText,
 };
 
 #[test]
@@ -76,11 +76,10 @@ fn credential_client_and_sensitive_text_formatting_is_value_free() {
 fn request_and_error_formatting_redacts_values() {
     let request = SaleRequest {
         amount_cents: 100,
-        currency: "USD".to_owned(),
         order_id: "order-debug-sentinel".to_owned(),
-        source: PaymentSource::PaymentToken("token-debug-sentinel".to_owned()),
-        vault_action: Some(VaultAction::AddCustomer),
-        stored_credential: Some(StoredCredential::InitialCustomer),
+        intent: SaleIntent::InitialStoredCredential {
+            payment_token: "token-debug-sentinel".to_owned(),
+        },
         billing_contact: Some(BillingContact {
             first_name: Some("name-debug-sentinel".to_owned()),
             last_name: None,

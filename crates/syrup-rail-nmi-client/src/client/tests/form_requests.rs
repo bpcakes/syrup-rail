@@ -1,14 +1,44 @@
 use super::*;
 
 #[test]
+fn every_sale_intent_has_one_explicit_transport_route() {
+    let cases = [
+        (SaleIntent::PaymentToken("token".to_owned()), false),
+        (SaleIntent::CustomerVault("vault".to_owned()), false),
+        (
+            SaleIntent::AddCustomer {
+                payment_token: "token".to_owned(),
+            },
+            true,
+        ),
+        (
+            SaleIntent::InitialStoredCredential {
+                payment_token: "token".to_owned(),
+            },
+            true,
+        ),
+        (
+            SaleIntent::RecurringStoredCredential {
+                customer_vault_id: "vault".to_owned(),
+                initial_transaction_id: "transaction".to_owned(),
+            },
+            false,
+        ),
+    ];
+
+    for (intent, uses_classic_api) in cases {
+        assert_eq!(intent.uses_classic_api(), uses_classic_api);
+    }
+}
+
+#[test]
 fn sale_customer_vault_form_adds_payment_method_to_vault() {
     let request = SaleRequest {
         amount_cents: 4_900,
-        currency: "USD".to_owned(),
         order_id: "ck_sub_123".to_owned(),
-        source: PaymentSource::PaymentToken("tok_test".to_owned()),
-        vault_action: Some(VaultAction::AddCustomer),
-        stored_credential: Some(StoredCredential::InitialCustomer),
+        intent: SaleIntent::InitialStoredCredential {
+            payment_token: "tok_test".to_owned(),
+        },
         billing_contact: Some(BillingContact {
             first_name: Some(" Ada ".to_owned()),
             last_name: Some(" Lovelace ".to_owned()),
@@ -49,13 +79,11 @@ fn sale_customer_vault_form_adds_payment_method_to_vault() {
 fn sale_customer_vault_form_includes_recurring_merchant_flags() {
     let request = SaleRequest {
         amount_cents: 4_900,
-        currency: "USD".to_owned(),
         order_id: "ck_renewal_123".to_owned(),
-        source: PaymentSource::CustomerVault("vault_123".to_owned()),
-        vault_action: None,
-        stored_credential: Some(StoredCredential::RecurringMerchant {
+        intent: SaleIntent::RecurringStoredCredential {
+            customer_vault_id: "vault_123".to_owned(),
             initial_transaction_id: "txn_initial_123".to_owned(),
-        }),
+        },
         billing_contact: None,
     };
     let params = classic_sale_params("private_key", &request, "49.00".to_owned());
@@ -119,13 +147,11 @@ fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
     let private_key = Zeroizing::new("private_key_sentinel".to_owned());
     let request = SaleRequest {
         amount_cents: 4_900,
-        currency: "USD".to_owned(),
         order_id: "ck_borrowed_order".to_owned(),
-        source: PaymentSource::CustomerVault("vault_borrowed".to_owned()),
-        vault_action: None,
-        stored_credential: Some(StoredCredential::RecurringMerchant {
+        intent: SaleIntent::RecurringStoredCredential {
+            customer_vault_id: "vault_borrowed".to_owned(),
             initial_transaction_id: "txn_borrowed".to_owned(),
-        }),
+        },
         billing_contact: Some(BillingContact {
             first_name: Some(" Ada ".to_owned()),
             last_name: Some(" Lovelace ".to_owned()),
@@ -350,54 +376,38 @@ async fn borrowed_form_owners_drop_on_construction_form_endpoint_and_send_paths(
     assert_eq!(send_drops.load(Ordering::SeqCst), 2);
 }
 
-#[tokio::test]
-async fn invalid_mutation_shape_is_rejected_before_transport() {
-    let client = Client::new(
-        "http://127.0.0.1:1",
-        "unused_private_key",
-        "unused_query_key",
-    )
-    .expect("closed-loopback client should construct");
-    let error = client
-        .sale(SaleRequest {
-            amount_cents: 100,
-            currency: "USD".to_owned(),
-            order_id: "ck_invalid_shape".to_owned(),
-            source: PaymentSource::PaymentToken("tok_invalid_shape".to_owned()),
-            vault_action: None,
-            stored_credential: Some(StoredCredential::RecurringMerchant {
-                initial_transaction_id: "txn_initial".to_owned(),
-            }),
-            billing_contact: None,
-        })
-        .await
-        .expect_err("invalid source/stored-credential combination must fail locally");
+#[test]
+fn legacy_sale_field_matrix_maps_only_the_five_valid_shapes() {
+    let token = || PaymentSource::PaymentToken("token".to_owned());
+    let vault = || PaymentSource::CustomerVault("vault".to_owned());
+    let initial = || StoredCredential::InitialCustomer;
+    let recurring = || StoredCredential::RecurringMerchant {
+        initial_transaction_id: "initial".to_owned(),
+    };
 
-    assert!(matches!(error, MutationError::InvalidRequest(_)));
-    assert_eq!(error.certainty(), crate::MutationCertainty::NotSubmitted);
-}
+    let cases = [
+        SaleIntent::from_legacy_parts(token(), None, None).is_ok(),
+        SaleIntent::from_legacy_parts(vault(), None, None).is_ok(),
+        SaleIntent::from_legacy_parts(token(), Some(VaultAction::AddCustomer), None).is_ok(),
+        SaleIntent::from_legacy_parts(token(), Some(VaultAction::AddCustomer), Some(initial()))
+            .is_ok(),
+        SaleIntent::from_legacy_parts(vault(), None, Some(recurring())).is_ok(),
+        SaleIntent::from_legacy_parts(vault(), Some(VaultAction::AddCustomer), None).is_ok(),
+        SaleIntent::from_legacy_parts(vault(), Some(VaultAction::AddCustomer), Some(initial()))
+            .is_ok(),
+        SaleIntent::from_legacy_parts(vault(), Some(VaultAction::AddCustomer), Some(recurring()))
+            .is_ok(),
+        SaleIntent::from_legacy_parts(vault(), None, Some(initial())).is_ok(),
+        SaleIntent::from_legacy_parts(token(), None, Some(initial())).is_ok(),
+        SaleIntent::from_legacy_parts(token(), None, Some(recurring())).is_ok(),
+        SaleIntent::from_legacy_parts(token(), Some(VaultAction::AddCustomer), Some(recurring()))
+            .is_ok(),
+    ];
 
-#[tokio::test]
-async fn initial_stored_credential_requires_vault_creation_before_transport() {
-    let client = Client::new(
-        "http://127.0.0.1:1",
-        "unused_private_key",
-        "unused_query_key",
-    )
-    .expect("closed-loopback client should construct");
-    let error = client
-        .sale(SaleRequest {
-            amount_cents: 100,
-            currency: "USD".to_owned(),
-            order_id: "ck_initial_without_vault".to_owned(),
-            source: PaymentSource::PaymentToken("tok_initial_without_vault".to_owned()),
-            vault_action: None,
-            stored_credential: Some(StoredCredential::InitialCustomer),
-            billing_contact: None,
-        })
-        .await
-        .expect_err("initial stored credential without vault creation must fail locally");
-
-    assert!(matches!(error, MutationError::InvalidRequest(_)));
-    assert_eq!(error.certainty(), crate::MutationCertainty::NotSubmitted);
+    assert_eq!(
+        cases,
+        [
+            true, true, true, true, true, false, false, false, false, false, false, false
+        ]
+    );
 }

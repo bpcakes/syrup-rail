@@ -4,7 +4,8 @@ use syrup_rail::{
     ActorId, BillingScopeId, PlanKey, SubscriberId, SubscriptionGrant, SubscriptionGrantCreation,
     SubscriptionGrantCreationOutcome, SubscriptionGrantId, SubscriptionGrantKind,
     SubscriptionGrantReason, SubscriptionGrantRecord, SubscriptionGrantRevocation,
-    SubscriptionGrantRevocationOutcome, SubscriptionStatus,
+    SubscriptionGrantRevocationAudit, SubscriptionGrantRevocationOutcome,
+    SubscriptionGrantRevocationState, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -378,21 +379,37 @@ fn grant_from_row(row: &PgRow) -> Result<SubscriptionGrantRecord, SubscriptionGr
         ActorId::new(row.try_get("granted_by_actor_id")?),
     )
     .map_err(|_| SubscriptionGrantMutationError::InvalidState(INVALID_GRANT_STATE))?;
-    SubscriptionGrantRecord::new(
+    SubscriptionGrantRecord::from_revocation_state(
         BillingScopeId::new(row.try_get("billing_scope_id")?),
         SubscriberId::new(row.try_get("subscriber_id")?),
         grant,
         grant_reason(row.try_get("reason")?)?,
-        row.try_get("revoked_at")?,
-        row.try_get::<Option<Uuid>, _>("revoked_by_actor_id")?
-            .map(ActorId::new),
-        row.try_get::<Option<String>, _>("revocation_reason")?
-            .map(grant_reason)
-            .transpose()?,
+        grant_revocation_state(row)?,
         row.try_get("created_at")?,
         row.try_get("updated_at")?,
     )
     .map_err(|_| SubscriptionGrantMutationError::InvalidState(INVALID_GRANT_STATE))
+}
+
+fn grant_revocation_state(
+    row: &PgRow,
+) -> Result<SubscriptionGrantRevocationState, SubscriptionGrantMutationError> {
+    let revoked_at = row.try_get::<Option<DateTime<Utc>>, _>("revoked_at")?;
+    let revoked_by_actor_id = row.try_get::<Option<Uuid>, _>("revoked_by_actor_id")?;
+    let reason = row.try_get::<Option<String>, _>("revocation_reason")?;
+    match (revoked_at, revoked_by_actor_id, reason) {
+        (None, None, None) => Ok(SubscriptionGrantRevocationState::Active),
+        (Some(revoked_at), Some(revoked_by_actor_id), Some(reason)) => Ok(
+            SubscriptionGrantRevocationState::Revoked(SubscriptionGrantRevocationAudit::new(
+                revoked_at,
+                ActorId::new(revoked_by_actor_id),
+                grant_reason(reason)?,
+            )),
+        ),
+        _ => Err(SubscriptionGrantMutationError::InvalidState(
+            INVALID_GRANT_STATE,
+        )),
+    }
 }
 
 fn grant_reason(value: String) -> Result<SubscriptionGrantReason, SubscriptionGrantMutationError> {
@@ -562,6 +579,72 @@ mod tests {
                     if record == revoked
             ) {
                 return Err(io::Error::other("repeated revocation was not idempotent").into());
+            }
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup
+    }
+
+    #[tokio::test]
+    async fn persisted_partial_revocation_audit_is_rejected() -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("sr_grant_partial").await?;
+        let result = async {
+            let scope = BillingScopeId::new(Uuid::now_v7());
+            let subscriber = SubscriberId::new(Uuid::now_v7());
+            let plan = PlanKey::new("base_subscription")?;
+            let grant_id = SubscriptionGrantId::new(Uuid::now_v7());
+            let creation = SubscriptionGrantCreation::new(
+                grant_id,
+                scope,
+                subscriber,
+                plan.clone(),
+                SubscriptionGrantKind::Promotion,
+                SubscriptionGrantReason::new("partial audit regression")?,
+                Utc::now() + Duration::days(30),
+                ActorId::new(Uuid::now_v7()),
+            );
+            let mut creation_transaction = database.pool.begin().await?;
+            if !matches!(
+                create_subscription_grant(&mut creation_transaction, &creation).await?,
+                SubscriptionGrantCreationOutcome::Created(_)
+            ) {
+                return Err(io::Error::other("grant was not created").into());
+            }
+            creation_transaction.commit().await?;
+
+            sqlx::query(
+                "ALTER TABLE billing_subscription_grants DROP CONSTRAINT billing_subscription_grants_revocation_check",
+            )
+            .execute(&database.pool)
+            .await?;
+            sqlx::query(
+                "UPDATE billing_subscription_grants SET revoked_at = clock_timestamp() WHERE id = $1",
+            )
+            .bind(grant_id.as_uuid())
+            .execute(&database.pool)
+            .await?;
+
+            let revocation = SubscriptionGrantRevocation::new(
+                grant_id,
+                scope,
+                subscriber,
+                plan,
+                ActorId::new(Uuid::now_v7()),
+                SubscriptionGrantReason::new("must reject partial audit")?,
+            );
+            let mut transaction = database.pool.begin().await?;
+            let error = revoke_subscription_grant(&mut transaction, &revocation)
+                .await
+                .expect_err("partial persisted revocation audit must fail closed");
+            transaction.rollback().await?;
+            if !matches!(error, SubscriptionGrantMutationError::InvalidState(_)) {
+                return Err(io::Error::other(format!(
+                    "expected invalid grant state, got {error:?}"
+                ))
+                .into());
             }
             Ok::<_, Box<dyn Error>>(())
         }

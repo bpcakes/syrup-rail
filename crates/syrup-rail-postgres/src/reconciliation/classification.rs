@@ -106,7 +106,7 @@ pub(super) async fn lock_pending_charge_for_classification(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     charge_id: Uuid,
     attempt_id: Uuid,
-) -> Result<Option<(ChargeRole, Option<String>, bool, bool)>, sqlx::Error> {
+) -> Result<Option<LockedPendingCharge>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT charges.charge_role,
@@ -175,33 +175,34 @@ pub(super) async fn lock_pending_charge_for_classification(
     .await?;
     row.map(|row| {
         let role = match row.try_get::<String, _>("charge_role")?.as_str() {
-            "primary" => ChargeRole::Primary,
-            "additional" => ChargeRole::Additional,
+            "primary" => ProcessorChargeRole::Primary,
+            "additional" => ProcessorChargeRole::Additional,
             _ => return Err(invalid_reconciliation_state()),
         };
-        Ok((
+        Ok(LockedPendingCharge {
+            id: charge_id,
             role,
-            row.try_get("transaction_id")?,
-            row.try_get("same_charge")?,
-            row.try_get("dimensions_match")?,
-        ))
+            transaction_id: row.try_get("transaction_id")?,
+            matches_attempt_evidence: row.try_get("same_charge")?,
+            dimensions_match: row.try_get("dimensions_match")?,
+        })
     })
     .transpose()
 }
 
-pub(super) async fn classify_pending_charge(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct LockedExternalReversalAttestation {
+    processor_charge_id: Uuid,
+    final_resolution_code: PaymentResolutionCode,
+}
+
+pub(super) async fn lock_external_reversal_attestation(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     attempt: &LockedAttempt,
-    charge_id: Uuid,
-    role: ChargeRole,
-    transaction_id: Option<&str>,
-    same_charge: bool,
-) -> Result<(ChargeProgression, Option<String>), sqlx::Error> {
-    let Some(transaction_id) = transaction_id else {
-        return Ok((
-            ChargeProgression::ReconciliationRequired,
-            Some("processor_charge_transaction_identity_required".to_owned()),
-        ));
+    charge: &LockedPendingCharge,
+) -> Result<Option<LockedExternalReversalAttestation>, sqlx::Error> {
+    let Some(transaction_id) = charge.transaction_id.as_deref() else {
+        return Ok(None);
     };
     let attestation = sqlx::query_as::<_, (Uuid, String)>(
         r#"
@@ -215,15 +216,69 @@ pub(super) async fn classify_pending_charge(
     .bind(transaction_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    if let Some((attested_charge_id, final_resolution_code)) = attestation {
-        if attested_charge_id != charge_id {
-            return Err(invalid_reconciliation_state());
+    attestation
+        .map(|(processor_charge_id, final_resolution_code)| {
+            Ok(LockedExternalReversalAttestation {
+                processor_charge_id,
+                final_resolution_code: PaymentResolutionCode::try_from(
+                    final_resolution_code.as_str(),
+                )
+                .map_err(|_| invalid_reconciliation_state())?,
+            })
+        })
+        .transpose()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PendingChargeTransition {
+    ReconciliationRequired(ProcessorChargeStateCode),
+    ExternalReversalRequired(ProcessorChargeStateCode),
+    Applied,
+    ExternallyReversed(PaymentResolutionCode),
+}
+
+impl PendingChargeTransition {
+    const fn progression(self) -> ProcessorChargeProgression {
+        match self {
+            Self::ReconciliationRequired(_) => ProcessorChargeProgression::ReconciliationRequired,
+            Self::ExternalReversalRequired(_) => {
+                ProcessorChargeProgression::ExternalReversalRequired
+            }
+            Self::Applied => ProcessorChargeProgression::Applied,
+            Self::ExternallyReversed(_) => ProcessorChargeProgression::ExternallyReversed,
         }
-        let final_resolution_code = PaymentResolutionCode::try_from(final_resolution_code.as_str())
-            .map_err(|_| invalid_reconciliation_state())?;
-        return Ok((
-            ChargeProgression::ExternallyReversed,
-            Some(final_resolution_code.as_str().to_owned()),
+    }
+
+    const fn state_code(self) -> Option<ProcessorChargeStateCode> {
+        match self {
+            Self::ReconciliationRequired(code) | Self::ExternalReversalRequired(code) => Some(code),
+            Self::Applied => None,
+            Self::ExternallyReversed(code) => {
+                Some(ProcessorChargeStateCode::PaymentResolution(code))
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct PendingChargeClassificationError;
+
+pub(super) fn classify_pending_charge(
+    attempt: &LockedAttempt,
+    charge: &LockedPendingCharge,
+    attestation: Option<&LockedExternalReversalAttestation>,
+) -> Result<PendingChargeTransition, PendingChargeClassificationError> {
+    if charge.transaction_id.is_none() {
+        return Ok(PendingChargeTransition::ReconciliationRequired(
+            ProcessorChargeStateCode::TransactionIdentityRequired,
+        ));
+    }
+    if let Some(attestation) = attestation {
+        if attestation.processor_charge_id != charge.id {
+            return Err(PendingChargeClassificationError);
+        }
+        return Ok(PendingChargeTransition::ExternallyReversed(
+            attestation.final_resolution_code,
         ));
     }
 
@@ -241,45 +296,36 @@ pub(super) async fn classify_pending_charge(
         && attempt.resolution_code
             == Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict);
     if attempt.amount_cents > 0
-        && (role == ChargeRole::Additional
+        && (charge.role == ProcessorChargeRole::Additional
             || terminal_external_reversal
             || initial_grant_conflict
-            || (attempt.transaction_id.is_some() && !same_charge))
+            || (attempt.transaction_id.is_some() && !charge.matches_attempt_evidence))
     {
-        return Ok((
-            ChargeProgression::ExternalReversalRequired,
-            Some(
-                if role == ChargeRole::Additional {
-                    "additional_approved_charge_identified"
-                } else {
-                    "processor_charge_external_reversal_required"
-                }
-                .to_owned(),
-            ),
-        ));
+        let code = if charge.role == ProcessorChargeRole::Additional {
+            ProcessorChargeStateCode::AdditionalApprovedChargeIdentified
+        } else {
+            ProcessorChargeStateCode::ExternalReversalRequired
+        };
+        return Ok(PendingChargeTransition::ExternalReversalRequired(code));
     }
-    if same_charge && attempt.status == PaymentAttemptStatus::Approved {
-        return Ok((ChargeProgression::Applied, None));
+    if charge.matches_attempt_evidence && attempt.status == PaymentAttemptStatus::Approved {
+        return Ok(PendingChargeTransition::Applied);
     }
-    Ok((
-        ChargeProgression::ReconciliationRequired,
-        Some(
-            if role == ChargeRole::Additional {
-                "zero_amount_additional_approved_charge"
-            } else {
-                "approved_charge_waiting_for_application"
-            }
-            .to_owned(),
-        ),
-    ))
+    let code = if charge.role == ProcessorChargeRole::Additional {
+        ProcessorChargeStateCode::ZeroAmountAdditionalApprovedCharge
+    } else {
+        ProcessorChargeStateCode::ApprovedChargeWaitingForApplication
+    };
+    Ok(PendingChargeTransition::ReconciliationRequired(code))
 }
 
 pub(super) async fn transition_pending_charge(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     charge_id: Uuid,
-    progression: ChargeProgression,
-    state_code: Option<&str>,
+    transition: PendingChargeTransition,
 ) -> Result<(), sqlx::Error> {
+    let progression = transition.progression();
+    let state_code = transition.state_code();
     let result = sqlx::query(
         r#"
         UPDATE billing_processor_charges
@@ -322,7 +368,7 @@ pub(super) async fn transition_pending_charge(
     )
     .bind(charge_id)
     .bind(progression.as_str())
-    .bind(state_code)
+    .bind(state_code.map(ProcessorChargeStateCode::as_str))
     .execute(&mut **transaction)
     .await?;
     if result.rows_affected() != 1 {
@@ -333,4 +379,234 @@ pub(super) async fn transition_pending_charge(
 
 pub(super) fn invalid_reconciliation_state() -> sqlx::Error {
     sqlx::Error::Protocol("canonical reconciliation state is invalid".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn locked_attempt(
+        kind: PaymentAttemptKind,
+        status: PaymentAttemptStatus,
+        resolution_code: Option<PaymentResolutionCode>,
+        amount_cents: i32,
+        transaction_id: Option<&str>,
+    ) -> LockedAttempt {
+        LockedAttempt {
+            locator: AttemptLocator {
+                id: Uuid::from_u128(1),
+                billing_scope_id: BillingScopeId::new(Uuid::from_u128(2)),
+                subscriber_id: SubscriberId::new(Uuid::from_u128(3)),
+                plan_key: Some(PlanKey::new("plan").expect("valid plan key")),
+                gateway_account_id: GatewayAccountId::new(Uuid::from_u128(4)),
+                kind,
+            },
+            status,
+            resolution_code,
+            amount_cents,
+            transaction_id: transaction_id.map(str::to_owned),
+        }
+    }
+
+    fn locked_charge(
+        role: ProcessorChargeRole,
+        transaction_id: Option<&str>,
+        matches_attempt_evidence: bool,
+    ) -> LockedPendingCharge {
+        LockedPendingCharge {
+            id: Uuid::from_u128(5),
+            role,
+            transaction_id: transaction_id.map(str::to_owned),
+            matches_attempt_evidence,
+            dimensions_match: true,
+        }
+    }
+
+    #[test]
+    fn pending_charge_classification_covers_the_full_decision_table() {
+        let ordinary_pending = locked_attempt(
+            PaymentAttemptKind::SubscriptionRenewal,
+            PaymentAttemptStatus::Pending,
+            None,
+            100,
+            None,
+        );
+        let cases = [
+            (
+                "missing transaction identity",
+                ordinary_pending.clone(),
+                locked_charge(ProcessorChargeRole::Primary, None, false),
+                None,
+                Ok(PendingChargeTransition::ReconciliationRequired(
+                    ProcessorChargeStateCode::TransactionIdentityRequired,
+                )),
+            ),
+            (
+                "matching attestation",
+                ordinary_pending.clone(),
+                locked_charge(ProcessorChargeRole::Primary, Some("transaction"), false),
+                Some(LockedExternalReversalAttestation {
+                    processor_charge_id: Uuid::from_u128(5),
+                    final_resolution_code: PaymentResolutionCode::ProcessorChargeExternallyRefunded,
+                }),
+                Ok(PendingChargeTransition::ExternallyReversed(
+                    PaymentResolutionCode::ProcessorChargeExternallyRefunded,
+                )),
+            ),
+            (
+                "positive additional charge",
+                ordinary_pending.clone(),
+                locked_charge(ProcessorChargeRole::Additional, Some("transaction"), false),
+                None,
+                Ok(PendingChargeTransition::ExternalReversalRequired(
+                    ProcessorChargeStateCode::AdditionalApprovedChargeIdentified,
+                )),
+            ),
+            (
+                "zero amount additional charge",
+                locked_attempt(
+                    PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
+                    PaymentAttemptStatus::Pending,
+                    None,
+                    0,
+                    None,
+                ),
+                locked_charge(ProcessorChargeRole::Additional, Some("transaction"), false),
+                None,
+                Ok(PendingChargeTransition::ReconciliationRequired(
+                    ProcessorChargeStateCode::ZeroAmountAdditionalApprovedCharge,
+                )),
+            ),
+            (
+                "terminal external reversal",
+                locked_attempt(
+                    PaymentAttemptKind::SubscriptionRenewal,
+                    PaymentAttemptStatus::Failed,
+                    Some(PaymentResolutionCode::ProcessorChargeExternallyVoided),
+                    100,
+                    None,
+                ),
+                locked_charge(ProcessorChargeRole::Primary, Some("transaction"), false),
+                None,
+                Ok(PendingChargeTransition::ExternalReversalRequired(
+                    ProcessorChargeStateCode::ExternalReversalRequired,
+                )),
+            ),
+            (
+                "initial grant conflict",
+                locked_attempt(
+                    PaymentAttemptKind::SubscriptionInitial,
+                    PaymentAttemptStatus::ReviewRequired,
+                    Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict),
+                    100,
+                    None,
+                ),
+                locked_charge(ProcessorChargeRole::Primary, Some("transaction"), false),
+                None,
+                Ok(PendingChargeTransition::ExternalReversalRequired(
+                    ProcessorChargeStateCode::ExternalReversalRequired,
+                )),
+            ),
+            (
+                "different attempt transaction",
+                locked_attempt(
+                    PaymentAttemptKind::SubscriptionRenewal,
+                    PaymentAttemptStatus::Approved,
+                    None,
+                    100,
+                    Some("other-transaction"),
+                ),
+                locked_charge(ProcessorChargeRole::Primary, Some("transaction"), false),
+                None,
+                Ok(PendingChargeTransition::ExternalReversalRequired(
+                    ProcessorChargeStateCode::ExternalReversalRequired,
+                )),
+            ),
+            (
+                "approved matching charge",
+                locked_attempt(
+                    PaymentAttemptKind::SubscriptionRenewal,
+                    PaymentAttemptStatus::Approved,
+                    None,
+                    100,
+                    Some("transaction"),
+                ),
+                locked_charge(ProcessorChargeRole::Primary, Some("transaction"), true),
+                None,
+                Ok(PendingChargeTransition::Applied),
+            ),
+            (
+                "primary charge waiting for application",
+                ordinary_pending,
+                locked_charge(ProcessorChargeRole::Primary, Some("transaction"), false),
+                None,
+                Ok(PendingChargeTransition::ReconciliationRequired(
+                    ProcessorChargeStateCode::ApprovedChargeWaitingForApplication,
+                )),
+            ),
+            (
+                "attestation for another charge",
+                locked_attempt(
+                    PaymentAttemptKind::SubscriptionRenewal,
+                    PaymentAttemptStatus::Pending,
+                    None,
+                    100,
+                    None,
+                ),
+                locked_charge(ProcessorChargeRole::Primary, Some("transaction"), false),
+                Some(LockedExternalReversalAttestation {
+                    processor_charge_id: Uuid::from_u128(6),
+                    final_resolution_code: PaymentResolutionCode::ProcessorChargeExternallyRefunded,
+                }),
+                Err(PendingChargeClassificationError),
+            ),
+        ];
+
+        for (name, attempt, charge, attestation, expected) in cases {
+            assert_eq!(
+                classify_pending_charge(&attempt, &charge, attestation.as_ref()),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_charge_transitions_project_only_valid_progression_and_code_pairs() {
+        let cases = [
+            (
+                PendingChargeTransition::ReconciliationRequired(
+                    ProcessorChargeStateCode::ApprovedChargeWaitingForApplication,
+                ),
+                ProcessorChargeProgression::ReconciliationRequired,
+                Some(ProcessorChargeStateCode::ApprovedChargeWaitingForApplication),
+            ),
+            (
+                PendingChargeTransition::ExternalReversalRequired(
+                    ProcessorChargeStateCode::AdditionalApprovedChargeIdentified,
+                ),
+                ProcessorChargeProgression::ExternalReversalRequired,
+                Some(ProcessorChargeStateCode::AdditionalApprovedChargeIdentified),
+            ),
+            (
+                PendingChargeTransition::Applied,
+                ProcessorChargeProgression::Applied,
+                None,
+            ),
+            (
+                PendingChargeTransition::ExternallyReversed(
+                    PaymentResolutionCode::ProcessorChargeExternallyVoided,
+                ),
+                ProcessorChargeProgression::ExternallyReversed,
+                Some(ProcessorChargeStateCode::PaymentResolution(
+                    PaymentResolutionCode::ProcessorChargeExternallyVoided,
+                )),
+            ),
+        ];
+
+        for (transition, progression, state_code) in cases {
+            assert_eq!(transition.progression(), progression);
+            assert_eq!(transition.state_code(), state_code);
+        }
+    }
 }

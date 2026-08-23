@@ -11,7 +11,7 @@ use super::super::{
     validation::trimmed_optional,
 };
 use super::common::{
-    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
+    IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
     ScalarOccurrenceCollector, finalize_foreground_identifiers, normalize_gateway_state,
     resolve_optional_scalar,
 };
@@ -195,14 +195,10 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
         return Ok(None);
     };
     let decision = PaymentDecisionFields::new(
-        collect_xml_scalar(transaction, &["response"], false)
-            .finish_decision(DecisionFieldKind::Response),
-        collect_xml_scalar(transaction, &["response_code"], false)
-            .finish_decision(DecisionFieldKind::ResponseCode),
-        collect_xml_scalar(transaction, &["status"], false)
-            .finish_decision(DecisionFieldKind::GatewayState),
-        collect_xml_scalar(transaction, &["condition"], false)
-            .finish_decision(DecisionFieldKind::GatewayState),
+        collect_xml_scalar(transaction, &["response"], false),
+        collect_xml_scalar(transaction, &["response_code"], false),
+        collect_xml_scalar(transaction, &["status"], false),
+        collect_xml_scalar(transaction, &["condition"], false),
     );
     let (response_text, _) =
         resolve_optional_scalar(collect_xml_scalar(transaction, &["response_text"], true).finish());
@@ -233,15 +229,16 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
         resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_type"], true).finish());
     let (card_number, _) =
         resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_number"], true).finish());
+    let (response, response_code, condition) = decision.into_public_raw_fields();
     Ok(Some(ExactQueryResponse {
         outcome: PaymentOutcome {
             status,
             transaction_id,
             customer_vault_id,
-            response: sensitive_gateway_field(decision.response.raw),
-            response_code: sensitive_gateway_field(decision.response_code.raw),
+            response: sensitive_gateway_field(response),
+            response_code: sensitive_gateway_field(response_code),
             response_text: sensitive_gateway_field(response_text),
-            condition: sensitive_gateway_field(decision.condition.raw),
+            condition: sensitive_gateway_field(condition),
             descriptor: PaymentDescriptor {
                 payment_type: sensitive_gateway_field(payment_type),
                 card_brand: sensitive_gateway_field(card_brand),

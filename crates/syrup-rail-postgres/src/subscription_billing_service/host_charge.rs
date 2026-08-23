@@ -69,7 +69,7 @@ impl SubscriptionBillingService {
             )
             .await?;
         if prepared_reservation.as_ref().is_some_and(|reservation| {
-            reservation.identity().gateway_account_id() != account.account_id
+            reservation.identity().gateway_account_id() != account.account_id()
         }) {
             return Err(SubscriptionBillingServiceError::InvalidState(
                 INVALID_SERVICE_STATE,
@@ -88,18 +88,9 @@ impl SubscriptionBillingService {
         }
         let gateway = self
             .resolver
-            .resolve(
-                command.billing_scope_id(),
-                account.account_id,
-                command.gateway_configuration_id(),
-                account.provider_key.clone(),
-            )
+            .resolve_identity(account.identity().clone())
             .await?;
-        if gateway.billing_scope_id() != command.billing_scope_id()
-            || gateway.gateway_account_id() != account.account_id
-            || gateway.gateway_configuration_id() != command.gateway_configuration_id()
-            || gateway.provider_key() != &account.provider_key
-        {
+        if gateway.identity() != account.identity() {
             return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
         if prepared_reservation.as_ref().is_some_and(|reservation| {
@@ -215,9 +206,9 @@ impl SubscriptionBillingService {
                 .resolve_host_charge_cooldown(
                     targets,
                     &reservation,
-                    &account.provider_key,
+                    account.provider_key(),
                     scope,
-                    HostChargeBeforeSubmissionResolution::admitted_not_submitted(),
+                    HostChargeResolutionCommand::admitted_cooldown(scope),
                 )
                 .await;
         }
@@ -308,9 +299,9 @@ impl SubscriptionBillingService {
                     .resolve_host_charge_cooldown(
                         targets,
                         reservation,
-                        &account.provider_key,
+                        account.provider_key(),
                         scope,
-                        HostChargeBeforeSubmissionResolution::prepared(),
+                        HostChargeResolutionCommand::prepared_cooldown(scope),
                     )
                     .await
                     .map(HostChargePreSubmissionOutcome::resolved),
@@ -331,7 +322,8 @@ impl SubscriptionBillingService {
         match stage {
             HostChargePreSubmissionStage::Unreserved => {
                 if matches!(failure, GatewayReadinessFailure::ProviderRateLimited(_)) {
-                    self.extend_provider_cooldown(&account.provider_key).await?;
+                    self.extend_provider_cooldown(account.provider_key())
+                        .await?;
                     return Err(SubscriptionBillingServiceError::GatewayMutationCooldown {
                         scope: GatewayMutationCooldownScope::Provider,
                     });
@@ -350,11 +342,7 @@ impl SubscriptionBillingService {
                 {
                     return Err(SubscriptionBillingServiceError::GatewayReadiness(error));
                 }
-                let resolution = if failure.cooldown().is_some() {
-                    HostChargeBeforeSubmissionResolution::prepared_provider_rate_limited()
-                } else {
-                    HostChargeBeforeSubmissionResolution::prepared()
-                };
+                let resolution = prepared_host_charge_resolution_command(&failure)?;
                 self.resolve_host_charge_failure(targets, reservation, failure, resolution)
                     .await
                     .map(HostChargePreSubmissionOutcome::resolved)
@@ -367,19 +355,13 @@ impl SubscriptionBillingService {
         targets: &dyn HostChargeTargetStore,
         reservation: &HostChargeReservation,
         failure: GatewayReadinessFailure,
-        resolution: HostChargeBeforeSubmissionResolution,
+        resolution: HostChargeResolutionCommand,
     ) -> Result<HostChargePaymentResult, SubscriptionBillingServiceError> {
         let gateway_error = failure.gateway_error();
         let cooldown_scope = failure.cooldown_error_scope();
         let code = failure.resolution_code();
         let payment = self
-            .resolve_host_charge_readiness(
-                targets,
-                reservation,
-                failure.into_detail(),
-                code,
-                resolution,
-            )
+            .resolve_host_charge_readiness(targets, reservation, failure.into_detail(), resolution)
             .await?;
         if payment.attempt().state().resolution_code() != Some(code) {
             return Ok(payment);
@@ -398,19 +380,11 @@ impl SubscriptionBillingService {
         targets: &dyn HostChargeTargetStore,
         reservation: &HostChargeReservation,
         detail: GatewayDiagnostic,
-        code: PaymentResolutionCode,
-        resolution: HostChargeBeforeSubmissionResolution,
+        resolution: HostChargeResolutionCommand,
     ) -> Result<HostChargePaymentResult, SubscriptionBillingServiceError> {
-        resolve_host_charge_before_submission(
-            &self.pool,
-            targets,
-            reservation,
-            detail,
-            code,
-            resolution,
-        )
-        .await
-        .map_err(Into::into)
+        resolve_host_charge_before_submission(&self.pool, targets, reservation, detail, resolution)
+            .await
+            .map_err(Into::into)
     }
 
     pub(super) async fn resolve_host_charge_cooldown(
@@ -419,7 +393,7 @@ impl SubscriptionBillingService {
         reservation: &HostChargeReservation,
         provider_key: &GatewayProviderKey,
         scope: GatewayMutationCooldownScope,
-        resolution: HostChargeBeforeSubmissionResolution,
+        resolution: HostChargeResolutionCommand,
     ) -> Result<HostChargePaymentResult, SubscriptionBillingServiceError> {
         let provider_name = provider_key.as_str().to_ascii_uppercase();
         let detail = match scope {
@@ -438,4 +412,46 @@ impl SubscriptionBillingService {
         )
         .await
     }
+}
+
+fn prepared_host_charge_resolution_command(
+    failure: &GatewayReadinessFailure,
+) -> Result<HostChargeResolutionCommand, SubscriptionBillingServiceError> {
+    let command = match failure {
+        GatewayReadinessFailure::Cooldown { scope, .. } => {
+            HostChargeResolutionCommand::prepared_cooldown(*scope)
+        }
+        GatewayReadinessFailure::ProviderRateLimited(_) => {
+            HostChargeResolutionCommand::prepared_readiness(
+                HostChargeReadinessEvent::ProviderRateLimited,
+            )
+        }
+        GatewayReadinessFailure::Gateway(GatewayError::RequestRejected(_)) => {
+            HostChargeResolutionCommand::prepared_readiness(
+                HostChargeReadinessEvent::RequestRejected,
+            )
+        }
+        GatewayReadinessFailure::Gateway(GatewayError::Malformed(_)) => {
+            HostChargeResolutionCommand::prepared_readiness(HostChargeReadinessEvent::Malformed)
+        }
+        GatewayReadinessFailure::Gateway(GatewayError::Configuration(_)) => {
+            HostChargeResolutionCommand::prepared_readiness(HostChargeReadinessEvent::Configuration)
+        }
+        GatewayReadinessFailure::Gateway(GatewayError::RateLimited(_)) => {
+            HostChargeResolutionCommand::prepared_readiness(
+                HostChargeReadinessEvent::GatewayRateLimited,
+            )
+        }
+        GatewayReadinessFailure::LiveModeUnavailable => {
+            HostChargeResolutionCommand::prepared_readiness(
+                HostChargeReadinessEvent::LiveModeUnavailable,
+            )
+        }
+        GatewayReadinessFailure::Gateway(GatewayError::Unavailable(_)) => {
+            return Err(SubscriptionBillingServiceError::InvalidState(
+                INVALID_SERVICE_STATE,
+            ));
+        }
+    };
+    Ok(command)
 }

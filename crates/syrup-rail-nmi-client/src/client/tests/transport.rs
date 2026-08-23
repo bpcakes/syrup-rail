@@ -45,11 +45,10 @@ fn order_ids_are_normalized_consistently_across_mutation_and_query_transports() 
     let order_id = " \t ck_round_trip \n";
     let sale = SaleRequest {
         amount_cents: 4_900,
-        currency: "USD".to_owned(),
         order_id: order_id.to_owned(),
-        source: PaymentSource::PaymentToken("tok_round_trip".to_owned()),
-        vault_action: Some(VaultAction::AddCustomer),
-        stored_credential: None,
+        intent: SaleIntent::AddCustomer {
+            payment_token: "tok_round_trip".to_owned(),
+        },
         billing_contact: None,
     };
     assert!(validate_sale_request(&sale, "private_key").is_ok());
@@ -149,11 +148,8 @@ async fn json_sale_sends_raw_private_key_authorization_header() {
     let outcome = gateway
         .sale(SaleRequest {
             amount_cents: 4_900,
-            currency: "USD".to_owned(),
             order_id: "ck_order_auth_header".to_owned(),
-            source: PaymentSource::PaymentToken("tok_auth_header".to_owned()),
-            vault_action: None,
-            stored_credential: None,
+            intent: SaleIntent::PaymentToken("tok_auth_header".to_owned()),
             billing_contact: None,
         })
         .await
@@ -187,13 +183,11 @@ async fn v5_recurring_merchant_sale_sends_scheduled_billing_metadata() {
     let outcome = client
         .sale(SaleRequest {
             amount_cents: 4_900,
-            currency: "USD".to_owned(),
             order_id: "ck_recurring_order".to_owned(),
-            source: PaymentSource::CustomerVault("vault_recurring".to_owned()),
-            vault_action: None,
-            stored_credential: Some(StoredCredential::RecurringMerchant {
+            intent: SaleIntent::RecurringStoredCredential {
+                customer_vault_id: "vault_recurring".to_owned(),
                 initial_transaction_id: "txn_initial".to_owned(),
-            }),
+            },
             billing_contact: None,
         })
         .await
@@ -252,11 +246,8 @@ async fn http_200_invalid_v5_json_is_an_indeterminate_mutation() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
-            currency: "USD".to_owned(),
             order_id: "ck_invalid_json".to_owned(),
-            source: PaymentSource::PaymentToken("tok_invalid_json".to_owned()),
-            vault_action: None,
-            stored_credential: None,
+            intent: SaleIntent::PaymentToken("tok_invalid_json".to_owned()),
             billing_contact: None,
         })
         .await
@@ -298,11 +289,8 @@ async fn connection_failure_is_known_not_submitted() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
-            currency: "USD".to_owned(),
             order_id: "ck_connect_failure".to_owned(),
-            source: PaymentSource::PaymentToken("tok_connect_failure".to_owned()),
-            vault_action: None,
-            stored_credential: None,
+            intent: SaleIntent::PaymentToken("tok_connect_failure".to_owned()),
             billing_contact: None,
         })
         .await
@@ -383,11 +371,8 @@ async fn established_http1_reset_is_indeterminate_and_never_retried() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
-            currency: "USD".to_owned(),
             order_id: "ck_established_reset".to_owned(),
-            source: PaymentSource::PaymentToken("tok_established_reset".to_owned()),
-            vault_action: None,
-            stored_credential: None,
+            intent: SaleIntent::PaymentToken("tok_established_reset".to_owned()),
             billing_contact: None,
         })
         .await
@@ -448,11 +433,8 @@ async fn http2_refused_stream_sale_is_indeterminate_and_never_retried() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
-            currency: "USD".to_owned(),
             order_id: "ck_refused_stream".to_owned(),
-            source: PaymentSource::PaymentToken("tok_refused_stream".to_owned()),
-            vault_action: None,
-            stored_credential: None,
+            intent: SaleIntent::PaymentToken("tok_refused_stream".to_owned()),
             billing_contact: None,
         })
         .await
@@ -479,11 +461,8 @@ async fn successful_oversized_response_is_an_indeterminate_mutation() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
-            currency: "USD".to_owned(),
             order_id: "ck_oversized_response".to_owned(),
-            source: PaymentSource::PaymentToken("tok_oversized_response".to_owned()),
-            vault_action: None,
-            stored_credential: None,
+            intent: SaleIntent::PaymentToken("tok_oversized_response".to_owned()),
             billing_contact: None,
         })
         .await
@@ -529,11 +508,8 @@ fn sale_amount_json_rejects_non_positive_cents() {
 fn sale_body_json_disables_processor_duplicate_checking() {
     let request = SaleRequest {
         amount_cents: 4_900,
-        currency: "USD".to_owned(),
         order_id: "ck_order_123".to_owned(),
-        source: PaymentSource::PaymentToken("tok_test".to_owned()),
-        vault_action: None,
-        stored_credential: None,
+        intent: SaleIntent::PaymentToken("tok_test".to_owned()),
         billing_contact: None,
     };
     let body = sale_body_json(
@@ -542,16 +518,15 @@ fn sale_body_json_disables_processor_duplicate_checking() {
     );
 
     assert_eq!(body.get("dup_seconds"), Some(&json!(0)));
+    assert_eq!(body.get("currency"), Some(&json!("USD")));
     assert!(body.get("duplicate_check_seconds").is_none());
 }
 
 #[test]
-fn sale_currency_is_usd_only_for_amount_cents_contract() {
-    assert!(ensure_supported_sale_currency("USD").is_ok());
-    assert!(matches!(
-        ensure_supported_sale_currency("JPY"),
-        Err(WireError::LocalInvalidRequest(message)) if message.contains("unsupported")
-    ));
+fn sale_currency_is_fixed_by_the_amount_cents_contract() {
+    let request = test_sale_request(PaymentSource::PaymentToken("token".to_owned()));
+    let body = sale_body_json(&request, amount_value(100).expect("valid amount"));
+    assert_eq!(body.get("currency"), Some(&json!("USD")));
 }
 
 #[test]
@@ -702,11 +677,8 @@ async fn http_429_sale_remains_indeterminate() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
-            currency: "USD".to_owned(),
             order_id: "ck_http_rate_limited".to_owned(),
-            source: PaymentSource::PaymentToken("tok_http_rate_limited".to_owned()),
-            vault_action: None,
-            stored_credential: None,
+            intent: SaleIntent::PaymentToken("tok_http_rate_limited".to_owned()),
             billing_contact: None,
         })
         .await

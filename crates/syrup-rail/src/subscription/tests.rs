@@ -113,6 +113,101 @@ fn grant_period_is_valid_by_construction() {
 }
 
 #[test]
+fn grant_revocation_is_one_validated_audit_state() {
+    let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+    let ends = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let scope = BillingScopeId::new(Uuid::from_u128(1));
+    let subscriber = SubscriberId::new(Uuid::from_u128(2));
+    let granting_actor = ActorId::new(Uuid::from_u128(3));
+    let revoking_actor = ActorId::new(Uuid::from_u128(4));
+    let grant = SubscriptionGrant::new(
+        SubscriptionGrantId::new(Uuid::from_u128(5)),
+        PlanKey::new("plan").unwrap(),
+        SubscriptionGrantKind::Testing,
+        starts,
+        ends,
+        granting_actor,
+    )
+    .unwrap();
+    let grant_reason = SubscriptionGrantReason::new("testing access").unwrap();
+
+    let active = SubscriptionGrantRecord::from_revocation_state(
+        scope,
+        subscriber,
+        grant.clone(),
+        grant_reason.clone(),
+        SubscriptionGrantRevocationState::Active,
+        starts,
+        starts,
+    )
+    .unwrap();
+    assert_eq!(
+        active.revocation_state(),
+        &SubscriptionGrantRevocationState::Active
+    );
+    assert_eq!(active.revoked_at(), None);
+    assert_eq!(active.revoked_by_actor_id(), None);
+    assert_eq!(active.revocation_reason(), None);
+
+    let revocation_reason = SubscriptionGrantReason::new("testing complete").unwrap();
+    let revoked = SubscriptionGrantRecord::from_revocation_state(
+        scope,
+        subscriber,
+        grant.clone(),
+        grant_reason.clone(),
+        SubscriptionGrantRevocationState::Revoked(SubscriptionGrantRevocationAudit::new(
+            starts,
+            revoking_actor,
+            revocation_reason.clone(),
+        )),
+        starts,
+        starts,
+    )
+    .unwrap();
+    assert!(matches!(
+        revoked.revocation_state(),
+        SubscriptionGrantRevocationState::Revoked(audit)
+            if audit.revoked_at() == &starts
+                && audit.revoked_by_actor_id() == revoking_actor
+                && audit.reason() == &revocation_reason
+    ));
+    assert_eq!(revoked.revoked_at(), Some(&starts));
+    assert_eq!(revoked.revoked_by_actor_id(), Some(revoking_actor));
+    assert_eq!(revoked.revocation_reason(), Some(&revocation_reason));
+
+    assert_eq!(
+        SubscriptionGrantRecord::new(
+            scope,
+            subscriber,
+            grant.clone(),
+            grant_reason.clone(),
+            Some(starts),
+            None,
+            None,
+            starts,
+            starts,
+        ),
+        Err(SubscriptionGrantRecordError::InvalidRevocation)
+    );
+    assert_eq!(
+        SubscriptionGrantRecord::from_revocation_state(
+            scope,
+            subscriber,
+            grant,
+            grant_reason,
+            SubscriptionGrantRevocationState::Revoked(SubscriptionGrantRevocationAudit::new(
+                starts - chrono::Duration::seconds(1),
+                revoking_actor,
+                revocation_reason,
+            )),
+            starts,
+            starts,
+        ),
+        Err(SubscriptionGrantRecordError::RevocationBeforeStart)
+    );
+}
+
+#[test]
 fn grant_reason_is_trimmed_bounded_and_card_safe() {
     assert_eq!(
         SubscriptionGrantReason::new("  launch partner  ")

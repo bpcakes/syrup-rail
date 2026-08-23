@@ -34,6 +34,18 @@ async fn foreground_service_applies_once_and_replays_before_host_admission()
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
+    let reconciled = service
+        .apply_reconciled_outcome(
+            result.attempt().identity().billing_scope_id(),
+            result.attempt().identity().attempt_id(),
+            &approved_outcome("txn_service_enroll"),
+        )
+        .await?;
+    assert_eq!(reconciled, result);
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+
     let replay = service.enroll(fixture.command.clone()).await?;
     assert_eq!(replay, result);
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
@@ -172,6 +184,19 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
+
+    let reconciled = service
+        .apply_reconciled_outcome(
+            payment.attempt().identity().billing_scope_id(),
+            payment.attempt().identity().attempt_id(),
+            &approved_outcome("txn_renewal_recurring"),
+        )
+        .await?;
+    assert_eq!(reconciled, *payment);
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
+
     let stale_update_status: String =
         sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
             .bind(stale_update_id.as_uuid())
@@ -365,6 +390,18 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         recovery_gateway.sale_order_ids.lock().await.as_slice(),
         &[original_order_id]
     );
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+
+    let reconciled = service
+        .apply_reconciled_outcome(
+            result.attempt().identity().billing_scope_id(),
+            result.attempt().identity().attempt_id(),
+            &approved_outcome_with_reference(Some("txn_recovery_approved"), "vault_recovery"),
+        )
+        .await?;
+    assert_eq!(reconciled, result);
+    assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
@@ -834,6 +871,42 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
 
+    let observed_transaction_id = "txn_method_observed_after_review";
+    let observed_outcome = GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Approved,
+        ProcessorEvidence::new(
+            Some(GatewayTransactionId::new(observed_transaction_id)?),
+            Some(GatewayPaymentMethodReference::new(
+                "vault_method_observed_after_review",
+            )?),
+            Some(GatewayDiagnostic::new("observed-response")),
+            Some(GatewayDiagnostic::new("observed-code")),
+            Some(GatewayDiagnostic::new("Observed response text")),
+            Some(GatewayDiagnostic::new("observed-condition")),
+            GatewayPaymentDescriptor::from_provider_parts(
+                Some(GatewayDiagnostic::new("creditcard")),
+                Some(GatewayDiagnostic::new("mastercard")),
+                Some("5555"),
+                Some(11),
+                Some(2032),
+            ),
+        ),
+    );
+    let merged_outcome = payment_method_replacement::reconciled_outcome_with_persisted_evidence(
+        parked.attempt(),
+        &observed_outcome,
+    );
+    let merged_evidence = merged_outcome.evidence();
+    assert_eq!(merged_outcome.status(), GatewayPaymentStatus::Approved);
+    assert_eq!(
+        merged_evidence,
+        parked.attempt().state().processor_evidence(),
+        "review-required replacement reconciliation must prefer every persisted field"
+    );
+    assert_eq!(parked_gateway.store_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
+
     let additional_transaction_id = "txn_method_unexpected_additional";
     let reconciled = service
         .apply_reconciled_outcome(
@@ -861,6 +934,10 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(additional_progression, "reconciliation_required");
+    assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
     let events = fixture.coordinator.events.lock().await;
     assert_eq!(events.len(), 2);

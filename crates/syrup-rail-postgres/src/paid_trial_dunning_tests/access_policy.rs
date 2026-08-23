@@ -82,8 +82,10 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
-            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
+                access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+                ..
+            },
             ..
         } if *subscription_id == suspended_id && *access_ended_at == first_suspended_at
     )));
@@ -124,8 +126,10 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            disposition: SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
-            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+            outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded {
+                ended_at,
+                access_ended_at,
+            },
             ..
         } if *subscription_id == suspended_id
             && *ended_at == final_suspended_at
@@ -172,8 +176,10 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
-            access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
+            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
+                access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
+                ..
+            },
             ..
         } if *subscription_id == remain_id
     )));
@@ -213,10 +219,10 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         &event.event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            disposition: SubscriptionPaymentFailureDisposition::DunningExhausted {
+            outcome: SubscriptionPaymentFailureOutcome::DunningExhausted {
                 exhausted_at,
+                access_ended_at,
             },
-            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
             ..
         } if *subscription_id == remain_id
             && *exhausted_at == remain_exhausted_at

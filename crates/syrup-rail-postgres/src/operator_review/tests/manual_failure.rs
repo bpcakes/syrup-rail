@@ -70,10 +70,10 @@ async fn manual_failure_uses_the_paid_trial_subscription_dunning_policy()
             &recorded[0],
             BillingEvent::SubscriptionPaymentFailed {
                 attempt_id: event_attempt_id,
-                disposition:
-                    syrup_rail::SubscriptionPaymentFailureDisposition::RetryScheduled {
-                        retry_at,
-                    },
+                outcome: syrup_rail::SubscriptionPaymentFailureOutcome::RetryScheduled {
+                    retry_at,
+                    ..
+                },
                 ..
             } if *event_attempt_id == PaymentAttemptId::new(attempt_id)
                 && *retry_at == next_attempt_at

@@ -6,10 +6,12 @@ fn expected_gateway_identity_requires_every_persisted_component() {
     let configuration_id = Uuid::from_u128(2);
     let provider_key = GatewayProviderKey::new("nmi").expect("valid provider key");
     let expected = ExpectedGatewayIdentity {
-        billing_scope_id: BillingScopeId::new(Uuid::from_u128(3)),
-        gateway_account_id: GatewayAccountId::new(account_id),
-        gateway_configuration_id: GatewayConfigurationId::new(configuration_id),
-        provider_key: &provider_key,
+        identity: syrup_rail::GatewayAccountIdentity::new(
+            BillingScopeId::new(Uuid::from_u128(3)),
+            GatewayAccountId::new(account_id),
+            provider_key,
+            GatewayConfigurationId::new(configuration_id),
+        ),
     };
 
     assert!(expected.matches_row(account_id, configuration_id, "nmi"));

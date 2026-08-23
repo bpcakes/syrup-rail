@@ -202,59 +202,6 @@ async fn recovery_subscription_state_matches(
     .await
 }
 
-async fn insert_recovery_attempt(
-    transaction: &mut Transaction<'_, Postgres>,
-    reservation: &SubscriptionRecoveryReservation,
-) -> Result<bool, sqlx::Error> {
-    let identity = reservation.identity();
-    let request = reservation.request();
-    let expected = reservation.expected_state();
-    let result = sqlx::query(
-        r#"
-        INSERT INTO billing_payment_attempts (
-            id, billing_scope_id, subscriber_id, plan_key, subscription_id,
-            payment_method_id, attempt_kind, status, idempotency_key,
-            request_fingerprint, amount_cents, currency,
-            billing_period_start_at, billing_period_end_at,
-            gateway_account_id, gateway_configuration_id, gateway_order_id,
-            billing_first_name, billing_last_name, billing_email,
-            subscription_expected_payment_method_id,
-            subscription_expected_initial_transaction_id,
-            subscription_expected_status
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, 'subscription_recovery', 'pending',
-            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-            $18, $19, $20, $21
-        )
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(request.idempotency_key().expose())
-    .bind(request.fingerprint().expose())
-    .bind(request.amount().cents())
-    .bind(request.amount().currency().as_str())
-    .bind(reservation.period().start_at())
-    .bind(reservation.period().end_at())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(request.gateway_order_id().expose())
-    .bind(request.billing_contact().first_name())
-    .bind(request.billing_contact().last_name())
-    .bind(request.billing_contact().email())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(expected.initial_transaction_id().expose())
-    .bind(expected.status().as_str())
-    .execute(&mut **transaction)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
 async fn reject_locked_recovery(
     transaction: &mut Transaction<'_, Postgres>,
     attempt: PaymentAttempt,
@@ -304,12 +251,11 @@ pub async fn preflight_subscription_recovery_in_transaction(
         ExistingAttemptPreflight::RequiresLockedContext => {}
     }
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
-    let Some(existing) = payment_attempt_by_idempotency(
+    let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     else {
@@ -336,12 +282,11 @@ pub async fn reserve_subscription_recovery_in_transaction(
     set_enrollment_timeouts(transaction).await?;
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
 
-    if let Some(existing) = payment_attempt_by_idempotency(
+    if let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     {
@@ -424,14 +369,18 @@ pub async fn reserve_subscription_recovery_in_transaction(
     )
     .map_err(|_| invalid_state())?;
 
-    let inserted = insert_recovery_attempt(transaction, &reservation).await?;
+    let inserted = insert_subscription_charge_attempt(
+        transaction,
+        reservation.identity(),
+        reservation.request(),
+    )
+    .await?;
     if inserted {
-        let attempt = payment_attempt_by_idempotency(
+        let attempt = lock_payment_attempt_by_idempotency(
             transaction,
             command.billing_scope_id(),
             command.subscriber_id(),
             command.idempotency_key(),
-            true,
         )
         .await?
         .ok_or_else(invalid_state)?;
@@ -441,12 +390,11 @@ pub async fn reserve_subscription_recovery_in_transaction(
         ));
     }
 
-    if let Some(existing) = payment_attempt_by_idempotency(
+    if let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     {
@@ -484,12 +432,11 @@ pub async fn admit_subscription_recovery_submission_in_transaction(
     fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
         .await?;
     fail_stale_unsubmitted_subscription_charges(transaction, reservation.subscription_id()).await?;
-    let attempt = payment_attempt_by_idempotency(
+    let attempt = lock_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.request().idempotency_key(),
-        true,
     )
     .await?
     .ok_or_else(invalid_state)?;

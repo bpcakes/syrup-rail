@@ -61,8 +61,26 @@ pub async fn find_payment_attempt_by_id_in_transaction(
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
-/// Locks the exact owner-scoped idempotency row for replay or mutation.
-pub async fn lock_payment_attempt_by_idempotency_in_transaction(
+pub(super) async fn find_payment_attempt_by_idempotency(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    idempotency_key: &IdempotencyKey,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    let query = format!(
+        "{PAYMENT_ATTEMPT_SELECT} \
+         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3"
+    );
+    let row = sqlx::query(&query)
+        .bind(billing_scope_id.as_uuid())
+        .bind(subscriber_id.as_uuid())
+        .bind(idempotency_key.expose())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    row.as_ref().map(payment_attempt_from_row).transpose()
+}
+
+pub(super) async fn lock_payment_attempt_by_idempotency(
     transaction: &mut Transaction<'_, Postgres>,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
@@ -80,6 +98,105 @@ pub async fn lock_payment_attempt_by_idempotency_in_transaction(
         .fetch_optional(&mut **transaction)
         .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
+}
+
+pub(super) async fn insert_subscription_charge_attempt(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: PaymentAttemptIdentity,
+    request: &PaymentAttemptRequest,
+) -> Result<bool, sqlx::Error> {
+    let (kind, plan_key, payment_method_id, period, expected_state) = match request.target() {
+        PaymentAttemptTarget::SubscriptionRenewal {
+            plan_key,
+            payment_method_id,
+            period,
+            expected_state,
+        } => (
+            PaymentAttemptKind::SubscriptionRenewal,
+            plan_key,
+            payment_method_id,
+            period,
+            expected_state,
+        ),
+        PaymentAttemptTarget::SubscriptionRecovery {
+            plan_key,
+            payment_method_id,
+            period,
+            expected_state,
+        } => (
+            PaymentAttemptKind::SubscriptionRecovery,
+            plan_key,
+            payment_method_id,
+            period,
+            expected_state,
+        ),
+        _ => {
+            return Err(sqlx::Error::Protocol(
+                "subscription charge attempt target is invalid".to_owned(),
+            ));
+        }
+    };
+    let contact = request.billing_contact();
+    let result = sqlx::query(
+        r#"
+        INSERT INTO billing_payment_attempts (
+            id, billing_scope_id, subscriber_id, plan_key, subscription_id,
+            payment_method_id, attempt_kind, status, idempotency_key,
+            request_fingerprint, amount_cents, currency,
+            billing_period_start_at, billing_period_end_at,
+            gateway_account_id, gateway_configuration_id, gateway_order_id,
+            billing_first_name, billing_last_name, billing_email,
+            subscription_expected_payment_method_id,
+            subscription_expected_initial_transaction_id,
+            subscription_expected_status
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11,
+            $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+        )
+        ON CONFLICT DO NOTHING
+        "#,
+    )
+    .bind(identity.attempt_id().as_uuid())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(plan_key.as_str())
+    .bind(expected_state.subscription_id().as_uuid())
+    .bind(payment_method_id.as_uuid())
+    .bind(kind.as_str())
+    .bind(request.idempotency_key().expose())
+    .bind(request.fingerprint().expose())
+    .bind(request.amount().cents())
+    .bind(request.amount().currency().as_str())
+    .bind(period.start_at())
+    .bind(period.end_at())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(identity.gateway_configuration_id().as_uuid())
+    .bind(request.gateway_order_id().expose())
+    .bind(contact.first_name())
+    .bind(contact.last_name())
+    .bind(contact.email())
+    .bind(expected_state.payment_method_id().as_uuid())
+    .bind(expected_state.initial_transaction_id().expose())
+    .bind(expected_state.status().as_str())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Locks the exact owner-scoped idempotency row for replay or mutation.
+pub async fn lock_payment_attempt_by_idempotency_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    idempotency_key: &IdempotencyKey,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    lock_payment_attempt_by_idempotency(
+        transaction,
+        billing_scope_id,
+        subscriber_id,
+        idempotency_key,
+    )
+    .await
 }
 
 pub(crate) async fn lock_payment_attempt_by_id_on_connection(
@@ -138,7 +255,7 @@ pub(crate) fn payment_attempt_from_row(
     let gateway_order_id = GatewayOrderId::from_generated_attempt(&order_value, attempt_id)
         .or_else(|_| GatewayOrderId::from_correlation(&order_value))
         .map_err(|_| invalid_state())?;
-    let request = PaymentAttemptRequest::new(
+    let request = PaymentAttemptRequest::from_persisted_parts(
         target,
         IdempotencyKey::new(row.try_get::<String, _>("idempotency_key")?)
             .map_err(|_| invalid_state())?,

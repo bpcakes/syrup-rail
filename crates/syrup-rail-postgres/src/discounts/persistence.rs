@@ -43,43 +43,32 @@ pub(super) async fn current_subscription_exists(
     connection: &mut PgConnection,
     claim: &SubscriptionDiscountClaim,
 ) -> Result<bool, SubscriptionDiscountOperationError> {
-    for _ in 0..2 {
-        let candidate = current_subscription_id(connection, claim).await?;
-        let Some(candidate) = candidate else {
-            return Ok(false);
-        };
-        let locked: Option<Uuid> = sqlx::query_scalar(
-            "SELECT id FROM billing_subscriptions WHERE id = $1 FOR NO KEY UPDATE",
-        )
-        .bind(candidate)
-        .fetch_optional(&mut *connection)
-        .await?;
-        if locked.is_some() && current_subscription_id(connection, claim).await? == Some(candidate)
-        {
-            return Ok(true);
-        }
-    }
-    Err(SubscriptionDiscountOperationError::InvalidState(
-        "current subscription ranking did not stabilize while acquiring its row lock",
-    ))
-}
-
-pub(super) async fn current_subscription_id(
-    connection: &mut PgConnection,
-    claim: &SubscriptionDiscountClaim,
-) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(
+    let current: Option<Uuid> = sqlx::query_scalar(
         r#"
-        SELECT id FROM billing_current_subscriptions
+        SELECT id
+        FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
-        ORDER BY current_subscription_rank, updated_at DESC, id DESC LIMIT 1
+            AND (
+                status IN ('active', 'past_due')
+                OR (status = 'canceled' AND current_period_end_at > now())
+            )
+        ORDER BY CASE status
+                WHEN 'active' THEN 0
+                WHEN 'past_due' THEN 1
+                ELSE 2
+            END,
+            updated_at DESC,
+            id DESC
+        LIMIT 1
+        FOR NO KEY UPDATE
         "#,
     )
     .bind(claim.billing_scope_id().as_uuid())
     .bind(claim.subscriber_id().as_uuid())
     .bind(claim.plan_key().as_str())
     .fetch_optional(&mut *connection)
-    .await
+    .await?;
+    Ok(current.is_some())
 }
 
 pub(super) async fn find_active_code(
@@ -350,7 +339,17 @@ pub(super) fn claim_from_row(
         })?,
     )
     .map_err(|_| SubscriptionDiscountOperationError::InvalidState(INVALID_DISCOUNT_STATE))?;
-    SubscriptionDiscountClaimRecord::new(
+    let state = SubscriptionDiscountClaimState::from_legacy_parts(
+        parse_claim_status(&row.try_get::<String, _>("status")?)?,
+        row.try_get("applied_at")?,
+        row.try_get::<Option<Uuid>, _>("applied_subscription_id")?
+            .map(SubscriptionId::new),
+        row.try_get::<Option<Uuid>, _>("applied_payment_attempt_id")?
+            .map(PaymentAttemptId::new),
+        row.try_get("superseded_at")?,
+    )
+    .map_err(|_| SubscriptionDiscountOperationError::InvalidState(INVALID_DISCOUNT_STATE))?;
+    Ok(SubscriptionDiscountClaimRecord::from_state(
         DiscountClaimId::new(row.try_get("id")?),
         BillingScopeId::new(row.try_get("billing_scope_id")?),
         SubscriberId::new(row.try_get("subscriber_id")?),
@@ -359,16 +358,9 @@ pub(super) fn claim_from_row(
         })?,
         DiscountCodeId::new(row.try_get("discount_code_id")?),
         snapshot,
-        parse_claim_status(&row.try_get::<String, _>("status")?)?,
+        state,
         row.try_get("claimed_at")?,
-        row.try_get("applied_at")?,
-        row.try_get::<Option<Uuid>, _>("applied_subscription_id")?
-            .map(SubscriptionId::new),
-        row.try_get::<Option<Uuid>, _>("applied_payment_attempt_id")?
-            .map(PaymentAttemptId::new),
-        row.try_get("superseded_at")?,
-    )
-    .map_err(|_| SubscriptionDiscountOperationError::InvalidState(INVALID_DISCOUNT_STATE))
+    ))
 }
 
 pub(super) fn discount_kind_from_row(

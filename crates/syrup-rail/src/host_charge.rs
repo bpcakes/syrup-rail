@@ -3,9 +3,9 @@ use chrono::{DateTime, Utc};
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
     ChargeAmount, GatewayConfigurationId, HostChargeTargetId, IdempotencyKey, PaymentAttempt,
-    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptRequest, PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind,
-    PaymentToken, ProcessorEvidence, ResolvedGateway, SubscriberId,
+    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
+    PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind, PaymentToken,
+    ProcessorEvidence, ResolvedGateway, SubscriberId,
 };
 use thiserror::Error;
 
@@ -138,12 +138,11 @@ impl HostChargeReservation {
             command.gateway_configuration_id(),
         );
         let amount = snapshot.charge().money();
-        let request = PaymentAttemptRequest::new(
+        let request = PaymentAttemptRequest::canonical(
             PaymentAttemptTarget::HostCharge {
                 target_id: command.target_id(),
             },
             command.idempotency_key().clone(),
-            PaymentAttemptFingerprint::for_host_charge(command.target_id(), amount),
             amount,
             gateway
                 .mutation_reference_factory()

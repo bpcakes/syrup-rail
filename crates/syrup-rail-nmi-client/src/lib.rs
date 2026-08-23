@@ -19,8 +19,8 @@ pub use client::{Client, ClientFactory};
 pub use configuration::{ConfigurationError, Credentials, Endpoint};
 pub use errors::{MutationCertainty, MutationError, QueryError};
 pub use requests::{
-    BillingContact, PaymentSource, ReportQuery, SaleRequest, StorePaymentMethodRequest,
-    StoredCredential, TransactionQuery, VaultAction,
+    BillingContact, PaymentSource, ReportQuery, SaleIntent, SaleIntentBuildError, SaleRequest,
+    StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
 };
 pub use responses::{
     AccountMode, PaymentDescriptor, PaymentDescriptorParts, PaymentOutcome,

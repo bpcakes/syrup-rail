@@ -3,9 +3,11 @@ use uuid::Uuid;
 
 use super::*;
 use crate::{
-    ChargeAmount, CumulativeRefundCents, CurrencyCode, DunningExhaustion, DunningSchedule,
-    GatewayPaymentDescriptor, GatewayPaymentMethodReference, PastDueAccessPolicy,
-    RecurringSubscriptionTerms, RenewalFailurePolicy, SubscriptionPeriodRule, SubscriptionStart,
+    ChargeAmount, CumulativeRefundCents, CurrencyCode, DiscountClaimId, DiscountCodeId,
+    DunningExhaustion, DunningSchedule, GatewayPaymentDescriptor, GatewayPaymentMethodReference,
+    LimitedDiscountMonths, PastDueAccessPolicy, PercentOffBasisPoints, RecurringSubscriptionTerms,
+    RenewalFailurePolicy, SubscriptionDiscountCode, SubscriptionDiscountSnapshot,
+    SubscriptionPeriodRule, SubscriptionStart,
 };
 
 fn subscription(value: u128) -> SubscriptionId {
@@ -90,6 +92,38 @@ fn initial_target(application: Option<SubscriptionInitialApplication>) -> Paymen
     }
 }
 
+fn enrollment_discount() -> SubscriptionEnrollmentDiscountSnapshot {
+    let usd = CurrencyCode::new("USD").unwrap();
+    SubscriptionEnrollmentDiscountSnapshot::new(
+        DiscountClaimId::new(Uuid::from_u128(1)),
+        DiscountCodeId::new(Uuid::from_u128(2)),
+        SubscriptionDiscountSnapshot::new(
+            SubscriptionDiscountCode::new("SAVE20").unwrap(),
+            Some("characterization".to_owned()),
+            SubscriptionDiscountKind::PercentOffBasisPoints(
+                PercentOffBasisPoints::new(2_000).unwrap(),
+            ),
+            SubscriptionDiscountDuration::LimitedMonths(LimitedDiscountMonths::new(3).unwrap()),
+            ChargeAmount::new(1_000, usd).unwrap(),
+            ChargeAmount::new(800, usd).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+fn canonical_fingerprint(target: PaymentAttemptTarget, cents: i32) -> String {
+    PaymentAttemptRequest::canonical(
+        target,
+        IdempotencyKey::new("canonical-key").unwrap(),
+        Money::new(cents, CurrencyCode::new("USD").unwrap()).unwrap(),
+        GatewayOrderId::from_correlation("canonical-order").unwrap(),
+        BillingContactSnapshot::new(None, None),
+    )
+    .fingerprint()
+    .expose()
+    .to_owned()
+}
+
 #[test]
 fn fingerprints_are_nonempty_and_value_safe_to_format() {
     assert_eq!(
@@ -100,6 +134,145 @@ fn fingerprints_are_nonempty_and_value_safe_to_format() {
     assert_eq!(fingerprint.expose(), "secret:economics");
     assert!(!format!("{fingerprint:?}").contains("secret:economics"));
     assert_eq!(fingerprint.to_string(), "[redacted]");
+}
+
+#[test]
+fn canonical_request_fingerprints_cover_every_kind_version_and_discount_shape() {
+    let offer = match initial_target(None) {
+        PaymentAttemptTarget::SubscriptionInitial { offer, .. } => offer,
+        _ => unreachable!(),
+    };
+    let initial = |terms_version, discount| PaymentAttemptTarget::SubscriptionInitial {
+        terms_version,
+        offer: offer.clone(),
+        discount,
+        application: None,
+    };
+    let period = BillingPeriod::new(instant(0), instant(1)).unwrap();
+    let expected_state = SubscriptionPaymentStateSnapshot::new(
+        subscription(1),
+        method(2),
+        GatewayTransactionId::new("txn-initial").unwrap(),
+        SubscriptionStatus::Active,
+    )
+    .unwrap();
+    let update_state = PaymentMethodUpdateSnapshot::new(
+        subscription(1),
+        method(2),
+        GatewayTransactionId::new("txn-initial").unwrap(),
+    );
+
+    let vectors = [
+        (
+            PaymentAttemptTarget::HostCharge {
+                target_id: target(20),
+            },
+            1_000,
+            "host_charge:00000000-0000-0000-0000-000000000014:1000:USD",
+        ),
+        (
+            initial(SubscriptionEnrollmentTermsVersion::V1, None),
+            1_000,
+            "subscription_initial:basic:1000:USD:discount:none:expected:full_price:1000:USD",
+        ),
+        (
+            initial(
+                SubscriptionEnrollmentTermsVersion::V1,
+                Some(enrollment_discount()),
+            ),
+            800,
+            "subscription_initial:basic:800:USD:discount:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000002:SAVE20:percent_off:none:2000:USD:1000:800:limited_months:3:expected:discounted:SAVE20:percent_off:none:2000:limited_months:3:USD:1000:800",
+        ),
+        (
+            initial(SubscriptionEnrollmentTermsVersion::V2, None),
+            1_000,
+            "subscription_initial:v2:basic:start:recurring_immediately:trial:none:recurring:1000:USD:calendar_months:1:dunning:[]:remain_past_due:suspend_immediately:initial:1000:USD:discount:none",
+        ),
+        (
+            initial(
+                SubscriptionEnrollmentTermsVersion::V2,
+                Some(enrollment_discount()),
+            ),
+            800,
+            "subscription_initial:v2:basic:start:recurring_immediately:trial:none:recurring:1000:USD:calendar_months:1:dunning:[]:remain_past_due:suspend_immediately:initial:800:USD:discount:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000002:SAVE20:percent_off:none:2000:USD:1000:800:limited_months:3",
+        ),
+        (
+            PaymentAttemptTarget::SubscriptionRenewal {
+                plan_key: PlanKey::new("basic").unwrap(),
+                payment_method_id: method(3),
+                period: period.clone(),
+                expected_state: expected_state.clone(),
+            },
+            1_000,
+            "subscription_renewal:basic:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000002:2026-08-01 00:00:00 UTC:1000:USD",
+        ),
+        (
+            PaymentAttemptTarget::SubscriptionRecovery {
+                plan_key: PlanKey::new("basic").unwrap(),
+                payment_method_id: method(3),
+                period,
+                expected_state,
+            },
+            1_000,
+            "subscription_recovery:basic:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000002:2026-08-01 00:00:00 UTC:1000:USD",
+        ),
+        (
+            PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
+                plan_key: PlanKey::new("basic").unwrap(),
+                payment_method_id: method(3),
+                expected_state: update_state,
+            },
+            0,
+            "subscription_payment_method_update:basic:00000000-0000-0000-0000-000000000001:00000000-0000-0000-0000-000000000002:txn-initial",
+        ),
+    ];
+
+    for (target, cents, expected) in vectors {
+        assert_eq!(canonical_fingerprint(target, cents), expected);
+    }
+}
+
+#[test]
+fn canonical_request_uses_expected_not_related_payment_method_identity() {
+    let expected_method = method(2);
+    let related_method = method(3);
+    let period = BillingPeriod::new(instant(0), instant(1)).unwrap();
+    let target = PaymentAttemptTarget::SubscriptionRenewal {
+        plan_key: PlanKey::new("basic").unwrap(),
+        payment_method_id: related_method,
+        period,
+        expected_state: SubscriptionPaymentStateSnapshot::new(
+            subscription(1),
+            expected_method,
+            GatewayTransactionId::new("txn-initial").unwrap(),
+            SubscriptionStatus::Active,
+        )
+        .unwrap(),
+    };
+    let fingerprint = canonical_fingerprint(target, 1_000);
+    assert!(fingerprint.contains(&expected_method.to_string()));
+    assert!(!fingerprint.contains(&related_method.to_string()));
+}
+
+#[test]
+fn persisted_request_rehydration_preserves_opaque_legacy_fingerprint_bytes() {
+    let legacy = PaymentAttemptFingerprint::new("legacy:v0:opaque/\u{df}").unwrap();
+    let request = PaymentAttemptRequest::from_persisted_parts(
+        PaymentAttemptTarget::HostCharge {
+            target_id: target(20),
+        },
+        IdempotencyKey::new("legacy-key").unwrap(),
+        legacy.clone(),
+        Money::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+        GatewayOrderId::from_correlation("legacy-order").unwrap(),
+        BillingContactSnapshot::new(None, None),
+    );
+
+    assert_eq!(request.fingerprint(), &legacy);
+    assert_ne!(
+        request.fingerprint().expose(),
+        canonical_fingerprint(request.target().clone(), 1_000)
+    );
 }
 
 #[test]

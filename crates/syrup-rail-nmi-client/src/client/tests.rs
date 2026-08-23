@@ -13,8 +13,8 @@ use url::form_urlencoded;
 use zeroize::Zeroizing;
 
 use crate::{
-    BillingContact, PaymentOutcomeDiagnostic, SensitiveText, StoredCredential,
-    TransactionReportDiagnostic, lossless_json::LosslessJsonValue,
+    BillingContact, PaymentOutcomeDiagnostic, PaymentSource, SaleIntent, SensitiveText,
+    StoredCredential, TransactionReportDiagnostic, VaultAction, lossless_json::LosslessJsonValue,
 };
 
 use super::form::{
@@ -35,8 +35,8 @@ use super::text::{last4, parse_expiry};
 use super::transport::{gateway_error_for_http_status, gateway_error_from_http_response};
 use super::v5::{amount_value, order_details_json, sale_body_json};
 use super::validation::{
-    ensure_supported_sale_currency, validate_report_query, validate_sale_request,
-    validate_store_payment_method_request, validate_transaction_query,
+    validate_report_query, validate_sale_request, validate_store_payment_method_request,
+    validate_transaction_query,
 };
 use super::*;
 
@@ -191,11 +191,9 @@ async fn spawn_capturing_server(
 fn test_sale_request(source: PaymentSource) -> SaleRequest {
     SaleRequest {
         amount_cents: 100,
-        currency: "USD".to_owned(),
         order_id: "ck_order".to_owned(),
-        source,
-        vault_action: None,
-        stored_credential: None,
+        intent: SaleIntent::from_legacy_parts(source, None, None)
+            .expect("a direct source is a valid sale intent"),
         billing_contact: None,
     }
 }

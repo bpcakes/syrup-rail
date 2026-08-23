@@ -59,7 +59,6 @@ pub use payment_method_replacement::{
     preflight_subscription_payment_method_replacement_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
 };
-use persistence::map_subscription_persistence_error;
 pub(crate) use persistence::{
     PAYMENT_ATTEMPT_SELECT, find_payment_attempt_by_id_on_connection,
     lock_payment_attempt_by_id_on_connection, payment_attempt_from_row,
@@ -67,6 +66,10 @@ pub(crate) use persistence::{
 };
 pub use persistence::{
     find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,
+};
+use persistence::{
+    find_payment_attempt_by_idempotency, insert_subscription_charge_attempt,
+    lock_payment_attempt_by_idempotency, map_subscription_persistence_error,
 };
 pub use recovery::{
     admit_subscription_recovery_submission_in_transaction,

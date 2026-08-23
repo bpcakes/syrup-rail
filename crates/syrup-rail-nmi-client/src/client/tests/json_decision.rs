@@ -173,6 +173,64 @@ fn payment_decision_evidence_is_reduced_symmetrically() {
 }
 
 #[test]
+fn decision_diagnostic_precedence_covers_each_closed_state() {
+    for (members, expected_status, expected_diagnostic) in [
+        (r#""response":"1""#, PaymentStatus::Approved, None),
+        (r#""status":"pending""#, PaymentStatus::Unknown, None),
+        (
+            r#""response":"1","response_code":"200""#,
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::ConflictingDecisionEvidence),
+        ),
+        (
+            r#""response":"1","status":"processor_surprise""#,
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence),
+        ),
+        (
+            r#""response":"1","response":"2","status":"processor_surprise""#,
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField),
+        ),
+        (
+            "",
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::MissingDecisionEvidence),
+        ),
+    ] {
+        let comma = if members.is_empty() { "" } else { "," };
+        let outcome = payment_outcome_from_json_text(&format!(
+            r#"{{"transaction_id":"txn_decision_precedence"{comma}{members}}}"#
+        ))
+        .expect("closed decision state should parse conservatively");
+
+        assert_eq!(outcome.status, expected_status, "{members}");
+        assert_eq!(
+            outcome.diagnostics,
+            expected_diagnostic.into_iter().collect::<Vec<_>>(),
+            "{members}"
+        );
+    }
+}
+
+#[test]
+fn unrecognized_decision_evidence_remains_redacted_from_outcome_debug() {
+    let raw = "decision-debug-sentinel";
+    let outcome = payment_outcome_from_json(&json!({
+        "transaction_id": "txn_redacted_decision",
+        "status": raw,
+    }))
+    .expect("unrecognized decision evidence should parse conservatively");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.diagnostics,
+        vec![PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence]
+    );
+    assert!(!format!("{outcome:?}").contains(raw));
+}
+
+#[test]
 fn communication_and_duplicate_response_codes_require_reconciliation() {
     for response_code in ["420", "421", "430"] {
         assert_eq!(

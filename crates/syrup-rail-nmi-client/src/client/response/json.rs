@@ -6,7 +6,7 @@ use super::super::{
     text::{bounded_gateway_text, last4, parse_expiry, sensitive_gateway_field, valid_last4},
 };
 use super::common::{
-    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
+    IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
     ScalarOccurrenceCollector, finalize_foreground_identifiers, rate_limited_wire_error,
     resolve_optional_scalar,
 };
@@ -182,14 +182,10 @@ pub(in crate::client) fn payment_outcome_from_json(
     value: &LosslessJsonValue,
 ) -> Result<PaymentOutcome, WireError> {
     let decision = PaymentDecisionFields::new(
-        collect_json_direct_scalar(value, "response", false)
-            .finish_decision(DecisionFieldKind::Response),
-        collect_json_direct_scalar(value, "response_code", false)
-            .finish_decision(DecisionFieldKind::ResponseCode),
-        collect_json_direct_scalar(value, "status", false)
-            .finish_decision(DecisionFieldKind::GatewayState),
-        collect_json_direct_scalar(value, "condition", false)
-            .finish_decision(DecisionFieldKind::GatewayState),
+        collect_json_direct_scalar(value, "response", false),
+        collect_json_direct_scalar(value, "response_code", false),
+        collect_json_direct_scalar(value, "status", false),
+        collect_json_direct_scalar(value, "condition", false),
     );
     let transaction_evidence = collect_json_identifier(
         value,
@@ -237,14 +233,15 @@ pub(in crate::client) fn payment_outcome_from_json(
         customer_vault_id,
         &mut diagnostics,
     );
+    let (response, response_code, condition) = decision.into_public_raw_fields();
     Ok(PaymentOutcome {
         status,
         transaction_id,
         customer_vault_id,
-        response: sensitive_gateway_field(decision.response.raw),
-        response_code: sensitive_gateway_field(decision.response_code.raw),
+        response: sensitive_gateway_field(response),
+        response_code: sensitive_gateway_field(response_code),
         response_text: sensitive_gateway_field(response_text),
-        condition: sensitive_gateway_field(decision.condition.raw),
+        condition: sensitive_gateway_field(condition),
         descriptor: descriptor_from_json(value),
         diagnostics,
     })

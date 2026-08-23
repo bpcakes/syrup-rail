@@ -111,6 +111,69 @@ pub enum PaymentAttemptTarget {
 }
 
 impl PaymentAttemptTarget {
+    fn canonical_fingerprint(&self, amount: Money) -> PaymentAttemptFingerprint {
+        match self {
+            Self::HostCharge { target_id } => {
+                PaymentAttemptFingerprint::for_host_charge(*target_id, amount)
+            }
+            Self::SubscriptionInitial {
+                terms_version,
+                offer,
+                discount,
+                ..
+            } => match terms_version {
+                SubscriptionEnrollmentTermsVersion::V1 => {
+                    PaymentAttemptFingerprint::for_subscription_initial_v1(
+                        offer.plan_key(),
+                        amount,
+                        discount.as_ref(),
+                    )
+                }
+                SubscriptionEnrollmentTermsVersion::V2 => {
+                    PaymentAttemptFingerprint::for_subscription_initial_v2(
+                        offer,
+                        amount,
+                        discount.as_ref(),
+                    )
+                }
+            },
+            Self::SubscriptionRenewal {
+                plan_key,
+                period,
+                expected_state,
+                ..
+            } => PaymentAttemptFingerprint::for_subscription_renewal(
+                plan_key,
+                expected_state.subscription_id(),
+                expected_state.payment_method_id(),
+                *period.start_at(),
+                amount,
+            ),
+            Self::SubscriptionRecovery {
+                plan_key,
+                period,
+                expected_state,
+                ..
+            } => PaymentAttemptFingerprint::for_subscription_recovery(
+                plan_key,
+                expected_state.subscription_id(),
+                expected_state.payment_method_id(),
+                *period.start_at(),
+                amount,
+            ),
+            Self::SubscriptionPaymentMethodUpdate {
+                plan_key,
+                expected_state,
+                ..
+            } => PaymentAttemptFingerprint::for_subscription_payment_method_update(
+                plan_key,
+                expected_state.subscription_id(),
+                expected_state.payment_method_id(),
+                expected_state.expected_initial_transaction_id(),
+            ),
+        }
+    }
+
     pub const fn kind(&self) -> PaymentAttemptKind {
         match self {
             Self::HostCharge { .. } => PaymentAttemptKind::HostCharge,
@@ -295,7 +358,29 @@ pub struct PaymentAttemptRequest {
 }
 
 impl PaymentAttemptRequest {
-    pub const fn new(
+    /// Builds a new request whose fingerprint is derived from its complete
+    /// target and amount.
+    pub fn canonical(
+        target: PaymentAttemptTarget,
+        idempotency_key: IdempotencyKey,
+        amount: Money,
+        gateway_order_id: GatewayOrderId,
+        billing_contact: BillingContactSnapshot,
+    ) -> Self {
+        let fingerprint = target.canonical_fingerprint(amount);
+        Self::from_persisted_parts(
+            target,
+            idempotency_key,
+            fingerprint,
+            amount,
+            gateway_order_id,
+            billing_contact,
+        )
+    }
+
+    /// Rehydrates a request while preserving its durable opaque fingerprint
+    /// byte for byte.
+    pub const fn from_persisted_parts(
         target: PaymentAttemptTarget,
         idempotency_key: IdempotencyKey,
         fingerprint: PaymentAttemptFingerprint,
@@ -311,6 +396,27 @@ impl PaymentAttemptRequest {
             gateway_order_id,
             billing_contact,
         }
+    }
+
+    /// Compatibility constructor for callers that already carry a durable
+    /// fingerprint. New live requests should use [`Self::canonical`], while
+    /// persistence codecs should use [`Self::from_persisted_parts`].
+    pub const fn new(
+        target: PaymentAttemptTarget,
+        idempotency_key: IdempotencyKey,
+        fingerprint: PaymentAttemptFingerprint,
+        amount: Money,
+        gateway_order_id: GatewayOrderId,
+        billing_contact: BillingContactSnapshot,
+    ) -> Self {
+        Self::from_persisted_parts(
+            target,
+            idempotency_key,
+            fingerprint,
+            amount,
+            gateway_order_id,
+            billing_contact,
+        )
     }
 
     pub const fn target(&self) -> &PaymentAttemptTarget {

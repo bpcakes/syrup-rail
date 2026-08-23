@@ -1,13 +1,13 @@
 use crate::{
-    BillingContact, MutationError, PaymentSource, QueryError, ReportQuery, SaleRequest,
-    StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
+    BillingContact, MutationError, QueryError, ReportQuery, SaleIntent, SaleRequest,
+    StorePaymentMethodRequest, TransactionQuery,
 };
 
 use super::request_budget::{OutboundRequestValidator, RequestEncoding};
 use super::{
     MAX_NMI_CONTACT_NAME_BYTES, MAX_NMI_EMAIL_BYTES, MAX_NMI_IDENTIFIER_BYTES,
     MAX_NMI_ORDER_ID_BYTES, MAX_NMI_PAYMENT_TOKEN_BYTES, MAX_NMI_REPORT_DATE_BYTES,
-    MAX_NMI_TRANSACTION_REPORTS, SUPPORTED_NMI_CURRENCY, WireError,
+    MAX_NMI_TRANSACTION_REPORTS, SUPPORTED_NMI_CURRENCY,
 };
 
 pub(super) fn validate_sale_request(
@@ -18,57 +18,39 @@ pub(super) fn validate_sale_request(
     if request.amount_cents <= 0 {
         return Err(invalid_mutation("payment amount must be positive"));
     }
-    if request.currency != SUPPORTED_NMI_CURRENCY {
-        return Err(invalid_mutation("payment currency must be USD"));
-    }
     if request.order_id.trim().is_empty() {
         return Err(invalid_mutation("payment order ID is required"));
     }
-    match &request.source {
-        PaymentSource::PaymentToken(token) if token.trim().is_empty() => {
+    match &request.intent {
+        SaleIntent::PaymentToken(token)
+        | SaleIntent::AddCustomer {
+            payment_token: token,
+        }
+        | SaleIntent::InitialStoredCredential {
+            payment_token: token,
+        } if token.trim().is_empty() => {
             return Err(invalid_mutation("payment token is required"));
         }
-        PaymentSource::CustomerVault(id) if id.trim().is_empty() => {
+        SaleIntent::CustomerVault(id)
+        | SaleIntent::RecurringStoredCredential {
+            customer_vault_id: id,
+            ..
+        } if id.trim().is_empty() => {
             return Err(invalid_mutation("Customer Vault ID is required"));
         }
-        PaymentSource::PaymentToken(_) | PaymentSource::CustomerVault(_) => {}
-    }
-    if matches!(request.source, PaymentSource::CustomerVault(_))
-        && request.vault_action == Some(VaultAction::AddCustomer)
-    {
-        return Err(invalid_mutation(
-            "adding a Customer Vault entry requires a payment token",
-        ));
-    }
-    match (&request.source, &request.stored_credential) {
-        (PaymentSource::CustomerVault(_), Some(StoredCredential::InitialCustomer)) => {
-            return Err(invalid_mutation(
-                "initial stored credentials require a payment token",
-            ));
-        }
-        (PaymentSource::PaymentToken(_), Some(StoredCredential::InitialCustomer))
-            if request.vault_action != Some(VaultAction::AddCustomer) =>
-        {
-            return Err(invalid_mutation(
-                "initial stored credentials require adding a Customer Vault entry",
-            ));
-        }
-        (PaymentSource::PaymentToken(_), Some(StoredCredential::RecurringMerchant { .. })) => {
-            return Err(invalid_mutation(
-                "merchant-initiated stored credentials require a Customer Vault source",
-            ));
-        }
-        (
-            _,
-            Some(StoredCredential::RecurringMerchant {
-                initial_transaction_id,
-            }),
-        ) if initial_transaction_id.trim().is_empty() => {
+        SaleIntent::RecurringStoredCredential {
+            initial_transaction_id,
+            ..
+        } if initial_transaction_id.trim().is_empty() => {
             return Err(invalid_mutation(
                 "merchant-initiated stored credentials require the initial transaction ID",
             ));
         }
-        _ => {}
+        SaleIntent::PaymentToken(_)
+        | SaleIntent::CustomerVault(_)
+        | SaleIntent::AddCustomer { .. }
+        | SaleIntent::InitialStoredCredential { .. }
+        | SaleIntent::RecurringStoredCredential { .. } => {}
     }
     Ok(())
 }
@@ -166,14 +148,14 @@ fn validate_sale_request_size(
     request: &SaleRequest,
     private_api_key: &str,
 ) -> Result<(), &'static str> {
-    let encoding = if request.vault_action == Some(VaultAction::AddCustomer) {
+    let encoding = if request.intent.uses_classic_api() {
         RequestEncoding::Form
     } else {
         RequestEncoding::Json
     };
     let mut validator = OutboundRequestValidator::new(encoding, private_api_key)?;
     validator.field(
-        &request.currency,
+        SUPPORTED_NMI_CURRENCY,
         SUPPORTED_NMI_CURRENCY.len(),
         "payment currency must be USD",
     )?;
@@ -182,21 +164,27 @@ fn validate_sale_request_size(
         MAX_NMI_ORDER_ID_BYTES,
         "payment order ID exceeds the supported size",
     )?;
-    match &request.source {
-        PaymentSource::PaymentToken(payment_token) => validator.field(
+    match &request.intent {
+        SaleIntent::PaymentToken(payment_token)
+        | SaleIntent::AddCustomer { payment_token }
+        | SaleIntent::InitialStoredCredential { payment_token } => validator.field(
             payment_token,
             MAX_NMI_PAYMENT_TOKEN_BYTES,
             "payment token exceeds the supported size",
         )?,
-        PaymentSource::CustomerVault(customer_vault_id) => validator.field(
+        SaleIntent::CustomerVault(customer_vault_id)
+        | SaleIntent::RecurringStoredCredential {
+            customer_vault_id, ..
+        } => validator.field(
             customer_vault_id,
             MAX_NMI_IDENTIFIER_BYTES,
             "Customer Vault ID exceeds the supported size",
         )?,
     }
-    if let Some(StoredCredential::RecurringMerchant {
+    if let SaleIntent::RecurringStoredCredential {
         initial_transaction_id,
-    }) = &request.stored_credential
+        ..
+    } = &request.intent
     {
         validator.field(
             initial_transaction_id,
@@ -269,15 +257,6 @@ fn validate_report_query_size(
         "report end date exceeds the supported size",
     )?;
     Ok(())
-}
-
-pub(super) fn ensure_supported_sale_currency(currency: &str) -> Result<(), WireError> {
-    if currency == SUPPORTED_NMI_CURRENCY {
-        return Ok(());
-    }
-    Err(WireError::LocalInvalidRequest(format!(
-        "unsupported NMI sale currency '{currency}'"
-    )))
 }
 
 pub(super) fn trimmed_optional(value: &Option<String>) -> Option<&str> {

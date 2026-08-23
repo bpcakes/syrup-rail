@@ -120,17 +120,13 @@ impl ScalarOccurrenceCollector {
         }
     }
 
-    pub(super) fn finish_decision(self, kind: DecisionFieldKind) -> DecisionField {
+    fn finish_decision(self, kind: DecisionFieldKind) -> DecisionField {
         if self.invalid {
-            return DecisionField {
-                saw_occurrence: true,
-                invalid_or_conflicting: true,
-                ..DecisionField::default()
-            };
+            return DecisionField::InvalidOrConflicting;
         }
         let Some(selected) = self.values.first() else {
             debug_assert!(!self.saw_occurrence);
-            return DecisionField::default();
+            return DecisionField::Missing;
         };
         let selected_evidence = kind.classify(selected);
         let selected_normalized = kind.normalize(selected);
@@ -144,18 +140,17 @@ impl ScalarOccurrenceCollector {
             .iter()
             .skip(1)
             .any(|value| kind.normalize(value) != selected_normalized);
-        DecisionField {
-            raw: (!conflicting_raw).then(|| selected.clone()),
-            evidence: (!conflicting_status).then_some(selected_evidence).flatten(),
-            saw_occurrence: true,
-            invalid_or_conflicting: conflicting_status,
-            unrecognized: !conflicting_status && selected_evidence.is_none(),
+        let raw = (!conflicting_raw).then(|| selected.clone());
+        match (conflicting_status, selected_evidence) {
+            (true, _) => DecisionField::InvalidOrConflicting,
+            (false, Some(status)) => DecisionField::Classified { raw, status },
+            (false, None) => DecisionField::Unrecognized { raw },
         }
     }
 }
 
 #[derive(Clone, Copy)]
-pub(super) enum DecisionFieldKind {
+enum DecisionFieldKind {
     Response,
     ResponseCode,
     GatewayState,
@@ -183,35 +178,64 @@ impl DecisionFieldKind {
     }
 }
 
-#[derive(Default)]
-pub(super) struct DecisionField {
-    pub(super) raw: Option<String>,
-    pub(super) evidence: Option<PaymentStatus>,
-    pub(super) saw_occurrence: bool,
-    pub(super) invalid_or_conflicting: bool,
-    pub(super) unrecognized: bool,
+enum DecisionField {
+    Missing,
+    InvalidOrConflicting,
+    Unrecognized {
+        raw: Option<String>,
+    },
+    Classified {
+        raw: Option<String>,
+        status: PaymentStatus,
+    },
 }
 
-#[derive(Default)]
+impl DecisionField {
+    fn evidence(&self) -> Option<PaymentStatus> {
+        match self {
+            Self::Classified { status, .. } => Some(*status),
+            Self::Missing | Self::InvalidOrConflicting | Self::Unrecognized { .. } => None,
+        }
+    }
+
+    fn is_present(&self) -> bool {
+        !matches!(self, Self::Missing)
+    }
+
+    fn raw(&self) -> Option<&str> {
+        match self {
+            Self::Unrecognized { raw } | Self::Classified { raw, .. } => raw.as_deref(),
+            Self::Missing | Self::InvalidOrConflicting => None,
+        }
+    }
+
+    fn into_raw(self) -> Option<String> {
+        match self {
+            Self::Unrecognized { raw } | Self::Classified { raw, .. } => raw,
+            Self::Missing | Self::InvalidOrConflicting => None,
+        }
+    }
+}
+
 pub(super) struct PaymentDecisionFields {
-    pub(super) response: DecisionField,
-    pub(super) response_code: DecisionField,
-    pub(super) status: DecisionField,
-    pub(super) condition: DecisionField,
+    response: DecisionField,
+    response_code: DecisionField,
+    status: DecisionField,
+    condition: DecisionField,
 }
 
 impl PaymentDecisionFields {
     pub(super) fn new(
-        response: DecisionField,
-        response_code: DecisionField,
-        status: DecisionField,
-        condition: DecisionField,
+        response: ScalarOccurrenceCollector,
+        response_code: ScalarOccurrenceCollector,
+        status: ScalarOccurrenceCollector,
+        condition: ScalarOccurrenceCollector,
     ) -> Self {
         Self {
-            response,
-            response_code,
-            status,
-            condition,
+            response: response.finish_decision(DecisionFieldKind::Response),
+            response_code: response_code.finish_decision(DecisionFieldKind::ResponseCode),
+            status: status.finish_decision(DecisionFieldKind::GatewayState),
+            condition: condition.finish_decision(DecisionFieldKind::GatewayState),
         }
     }
 
@@ -222,19 +246,25 @@ impl PaymentDecisionFields {
             &self.status,
             &self.condition,
         ];
-        if fields.iter().any(|field| field.invalid_or_conflicting) {
+        if fields
+            .iter()
+            .any(|field| matches!(field, &&DecisionField::InvalidOrConflicting))
+        {
             return (
                 PaymentStatus::Unknown,
                 Some(PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField),
             );
         }
-        if fields.iter().any(|field| field.unrecognized) {
+        if fields
+            .iter()
+            .any(|field| matches!(field, &&DecisionField::Unrecognized { .. }))
+        {
             return (
                 PaymentStatus::Unknown,
                 Some(PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence),
             );
         }
-        let mut evidence = fields.iter().filter_map(|field| field.evidence);
+        let mut evidence = fields.iter().filter_map(|field| field.evidence());
         let Some(status) = evidence.next() else {
             return (
                 PaymentStatus::Unknown,
@@ -252,17 +282,25 @@ impl PaymentDecisionFields {
     }
 
     pub(super) fn has_structured_evidence(&self) -> bool {
-        self.response.saw_occurrence
-            || self.response_code.saw_occurrence
-            || self.status.saw_occurrence
-            || self.condition.saw_occurrence
+        self.response.is_present()
+            || self.response_code.is_present()
+            || self.status.is_present()
+            || self.condition.is_present()
     }
 
     pub(super) fn is_rate_limited(&self) -> bool {
-        self.response.raw.as_deref() == Some("3")
-            && self.response_code.raw.as_deref() == Some("301")
-            && !self.status.saw_occurrence
-            && !self.condition.saw_occurrence
+        self.response.raw() == Some("3")
+            && self.response_code.raw() == Some("301")
+            && !self.status.is_present()
+            && !self.condition.is_present()
+    }
+
+    pub(super) fn into_public_raw_fields(self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.response.into_raw(),
+            self.response_code.into_raw(),
+            self.condition.into_raw(),
+        )
     }
 }
 

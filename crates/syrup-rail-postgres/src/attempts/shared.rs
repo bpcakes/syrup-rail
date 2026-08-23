@@ -139,12 +139,11 @@ pub(super) async fn preflight_existing_attempt(
     idempotency_key: &IdempotencyKey,
     matches_command: impl FnOnce(&PaymentAttempt) -> bool,
 ) -> Result<ExistingAttemptPreflight, PaymentAttemptStoreError> {
-    let Some(existing) = payment_attempt_by_idempotency(
+    let Some(existing) = find_payment_attempt_by_idempotency(
         transaction,
         billing_scope_id,
         subscriber_id,
         idempotency_key,
-        false,
     )
     .await?
     else {
@@ -170,46 +169,47 @@ pub(super) async fn preflight_existing_attempt(
 /// Database provider keys remain raw values at this boundary: an unexpected
 /// persisted value fails closed as a mismatch rather than becoming a new parse
 /// error contract.
-#[derive(Clone, Copy)]
-pub(super) struct ExpectedGatewayIdentity<'a> {
-    pub(super) billing_scope_id: BillingScopeId,
-    pub(super) gateway_account_id: GatewayAccountId,
-    pub(super) gateway_configuration_id: GatewayConfigurationId,
-    pub(super) provider_key: &'a GatewayProviderKey,
+#[derive(Clone)]
+pub(super) struct ExpectedGatewayIdentity {
+    pub(super) identity: syrup_rail::GatewayAccountIdentity,
 }
 
-impl<'a> ExpectedGatewayIdentity<'a> {
+impl ExpectedGatewayIdentity {
     pub(super) fn for_gateway(
         billing_scope_id: BillingScopeId,
         expected_gateway_configuration_id: GatewayConfigurationId,
-        gateway: &'a syrup_rail::ResolvedGateway,
+        gateway: &syrup_rail::ResolvedGateway,
     ) -> Self {
         Self {
-            billing_scope_id,
-            gateway_account_id: gateway.gateway_account_id(),
-            gateway_configuration_id: expected_gateway_configuration_id,
-            provider_key: gateway.provider_key(),
+            identity: syrup_rail::GatewayAccountIdentity::new(
+                billing_scope_id,
+                gateway.gateway_account_id(),
+                gateway.provider_key().clone(),
+                expected_gateway_configuration_id,
+            ),
         }
     }
 
     pub(super) fn from_reservation(
         identity: PaymentAttemptIdentity,
-        provider_key: &'a GatewayProviderKey,
+        provider_key: &GatewayProviderKey,
     ) -> Self {
         Self {
-            billing_scope_id: identity.billing_scope_id(),
-            gateway_account_id: identity.gateway_account_id(),
-            gateway_configuration_id: identity.gateway_configuration_id(),
-            provider_key,
+            identity: syrup_rail::GatewayAccountIdentity::new(
+                identity.billing_scope_id(),
+                identity.gateway_account_id(),
+                provider_key.clone(),
+                identity.gateway_configuration_id(),
+            ),
         }
     }
 
     pub(super) const fn billing_scope_id(&self) -> BillingScopeId {
-        self.billing_scope_id
+        self.identity.billing_scope_id()
     }
 
     pub(super) const fn gateway_account_id(&self) -> GatewayAccountId {
-        self.gateway_account_id
+        self.identity.gateway_account_id()
     }
 
     pub(super) fn matches_row(
@@ -218,9 +218,9 @@ impl<'a> ExpectedGatewayIdentity<'a> {
         configuration_id: Uuid,
         provider_key: &str,
     ) -> bool {
-        account_id == self.gateway_account_id.into_uuid()
-            && configuration_id == self.gateway_configuration_id.into_uuid()
-            && provider_key == self.provider_key.as_str()
+        account_id == self.identity.gateway_account_id().into_uuid()
+            && configuration_id == self.identity.gateway_configuration_id().into_uuid()
+            && provider_key == self.identity.provider_key().as_str()
     }
 }
 
@@ -262,28 +262,6 @@ pub(crate) async fn try_lock_subscription_aggregate(
     .bind(plan_key.as_str())
     .fetch_one(&mut **transaction)
     .await
-}
-
-pub(super) async fn payment_attempt_by_idempotency(
-    transaction: &mut Transaction<'_, Postgres>,
-    billing_scope_id: BillingScopeId,
-    subscriber_id: SubscriberId,
-    idempotency_key: &IdempotencyKey,
-    for_update: bool,
-) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let lock = if for_update { "FOR UPDATE" } else { "" };
-    let query = format!(
-        "{PAYMENT_ATTEMPT_SELECT} \
-         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3 \
-         {lock}"
-    );
-    let row = sqlx::query(&query)
-        .bind(billing_scope_id.as_uuid())
-        .bind(subscriber_id.as_uuid())
-        .bind(idempotency_key.expose())
-        .fetch_optional(&mut **transaction)
-        .await?;
-    row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
 pub(crate) async fn lock_initial_attempt_rows(
@@ -374,7 +352,7 @@ pub(crate) async fn expire_stale_initial_attempts(
 
 pub(super) async fn gateway_identity_matches_account(
     transaction: &mut Transaction<'_, Postgres>,
-    expected: &ExpectedGatewayIdentity<'_>,
+    expected: &ExpectedGatewayIdentity,
 ) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"

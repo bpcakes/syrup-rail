@@ -6,12 +6,13 @@ use syrup_rail::{
     BillingScopeId, ChargeAmount, CurrencyCode, DiscountClaimId, DiscountCodeId, IdempotencyKey,
     LimitedDiscountMonths, PaymentAttemptId, PercentOffBasisPoints, PlanKey, PositiveDiscountCents,
     SubscriberId, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
-    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimStatus,
-    SubscriptionDiscountClearOutcome, SubscriptionDiscountCode, SubscriptionDiscountCodeCreation,
-    SubscriptionDiscountCodeQuote, SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus,
-    SubscriptionDiscountCodeUpdate, SubscriptionDiscountDuration, SubscriptionDiscountError,
-    SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentReservation,
-    SubscriptionId, SubscriptionOffer,
+    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimState,
+    SubscriptionDiscountClaimStatus, SubscriptionDiscountClearOutcome, SubscriptionDiscountCode,
+    SubscriptionDiscountCodeCreation, SubscriptionDiscountCodeQuote,
+    SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus, SubscriptionDiscountCodeUpdate,
+    SubscriptionDiscountDuration, SubscriptionDiscountError, SubscriptionDiscountKind,
+    SubscriptionDiscountSnapshot, SubscriptionEnrollmentReservation, SubscriptionId,
+    SubscriptionOffer,
 };
 use thiserror::Error;
 use uuid::Uuid;

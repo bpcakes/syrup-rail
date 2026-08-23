@@ -52,10 +52,11 @@ pub use billing_portal::{
 pub use card_data::{raw_card_data_ranges, string_contains_raw_card_data};
 pub use discount::{
     ClearSubscriptionDiscount, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
-    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimStatus,
-    SubscriptionDiscountClearOutcome, SubscriptionDiscountCodeCreation,
-    SubscriptionDiscountCodeQuote, SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus,
-    SubscriptionDiscountCodeUpdate, discounted_charge,
+    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimState,
+    SubscriptionDiscountClaimStatus, SubscriptionDiscountClearOutcome,
+    SubscriptionDiscountCodeCreation, SubscriptionDiscountCodeQuote,
+    SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus, SubscriptionDiscountCodeUpdate,
+    discounted_charge,
 };
 pub use enrollment::{
     EnrollSubscription, SubscriptionActivationProjection, SubscriptionEnrollmentDiscountSnapshot,
@@ -69,6 +70,7 @@ pub use enrollment::{
 pub use event::{
     BillingEvent, BillingEventKey, BillingEventSubject, PaymentCardDisplay, SubscriptionEndReason,
     SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureDisposition,
+    SubscriptionPaymentFailureOutcome,
 };
 pub use gateway::{
     ApprovedProcessorEvidence, CardLastFour, GatewayAccountMode, GatewayError,
@@ -98,7 +100,7 @@ pub use host_charge::{
 };
 pub use identity::{
     ActorId, BillingScopeId, DiscountClaimId, DiscountCodeId, GatewayAccountId,
-    GatewayAccountRegistration, GatewayConfigurationActivation,
+    GatewayAccountIdentity, GatewayAccountRegistration, GatewayConfigurationActivation,
     GatewayConfigurationActivationOutcome, GatewayConfigurationId, GatewayLifecycleCursorKey,
     GatewayProviderKey, HostChargeTargetId, IdempotencyKey, IdempotencyKeyError, PaymentAttemptId,
     PaymentAttemptKind, PaymentAttemptKindParseError, PaymentAttemptStatus,
@@ -172,7 +174,8 @@ pub use subscription::{
     SubscriptionGrantCreationOutcome, SubscriptionGrantError, SubscriptionGrantKind,
     SubscriptionGrantKindParseError, SubscriptionGrantReason, SubscriptionGrantReasonError,
     SubscriptionGrantRecord, SubscriptionGrantRecordError, SubscriptionGrantRevocation,
-    SubscriptionGrantRevocationOutcome, classify_past_due_access,
+    SubscriptionGrantRevocationAudit, SubscriptionGrantRevocationOutcome,
+    SubscriptionGrantRevocationState, classify_past_due_access,
 };
 pub use subscription_payment_context::SubscriptionPaymentContext;
 pub use terms::{
