@@ -1,4 +1,4 @@
-_commit = "f2b38c9eb729c7499ff1f5f49ff682b6039d7f43"
+_commit = "0a35d0cabddb64ca75fc594e737491fda0f0ea4b"
 _src_path = "https://github.com/bpcakes/jig-sh.git"
 _template_mode = ""
 _template_local_path = ""
@@ -11,6 +11,7 @@ sqlx_enabled = true
 rust_crate_roots = ["crates"]
 
 rust_migration_dir = "crates/syrup-rail-postgres/schema"
+rust_migration_layout = "versioned_artifacts"
 rust_sqlx_metadata_dir = "crates/syrup-rail-postgres/.sqlx"
 
 schema_dump_enabled = false

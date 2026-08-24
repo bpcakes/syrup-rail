@@ -16,6 +16,12 @@ This plan verifies and implements accepted simplification-audit issues in order.
 - [x] Return R-40 to open because reachable Jig master does not yet implement the migration-layout contract.
 - [x] Re-run contract, formatting, Clippy, SQLx, and full tests and prove a clean Cargo install from the reachable master pin.
 - [x] Reconcile R-41 against the lock protocol now present in reachable Jig master `f2b38c9`, record the stronger protocol and equivalent acceptance evidence, and close the bead without duplicating upstream work.
+- [x] Reclaim R-40 after the later implementation request and revalidate the existing upstream implementation on top of current Jig master.
+- [x] Commit fresh upstream evidence at local Jig head `7ff97a0` and retain a generic local publication ref `codex/migration-layout`.
+- [x] Render the exact Syrup Rail answers into an isolated clone and prove the generated versioned-artifact contract and recursive immutability gate pass without changing schema artifacts.
+- [x] Publish `codex/migration-layout` as upstream pull request #11, resolve its change-sensitive Rust LOC failure, and push final head `0a35d0cabddb64ca75fc594e737491fda0f0ea4b`.
+- [x] Regenerate Syrup Rail from that exact remote head and pass contract, direct rejection/no-mutation, recursive immutability, formatting, Clippy, SQLx, and full test validation without schema or SQLx metadata changes.
+- [x] Close R-40 and the fully completed simplification-audit epic; refresh final work-plan evidence before committing the downstream slice.
 
 ## Surprises & Discoveries
 
@@ -25,23 +31,26 @@ This plan verifies and implements accepted simplification-audit issues in order.
 - Reachable Jig master already had a newer OS-exclusive guard and owner-record protocol. The later regeneration to `f2b38c9` brought that protocol into Syrup Rail even though R-41 had initially been skipped, so reconciliation—not a second implementation—is the correct final slice.
 - R-35's existing malformed-attestation test called the codec directly. Routing it through `attest_external_reversal` now proves the private error conversion at the public operator workflow boundary.
 - A full downstream harness render from the current upstream Jig head also removed unrelated repository-owned CI and security guidance accumulated since the old pin. Those unrelated replacements were not retained; the R-40 config/contract/launcher/guidance changes were kept, and the existing CI was extended only with the new recursive migration-immutability check.
-- Upstream Jig's complete standard library suite passed once (1,577 passed, 2 ignored) and its full work gate passed once (2,206 tests plus vault groups). Later reruns exposed an unrelated Nextest-only worker cleanup failure; the same exact test passes under `cargo test`. Clippy is independently blocked by a pre-existing `collapsible_if` lint in `crates/jig/build.rs:300`.
-- The upstream implementation was committed only on local branch `codex/syrup-rail-r40` at `2f1a744`. Review proved that GitHub rejected the pinned revision with `upload-pack: not our ref`. At the user's direction, no branch was pushed; Syrup Rail was regenerated from reachable Jig master `f2b38c9`, and R-40 was returned to open.
+- Upstream Jig's fresh complete standard suite passes 1,577 library tests plus every integration target (2 ignored). The configured Nextest gate again passes 2,205 of 2,206 and exposes the same unrelated worker-cleanup flake; that exact test passes alone under Nextest and in the standard suite. Rust 1.97 also exposes repository-wide pre-existing `collapsible_if`/`manual_is_multiple_of` Clippy drift in untouched crates; the migration-layout targets pass when those baseline lint categories are allowed.
+- Pull request https://github.com/bpcakes/jig-sh/pull/11 publishes the implementation on `codex/migration-layout`. Its first change-sensitive LOC run correctly failed on touched legacy files; the follow-up extraction returns `cli/tests.rs` to its base contents, reduces `context.rs` to 991 lines and `policy/tests.rs` to 735 lines, and passes the local LOC gate at final head `0a35d0cabddb64ca75fc594e737491fda0f0ea4b`.
+- The actual downstream regeneration from the remote PR head adds `rust_migration_layout = "versioned_artifacts"`, removes `jig.migration_add`, and leaves schema artifacts untouched. Existing managed AGENTS guidance already matches the versioned-layout template. Broad generated CI differences remain unrelated repository-owned drift and were not accepted.
 
 ## Decision Log
 
 - Execute one bead at a time. The initial R-41 skip prevented duplicate work at that point; the later request to reconcile authorizes recording the now-pinned upstream protocol as a superseding implementation without changing managed code again.
 - Follow `docs/security/threat-model.md` for R-35 because processor-charge and operator-attestation rows are protected financial evidence. No new security mechanism or trust boundary is planned.
 - Preserve R-40's smallest credible downstream scope by retaining repository-owned CI/security customizations while accepting the generated contract-v4 launchers required to distinguish the newly pinned runtime from older `0.2.0` binaries.
-- Do not publish the local R-40 branch. Use the installed Jig binary from reachable master `f2b38c9`, regenerate the downstream harness from that exact remote revision, and leave R-40 open until the feature exists upstream on a reachable commit.
+- The explicit request to drive the upstream Jig change to a PR authorizes publication. Keep the downstream pin portable by regenerating only from the exact pushed PR head, not an unpublished local commit.
 
 ## Outcomes & Retrospective
 
 R-41 is reconciled to reachable Jig master `f2b38c9`, which contains the OS-exclusive guard, `owner-v1` record, and acquisition-token cleanup introduced before that revision. An ancient-mtime live-owner test, reclaimable-owner tests, token-matched cleanup, template consistency checks, and the fake-cargo default/runtime/MCP reuse fixture cover the original invariants under the stronger protocol. No new upstream or generated code was needed for reconciliation. R-35 now owns a private `ProcessorChargePersistenceError { Sql, InvalidState }`, maps it exhaustively at both consumers, and no longer admits operator host/workflow errors into charge storage. Focused charge/operator suites, formatting, Clippy, contract, SQLx, and repository tests pass; no schema, SQLx metadata, or public error type changed.
 
-R-40's local upstream experiment modeled `flat_migrations | versioned_artifacts`, but it was never published and is not part of the final downstream render. Syrup Rail now pins reachable Jig master `f2b38c9`; the generated contract again exposes `jig.migration_add`, while repository guidance continues to forbid that command for the versioned schema tree. R-40 remains open for a future implementation on a reachable upstream revision.
+R-40's upstream implementation is published in Jig pull request #11 at `0a35d0cabddb64ca75fc594e737491fda0f0ea4b`. The compatibility default remains `flat_migrations`; explicit `versioned_artifacts` mode omits and rejects migration-add while preserving recursive immutability. Syrup Rail now pins that reachable head, declares the versioned layout, and has a generated contract with no `jig.migration_add` tool. A direct migration-add attempt returns the layout-specific error before mutation, and recursive immutability passes with no schema or SQLx metadata diff.
 
-Fresh downstream `jig.contract_check`, `jig.test`, `jig.sqlx_check`, `jig.fmt_check`, and `jig.clippy` receipts pass against reachable Jig master `f2b38c9`; the work evidence and required gates are fresh. A clean `cargo install --git ... --rev f2b38c9... --locked` also succeeds and reports `jig 0.2.0`.
+Fresh downstream `jig.contract_check`, `jig.test`, `jig.sqlx_check`, `jig.fmt_check`, and `jig.clippy` receipts pass against the remote PR head. The normal generated launcher performed a clean Cargo install of that exact revision before the contract check, so the cutover does not depend on the sibling checkout.
+
+R-40 and the parent simplification-audit epic are closed. All 36 epic descendants are now closed with their implementation or canonical audit evidence retained in Beads.
 
 ## Context and orientation
 
@@ -57,7 +66,7 @@ R-41 was initially skipped, then reconciled without code changes after the reach
 
 For R-35, read the PostgreSQL crate guide and inspect all codec consumers and tests. Introduce the private two-variant error at the neutral module, add exhaustive conversions at operator-review and charge-store boundaries, delete reverse/catch-all mappings, and add focused malformed-row plus SQL classification regression coverage. Run focused PostgreSQL tests, formatting, Clippy, SQLx, and the repository backend test gate.
 
-Third, inspect Jig's configuration schema, generated contract, migration CLI/MCP handlers, managed guidance, and immutability tests. Add the closed layout setting with a flat default. Gate contract exposure and runtime admission on flat mode, keep recursive immutability protection for both modes, add upstream fixtures for both layouts, then update the Syrup Rail pin/config and regenerate managed files. Prove the contract lacks migration-add, direct CLI/MCP calls reject it, immutable v1/v2 artifacts remain protected, and no schema artifact changed.
+Third, inspect Jig's configuration schema, generated contract, migration CLI/MCP handlers, managed guidance, and immutability tests. Add the closed layout setting with a flat default. Gate contract exposure and runtime admission on flat mode, keep recursive immutability protection for both modes, add upstream fixtures for both layouts, then publish the validated upstream head and update the Syrup Rail pin/config through managed regeneration. Prove the contract lacks migration-add, direct CLI/MCP calls reject it, immutable v1/v2 artifacts remain protected, and no schema artifact changed.
 
 ## Concrete steps
 
@@ -79,4 +88,4 @@ Tests and generation commands must be rerunnable. Lock cleanup operates only on 
 
 ## Interfaces and dependencies
 
-R-41 is satisfied by the already-pinned reachable upstream revision. R-40 still depends on the local upstream Jig checkout and coordinated downstream regeneration. R-35 has no external dependency and must not change public Rust error types. R-40 must default older/unspecified configurations to flat migrations so existing adopters retain their contract, while Syrup Rail explicitly opts into versioned artifacts.
+R-41 is satisfied by the reachable upstream revision that introduced the stronger lock protocol. R-40 is published and consumed from Jig pull request #11's exact remote head. R-35 has no external dependency and must not change public Rust error types. R-40 defaults older or unspecified configurations to flat migrations so existing adopters retain their contract, while Syrup Rail explicitly opts into versioned artifacts.
