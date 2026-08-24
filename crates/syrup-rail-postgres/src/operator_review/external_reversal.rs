@@ -283,7 +283,7 @@ pub(super) async fn lock_processor_charge(
     .bind(charge_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
-    row.as_ref().map(processor_charge_from_row).transpose()
+    Ok(row.as_ref().map(processor_charge_from_row).transpose()?)
 }
 
 #[allow(clippy::too_many_arguments)]

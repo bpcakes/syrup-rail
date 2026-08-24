@@ -178,7 +178,7 @@ pub(super) async fn charge_by_id(
     .bind(charge_id)
     .fetch_one(connection)
     .await?;
-    processor_charge_from_row(&row).map_err(map_operator_error)
+    processor_charge_from_row(&row).map_err(ProcessorChargeStoreError::from)
 }
 
 pub(super) fn compensating_progression(
@@ -290,19 +290,4 @@ pub(super) fn is_transient(error: &ProcessorChargeStoreError) -> bool {
         database_error.code().as_deref(),
         Some("40001" | "40P01" | "55P03" | "57014")
     )
-}
-
-pub(super) fn map_operator_error(error: OperatorReviewError) -> ProcessorChargeStoreError {
-    match error {
-        OperatorReviewError::Sql(error) => ProcessorChargeStoreError::Sql(error),
-        OperatorReviewError::InvalidState(message) => {
-            ProcessorChargeStoreError::InvalidState(message)
-        }
-        OperatorReviewError::Host(_)
-        | OperatorReviewError::ManualFailureHost(_)
-        | OperatorReviewError::BillingTransaction(_)
-        | OperatorReviewError::BillingEvent(_) => {
-            ProcessorChargeStoreError::InvalidState(INVALID_CHARGE_STATE)
-        }
-    }
 }

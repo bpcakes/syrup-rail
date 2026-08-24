@@ -42,10 +42,12 @@ pub enum GatewayLifecycleApplyOutcome {
 }
 
 impl GatewayLifecycleApplyOutcome {
+    /// Returns one when this outcome applied evidence to a canonical attempt.
     pub const fn applied_count(self) -> u64 {
         if matches!(self, Self::Applied) { 1 } else { 0 }
     }
 
+    /// Returns one when this outcome left evidence staged for a later match.
     pub const fn staged_count(self) -> u64 {
         if matches!(self, Self::StagedAmbiguous | Self::StagedNoMatch) {
             1
@@ -55,6 +57,24 @@ impl GatewayLifecycleApplyOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayLifecycleSummaryOutcome {
+    Evidence(GatewayLifecycleApplyOutcome),
+    ExplicitQuarantine,
+}
+
+impl From<GatewayLifecycleApplyOutcome> for GatewayLifecycleSummaryOutcome {
+    fn from(outcome: GatewayLifecycleApplyOutcome) -> Self {
+        Self::Evidence(outcome)
+    }
+}
+
+/// Per-call accounting for lifecycle report reconciliation.
+///
+/// Evidence increments exactly one of `applied`, `staged`, or `quarantined`,
+/// except superseded evidence, which increments none. Explicit quarantine
+/// reports increment `quarantined`. During staged draining, `cleaned` counts
+/// expired pending rows removed independently of evidence outcomes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GatewayLifecycleReconciliationSummary {
     applied: u64,
@@ -64,25 +84,48 @@ pub struct GatewayLifecycleReconciliationSummary {
 }
 
 impl GatewayLifecycleReconciliationSummary {
+    /// Evidence outcomes applied to canonical payment attempts.
     pub const fn applied(self) -> u64 {
         self.applied
     }
 
+    /// Evidence outcomes left pending because no unique candidate remained.
     pub const fn staged(self) -> u64 {
         self.staged
     }
 
+    /// Explicit reports and evidence outcomes that wrote or reopened quarantine.
     pub const fn quarantined(self) -> u64 {
         self.quarantined
     }
 
+    /// Expired pending evidence rows removed during a staged-drain call.
     pub const fn cleaned(self) -> u64 {
         self.cleaned
     }
 
-    fn record_outcome(&mut self, outcome: GatewayLifecycleApplyOutcome) {
-        self.applied += outcome.applied_count();
-        self.staged += outcome.staged_count();
+    fn record_outcome(&mut self, outcome: GatewayLifecycleSummaryOutcome) {
+        match outcome {
+            GatewayLifecycleSummaryOutcome::Evidence(GatewayLifecycleApplyOutcome::Applied) => {
+                self.applied += 1;
+            }
+            GatewayLifecycleSummaryOutcome::Evidence(
+                GatewayLifecycleApplyOutcome::StagedAmbiguous
+                | GatewayLifecycleApplyOutcome::StagedNoMatch,
+            ) => {
+                self.staged += 1;
+            }
+            GatewayLifecycleSummaryOutcome::Evidence(
+                GatewayLifecycleApplyOutcome::InvalidRefundEconomics
+                | GatewayLifecycleApplyOutcome::ConflictingLifecycleEvidence,
+            )
+            | GatewayLifecycleSummaryOutcome::ExplicitQuarantine => {
+                self.quarantined += 1;
+            }
+            GatewayLifecycleSummaryOutcome::Evidence(
+                GatewayLifecycleApplyOutcome::AlreadySuperseded,
+            ) => {}
+        }
     }
 }
 
@@ -256,7 +299,7 @@ pub async fn reconcile_gateway_transaction_reports(
             GatewayTransactionReport::Ignore => {}
             GatewayTransactionReport::Quarantine(quarantine) => {
                 record_quarantine(pool, account, &quarantine).await?;
-                summary.quarantined += 1;
+                summary.record_outcome(GatewayLifecycleSummaryOutcome::ExplicitQuarantine);
             }
             GatewayTransactionReport::Evidence(evidence) => {
                 let outcome = apply_or_stage_evidence(
@@ -267,7 +310,7 @@ pub async fn reconcile_gateway_transaction_reports(
                     None,
                 )
                 .await?;
-                summary.record_outcome(outcome);
+                summary.record_outcome(outcome.into());
             }
         }
     }
@@ -325,7 +368,19 @@ pub async fn apply_staged_gateway_lifecycle_evidence(
     // cleaned count while expiry becomes the only pending-evidence clock.
     summary.cleaned += cleanup_pending(pool, account).await?;
 
-    for (pending_id, evidence) in actionable_pending(pool, account).await? {
+    let pending = actionable_pending(pool, account).await?;
+    apply_actionable_pending(pool, host_charge_targets, account, pending, &mut summary).await?;
+    Ok(summary)
+}
+
+async fn apply_actionable_pending(
+    pool: &PgPool,
+    host_charge_targets: &dyn HostChargeTargetStore,
+    account: &GatewayLifecycleAccount,
+    pending: Vec<(Uuid, StoredEvidence)>,
+    summary: &mut GatewayLifecycleReconciliationSummary,
+) -> Result<(), GatewayLifecycleReconciliationError> {
+    for (pending_id, evidence) in pending {
         let outcome = apply_or_stage_evidence(
             pool,
             host_charge_targets,
@@ -334,9 +389,9 @@ pub async fn apply_staged_gateway_lifecycle_evidence(
             Some(pending_id),
         )
         .await?;
-        summary.applied += outcome.applied_count();
+        summary.record_outcome(outcome.into());
     }
-    Ok(summary)
+    Ok(())
 }
 
 async fn apply_or_stage_evidence(
@@ -1268,6 +1323,275 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(attempt_id)
+    }
+
+    #[test]
+    fn summary_reducer_counts_every_outcome_once() {
+        for (outcome, expected) in [
+            (
+                GatewayLifecycleSummaryOutcome::Evidence(GatewayLifecycleApplyOutcome::Applied),
+                (1, 0, 0),
+            ),
+            (
+                GatewayLifecycleSummaryOutcome::Evidence(
+                    GatewayLifecycleApplyOutcome::AlreadySuperseded,
+                ),
+                (0, 0, 0),
+            ),
+            (
+                GatewayLifecycleSummaryOutcome::Evidence(
+                    GatewayLifecycleApplyOutcome::InvalidRefundEconomics,
+                ),
+                (0, 0, 1),
+            ),
+            (
+                GatewayLifecycleSummaryOutcome::Evidence(
+                    GatewayLifecycleApplyOutcome::ConflictingLifecycleEvidence,
+                ),
+                (0, 0, 1),
+            ),
+            (
+                GatewayLifecycleSummaryOutcome::Evidence(
+                    GatewayLifecycleApplyOutcome::StagedAmbiguous,
+                ),
+                (0, 1, 0),
+            ),
+            (
+                GatewayLifecycleSummaryOutcome::Evidence(
+                    GatewayLifecycleApplyOutcome::StagedNoMatch,
+                ),
+                (0, 1, 0),
+            ),
+            (
+                GatewayLifecycleSummaryOutcome::ExplicitQuarantine,
+                (0, 0, 1),
+            ),
+        ] {
+            let mut summary = GatewayLifecycleReconciliationSummary::default();
+            summary.record_outcome(outcome);
+            assert_eq!(
+                (summary.applied(), summary.staged(), summary.quarantined()),
+                expected,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn summary_accounts_for_incoming_and_staged_quarantine_and_superseded_evidence()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("life_summary").await?;
+        let fixture = create_gateway_account(&database.pool, "nmi").await?;
+        let account = lifecycle_account(fixture, "nmi");
+        let host_targets = ExactHostTargets::default();
+        let observed_at = Utc::now() - chrono::Duration::minutes(1);
+
+        insert_host_attempt(
+            &database.pool,
+            fixture,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "txn-invalid-economics",
+            1_000,
+            observed_at,
+        )
+        .await?;
+        let conflicting_attempt_id = insert_host_attempt(
+            &database.pool,
+            fixture,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "txn-conflicting-evidence",
+            1_000,
+            observed_at,
+        )
+        .await?;
+        sqlx::query(
+            r#"
+            UPDATE billing_payment_attempts
+            SET gateway_lifecycle_status = 'settled',
+                gateway_lifecycle_at = $2,
+                refunded_amount_cents = 100
+            WHERE id = $1
+            "#,
+        )
+        .bind(conflicting_attempt_id)
+        .bind(observed_at)
+        .execute(&database.pool)
+        .await?;
+
+        let incoming = reconcile_gateway_transaction_reports(
+            &database.pool,
+            &host_targets,
+            &account,
+            vec![
+                evidence(
+                    "txn-invalid-economics",
+                    GatewayLifecycleState::Refunded {
+                        cumulative_refunded_cents: CumulativeRefundCents::new(500)?,
+                    },
+                    observed_at,
+                )?,
+                evidence(
+                    "txn-conflicting-evidence",
+                    GatewayLifecycleState::Voided,
+                    observed_at + chrono::Duration::seconds(1),
+                )?,
+                GatewayTransactionReport::Quarantine(GatewayLifecycleQuarantine::new(
+                    Some(GatewayTransactionId::new("txn-explicit-quarantine")?),
+                    None,
+                    GatewayLifecycleQuarantineReason::MalformedReportStructure,
+                )?),
+                GatewayTransactionReport::Ignore,
+            ],
+        )
+        .await?;
+        assert_eq!(incoming.applied(), 0);
+        assert_eq!(incoming.staged(), 0);
+        assert_eq!(incoming.quarantined(), 3);
+        assert_eq!(incoming.cleaned(), 0);
+
+        insert_host_attempt(
+            &database.pool,
+            fixture,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "txn-superseded",
+            1_000,
+            observed_at,
+        )
+        .await?;
+        let superseded_report = evidence(
+            "txn-superseded",
+            GatewayLifecycleState::PendingSettlement,
+            observed_at,
+        )?;
+        let applied = reconcile_gateway_transaction_reports(
+            &database.pool,
+            &host_targets,
+            &account,
+            vec![superseded_report.clone()],
+        )
+        .await?;
+        assert_eq!(applied.applied(), 1);
+        let superseded = reconcile_gateway_transaction_reports(
+            &database.pool,
+            &host_targets,
+            &account,
+            vec![superseded_report],
+        )
+        .await?;
+        assert_eq!(superseded, GatewayLifecycleReconciliationSummary::default());
+
+        let staged = reconcile_gateway_transaction_reports(
+            &database.pool,
+            &host_targets,
+            &account,
+            vec![evidence(
+                "txn-staged-invalid",
+                GatewayLifecycleState::Refunded {
+                    cumulative_refunded_cents: CumulativeRefundCents::new(500)?,
+                },
+                observed_at,
+            )?],
+        )
+        .await?;
+        assert_eq!(staged.staged(), 1);
+        insert_host_attempt(
+            &database.pool,
+            fixture,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "txn-staged-invalid",
+            1_000,
+            observed_at,
+        )
+        .await?;
+        let drained =
+            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
+                .await?;
+        assert_eq!(drained.applied(), 0);
+        assert_eq!(drained.staged(), 0);
+        assert_eq!(drained.quarantined(), 1);
+        assert_eq!(drained.cleaned(), 0);
+        let pending_invalid: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM billing_gateway_lifecycle_pending_updates
+            WHERE gateway_account_id = $1
+                AND gateway_transaction_id = 'txn-staged-invalid'
+            "#,
+        )
+        .bind(fixture.gateway_account_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(pending_invalid, 0);
+
+        database.cleanup().await
+    }
+
+    #[tokio::test]
+    async fn staged_candidate_changed_after_selection_remains_staged_and_is_counted()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("life_staged_race").await?;
+        let fixture = create_gateway_account(&database.pool, "nmi").await?;
+        let account = lifecycle_account(fixture, "nmi");
+        let host_targets = ExactHostTargets::default();
+        let observed_at = Utc::now() - chrono::Duration::minutes(1);
+        let staged = reconcile_gateway_transaction_reports(
+            &database.pool,
+            &host_targets,
+            &account,
+            vec![evidence(
+                "txn-candidate-changed",
+                GatewayLifecycleState::PendingSettlement,
+                observed_at,
+            )?],
+        )
+        .await?;
+        assert_eq!(staged.staged(), 1);
+        let attempt_id = insert_host_attempt(
+            &database.pool,
+            fixture,
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "txn-candidate-changed",
+            1_000,
+            observed_at,
+        )
+        .await?;
+
+        let selected = actionable_pending(&database.pool, &account).await?;
+        assert_eq!(selected.len(), 1);
+        sqlx::query("UPDATE billing_payment_attempts SET status = 'failed' WHERE id = $1")
+            .bind(attempt_id)
+            .execute(&database.pool)
+            .await?;
+        let mut summary = GatewayLifecycleReconciliationSummary::default();
+        apply_actionable_pending(
+            &database.pool,
+            &host_targets,
+            &account,
+            selected,
+            &mut summary,
+        )
+        .await?;
+        assert_eq!(summary.applied(), 0);
+        assert_eq!(summary.staged(), 1);
+        assert_eq!(summary.quarantined(), 0);
+        let pending_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)
+            FROM billing_gateway_lifecycle_pending_updates
+            WHERE gateway_account_id = $1
+                AND gateway_transaction_id = 'txn-candidate-changed'
+            "#,
+        )
+        .bind(fixture.gateway_account_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(pending_count, 1);
+
+        database.cleanup().await
     }
 
     #[tokio::test]

@@ -10,7 +10,7 @@ use syrup_rail::{
     SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
     SubscriptionGrant, SubscriptionGrantId, SubscriptionGrantKind, SubscriptionId,
-    SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
+    SubscriptionLifecycle, SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -586,13 +586,23 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
         &past_due_access,
     ))
     .map_err(map_subscription_persistence_error)?;
-    let next_payment_attempt_at = row.try_get("paid_next_payment_attempt_at")?;
-    let subscription = Subscription::new(
+    let current_period = BillingPeriod::new(
+        row.try_get("paid_period_start_at")?,
+        row.try_get("paid_period_end_at")?,
+    )
+    .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?;
+    let lifecycle = SubscriptionLifecycle::from_parts(
+        status,
+        current_period,
+        row.try_get("paid_next_renewal_at")?,
+        row.try_get("paid_next_payment_attempt_at")?,
+    )
+    .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?;
+    let subscription = Subscription::from_lifecycle(
         SubscriptionId::new(subscription_id),
         row.try_get::<String, _>("paid_plan_key")?
             .parse()
             .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
-        status,
         phase,
         PaymentMethodId::new(row.try_get("paid_payment_method_id")?),
         ChargeAmount::new(
@@ -603,13 +613,7 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
         .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
         recurring_period,
         renewal_failure,
-        BillingPeriod::new(
-            row.try_get("paid_period_start_at")?,
-            row.try_get("paid_period_end_at")?,
-        )
-        .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
-        row.try_get("paid_next_renewal_at")?,
-        next_payment_attempt_at,
+        lifecycle,
     );
     let applied_discount = applied_discount_from_row(row)?;
 

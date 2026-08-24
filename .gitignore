@@ -35,6 +35,7 @@ build/
 .vite/
 .turbo/
 .astro/
+.contract-stage-*/
 
 # Jig local runtime cache. Keep durable agent state tracked.
 .agent/.cache/*

@@ -520,40 +520,59 @@ async fn resolved_at(
         .await
 }
 
-async fn make_trial_due(
+async fn force_due_renewal(
     pool: &PgPool,
+    billing_scope_id: BillingScopeId,
     subscription_id: syrup_rail::SubscriptionId,
-) -> Result<DateTime<Utc>, sqlx::Error> {
-    let due_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
-            .fetch_one(pool)
-            .await?;
-    sqlx::query(
-        r#"
-        UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '7 days',
-            current_period_end_at = $2,
-            next_renewal_at = $2,
-            next_payment_attempt_at = $2
-        WHERE id = $1
+) -> Result<ChargeRenewal, sqlx::Error> {
+    let (persisted_scope_id, persisted_subscription_id, due_at): (Uuid, Uuid, DateTime<Utc>) =
+        sqlx::query_as(
+            r#"
+        WITH clock AS MATERIALIZED (
+            SELECT clock_timestamp() - interval '1 second' AS due_at
+        )
+        UPDATE billing_subscriptions AS subscription
+        SET current_period_start_at =
+                clock.due_at
+                - (subscription.current_period_end_at - subscription.current_period_start_at),
+            current_period_end_at = clock.due_at,
+            next_renewal_at = clock.due_at,
+            next_payment_attempt_at = clock.due_at
+        FROM clock
+        WHERE subscription.billing_scope_id = $1
+            AND subscription.id = $2
+        RETURNING
+            subscription.billing_scope_id,
+            subscription.id,
+            subscription.next_renewal_at
         "#,
-    )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
-    .execute(pool)
-    .await?;
-    Ok(due_at)
+        )
+        .bind(billing_scope_id.as_uuid())
+        .bind(subscription_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+    Ok(ChargeRenewal::new(
+        BillingScopeId::new(persisted_scope_id),
+        syrup_rail::SubscriptionId::new(persisted_subscription_id),
+        due_at,
+    ))
 }
 
-async fn make_retry_due(
-    pool: &PgPool,
-    subscription_id: syrup_rail::SubscriptionId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+async fn make_retry_due(pool: &PgPool, renewal: ChargeRenewal) -> Result<(), sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE billing_subscriptions
+        SET next_payment_attempt_at = clock_timestamp() - interval '1 second'
+        WHERE billing_scope_id = $1
+            AND id = $2
+            AND next_renewal_at = $3
+        RETURNING id
+        "#,
     )
-    .bind(subscription_id.as_uuid())
-    .execute(pool)
+    .bind(renewal.billing_scope_id().as_uuid())
+    .bind(renewal.subscription_id().as_uuid())
+    .bind(renewal.period_start_at())
+    .fetch_one(pool)
     .await?;
     Ok(())
 }
@@ -562,17 +581,10 @@ async fn decline_due_renewal(
     pool: &PgPool,
     gateway: &ResolvedGateway,
     coordinator: &dyn BillingTransactionCoordinator,
-    billing_scope_id: BillingScopeId,
-    subscription_id: syrup_rail::SubscriptionId,
-    due_at: DateTime<Utc>,
+    renewal: ChargeRenewal,
     transaction_id: &str,
 ) -> Result<(SubscriptionEnrollmentPaymentResult, DateTime<Utc>), Box<dyn Error>> {
-    let reservation = reserve_and_admit_renewal(
-        pool,
-        gateway,
-        ChargeRenewal::new(billing_scope_id, subscription_id, due_at),
-    )
-    .await?;
+    let reservation = reserve_and_admit_renewal(pool, gateway, renewal).await?;
     let result = apply_subscription_renewal_gateway_outcome(
         pool,
         coordinator,

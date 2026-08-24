@@ -1,23 +1,28 @@
 ## Progress
 
 - [x] Claimed the R-02 Beads task and inspected repository/crate guidance.
-- [ ] Define the validated core lifecycle/schedule representation and compatibility constructor boundary.
-- [ ] Migrate PostgreSQL hydration to reject invalid persisted combinations.
-- [ ] Add the core state matrix and persistence regression coverage.
-- [ ] Run focused suites and repository backend gates.
-- [ ] Record evidence, close R-02, and sync Beads.
+- [x] Define the validated core lifecycle/schedule representation and compatibility constructor boundary.
+- [x] Migrate PostgreSQL hydration to reject invalid persisted combinations.
+- [x] Add the core state matrix and persistence regression coverage.
+- [x] Run focused suites and repository backend gates.
+- [x] Record evidence, close R-02, and sync Beads.
 
 ## Surprises & Discoveries
 
 - The worktree contains broad existing changes. Subscription grant edits overlap the same core files but do not touch R-02 fields; preserve them.
+- The broad pre-existing edits were consolidated in commit `11e801d` before R-02 implementation resumed, leaving a clean baseline for the six source/documentation files in this task.
 
 ## Decision Log
 
 - Preserve the infallible public Subscription::new API for compatibility; add a validated construction path for internal persistence first, matching the task safe slice.
+- Represent `SubscriptionLifecycle` as an opaque validated value backed by a closed private enum. This keeps invalid past-due schedules unconstructable while preserving status-based public projections.
 
 ## Outcomes & Retrospective
 
-- Pending.
+- Added the public `SubscriptionLifecycle` validated construction path while preserving the infallible `Subscription::new` compatibility surface. `BillingPeriod::end_at` now owns the renewal projection, and the lifecycle matrix owns automatic-payment scheduling.
+- Migrated the shared complete-row codec and entitlement projection to reject period/renewal mismatches and active, past-due, canceled, or unpaid schedule contradictions as their established invalid-state errors.
+- Added exhaustive core and persistence-codec matrices. The core suite passed 113 tests; the PostgreSQL suite passed 226 library tests, five host-integration tests, and doctests. Format, Clippy, contract, SQLx, repository-wide tests, and the explicit public-API/documentation check passed.
+- No schema artifact or SQLx metadata changed. R-02 was closed and the Beads JSONL export is current.
 
 ## Context and orientation
 

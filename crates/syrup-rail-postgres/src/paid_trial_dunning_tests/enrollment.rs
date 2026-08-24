@@ -232,36 +232,65 @@ async fn fixed_day_recurring_cadence_persists_and_drives_the_next_renewal()
     );
     let subscription_id = subscription.id();
 
-    let due_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
-            .fetch_one(&database.pool)
-            .await?;
-    sqlx::query(
-        r#"
-        UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '14 days',
-            current_period_end_at = $2,
-            next_renewal_at = $2,
-            next_payment_attempt_at = $2
-        WHERE id = $1
-        "#,
-    )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
-    .execute(&database.pool)
-    .await?;
-
-    let renewal = reserve_and_admit_renewal(
+    assert!(matches!(
+        force_due_renewal(
+            &database.pool,
+            BillingScopeId::new(Uuid::now_v7()),
+            subscription_id,
+        )
+        .await,
+        Err(sqlx::Error::RowNotFound)
+    ));
+    assert!(matches!(
+        force_due_renewal(
+            &database.pool,
+            BillingScopeId::new(account.billing_scope_id),
+            syrup_rail::SubscriptionId::new(Uuid::now_v7()),
+        )
+        .await,
+        Err(sqlx::Error::RowNotFound)
+    ));
+    let renewal_command = force_due_renewal(
         &database.pool,
-        &gateway,
+        BillingScopeId::new(account.billing_scope_id),
+        subscription_id,
+    )
+    .await?;
+    assert_eq!(
+        renewal_command,
         ChargeRenewal::new(
             BillingScopeId::new(account.billing_scope_id),
             subscription_id,
-            due_at,
-        ),
+            *renewal_command.period_start_at(),
+        )
+    );
+    let (forced_start_at, forced_end_at, next_renewal_at, next_payment_attempt_at): (
+        DateTime<Utc>,
+        DateTime<Utc>,
+        DateTime<Utc>,
+        Option<DateTime<Utc>>,
+    ) = sqlx::query_as(
+        r#"
+        SELECT
+            current_period_start_at,
+            current_period_end_at,
+            next_renewal_at,
+            next_payment_attempt_at
+        FROM billing_subscriptions
+        WHERE billing_scope_id = $1 AND id = $2
+        "#,
     )
+    .bind(renewal_command.billing_scope_id().as_uuid())
+    .bind(renewal_command.subscription_id().as_uuid())
+    .fetch_one(&database.pool)
     .await?;
-    assert_eq!(renewal.period().start_at(), &due_at);
+    assert_eq!(forced_end_at - forced_start_at, ChronoDuration::days(14));
+    assert_eq!(next_renewal_at, *renewal_command.period_start_at());
+    assert_eq!(next_payment_attempt_at, Some(next_renewal_at));
+
+    let renewal = reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
+    let due_at = renewal_command.period_start_at();
+    assert_eq!(renewal.period().start_at(), due_at);
     assert_eq!(
         *renewal.period().end_at() - renewal.period().start_at(),
         ChronoDuration::days(14)

@@ -28,7 +28,9 @@ This repository uses the shared `jig.sh` workflow. Keep repo-local business rule
 - Prefer direct cutovers only for internal code-only changes that can ship in one coordinated deploy.
 - Preserve compatibility or stage rollouts for persisted database state, queued job types, public API contracts, bookmarked routes, webhook boundaries, or source-of-truth moves that can straddle deploys.
 
-- Never overwrite an existing database migration; add a new forward-only migration instead.
+
+- The migration tree contains complete versioned schema artifacts. Never overwrite a shipped version; add the next forward-only version and its repository-owned cutover artifact.
+
 
 
 ## Backend Defaults
@@ -36,9 +38,9 @@ This repository uses the shared `jig.sh` workflow. Keep repo-local business rule
 - Treat `crates` as Rust crate roots.
 - Add crate-level `AGENTS.md` files when a crate has meaningful ownership, entrypoint, or invariant guidance that should travel with that crate.
 
-- Versioned SQL schema artifacts live under
-  `crates/syrup-rail-postgres/schema`; follow the crate guide for the current
-  artifact and immutable shipped versions.
+
+- Versioned SQL schema artifacts live under `crates/syrup-rail-postgres/schema`; do not use `scripts/jig sqlx migration add` in this layout.
+
 - SQLx metadata is committed in `crates/syrup-rail-postgres/.sqlx`.
 
 - Keep transport logic thin and business logic in the owning crate.
@@ -64,6 +66,8 @@ No web apps are configured in `.jig.toml`.
 
 
 - `scripts/jig check sqlx`
+
+
 
 - `scripts/jig check contract`
 

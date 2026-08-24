@@ -22,12 +22,8 @@
     ],
     "backups": [
       {
-        "backup_path": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01KZ9VJKZ5VC5VBV015VB6MDV4/.jig.toml",
+        "backup_path": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01M0SJRFFKXJPYYR16MF4K59B1/.jig.toml",
         "path": ".jig.toml"
-      },
-      {
-        "backup_path": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01KZ9VJKZ5VC5VBV015VB6MDV4/agent-map.md",
-        "path": "agent-map.md"
       }
     ],
     "conflicts": [
@@ -35,18 +31,12 @@
         "detail": "destination differs from the rendered template-managed path",
         "kind": "modified_managed_path",
         "path": ".jig.toml"
-      },
-      {
-        "detail": "destination differs from the rendered template-managed path",
-        "kind": "modified_managed_path",
-        "path": "agent-map.md"
       }
     ],
     "dry_run": false,
     "files_created": [],
     "files_modified": [
-      ".jig.toml",
-      "agent-map.md"
+      ".jig.toml"
     ],
     "files_removed": [],
     "files_unchanged": [
@@ -62,6 +52,7 @@
       ".gitignore",
       ".mcp.json",
       "AGENTS.md",
+      "agent-map.md",
       "scripts/install-jig.sh",
       "scripts/jig",
       "scripts/new-checkout.sh",
@@ -71,10 +62,10 @@
     "managed_blocks_rendered": [],
     "retired_managed_paths": []
   },
-  "backup_root": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01KZ9VJKZ5VC5VBV015VB6MDV4",
+  "backup_root": "/Users/aa/Documents/syrup-rail/.agent/.cache/adopt/backups/01M0SJRFFKXJPYYR16MF4K59B1",
   "canonical_receipt_path": ".agent/.cache/adopt/adopt-last.json",
   "command": "adopt",
-  "created_at_unix": 1785963565,
+  "created_at_unix": 1787564932,
   "destination": "/Users/aa/Documents/syrup-rail",
   "legacy_receipt_deprecated": true,
   "legacy_receipt_path": ".agent/state/adopt-last.json",

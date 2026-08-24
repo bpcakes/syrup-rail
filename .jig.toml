@@ -1,11 +1,10 @@
-_commit = "ecd216698e3ba46faf47ab74926efd5e683c5df2"
+_commit = "f2b38c9eb729c7499ff1f5f49ff682b6039d7f43"
 _src_path = "https://github.com/bpcakes/jig-sh.git"
 _template_mode = ""
 _template_local_path = ""
 repo_name = "syrup-rail"
 default_branch = "main"
 ci_github_runner = "ubuntu-latest"
-jig_version = "0.2.0"
 template_source_url = "https://github.com/bpcakes/jig-sh.git"
 harness_footprint = "full"
 sqlx_enabled = true
@@ -25,7 +24,7 @@ sqlx_check_command = "scripts/check-sqlx.sh"
 # orchestration is needed.
 bootstrap_command = "cargo fetch --locked"
 
-rust_fmt_check_command = "cargo fmt --all -- --check"
+rust_fmt_check_command = "if [ -f Cargo.toml ]; then cargo fmt --all -- --check; else printf '%s\\n' 'No Cargo.toml found; skipping cargo fmt.'; fi"
 rust_clippy_command = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
 rust_test_command = "cargo test --workspace --all-features"
 rust_test_locked_command = "cargo test --workspace --all-features --locked -- --test-threads=1"
@@ -53,6 +52,10 @@ tld = "localhost"
 workspace_discovery = false
 
 
+
+[execution]
+command_timeout_seconds = 1800
+command_output_limit_bytes = 67108864
 
 
 [status]

@@ -16,6 +16,14 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Changed
 
+- Count invalid or conflicting gateway lifecycle evidence in reconciliation
+  quarantine totals, and report evidence that remains staged during drain
+  calls. Reconciliation summaries are per-call observations, so the same
+  pending evidence may contribute to `staged` on more than one drain call.
+- Add `SubscriptionLifecycle` as the validated status, billing-period, and
+  payment-schedule construction path. PostgreSQL subscription hydration now
+  rejects contradictory rows, while `Subscription::new` remains available as
+  the flat compatibility constructor.
 - Replace the NMI client's independent sale source, vault action, stored-
   credential, and currency fields with the closed `SaleIntent` contract.
   Direct raw-client callers must construct one of the five supported intents;

@@ -12,20 +12,20 @@ use syrup_rail::{
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::PaymentAttemptStoreError;
 use crate::attempts::{
     PAYMENT_ATTEMPT_SELECT, find_payment_attempt_by_id_on_connection,
     lock_payment_attempt_by_id_on_connection, lock_subscription_aggregate,
     payment_attempt_from_row, set_enrollment_timeouts,
 };
 use crate::processor_charge_persistence::{
-    attestation_by_charge, attestation_matches_source, processor_charge_from_row,
+    ProcessorChargePersistenceError, attestation_by_charge, attestation_matches_source,
+    processor_charge_from_row,
 };
-use crate::{OperatorReviewError, PaymentAttemptStoreError};
 
 use storage::{
     charge_by_id, compensating_progression, identify_transactionless, initial_charge_progression,
-    initial_charge_state_code, is_transient, map_operator_error, matching_charge,
-    owned_by_other_attempt, parse_role,
+    initial_charge_state_code, is_transient, matching_charge, owned_by_other_attempt, parse_role,
 };
 
 mod storage;
@@ -42,6 +42,15 @@ pub enum ProcessorChargeStoreError {
     Attempt(#[from] PaymentAttemptStoreError),
     #[error("{0}")]
     InvalidState(&'static str),
+}
+
+impl From<ProcessorChargePersistenceError> for ProcessorChargeStoreError {
+    fn from(error: ProcessorChargePersistenceError) -> Self {
+        match error {
+            ProcessorChargePersistenceError::Sql(error) => Self::Sql(error),
+            ProcessorChargePersistenceError::InvalidState(message) => Self::InvalidState(message),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -420,7 +429,7 @@ async fn store_once(
             }
             if let Some(attestation) = attestation_by_charge(&mut transaction, charge.id)
                 .await
-                .map_err(map_operator_error)?
+                .map_err(ProcessorChargeStoreError::from)?
                 && (!charge.exact_replay
                     || !attestation_matches_source(&attestation, &attempt, &persisted))
             {
@@ -745,7 +754,7 @@ async fn transition_processor_charge(
     .ok_or(ProcessorChargeStoreError::InvalidState(
         "processor charge transition did not match its expected state or eligibility",
     ))?;
-    processor_charge_from_row(&row).map_err(map_operator_error)
+    processor_charge_from_row(&row).map_err(ProcessorChargeStoreError::from)
 }
 
 #[cfg(test)]

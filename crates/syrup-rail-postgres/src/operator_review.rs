@@ -27,8 +27,9 @@ use crate::attempts::{
 };
 use crate::host_error::{BoxError, RedactedHostErrorSource};
 use crate::processor_charge_persistence::{
-    attestation_by_charge, attestation_matches_source, expected_reversal_resolution,
-    parse_charge_state_code, parse_kind, parse_progression, parse_role, processor_charge_from_row,
+    ProcessorChargePersistenceError, attestation_by_charge, attestation_matches_source,
+    expected_reversal_resolution, parse_charge_state_code, parse_kind, parse_progression,
+    parse_role, processor_charge_from_row,
 };
 use crate::renewal_failure::{
     RenewalFailureApplication, RenewalFailureStoreError, apply_resolved_automatic_renewal_failure,
@@ -70,6 +71,15 @@ pub enum OperatorReviewError {
     BillingTransaction(#[from] BillingTransactionError),
     #[error(transparent)]
     BillingEvent(#[from] BillingEventWriteError),
+}
+
+impl From<ProcessorChargePersistenceError> for OperatorReviewError {
+    fn from(error: ProcessorChargePersistenceError) -> Self {
+        match error {
+            ProcessorChargePersistenceError::Sql(error) => Self::Sql(error),
+            ProcessorChargePersistenceError::InvalidState(message) => Self::InvalidState(message),
+        }
+    }
 }
 
 impl From<crate::PaymentAttemptStoreError> for OperatorReviewError {

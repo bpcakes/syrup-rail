@@ -95,6 +95,95 @@ fn past_due_access_requires_both_continuing_policy_and_a_scheduled_payment() {
 }
 
 #[test]
+fn subscription_lifecycle_validates_the_complete_status_schedule_matrix() {
+    let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+    let ends = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let before_end = ends - chrono::Duration::seconds(1);
+    let after_end = ends + chrono::Duration::seconds(1);
+
+    for (status, next_payment_attempt_at) in [
+        (SubscriptionStatus::Active, Some(ends)),
+        (SubscriptionStatus::PastDue, None),
+        (SubscriptionStatus::PastDue, Some(ends)),
+        (SubscriptionStatus::PastDue, Some(after_end)),
+        (SubscriptionStatus::Canceled, None),
+        (SubscriptionStatus::Unpaid, None),
+    ] {
+        let lifecycle = SubscriptionLifecycle::from_parts(
+            status,
+            BillingPeriod::new(starts, ends).unwrap(),
+            ends,
+            next_payment_attempt_at,
+        )
+        .unwrap();
+        assert_eq!(lifecycle.status(), status);
+        assert_eq!(lifecycle.current_period().start_at(), &starts);
+        assert_eq!(lifecycle.current_period().end_at(), &ends);
+        assert_eq!(lifecycle.next_renewal_at(), &ends);
+        assert_eq!(
+            lifecycle.next_payment_attempt_at(),
+            next_payment_attempt_at.as_ref()
+        );
+    }
+
+    for (status, next_payment_attempt_at) in [
+        (SubscriptionStatus::Active, None),
+        (SubscriptionStatus::Active, Some(before_end)),
+        (SubscriptionStatus::Active, Some(after_end)),
+        (SubscriptionStatus::PastDue, Some(before_end)),
+        (SubscriptionStatus::Canceled, Some(ends)),
+        (SubscriptionStatus::Unpaid, Some(ends)),
+    ] {
+        assert_eq!(
+            SubscriptionLifecycle::from_parts(
+                status,
+                BillingPeriod::new(starts, ends).unwrap(),
+                ends,
+                next_payment_attempt_at,
+            ),
+            Err(SubscriptionLifecycleError::InvalidPaymentSchedule),
+        );
+    }
+
+    for status in SubscriptionStatus::ALL {
+        assert_eq!(
+            SubscriptionLifecycle::from_parts(
+                status,
+                BillingPeriod::new(starts, ends).unwrap(),
+                ends + chrono::Duration::seconds(1),
+                None,
+            ),
+            Err(SubscriptionLifecycleError::NextRenewalDoesNotMatchPeriod),
+        );
+    }
+}
+
+#[test]
+fn subscription_from_lifecycle_derives_status_and_schedule_projections() {
+    let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+    let ends = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let subscription = Subscription::from_lifecycle(
+        SubscriptionId::new(Uuid::from_u128(1)),
+        PlanKey::new("plan").unwrap(),
+        SubscriptionPhase::Recurring,
+        PaymentMethodId::new(Uuid::from_u128(2)),
+        ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+        SubscriptionPeriodRule::calendar_months(1).unwrap(),
+        RenewalFailurePolicy::new(
+            DunningSchedule::default(),
+            DunningExhaustion::MarkUnpaid,
+            PastDueAccessPolicy::SuspendImmediately,
+        ),
+        SubscriptionLifecycle::active(BillingPeriod::new(starts, ends).unwrap()),
+    );
+
+    assert_eq!(subscription.status(), SubscriptionStatus::Active);
+    assert_eq!(subscription.current_period().end_at(), &ends);
+    assert_eq!(subscription.next_renewal_at(), &ends);
+    assert_eq!(subscription.next_payment_attempt_at(), Some(&ends));
+}
+
+#[test]
 fn grant_period_is_valid_by_construction() {
     let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
     let id = SubscriptionGrantId::new(Uuid::from_u128(1));

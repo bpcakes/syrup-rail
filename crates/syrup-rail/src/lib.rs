@@ -175,7 +175,8 @@ pub use subscription::{
     SubscriptionGrantKindParseError, SubscriptionGrantReason, SubscriptionGrantReasonError,
     SubscriptionGrantRecord, SubscriptionGrantRecordError, SubscriptionGrantRevocation,
     SubscriptionGrantRevocationAudit, SubscriptionGrantRevocationOutcome,
-    SubscriptionGrantRevocationState, classify_past_due_access,
+    SubscriptionGrantRevocationState, SubscriptionLifecycle, SubscriptionLifecycleError,
+    classify_past_due_access,
 };
 pub use subscription_payment_context::SubscriptionPaymentContext;
 pub use terms::{

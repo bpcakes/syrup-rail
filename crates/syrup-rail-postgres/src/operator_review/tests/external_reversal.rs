@@ -1,5 +1,4 @@
 use super::*;
-use crate::processor_charge_persistence::attestation_by_charge;
 use syrup_rail::{
     ExternalReversalOutcome, ExternalReversalPriorClassification, PaymentResolutionCode,
 };
@@ -548,14 +547,25 @@ async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
         Err(crate::SchemaConformanceError::Contract { version: 3, detail })
             if detail == crate::schema_contract::INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL
     ));
-    let mut connection = database.pool.acquire().await?;
-    let error = attestation_by_charge(&mut connection, charge_id)
-        .await
-        .expect_err("incompatible legacy tuple must fail strict hydration");
+    let error = attest_external_reversal(
+        &database.pool,
+        &ExactHostRelease::default(),
+        ProcessorChargeId::new(charge_id),
+        ActorId::new(Uuid::now_v7()),
+        ExternalReversalKind::Refund,
+        &GatewayTransactionId::new(transaction_id)?,
+        &ExternalReversalReason::new("operator confirmed refund")?,
+    )
+    .await
+    .expect_err("incompatible legacy tuple must fail strict hydration");
     assert!(matches!(
-        error,
+        &error,
         OperatorReviewError::InvalidState("operator attestation resolution tuple is invalid")
     ));
+    assert_eq!(
+        error.to_string(),
+        "operator attestation resolution tuple is invalid"
+    );
 
     database.cleanup().await?;
     Ok(())

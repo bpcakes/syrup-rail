@@ -151,6 +151,7 @@ impl SubscriptionBillingService {
         Ok(outcome)
     }
 
+    #[allow(deprecated)]
     pub(super) async fn renewal_gateway_account(
         &self,
         command: ChargeRenewal,

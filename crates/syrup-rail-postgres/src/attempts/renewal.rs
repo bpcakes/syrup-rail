@@ -140,6 +140,7 @@ async fn reject_locked_renewal(
     Ok(SubscriptionRenewalSubmissionOutcome::Rejected { attempt, reason })
 }
 
+#[allow(deprecated)]
 fn map_renewal_store_error(error: crate::RenewalStoreError) -> PaymentAttemptStoreError {
     match error {
         crate::RenewalStoreError::Sql(error) => PaymentAttemptStoreError::Sql(error),
