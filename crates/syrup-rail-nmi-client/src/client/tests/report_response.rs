@@ -507,6 +507,81 @@ fn query_transaction_reports_do_not_reuse_the_transaction_page_limit_for_actions
 }
 
 #[test]
+fn malformed_transaction_does_not_consume_later_action_capacity() {
+    let later_actions = "<action/>".repeat(MAX_NMI_REPORT_ACTIONS);
+    let xml = format!(
+        "<nm_response><transaction><transaction_id>txn_malformed_first</transaction_id><order_id>ck_malformed_first</order_id><action><action_type>settle</action_type></action><action><amount>1.00</amount><amount>2.00</amount></action></transaction><transaction><transaction_id>txn_budget_consumer</transaction_id>{later_actions}</transaction></nm_response>"
+    );
+    assert!(xml.len() < MAX_NMI_REPORT_RESPONSE_BYTES);
+
+    let reports = query_transaction_reports_from_xml(&xml)
+        .expect("malformed action evidence must not consume later page capacity");
+
+    assert_eq!(reports.len(), 2);
+    assert_eq!(
+        reports[0]
+            .transaction_id
+            .as_ref()
+            .map(SensitiveText::expose),
+        Some("txn_malformed_first")
+    );
+    assert_eq!(
+        reports[0].order_id.as_ref().map(SensitiveText::expose),
+        Some("ck_malformed_first")
+    );
+    assert_transaction_local_malformed(&reports[0]);
+    assert_eq!(reports[1].actions.len(), MAX_NMI_REPORT_ACTIONS);
+    assert!(reports[1].diagnostics.is_empty());
+}
+
+#[test]
+fn query_transaction_reports_accept_exact_aggregate_action_capacity() {
+    let first_action_count = MAX_NMI_REPORT_ACTIONS / 2;
+    let second_action_count = MAX_NMI_REPORT_ACTIONS - first_action_count;
+    let first_actions = "<action/>".repeat(first_action_count);
+    let second_actions = "<action/>".repeat(second_action_count);
+    let xml = format!(
+        "<nm_response><transaction><transaction_id>txn_exact_cap_first</transaction_id>{first_actions}</transaction><transaction><transaction_id>txn_exact_cap_second</transaction_id>{second_actions}</transaction></nm_response>"
+    );
+    assert!(xml.len() < MAX_NMI_REPORT_RESPONSE_BYTES);
+
+    let reports = query_transaction_reports_from_xml(&xml)
+        .expect("the exact aggregate action capacity should be accepted");
+
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].actions.len(), first_action_count);
+    assert_eq!(reports[1].actions.len(), second_action_count);
+    assert!(reports.iter().all(|report| report.diagnostics.is_empty()));
+}
+
+#[test]
+fn query_transaction_reports_quarantine_the_transaction_exceeding_aggregate_action_capacity() {
+    let first_action_count = MAX_NMI_REPORT_ACTIONS / 2;
+    let second_action_count = MAX_NMI_REPORT_ACTIONS - first_action_count + 1;
+    let first_actions = "<action/>".repeat(first_action_count);
+    let second_actions = "<action/>".repeat(second_action_count);
+    let xml = format!(
+        "<nm_response><transaction><transaction_id>txn_cap_plus_one_first</transaction_id>{first_actions}</transaction><transaction><transaction_id>txn_cap_plus_one_second</transaction_id>{second_actions}</transaction></nm_response>"
+    );
+    assert!(xml.len() < MAX_NMI_REPORT_RESPONSE_BYTES);
+
+    let reports = query_transaction_reports_from_xml(&xml)
+        .expect("aggregate action overflow should remain transaction-local");
+
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].actions.len(), first_action_count);
+    assert!(reports[0].diagnostics.is_empty());
+    assert_eq!(
+        reports[1]
+            .transaction_id
+            .as_ref()
+            .map(SensitiveText::expose),
+        Some("txn_cap_plus_one_second")
+    );
+    assert_transaction_local_malformed(&reports[1]);
+}
+
+#[test]
 fn query_transaction_reports_bound_expanded_action_record_storage() {
     let xml = format!(
         "<nm_response><transaction><transaction_id>txn_action_storage_bound</transaction_id>{}</transaction></nm_response>",

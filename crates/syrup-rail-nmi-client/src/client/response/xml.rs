@@ -116,6 +116,14 @@ struct ExactQueryResponse {
     order_id: ResolvedScalar,
 }
 
+struct ParsedReportAuthority {
+    condition: Option<String>,
+    actions: Vec<TransactionAction>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MalformedReportAuthority;
+
 fn direct_element_count_without_nested_matches<'document, 'input>(
     parent: roxmltree::Node<'document, 'input>,
     element_name: &'static str,
@@ -335,105 +343,101 @@ pub(in crate::client) fn query_transaction_reports_from_xml(
     let mut reports = Vec::with_capacity(transaction_count);
     let mut remaining_action_capacity = MAX_NMI_REPORT_ACTIONS;
     for transaction in element_children_named(envelope, "transaction") {
-        let mut malformed_structure = false;
-        let transaction_id = report_field(
+        let (transaction_id, invalid_transaction_id) = resolve_optional_scalar(
             collect_xml_scalar(transaction, &["transaction_id"], false).finish(),
-            &mut malformed_structure,
         );
-        let order_id = report_field(
-            collect_xml_scalar(transaction, &["order_id"], false).finish(),
-            &mut malformed_structure,
-        );
-        let condition = report_field(
-            collect_xml_scalar(transaction, &["condition"], false)
-                .finish_normalized(normalize_gateway_state),
-            &mut malformed_structure,
-        );
-        let reserved_action_count = if malformed_structure {
-            0
+        let (order_id, invalid_order_id) =
+            resolve_optional_scalar(collect_xml_scalar(transaction, &["order_id"], false).finish());
+        let authority = if invalid_transaction_id || invalid_order_id {
+            Err(MalformedReportAuthority)
         } else {
-            match direct_element_count_without_nested_matches(
-                transaction,
-                "action",
-                "transaction report response",
-            ) {
-                Ok(action_count) if action_count <= remaining_action_capacity => {
-                    remaining_action_capacity -= action_count;
-                    action_count
-                }
-                Ok(_) | Err(_) => {
-                    malformed_structure = true;
-                    0
-                }
-            }
+            parse_report_authority(transaction, remaining_action_capacity)
         };
-        let mut actions = Vec::with_capacity(reserved_action_count);
-        if !malformed_structure {
-            for action in element_children_named(transaction, "action") {
-                let action_type = report_field(
-                    collect_xml_scalar(action, &["action_type"], false)
-                        .finish_normalized(normalize_gateway_state),
-                    &mut malformed_structure,
-                );
-                let date = report_field(
-                    collect_xml_scalar(action, &["date"], false).finish(),
-                    &mut malformed_structure,
-                );
-                let amount = report_field(
-                    collect_xml_scalar(action, &["amount"], false)
-                        .finish_normalized(normalize_report_amount),
-                    &mut malformed_structure,
-                );
-                let success = report_field(
-                    collect_xml_scalar(action, &["success"], false)
-                        .finish_normalized(normalize_report_success),
-                    &mut malformed_structure,
-                );
-                if malformed_structure {
-                    break;
+
+        let report = match authority {
+            Ok(authority) => {
+                remaining_action_capacity -= authority.actions.len();
+                TransactionReport {
+                    transaction_id: transaction_id.map(SensitiveText::new),
+                    order_id: order_id.map(SensitiveText::new),
+                    condition: authority.condition.map(SensitiveText::new),
+                    actions: authority.actions,
+                    diagnostics: Vec::new(),
                 }
-                let (response_code, _) = resolve_optional_scalar(
-                    collect_xml_scalar(action, &["response_code"], true).finish(),
-                );
-                let (response_text, _) = resolve_optional_scalar(
-                    collect_xml_scalar(action, &["response_text"], true).finish(),
-                );
-                actions.push(TransactionAction {
-                    action_type: action_type.map(SensitiveText::new),
-                    date: date.map(SensitiveText::new),
-                    amount: amount.map(SensitiveText::new),
-                    success: success.map(SensitiveText::new),
-                    response_code: response_code.map(SensitiveText::new),
-                    response_text: response_text.map(SensitiveText::new),
-                });
             }
-        }
-        let diagnostics = if malformed_structure {
-            // Keep only independently resolved identifiers for quarantine
-            // correlation. No partial condition or action evidence may escape
-            // a malformed transaction as lifecycle authority. Release any
-            // reserved vector allocation and make its capacity available to
-            // later independent transactions in this page.
-            if reserved_action_count > 0 {
-                remaining_action_capacity += reserved_action_count;
-            }
-            actions = Vec::new();
-            vec![TransactionReportDiagnostic::MalformedStructure]
-        } else {
-            Vec::new()
+            Err(MalformedReportAuthority) => malformed_transaction_report(transaction_id, order_id),
         };
-        reports.push(TransactionReport {
-            transaction_id: transaction_id.map(SensitiveText::new),
-            order_id: order_id.map(SensitiveText::new),
-            condition: (!malformed_structure)
-                .then_some(condition)
-                .flatten()
-                .map(SensitiveText::new),
-            actions,
-            diagnostics,
-        });
+        reports.push(report);
     }
     Ok(reports)
+}
+
+fn parse_report_authority(
+    transaction: roxmltree::Node<'_, '_>,
+    remaining_action_capacity: usize,
+) -> Result<ParsedReportAuthority, MalformedReportAuthority> {
+    let condition = report_field(
+        collect_xml_scalar(transaction, &["condition"], false)
+            .finish_normalized(normalize_gateway_state),
+    )?;
+    let action_count = direct_element_count_without_nested_matches(
+        transaction,
+        "action",
+        "transaction report response",
+    )
+    .map_err(|_| MalformedReportAuthority)?;
+    if action_count > remaining_action_capacity {
+        return Err(MalformedReportAuthority);
+    }
+
+    let actions = element_children_named(transaction, "action")
+        .map(parse_report_action)
+        .collect::<Result<Vec<_>, _>>()?;
+    debug_assert_eq!(actions.len(), action_count);
+
+    Ok(ParsedReportAuthority { condition, actions })
+}
+
+fn parse_report_action(
+    action: roxmltree::Node<'_, '_>,
+) -> Result<TransactionAction, MalformedReportAuthority> {
+    let action_type = report_field(
+        collect_xml_scalar(action, &["action_type"], false)
+            .finish_normalized(normalize_gateway_state),
+    )?;
+    let date = report_field(collect_xml_scalar(action, &["date"], false).finish())?;
+    let amount = report_field(
+        collect_xml_scalar(action, &["amount"], false).finish_normalized(normalize_report_amount),
+    )?;
+    let success = report_field(
+        collect_xml_scalar(action, &["success"], false).finish_normalized(normalize_report_success),
+    )?;
+    let (response_code, _) =
+        resolve_optional_scalar(collect_xml_scalar(action, &["response_code"], true).finish());
+    let (response_text, _) =
+        resolve_optional_scalar(collect_xml_scalar(action, &["response_text"], true).finish());
+
+    Ok(TransactionAction {
+        action_type: action_type.map(SensitiveText::new),
+        date: date.map(SensitiveText::new),
+        amount: amount.map(SensitiveText::new),
+        success: success.map(SensitiveText::new),
+        response_code: response_code.map(SensitiveText::new),
+        response_text: response_text.map(SensitiveText::new),
+    })
+}
+
+fn malformed_transaction_report(
+    transaction_id: Option<String>,
+    order_id: Option<String>,
+) -> TransactionReport {
+    TransactionReport {
+        transaction_id: transaction_id.map(SensitiveText::new),
+        order_id: order_id.map(SensitiveText::new),
+        condition: None,
+        actions: Vec::new(),
+        diagnostics: vec![TransactionReportDiagnostic::MalformedStructure],
+    }
 }
 
 fn collect_xml_scalar(
@@ -492,14 +496,11 @@ fn strict_xml_element_scalar(node: roxmltree::Node<'_, '_>) -> Option<String> {
     }
 }
 
-fn report_field(value: ResolvedScalar, malformed_structure: &mut bool) -> Option<String> {
+fn report_field(value: ResolvedScalar) -> Result<Option<String>, MalformedReportAuthority> {
     match value {
-        ResolvedScalar::Missing => None,
-        ResolvedScalar::OneConsistent(value) => Some(value),
-        ResolvedScalar::InvalidOrConflicting => {
-            *malformed_structure = true;
-            None
-        }
+        ResolvedScalar::Missing => Ok(None),
+        ResolvedScalar::OneConsistent(value) => Ok(Some(value)),
+        ResolvedScalar::InvalidOrConflicting => Err(MalformedReportAuthority),
     }
 }
 
