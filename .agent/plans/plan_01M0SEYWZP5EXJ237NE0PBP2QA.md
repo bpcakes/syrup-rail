@@ -1,6 +1,6 @@
 # Implement the requested audit tasks sequentially
 
-This plan verifies and implements accepted simplification-audit issues in order. The user skipped R-41 after verification, so it remains open and unchanged. R-35 is a private Rust error-boundary refactor in `crates/syrup-rail-postgres`. R-40 requires changes in the upstream Jig checkout at `/Users/aa/Documents/jig-sh` followed by regeneration of Syrup Rail's managed harness. Each implemented issue is validated and closed before the next is claimed.
+This plan verifies and implements accepted simplification-audit issues in order. R-41 was initially skipped, then reconciled after the later reachable-master regeneration brought the stronger upstream lock protocol into Syrup Rail. R-35 is a private Rust error-boundary refactor in `crates/syrup-rail-postgres`. R-40 requires changes in the upstream Jig checkout at `/Users/aa/Documents/jig-sh` followed by regeneration of Syrup Rail's managed harness. Each implemented issue is validated and closed before the next is claimed.
 
 ## Progress
 
@@ -15,13 +15,14 @@ This plan verifies and implements accepted simplification-audit issues in order.
 - [x] Resolve the review portability blocker by abandoning the unpublished R-40 pin and regenerating from reachable Jig master `f2b38c9`.
 - [x] Return R-40 to open because reachable Jig master does not yet implement the migration-layout contract.
 - [x] Re-run contract, formatting, Clippy, SQLx, and full tests and prove a clean Cargo install from the reachable master pin.
+- [x] Reconcile R-41 against the lock protocol now present in reachable Jig master `f2b38c9`, record the stronger protocol and equivalent acceptance evidence, and close the bead without duplicating upstream work.
 
 ## Surprises & Discoveries
 
 - The Syrup Rail worktree already contains completed R-02 changes and append-only Jig/Beads receipts. These are user-owned and must be preserved.
 - `scripts/install-jig.sh` is listed in `.agent/jig-managed-paths.json`; direct downstream-only edits would be overwritten. The source of truth is the sibling Jig checkout's Jinja template.
-- The current lock directory is empty, reclaimed only when its mtime exceeds 300 seconds, and removed unconditionally by the original process's EXIT trap. This proves both live-owner theft and ABA release are present.
-- The current upstream Jig master already has a much newer guard/owner-record protocol, but Syrup Rail's pinned release is on a divergent older history. No upstream or downstream R-41 code was changed before the user skipped it.
+- At initial R-41 verification, Syrup Rail's old generated lock directory was empty, reclaimed only when its mtime exceeded 300 seconds, and removed unconditionally by the original process's EXIT trap. That proved both live-owner theft and ABA release were present at that revision.
+- Reachable Jig master already had a newer OS-exclusive guard and owner-record protocol. The later regeneration to `f2b38c9` brought that protocol into Syrup Rail even though R-41 had initially been skipped, so reconciliation—not a second implementation—is the correct final slice.
 - R-35's existing malformed-attestation test called the codec directly. Routing it through `attest_external_reversal` now proves the private error conversion at the public operator workflow boundary.
 - A full downstream harness render from the current upstream Jig head also removed unrelated repository-owned CI and security guidance accumulated since the old pin. Those unrelated replacements were not retained; the R-40 config/contract/launcher/guidance changes were kept, and the existing CI was extended only with the new recursive migration-immutability check.
 - Upstream Jig's complete standard library suite passed once (1,577 passed, 2 ignored) and its full work gate passed once (2,206 tests plus vault groups). Later reruns exposed an unrelated Nextest-only worker cleanup failure; the same exact test passes under `cargo test`. Clippy is independently blocked by a pre-existing `collapsible_if` lint in `crates/jig/build.rs:300`.
@@ -29,14 +30,14 @@ This plan verifies and implements accepted simplification-audit issues in order.
 
 ## Decision Log
 
-- Execute one bead at a time. The user's explicit skip supersedes implementing R-41; do not claim R-40 until R-35 is closed.
+- Execute one bead at a time. The initial R-41 skip prevented duplicate work at that point; the later request to reconcile authorizes recording the now-pinned upstream protocol as a superseding implementation without changing managed code again.
 - Follow `docs/security/threat-model.md` for R-35 because processor-charge and operator-attestation rows are protected financial evidence. No new security mechanism or trust boundary is planned.
 - Preserve R-40's smallest credible downstream scope by retaining repository-owned CI/security customizations while accepting the generated contract-v4 launchers required to distinguish the newly pinned runtime from older `0.2.0` binaries.
 - Do not publish the local R-40 branch. Use the installed Jig binary from reachable master `f2b38c9`, regenerate the downstream harness from that exact remote revision, and leave R-40 open until the feature exists upstream on a reachable commit.
 
 ## Outcomes & Retrospective
 
-R-41 was verified, unclaimed, and left unchanged after the user skipped it. R-35 now owns a private `ProcessorChargePersistenceError { Sql, InvalidState }`, maps it exhaustively at both consumers, and no longer admits operator host/workflow errors into charge storage. Focused charge/operator suites, formatting, Clippy, contract, SQLx, and repository tests pass; no schema, SQLx metadata, or public error type changed.
+R-41 is reconciled to reachable Jig master `f2b38c9`, which contains the OS-exclusive guard, `owner-v1` record, and acquisition-token cleanup introduced before that revision. An ancient-mtime live-owner test, reclaimable-owner tests, token-matched cleanup, template consistency checks, and the fake-cargo default/runtime/MCP reuse fixture cover the original invariants under the stronger protocol. No new upstream or generated code was needed for reconciliation. R-35 now owns a private `ProcessorChargePersistenceError { Sql, InvalidState }`, maps it exhaustively at both consumers, and no longer admits operator host/workflow errors into charge storage. Focused charge/operator suites, formatting, Clippy, contract, SQLx, and repository tests pass; no schema, SQLx metadata, or public error type changed.
 
 R-40's local upstream experiment modeled `flat_migrations | versioned_artifacts`, but it was never published and is not part of the final downstream render. Syrup Rail now pins reachable Jig master `f2b38c9`; the generated contract again exposes `jig.migration_add`, while repository guidance continues to forbid that command for the versioned schema tree. R-40 remains open for a future implementation on a reachable upstream revision.
 
@@ -44,7 +45,7 @@ Fresh downstream `jig.contract_check`, `jig.test`, `jig.sqlx_check`, `jig.fmt_ch
 
 ## Context and orientation
 
-R-41's generated installer is `scripts/install-jig.sh`; its upstream source is `templates/project/scripts/install-jig.sh.jinja` in `/Users/aa/Documents/jig-sh`. The installer serializes `cargo install` calls through `<install-root>.lock`. Its current age-only stale check can steal a live lock, and the old process can then delete a successor's lock.
+R-41's generated installer is `scripts/install-jig.sh`; its upstream source is `templates/project/scripts/install-jig.sh.jinja` in `/Users/aa/Documents/jig-sh`. The pinned implementation serializes `cargo install` through an OS-exclusive `<install-root>.lock.guard`, publishes `owner-v1 <pid> <token>` in the legacy lock directory, reclaims a marked directory only while holding the guard, and removes it only when the observed token still matches. The inner shell's EXIT handler no longer removes the directory; the guard-owning parent performs token-checked cleanup before unlocking, so a successor cannot be acquired during old-owner cleanup.
 
 R-35 centers on `crates/syrup-rail-postgres/src/processor_charge_persistence.rs`, consumed by `operator_review.rs` and `processor_charges/storage.rs`. The neutral persistence codec currently returns the operator-review workflow's broader error type. The target is a private `ProcessorChargePersistenceError { Sql, InvalidState }` converted independently at each consumer boundary while preserving public error variants, messages, redaction, and transient SQL handling.
 
@@ -52,7 +53,7 @@ R-40 centers on `.jig.toml`, `.agent/jig-contract.json`, generated guidance, and
 
 ## Plan of work
 
-R-41 was intentionally skipped after verification.
+R-41 was initially skipped, then reconciled without code changes after the reachable-master regeneration made the upstream guard/owner protocol authoritative in Syrup Rail.
 
 For R-35, read the PostgreSQL crate guide and inspect all codec consumers and tests. Introduce the private two-variant error at the neutral module, add exhaustive conversions at operator-review and charge-store boundaries, delete reverse/catch-all mappings, and add focused malformed-row plus SQL classification regression coverage. Run focused PostgreSQL tests, formatting, Clippy, SQLx, and the repository backend test gate.
 
@@ -64,7 +65,7 @@ Run upstream tests from `/Users/aa/Documents/jig-sh` and downstream commands fro
 
 ## Validation and acceptance
 
-R-41 is complete only when a fake-cargo harness proves a live owner remains exclusive beyond the former stale threshold, a killed/dead owner can be reclaimed, an old owner's exit cannot remove a replacement generation, and default/runtime/MCP profile-root reuse is unchanged. Upstream template tests and Syrup Rail's generated contract check must pass.
+R-41 is complete because the pinned protocol removes age-based theft, keeps an ancient-mtime live guard exclusive, reclaims a marked directory only after the kernel guard becomes available, and performs token-matched cleanup while still holding that guard. This makes the old-owner/removes-replacement interleaving impossible rather than merely detecting it afterward. Upstream runtime-cache-lock tests, template consistency checks, the fake-cargo default/runtime/MCP reuse fixture, and Syrup Rail's generated contract check provide the acceptance evidence.
 
 R-35 is complete only when malformed charge and attestation rows traverse both consumers with unchanged public invalid-state behavior, transient SQL remains distinguishable/retryable where currently supported, and replay/drift/reversal tests plus exact public error/redaction behavior pass.
 
@@ -78,4 +79,4 @@ Tests and generation commands must be rerunnable. Lock cleanup operates only on 
 
 ## Interfaces and dependencies
 
-R-41 and R-40 depend on the local upstream Jig checkout and coordinated downstream regeneration. R-35 has no external dependency and must not change public Rust error types. R-40 must default older/unspecified configurations to flat migrations so existing adopters retain their contract, while Syrup Rail explicitly opts into versioned artifacts.
+R-41 is satisfied by the already-pinned reachable upstream revision. R-40 still depends on the local upstream Jig checkout and coordinated downstream regeneration. R-35 has no external dependency and must not change public Rust error types. R-40 must default older/unspecified configurations to flat migrations so existing adopters retain their contract, while Syrup Rail explicitly opts into versioned artifacts.
