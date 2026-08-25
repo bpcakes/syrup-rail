@@ -6,13 +6,32 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Fixed
 
-- Make the required runtime schema-v3 assertion reject incompatible live
-  external-reversal resolution tuples in the same read-only snapshot as the
-  catalog check, removing a separate opt-in deployment preflight.
+- Make the retained schema-v3 runtime assertion reject incompatible live
+  external-reversal resolution tuples in the same read-only snapshot as its
+  catalog check. This remains available to hosts validating v3 while staging
+  the required schema-v4 cutover.
 - Coordinate subscriber billing-data scrubbing with approved payment-method
   writers through the deployed payment-method advisory-lock identity. A
   concurrent approval can no longer restore mutable attempt or payment-method
   data while the scrub runs.
+
+### Breaking
+
+- Replace the NMI client's independent sale source, vault action, stored-
+  credential, and currency fields with the closed `SaleIntent` contract.
+  Direct raw-client callers must construct one of the five supported intents;
+  code migrating historical field combinations can use
+  `SaleIntent::from_legacy_parts`. NMI sales remain fixed to USD.
+- Replace the independent `disposition` and `access` fields on
+  `BillingEvent::SubscriptionPaymentFailed` with one
+  `SubscriptionPaymentFailureOutcome`. Consumers can obtain the compatibility
+  projections through `outcome.disposition()` and `outcome.access()`; the host
+  integration example preserves the existing V1 outbox JSON shape.
+- Replace the raw `ExternalReversalAttestation::new` constructor with a typed
+  `ExternalReversalResolution` input. Code that reconstructs legacy raw tuples
+  must use the fallible `ExternalReversalAttestation::from_legacy_parts` and
+  handle `ExternalReversalResolutionError` instead of relying on unchecked or
+  panicking construction.
 
 ### Changed
 
@@ -24,16 +43,6 @@ All notable changes to the Syrup Rail crates are documented in this file.
   payment-schedule construction path. PostgreSQL subscription hydration now
   rejects contradictory rows, while `Subscription::new` remains available as
   the flat compatibility constructor.
-- Replace the NMI client's independent sale source, vault action, stored-
-  credential, and currency fields with the closed `SaleIntent` contract.
-  Direct raw-client callers must construct one of the five supported intents;
-  code migrating historical field combinations can use
-  `SaleIntent::from_legacy_parts`. NMI sales remain fixed to USD.
-- Replace the independent `disposition` and `access` fields on
-  `BillingEvent::SubscriptionPaymentFailed` with one
-  `SubscriptionPaymentFailureOutcome`. Consumers can obtain the compatibility
-  projections through `outcome.disposition()` and `outcome.access()`; the host
-  integration example preserves the existing V1 outbox JSON shape.
 - Model subscription discount-claim lifecycle and grant revocation audit facts
   as closed state values while retaining the legacy constructors and getters as
   compatibility projections.
@@ -45,11 +54,6 @@ All notable changes to the Syrup Rail crates are documented in this file.
   `PaymentAttemptRequest::canonical`; persistence codecs use
   `PaymentAttemptRequest::from_persisted_parts`, while `new` remains available
   as a compatibility wrapper for callers carrying durable fingerprints.
-- Replace the raw `ExternalReversalAttestation::new` constructor with a typed
-  `ExternalReversalResolution` input. Code that reconstructs legacy raw tuples
-  must use the fallible `ExternalReversalAttestation::from_legacy_parts` and
-  handle `ExternalReversalResolutionError` instead of relying on unchecked or
-  panicking construction.
 - Record provider-rate-limit readiness failures without inventing a
   `gateway_condition` of `failed`. The typed provider-rate-limit resolution
   code remains the durable reason for the failed attempt.
@@ -59,6 +63,24 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Use `expires_at` as the sole pending lifecycle-evidence clock. Reconciliation
   no longer repeats the unactionable-candidate query or writes inert check
   counters; the existing bounded expiry cleanup behavior remains unchanged.
+
+### Migration
+
+- Version 0.4.0 requires PostgreSQL schema v4. Before scheduling downtime, run
+  `schema/v4/preflight_from_v3.sql` to measure retained external-reversal
+  attestations and count incompatible resolution tuples. When blockers exist,
+  run `schema/v4/audit_incompatible_attestations_from_v3.sql` through an
+  authorized operator process to identify the affected internal rows without
+  exposing unnecessary provider or presentation evidence. Rehearse the exact
+  upgrade artifact on representative data, drain schema-v3 billing traffic,
+  stop every v3 writer, and apply `schema/v4/upgrade_from_v3.sql` in one
+  host-owned transaction. Its validated CHECK replacement scans the retained
+  table under `ACCESS EXCLUSIVE`; size the maintenance window and configure
+  deployment timeouts from the rehearsal rather than an assumed universal row
+  limit. Investigate blockers through an audited host process, never by
+  bypassing the constraint or silently rewriting financial evidence. After
+  commit, start 0.4.0 with `assert_runtime_schema_v4_compatible`; do not restart
+  a v3 writer.
 
 ### Developer experience
 

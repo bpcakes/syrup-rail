@@ -1,20 +1,20 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.3
-supports PostgreSQL 18 only and uses schema v3.
+SQLx operations, and high-level subscription billing service. The current
+development line supports PostgreSQL 18 only and uses schema v4.
 
 ```toml
 [dependencies]
-syrup-rail = "0.3.0"
-syrup-rail-postgres = "0.3.0"
+syrup-rail = "0.4.0"
+syrup-rail-postgres = "0.4.0"
 ```
 
-New hosts install `schema/v3/install.sql` through their normal migration
-system. Existing hosts reach schema v2 using its immutable artifacts when
-necessary, then stop every schema-v2 billing writer and apply
-`schema/v3/upgrade_from_v2.sql` transactionally before rolling forward with
-0.3. Schemas v1 and v2 are immutable. The detailed versioned guides explain the
+New hosts install `schema/v4/install.sql` through their normal migration
+system. Existing hosts reach schema v3 using its immutable artifacts when
+necessary, then stop every schema-v3 billing writer and apply
+`schema/v4/upgrade_from_v3.sql` transactionally before rolling forward.
+Schemas v1 through v3 are immutable. The detailed versioned guides explain the
 required lock, maintenance, and rehearsal boundaries.
 
 After the host applies its migration and before it serves billing traffic,
@@ -22,17 +22,18 @@ verify the runtime contract:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v3_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v4_compatible(pool).await?;
 # Ok(())
 # }
 ```
 
-The assertion checks both the canonical catalog and live data assumptions that
-cannot be expressed by the immutable schema-v3 constraints. In particular, it
-fails closed when an external-reversal attestation contains a resolution tuple
-that the typed runtime model cannot represent. Keep the prior application
-version serving while investigating such a failure; do not bypass startup
-validation or rewrite financial evidence without an audited data-repair plan.
+The assertion checks the canonical catalog and validated schema-v4 constraints.
+The v3-to-v4 migration validates retained external-reversal attestations once
+and fails closed when a tuple cannot be represented by the typed runtime. Keep
+the prior application version stopped while investigating such a migration
+failure; do not bypass validation or rewrite financial evidence without an
+audited data-repair plan. Successful v4 startup checks do not scan that retained
+financial evidence.
 
 During `REINDEX CONCURRENTLY`, PostgreSQL exposes the command, phase, and
 target details only to the maintenance role and statistics-privileged roles.

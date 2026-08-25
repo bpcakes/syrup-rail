@@ -156,6 +156,7 @@ pub use reconciliation::{
 pub use renewal::{RenewalStoreError, due_renewals, due_renewals_page, renewal_attempt_state};
 pub use schema_contract::{
     SUPPORTED_POSTGRES_MAJOR_VERSION, SchemaConformanceError, assert_runtime_schema_v3_compatible,
+    assert_runtime_schema_v4_compatible,
 };
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,

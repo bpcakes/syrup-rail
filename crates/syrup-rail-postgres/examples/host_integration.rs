@@ -34,7 +34,7 @@ use syrup_rail_postgres::{
     EntitlementGuardError, EntitlementWriteTransaction, RenewalStoreError, SchemaConformanceError,
     SubscriptionBillingPortalQueryError, SubscriptionBillingService,
     SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
-    SubscriptionOfferStore, assert_runtime_schema_v3_compatible, due_renewals_page,
+    SubscriptionOfferStore, assert_runtime_schema_v4_compatible, due_renewals_page,
     require_entitlement_for_update, subscription_billing_portal, subscription_payment_history_page,
 };
 
@@ -102,12 +102,12 @@ pub fn build_subscription_billing_service(
 /// migration through its normal deployment workflow first. This assertion uses
 /// one repeatable-read, read-only runtime-contract snapshot; it never installs,
 /// upgrades, audits, or otherwise changes the database. It requires PostgreSQL
-/// 18 and rejects host-specific columns on canonical relations or incompatible
-/// live external-reversal resolution tuples.
+/// 18 and rejects host-specific columns on canonical relations. The schema-v4
+/// migration has already validated external-reversal resolution tuples.
 pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
-    assert_runtime_schema_v3_compatible(pool).await
+    assert_runtime_schema_v4_compatible(pool).await
 }
 
 /// Admits a host-authorized protected write and returns its only valid transaction.

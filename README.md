@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.3.0"
-syrup-rail-postgres = "0.3.0"
-syrup-rail-nmi = "0.3.0" # only for NMI-backed hosts
+syrup-rail = "0.4.0"
+syrup-rail-postgres = "0.4.0"
+syrup-rail-nmi = "0.4.0" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.3.0"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.4.0"`
 directly.
 
 ## Subscription terms
@@ -97,11 +97,11 @@ entitlement changes from `AllowedDuringDunning` to `Suspended`. Hosts that
 mirror access outside Syrup Rail must consume the outcome's access projection
 from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v3 is the
+PostgreSQL 18 is the only supported database major, and schema v4 is the
 current contract. New hosts install
-[`schema/v3/install.sql`](crates/syrup-rail-postgres/schema/v3/install.sql).
-Existing hosts first reach schema v2 when necessary, then follow the checked-in
-[`v2` to `v3` cutover guide](crates/syrup-rail-postgres/schema/v3/README.md).
+[`schema/v4/install.sql`](crates/syrup-rail-postgres/schema/v4/install.sql).
+Existing hosts first reach schema v3 when necessary, then follow the checked-in
+[`v3` to `v4` cutover guide](crates/syrup-rail-postgres/schema/v4/README.md).
 
 ## PostgreSQL host integration
 
@@ -123,18 +123,19 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v3 install or forward-only v2-to-v3
+After the host has applied its immutable v4 install or forward-only v3-to-v4
 upgrade migration, call
-`assert_runtime_schema_v3_compatible(&pool).await` during process startup and
+`assert_runtime_schema_v4_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v3 catalog, fingerprint, and live data invariants required by the typed runtime
-inside one repeatable-read, read-only transaction. It first rejects every
+v4 catalog and fingerprint required by the typed runtime inside one
+repeatable-read, read-only transaction. Schema v4 validates the external-
+reversal resolution tuple invariant during migration, so startup does not scan
+retained attestations. The assertion first rejects every
 PostgreSQL major other than 18. Separately named host-prefixed tables,
 constraints, indexes, functions, and triggers are valid extension points, but
 canonical table and view columns are closed: adding even a host-prefixed column
 to a canonical relation is unsupported and fails the fingerprint check. The
-assertion also fails closed for v1, v2, other canonical drift, or an external-
-reversal resolution tuple that the typed runtime cannot represent. It never
+assertion also fails closed for v1, v2, v3, or other canonical drift. It never
 installs, upgrades, audits, or mutates the database. Hosts remain responsible
 for applying and coordinating their own migrations. The compiled host
 integration example includes a default-feature helper for this startup check.
@@ -217,7 +218,7 @@ compile the integration boundary without contacting a database or provider.
 - `scripts/check-public-api.sh`
 - `cargo test -p syrup-rail-nmi-client`
 
-See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
+See [the 0.4 public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.
 
 ## Releasing

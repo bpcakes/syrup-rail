@@ -124,7 +124,7 @@ pub async fn due_renewals(pool: &PgPool) -> Result<Vec<RenewalDispatch>, Renewal
 /// Nor is it a dispatch lease: hosts own queue/outbox persistence and the
 /// eventual renewal operation revalidates mutable state.
 ///
-/// Hosts must successfully run [`crate::assert_runtime_schema_v3_compatible`]
+/// Hosts must successfully run [`crate::assert_runtime_schema_v4_compatible`]
 /// before accepting traffic. Pagination relies on the validated immediate
 /// foreign keys from subscriptions to accounts and accounts to provider
 /// cooldown rows rather than repeating a global orphan scan on every page.

@@ -8,7 +8,7 @@ ports used by the adapter crates.
 
 ```toml
 [dependencies]
-syrup-rail = "0.3.0"
+syrup-rail = "0.4.0"
 ```
 
 Construct subscription offers from explicit start, recurring, and failure

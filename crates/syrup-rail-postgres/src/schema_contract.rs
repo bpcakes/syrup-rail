@@ -22,6 +22,9 @@ pub const V2_INSTALL_SQL: &str = include_str!("../schema/v2/install.sql");
 /// The immutable version-3 fresh-install artifact.
 pub const V3_INSTALL_SQL: &str = include_str!("../schema/v3/install.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The immutable version-4 fresh-install artifact.
+pub const V4_INSTALL_SQL: &str = include_str!("../schema/v4/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The read-only version-1-to-version-2 upgrade preflight.
 pub const V1_TO_V2_PREFLIGHT_SQL: &str = include_str!("../schema/v2/preflight_from_v1.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -34,6 +37,16 @@ pub const V1_TO_V2_UPGRADE_SQL: &str = include_str!("../schema/v2/upgrade_from_v
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The immutable forward-only version-2-to-version-3 upgrade artifact.
 pub const V2_TO_V3_UPGRADE_SQL: &str = include_str!("../schema/v3/upgrade_from_v2.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The read-only version-3-to-version-4 upgrade preflight.
+pub const V3_TO_V4_PREFLIGHT_SQL: &str = include_str!("../schema/v4/preflight_from_v3.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The read-only audit of incompatible v3 external-reversal attestations.
+pub const V3_TO_V4_INCOMPATIBLE_ATTESTATION_AUDIT_SQL: &str =
+    include_str!("../schema/v4/audit_incompatible_attestations_from_v3.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The immutable forward-only version-3-to-version-4 upgrade artifact.
+pub const V3_TO_V4_UPGRADE_SQL: &str = include_str!("../schema/v4/upgrade_from_v3.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
@@ -42,6 +55,7 @@ const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
 const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
+const V4_CATALOG_FINGERPRINT: u64 = 0x023d_0171_91be_dc34;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 pub(crate) const INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL: &str =
@@ -270,10 +284,11 @@ const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
 ];
 
 const V3_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V2_CURRENT_SUBSCRIPTION_COLUMNS;
+const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V3_CURRENT_SUBSCRIPTION_COLUMNS;
 
 /// Why a host database does not satisfy a canonical schema contract.
 ///
-/// [`crate::assert_runtime_schema_v3_compatible`] reports version `3` in its
+/// Runtime compatibility assertions report their schema version in the
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
 /// or commit the read-only catalog snapshot.
 #[non_exhaustive]
@@ -310,10 +325,13 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
     }
 }
 
-/// Asserts that a host database is compatible with the canonical schema-v3
-/// contract before the host accepts billing work.
+/// Asserts that a host database still on schema v3 is compatible while the host
+/// stages the required schema-v4 cutover.
 ///
-/// Call this after the host has applied its immutable Syrup Rail install or
+/// Syrup Rail 0.4 hosts must apply schema v4 and call
+/// [`assert_runtime_schema_v4_compatible`] before accepting billing work. This
+/// retained v3 assertion supports only the pre-cutover validation window.
+/// Call it after the host has applied its immutable schema-v3 install or
 /// forward-only upgrade migration through its normal migration deployment.
 /// This function does not install, upgrade, audit, or otherwise mutate the
 /// database. It runs the same full canonical v3 catalog conformance and
@@ -344,6 +362,33 @@ pub async fn assert_runtime_schema_v3_compatible(
     .await
 }
 
+/// Asserts that a host database is compatible with the canonical schema-v4
+/// contract before the host accepts billing work.
+///
+/// Call this after the host has applied its immutable Syrup Rail install or
+/// forward-only upgrade migration through its normal migration deployment.
+/// This function does not install, upgrade, audit, or otherwise mutate the
+/// database. It runs the complete canonical v4 catalog conformance and
+/// fingerprint check in one `REPEATABLE READ READ ONLY` PostgreSQL transaction.
+/// The validated v4 external-reversal constraint encodes the typed resolution
+/// tuple invariant, so this assertion does not scan retained attestations.
+/// PostgreSQL major version 18 is required; other majors are rejected before
+/// catalog comparison.
+///
+/// Concurrent-reindex transition handling and visibility requirements are the
+/// same as for [`assert_runtime_schema_v3_compatible`].
+pub async fn assert_runtime_schema_v4_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        4,
+        V4_CURRENT_SUBSCRIPTION_COLUMNS,
+        V4_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 async fn assert_runtime_schema_v2_compatible(pool: &PgPool) -> Result<(), SchemaConformanceError> {
     assert_schema_conforms_in_read_only_snapshot(
@@ -367,6 +412,13 @@ pub async fn assert_v2_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
 /// objects without exposing a production runtime migrator.
 pub async fn assert_v3_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
     assert_runtime_schema_v3_compatible(pool).await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v4
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v4_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v4_compatible(pool).await
 }
 
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -507,7 +559,10 @@ async fn assert_schema_conforms(
     }
     require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
         .await?;
-    if version >= 3 {
+    // Shipped v3 cannot express the typed tuple matrix in its constraint, so
+    // its compatibility API retains the live-row preflight. V4 validates the
+    // invariant during cutover and fingerprints the replacement constraint.
+    if version == 3 {
         require_compatible_external_reversal_attestations(connection, version).await?;
     }
     require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await

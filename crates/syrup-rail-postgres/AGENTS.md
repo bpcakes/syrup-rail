@@ -9,15 +9,19 @@ and transaction orchestration.
 
 - `src/lib.rs` — the public PostgreSQL operation facade and crate-private
   module ownership map.
-- `schema/v3/install.sql` — current authoritative fresh-install DDL;
-  `schema/v3/upgrade_from_v2.sql` is the forward-only v2 cutover artifact.
+- `schema/v4/install.sql` — current authoritative fresh-install DDL;
+  `schema/v4/preflight_from_v3.sql`,
+  `schema/v4/audit_incompatible_attestations_from_v3.sql`, and
+  `schema/v4/upgrade_from_v3.sql` are the read-only sizing, minimized blocker
+  audit, and forward-only v3 cutover artifacts.
+- `schema/v3/**` — immutable shipped version-3 distribution artifacts.
 - `schema/v2/preflight_from_v1.sql`,
   `schema/v2/audit_retry_reclassification_from_v1.sql`, and
   `schema/v2/upgrade_from_v1.sql` — checked-in read-only preflight,
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v3 runtime compatibility
+- `src/schema_contract.rs` — production read-only v4 runtime compatibility
   assertion plus canonical catalog conformance. Version-specific, upgrade, and
   shared fixture tests live under `src/schema_contract/tests/`; checked-in
   install/upgrade SQL constants remain behind tests or the explicit
@@ -103,10 +107,11 @@ and transaction orchestration.
 
 - Change canonical tables, constraints, functions, triggers, or views in the
   current versioned schema artifact and supply a forward-only upgrade for any
-  materialized version. Never edit `schema/v1/**`.
+  materialized version. Never edit shipped artifacts under `schema/v1/**`
+  through `schema/v3/**`.
 - Change host conformance or schema behavior tests in the matching
-  `src/schema_contract/tests/{v1,v2,upgrade}` module, keep shared setup in the
-  fixture modules, and update the catalog fingerprint intentionally.
+  `src/schema_contract/tests/{v1,v2,v3,v4,upgrade}` module, keep shared setup in
+  the fixture modules, and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
 - Change canonical attempt row parsing/loaders in `src/attempts/persistence.rs`,
@@ -147,7 +152,7 @@ and transaction orchestration.
   Pass selected presentation fields to the core conversion before deciding
   presence; normalized absence must remain `None`. Keep the exact-plan
   identity prefix plus descending `(created_at, id)` keyset aligned with
-  `billing_payment_attempts_subscription_history_idx` in the current schema-v3
+  `billing_payment_attempts_subscription_history_idx` in the current schema-v4
   artifacts and the runtime schema contract. Keep first-page and continuation
   SQL as separate physical statements, with the continuation keyset as an
   unconditional index condition; the PostgreSQL generic-plan regression must
@@ -160,7 +165,7 @@ and transaction orchestration.
   first-page and continuation SQL phases separate, force the candidate CTE to
   fold so it is not unconditionally materialized before the outer page limit,
   and keep that keyset aligned with `billing_subscriptions_due_idx` in both
-  schema-v3 artifacts and the complete runtime index contract. Folding and an
+  schema-v4 artifacts and the complete runtime index contract. Folding and an
   aligned index make early stopping available; PostgreSQL still chooses plans
   by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
@@ -215,14 +220,15 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
-- `assert_runtime_schema_v3_compatible` must reuse the complete canonical v3
+- `assert_runtime_schema_v4_compatible` must reuse the complete canonical v4
   catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
   major other than 18, and run no DDL; hosts apply versioned install and
   forward-only upgrade artifacts through their own migrations.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
-- The feature-gated `assert_v1_conforms`, `assert_v2_conforms`, and
-  `assert_v3_conforms` wrappers are also read-only; mutation and locking
+- The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
+  `assert_v3_conforms`, and `assert_v4_conforms` wrappers are also read-only;
+  mutation and locking
   behavior belongs in package fixtures and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;
   `billing_*` constraint and index names are reserved for canonical objects.

@@ -1,4 +1,4 @@
-# Syrup Rail 0.3 public API
+# Syrup Rail 0.4 public API
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -59,14 +59,14 @@ phases continue. Exact provider queries are reserved for attempts with
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v3_compatible` after host migrations and before
-serving billing traffic. Version 0.3 supports PostgreSQL 18 and schema v3 only;
-the assertion is read-only and does not install or upgrade a schema. It checks
-the canonical catalog and live data invariants that schema v3 cannot express,
-including typed external-reversal resolution compatibility. It tolerates
-concurrent-reindex shadows only when the validating role can observe the
-matching `pg_stat_progress_create_index` details; cross-role maintenance is
-fail-closed unless the observer has PostgreSQL statistics privileges.
+Use `assert_runtime_schema_v4_compatible` after host migrations and before
+serving billing traffic. The current development line supports PostgreSQL 18
+and schema v4; the assertion is read-only and does not install or upgrade a
+schema. The v3-to-v4 cutover validates typed external-reversal resolution
+compatibility once, while startup checks only the canonical catalog. It
+tolerates concurrent-reindex shadows only when the validating role can observe
+the matching `pg_stat_progress_create_index` details; cross-role maintenance
+is fail-closed unless the observer has PostgreSQL statistics privileges.
 
 ## Typed domain and advanced transaction-local surface
 

@@ -12,11 +12,13 @@ use syrup_rail::{
 
 use crate::schema_contract::{
     V1_INSTALL_SQL, V1_TO_V2_UPGRADE_SQL, V2_INSTALL_SQL, V2_TO_V3_UPGRADE_SQL, V3_INSTALL_SQL,
+    V3_TO_V4_UPGRADE_SQL, V4_INSTALL_SQL,
 };
 
 pub(crate) struct TestDatabase {
     harness: PostgresHarness,
     lease: DatabaseLease,
+    database_url: String,
     pub(crate) pool: PgPool,
 }
 
@@ -46,7 +48,7 @@ pub(crate) fn immediate_offer(plan_key: PlanKey, charge: ChargeAmount) -> Subscr
 
 impl TestDatabase {
     pub(crate) async fn start(project: &str) -> Result<Self, Box<dyn Error>> {
-        Self::start_with_install(project, V3_INSTALL_SQL).await
+        Self::start_with_install(project, V4_INSTALL_SQL).await
     }
 
     pub(crate) async fn start_v1(project: &str) -> Result<Self, Box<dyn Error>> {
@@ -55,6 +57,10 @@ impl TestDatabase {
 
     pub(crate) async fn start_v2(project: &str) -> Result<Self, Box<dyn Error>> {
         Self::start_with_install(project, V2_INSTALL_SQL).await
+    }
+
+    pub(crate) async fn start_v3(project: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_install(project, V3_INSTALL_SQL).await
     }
 
     pub(crate) async fn start_v1_then_upgrade_to_v2(project: &str) -> Result<Self, Box<dyn Error>> {
@@ -90,20 +96,35 @@ impl TestDatabase {
         Ok(())
     }
 
+    pub(crate) async fn upgrade_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::raw_sql(V3_TO_V4_UPGRADE_SQL)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     async fn start_with_install(project: &str, install_sql: &str) -> Result<Self, Box<dyn Error>> {
         let harness =
             PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await?;
         let lease = harness.empty_database().await?;
+        let database_url = lease.database_url().to_owned();
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect(lease.database_url())
+            .connect(&database_url)
             .await?;
         sqlx::raw_sql(install_sql).execute(&pool).await?;
         Ok(Self {
             harness,
             lease,
+            database_url,
             pool,
         })
+    }
+
+    pub(crate) fn database_url(&self) -> &str {
+        &self.database_url
     }
 
     pub(crate) async fn cleanup(self) -> Result<(), Box<dyn Error>> {

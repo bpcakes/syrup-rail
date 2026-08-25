@@ -321,7 +321,7 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         .await?,
         ExternalReversalAttestationOutcome::ReplayConflict
     );
-    crate::assert_runtime_schema_v3_compatible(&database.pool).await?;
+    crate::assert_runtime_schema_v4_compatible(&database.pool).await?;
 
     database.cleanup().await?;
     Ok(())
@@ -468,7 +468,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
 #[tokio::test]
 async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("rail_op_tuple").await?;
+    let database = TestDatabase::start_v3("rail_op_tuple").await?;
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let attempt_id = Uuid::now_v7();
     let charge_id = Uuid::now_v7();
