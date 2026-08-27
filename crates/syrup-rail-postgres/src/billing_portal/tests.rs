@@ -612,6 +612,7 @@ async fn insert_subscription(
     sqlx::query(
         r#"
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -620,6 +621,7 @@ async fn insert_subscription(
             trial_period_count, dunning_retry_delays_seconds, dunning_exhaustion,
             past_due_access, next_payment_attempt_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, $5, $6, $7, 5900, 'USD', $8, $9, $9, $10,
             $11, $12, 'calendar_months', 1, $13, $14, $15, ARRAY[]::bigint[],
             'remain_past_due', 'suspend_immediately', $16
@@ -760,6 +762,7 @@ async fn insert_payment_method_update_attempt(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency, gateway_account_id,
@@ -771,6 +774,7 @@ async fn insert_payment_method_update_attempt(
             payment_method_update_expected_initial_transaction_id, submitted_at,
             resolved_at, created_at, updated_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, $5, $6,
             'subscription_payment_method_update', 'failed', $7, $8, 0, 'USD',
             $9, $10, $11, 'history-transaction-secret-' || $1::text,
@@ -808,6 +812,7 @@ async fn insert_payment_history_population(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency, gateway_account_id,
@@ -817,6 +822,7 @@ async fn insert_payment_history_population(
             resolved_at, created_at, updated_at
         )
         SELECT
+            'live',
             md5('payment-history-plan-attempt-' || value)::uuid,
             $1,
             $2,
@@ -868,6 +874,7 @@ async fn insert_renewal_attempt(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency, billing_period_start_at,
@@ -876,6 +883,7 @@ async fn insert_renewal_attempt(
             subscription_expected_initial_transaction_id, subscription_expected_status,
             submitted_at, resolved_at, created_at, updated_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'declined',
             $7, $8, 5900, 'USD', $9, $10, $11, $12, $13, $6, $14, 'active',
             $15, $15, $15, $15
@@ -911,11 +919,13 @@ async fn insert_host_charge(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, host_charge_target_id,
             attempt_kind, status, idempotency_key, request_fingerprint,
             amount_cents, currency, gateway_account_id, gateway_configuration_id,
             gateway_order_id, created_at, updated_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, 'host_charge', 'pending', $5, $6, 1200, 'USD',
             $7, $8, $9, $10, $10
         )

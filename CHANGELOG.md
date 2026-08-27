@@ -4,6 +4,293 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-27
+
+### Added
+
+- Allow hosts to require an exact gateway account mode for payment mutations.
+  The service remains live-only by default; explicitly requiring test mode
+  permits test-account mutations while rejecting an observed live account
+  before submission.
+- Add PostgreSQL schema v4 and its forward-only v3 cutover. Payment attempts
+  and subscriptions now persist their required gateway account mode so neither
+  prepared work nor future renewal authority can cross deployment modes.
+- Require an opaque, mode-verified gateway capability at every supported
+  low-level provider-submission boundary.
+- Make `EntitlementQuery` and `EntitlementGuard` default to live paid
+  subscriptions. Test workers select `Test`; trusted administrative tooling
+  can opt into cross-mode reads with `across_gateway_account_modes`.
+
+### Changed
+
+- Require every low-level reservation constructor, plus direct
+  `PaymentAttemptIdentity` construction, to state the trusted gateway account
+  mode explicitly instead of silently choosing `live`. The public
+  `Subscription::new` and `RenewalDispatch::new` constructors now take that
+  mode, `RenewalDispatchPageCursor::new` now takes its optional mode filter,
+  and `preflight_host_charge_in_transaction` now takes the service's required
+  mode so it can skip host callbacks for wrong-mode prepared replay.
+- Return terminal idempotent results across deployment-mode changes while
+  rejecting only prepared attempts that could still reach the provider.
+- Leave a prepared initial-enrollment attempt intact when a wrong-mode
+  low-level admission caller reaches it, so the matching deployment can still
+  complete the canonical work. Submission admission now validates the locked
+  attempt first, so wrong-mode and already-admitted replays do not invoke the
+  host offer callback.
+- Include the subscription's required gateway account mode in renewal
+  dispatches so hosts can route work to a matching service deployment. Add
+  `due_renewals_page_for_mode` and `due_renewals_for_mode` so a mode-specific
+  worker uses a dedicated mode-leading index before applying the bounded page
+  limit. Renewal cursors now record their mode filter and reject cross-mode or
+  filtered/unfiltered reuse.
+- Remove the v4 cutover defaults after backfill so every current-schema
+  payment-attempt and subscription writer must supply an explicit mode.
+- Add the scope-neutral `GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS`
+  constant. The incompatible 0.4.0 cutover removes the pre-existing
+  renewal-specific name; migrate callers to the scope-neutral constant.
+- Stage the schema-v3-to-v4 cutover so the large constraint-validation scan
+  runs after the exclusive preparation lock is committed.
+- Build the mode-leading renewal index in a dedicated non-transactional
+  `index_from_v3.sql` stage with `CREATE INDEX CONCURRENTLY`, along with a
+  covering replacement for the all-mode renewal index, before writers stop,
+  instead of putting either table scan in the final billing outage.
+- Publish the mandatory schema-v4 runtime boundary as Cargo-incompatible 0.4.0
+  and raise the minimum `h2` version to 0.4.16.
+
+### Action required for hosts
+
+- Obtain explicit deployment-owner sign-off before starting the schema-v4
+  prepare stage. Preparation opens a roll-forward-only availability-risk window
+  in which a restarted v3 process cannot pass startup validation. Use a full
+  billing maintenance window for all four stages by default. Keeping v3 writers
+  active through the concurrent-build stages is an exception that requires
+  written sign-off proving process restarts are prevented for the whole window.
+- Rehearse NMI query-rate headroom for the deployment's mutation volume. The
+  final mode verification adds one account-mode request to initial enrollment
+  and prepared host-charge replay; other flows already performed that final
+  query. Alert before rollout if the added control-plane traffic approaches the
+  provider's throttle budget.
+- Update test-deployment entitlement construction before upgrading:
+  `EntitlementQuery::new` and `EntitlementGuard::new` now select live paid
+  subscriptions. Every test worker that previously relied on these constructors
+  without a mode must explicitly call
+  `with_required_gateway_account_mode(GatewayAccountMode::Test)`; otherwise its
+  test subscriptions are denied. Use `across_gateway_account_modes` only for
+  trusted administrative tooling that intentionally owns both modes.
+- Return `Applied` or `ExactReplay` from every successful
+  `HostChargeTargetStore::apply_transition`. `StaleTarget` and `Unchanged` now
+  fail closed for submitted declines as well as pre-submission releases and
+  first-time approved/reversal paths. The sole exception is a `Paid` callback
+  made while locking an already-approved canonical replay: after the attempt
+  lock proves the original paid transition committed, a refused replay returns
+  that canonical payment so a later legitimate reversal remains intact. Keep
+  host transitions monotonic—return `StaleTarget` for a reversed target and
+  never move it back to paid. A submitted attempt remains pending until lifecycle
+  reconciliation or operator review if the host refuses the target transition;
+  routine account/provider cooldown pacing also invokes
+  `ReleasedBeforeSubmission` and returns `InvalidState` if refused. Audit this
+  callback before deploying 0.4.0 to avoid stranded attempts. Make a host
+  integration test that applies and exactly replays
+  `ReleasedBeforeSubmission` for ordinary cooldown pacing a release gate; enum
+  exhaustiveness forces a new match arm but cannot prove the adapter returns a
+  durable outcome. If a refusal follows a concurrent canonical winner, the
+  caller reloads and returns that canonical payment instead of reporting
+  `InvalidState`.
+- Alert on repeated `syrup_rail::gateway_cooldown` warnings for the same account
+  or configuration. A rotated or removed identity intentionally skips its
+  advisory cooldown, but repeated identity mismatches can reveal stale resolver
+  configuration and leave that account without shared throttle protection.
+  Treat an error on the same target as a schema/configuration invariant breach:
+  provider-scoped cooldown storage is missing and the financial attempt is
+  deliberately left unresolved.
+- Alert on `syrup_rail::host_charge_target` warnings. They identify refused
+  payment/release transitions whose financial attempt intentionally remains
+  unresolved until host repair or explicit reconciliation.
+- Partition production access explicitly if test- and live-mode subscriptions
+  coexist in one database. Entitlement reads and guards default to live paid
+  subscriptions; test workers must select `Test`, and trusted cross-mode tools
+  must call `across_gateway_account_modes`. Host-issued grants,
+  current-subscription reads, and billing portal reads remain mode-neutral.
+- Treat subscriber/plan state as one aggregate across modes. A test-mode
+  subscription or active grant blocks a second live enrollment, saved discount
+  claims are shared, and cancellation/deletion blockers are mode-neutral.
+  Entitlement guidance for an in-flight initial attempt is also mode-neutral,
+  so it agrees with enrollment admission even when paid-subscription projection
+  is mode-filtered. Use isolated databases/tenants or synthetic test subscribers
+  when test activity must not affect a real subscriber's live billing lifecycle.
+- Audit every custom `PaymentGateway` adapter before upgrading.
+  `GatewayNotSubmittedError::Unavailable` was renamed to `NotTransmitted` so
+  adapters must acknowledge that the variant now authorizes same-attempt,
+  same-order replay and is valid only when the adapter proves that no request
+  reached the provider. A possibly transmitted request must remain
+  indeterminate; misclassification can duplicate a charge.
+  The durable resolution code intentionally remains
+  `gateway_unavailable_before_submission` for stored-data compatibility even
+  though rows carrying it now certify the stronger `NotTransmitted`, same-key
+  retryable contract.
+- Implement the renamed `HostChargeTargetStore::ensure_submission_admitted`
+  callback as a repeat-safe operation for the same attempt. A transient final
+  mode query retains the claimed target, and same-key retry revalidates it
+  through that callback before provider I/O. Repeating the callback for an
+  attempt must produce no additional observable side effect: use keyed upserts
+  for audit facts and do not increment counters or append duplicate audit rows.
+- Keep enrollment offer callbacks within the documented lock order. Submission
+  admission now locks and validates the attempt before invoking the callback;
+  already-admitted replay and wrong-mode rejection skip it. The callback must
+  use only the supplied connection, must not acquire attempt-ledger locks, and
+  must not perform slow external I/O. Reservation may still invoke it before an
+  attempt row exists.
+- Keep `HostChargeTargetStore::preflight_target` side-effect-free. Terminal
+  and review-required replay, plus a wrong-mode prepared replay, now resolve
+  before that callback; a same-mode prepared replay still invokes it to
+  revalidate target economics. Canonical review replay owns its retained
+  economics, so changed one-shot command values do not replace it with an
+  idempotency conflict. Canonical terminal and submitted in-flight replay use a
+  lock-free snapshot path and do not re-check current host economics; unlike
+  0.3, an in-flight replay can observe the canonical attempt as pending instead
+  of waiting for its concurrent application transaction. The attempt identity
+  remains authoritative.
+  `HostChargeReservationDecision::IdempotentContender` now carries the current
+  target snapshot, which hosts must return so the ledger can reject a changed
+  same-key charge before gateway I/O.
+- Handle the new `HostChargeTargetTransitionKind::ReleasedBeforeSubmission`
+  variant by repeat-safely releasing a claimed target. It represents a
+  determinate pre-submission failure, including infrastructure
+  misconfiguration and an already-active mutation cooldown; `PaymentFailed`
+  remains reserved for submitted outcomes.
+- Update stale host-charge cleanup handling: the existing
+  `fail_stale_unsubmitted_host_charges` path now emits
+  `ReleasedBeforeSubmission` instead of `PaymentFailed`. Move any host dunning,
+  notification, or retry logic for that never-submitted cleanup outcome to the
+  new transition; `PaymentFailed` will no longer fire for it.
+- Prepared host-charge mode mismatch now returns
+  `Err(GatewayReadiness(Configuration))` after durably resolving and releasing
+  the target, matching fresh host charges. Subscriber flows retain their
+  existing `Ok(canonical failed payment)` surface for determinate readiness
+  failures. Terminal same-key replay still returns the canonical payment.
+- Handle post-reservation renewal readiness failures as
+  `SubscriptionRenewalOutcome::NotSubmitted { payment, error }`. These failures
+  were previously resolved and returned as `Noop`; schedulers should now record
+  or classify the typed not-submitted error while treating the returned payment
+  as the canonical durable result.
+- Route each `RenewalDispatch` to a service whose configured required mode
+  matches `RenewalDispatch::required_gateway_account_mode`. Mode-specific
+  workers should scan with `due_renewals_page_for_mode` and keep that mode for
+  the whole cursor chain; the unfiltered API is for a central router that owns
+  both modes. Reservation also revalidates the durable subscription mode and
+  fails closed on mismatch. The mode is write-once subscription authority;
+  there is no supported API or migration that changes an existing
+  subscription's mode. Route it to the matching deployment instead.
+- Update exhaustive matches for the new
+  `GatewayNotSubmittedError::{AccountModeMismatch, AccountModeVerification}`
+  variants; the new `GatewayAccountModeChanged` variants on
+  `SubscriptionEnrollmentReservationRejection`,
+  `SubscriptionEnrollmentSubmissionRejection`,
+  `SubscriptionRecoveryReservationRejection`,
+  `SubscriptionPaymentMethodReplacementRejection`,
+  `SubscriptionRenewalReservationRejection`, and `HostChargeReservationOutcome`;
+  the new `RenewalStoreError::CursorModeMismatch`; the new
+  `GatewayLifecycleApplyOutcome::HostTargetTransitionSkipped`; and the new durable
+  `PaymentResolutionCode::GatewayTestReadinessFailedBeforeSubmission` value.
+  Keep provider-mode details out of subscriber UI copy; typed low-level errors
+  retain required and observed modes for protected operator diagnostics.
+- Treat `GatewayLifecycleReconciliationSummary::skipped()` as retryable host
+  reconciliation work. A refused full-reversal target transition now rolls
+  back the attempt update, durably re-stages first-seen evidence before a
+  provider cursor can advance, and continues the batch so unrelated reports
+  still make progress. `GatewayLifecycleReconciliationSummary::staged()` now
+  counts only newly inserted pending evidence; redelivery of the same unmatched,
+  ambiguous, or host-refused report contributes zero instead of counting the
+  already-durable pending row again.
+- During the staged v3-to-v4 cutover, do not restart a schema-v3 process after
+  `prepare_from_v3.sql` commits: its v3 startup assertion intentionally rejects
+  the prepared catalog. Keep existing v3 writers running through validation,
+  then run `index_from_v3.sql` outside an explicit transaction while they
+  continue. Stop them only after the concurrent index is valid, then roll
+  forward through `upgrade_from_v3.sql` and the 0.4 deployment.
+
+### Removed
+
+- Remove the schema-v3 runtime assertion from the ordinary production facade;
+  schema-v3 validation remains available only to tests and migration tooling.
+
+### Fixed
+
+- Verify the required gateway account mode both before final admission and
+  again at the provider-submission boundary. The first check avoids creating or
+  admitting work when the account is already misconfigured; the mandatory
+  second check prevents supported low-level submitters from carrying a stale
+  observation across admission. NMI still exposes mode lookup and mutation as
+  separate requests, so hard test/live isolation requires separate merchant
+  accounts rather than coordination around one mutable account switch. Initial
+  enrollments and prepared host-charge replays gain one provider query; a
+  transient failure of that final post-admission query now atomically restores
+  resumable enrollment, recovery, payment-method replacement, and host-charge
+  attempts to prepared state. Automatic renewal retains its established
+  terminal not-submitted handling because it does not resume prepared attempts.
+- Centralize replay classification for durable attempts so terminal and local
+  repair results remain canonical across deployment-mode changes, while every
+  prepared attempt that could still reach the provider rejects a changed
+  required mode consistently.
+- Classify every not-submitted mutation once for its durable resolution,
+  cooldown, retry safety, and host-target release. Determinate final
+  account-mode failures now release a claimed host target together with the
+  terminal never-submitted attempt, while transient unavailability restores
+  the prepared attempt and retains its claim. Host-charge mutation
+  throttles now persist the same account cooldown as subscriber mutations and
+  release their terminal attempt's claimed target; determinate
+  prepared-readiness failures and already-active cooldown gates likewise
+  release their target atomically.
+- Treat every transient `Unavailable` result that is provably not submitted as
+  retry-safe for flows with prepared-attempt replay, regardless of whether it
+  came from the mutation transport or the final account-mode query. Invalid
+  adapter attempts to return caller-owned account-mode variants are normalized
+  to a terminal malformed-contract error.
+- Commit an observed provider/account throttle independently of canonical
+  attempt and host-target resolution. Concurrent operator or reconciliation
+  resolution, a stale host target, or a later host callback failure can no
+  longer roll back cooldown protection for unrelated gateway work. A rotated
+  or removed gateway identity skips the advisory cooldown with a warning
+  instead of stranding the financial attempt.
+- Record mutation-endpoint account throttles as the new
+  `GatewayAccountRateLimitedBeforeSubmission` resolution code while retaining
+  `GatewayProviderRateLimitedBeforeSubmission` for provider-wide readiness
+  throttles. Both codes retain the renewal fast-to-slow retry curve, while
+  their cross-subscription cooldown scopes remain account and provider.
+  NMI HTTP 429 remains provider-scoped because it is a documented system-wide
+  transport throttle with an indeterminate mutation outcome; only in-band code
+  301 proves a not-submitted, merchant-account-scoped throttle. The account-mode
+  query API collapses both signals into one `GatewayError::RateLimited`, so
+  readiness failures conservatively retain provider-wide cooldown.
+- Rename the public renewal rate-limit pacing symbols to match their expanded
+  account-and-provider semantics:
+  `RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS` to
+  `RENEWAL_RATE_LIMIT_FAST_RETRY_ATTEMPTS`,
+  `RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS` to
+  `RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS`, and
+  `provider_rate_limit_retry_after_seconds` to
+  `rate_limit_retry_after_seconds`. Rename `RenewalAttemptState` fields
+  `provider_rate_limited_attempt_count` and `last_provider_rate_limited_at` to
+  `rate_limited_attempt_count` and `last_rate_limited_at`. Remove
+  `RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS` in favor of
+  `GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS`; 0.4.0 applies the same
+  Cargo-breaking migration policy to the whole symbol family.
+- Classify NMI HTTP 404 and 405 responses as terminal configuration defects,
+  not transient `Unavailable` transport failures. The adapter maps a proven
+  pre-transmission `Unavailable` to `GatewayNotSubmittedError::NotTransmitted`,
+  which authorizes same-attempt, same-order replay.
+- Normalize recovery and payment-method replacement reservation-time, plus
+  enrollment admission-time, gateway mode changes to the service-level
+  `GatewayConfigurationChanged` error used by the other payment flows, while
+  their lower-level outcomes retain a distinct `GatewayAccountModeChanged`
+  reason.
+- Preserve that mode-change classification in concurrent enrollment and host
+  reservation races. Typed verification and not-submitted errors retain both
+  the required and observed modes for protected operator triage, while the
+  high-level subscriber facade and durable `gateway_response_text` use
+  provider-neutral, subscriber-safe wording. The durable text now says that the
+  account mode did not match the deployment without revealing either mode.
+
 ## [0.3.0] - 2026-08-16
 
 ### Fixed
@@ -345,7 +632,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/bpcakes/syrup-rail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/bpcakes/syrup-rail/compare/v0.1.0...v0.1.1

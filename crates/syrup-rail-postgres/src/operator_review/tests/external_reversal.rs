@@ -68,11 +68,13 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
                 gateway_configuration_id, gateway_order_id, review_required_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
                 500, 'USD', $7, $8, $9, clock_timestamp()
             )
@@ -276,6 +278,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
@@ -292,6 +295,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
                 subscription_initial_dunning_exhaustion,
                 subscription_initial_past_due_access
             ) VALUES (
+                'live',
                 $1, $2, $3, 'base', 'subscription_initial', 'review_required',
                 $4, $5, 500, 'USD', $6, $7, $8, 'txn-grant-conflict',
                 '1', '100', 'Approved', 'complete',

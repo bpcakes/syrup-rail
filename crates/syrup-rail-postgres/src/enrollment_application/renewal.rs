@@ -6,9 +6,8 @@ use syrup_rail::{
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
     GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId,
     PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
-    ProcessorEvidence, ResolvedGateway, SubscriptionEnrollmentPaymentResult,
-    SubscriptionRenewalReservation, SubscriptionRenewalSubmissionOutcome,
-    SubscriptionRenewalSubmissionRejection,
+    ProcessorEvidence, SubscriptionEnrollmentPaymentResult, SubscriptionRenewalReservation,
+    SubscriptionRenewalSubmissionOutcome, SubscriptionRenewalSubmissionRejection,
 };
 
 use crate::{
@@ -20,15 +19,15 @@ use crate::{
 
 use super::{
     APPROVED_APPLICATION_ATTEMPTS, APPROVED_EVIDENCE_RETRY_DELAY, APPROVED_EVIDENCE_WRITE_ATTEMPTS,
-    AttemptResolutionStatus, AttemptTransition, BILLING_LOCK_TIMEOUT, INVALID_APPLICATION_STATE,
-    OutcomeReservation, OutcomeResolutionBoundary, OutcomeResolutionCommand,
-    RENEWAL_APPROVED_STORAGE_FAILURE_TEXT, RENEWAL_INCOMPLETE_APPROVAL_TEXT,
-    RENEWAL_STALE_STATE_TEXT, RateLimitCooldown, SubscriptionEnrollmentApplicationError,
-    advance_subscription_discount_after_successful_charge, clear_attempt_submission,
-    extend_rate_limit_cooldown, finalize_approved_application, is_retryable_evidence_error,
-    load_applied_subscription, load_subscription, lock_expected_reservation_attempt,
-    lock_payment_method_domain, lock_subscription_aggregate, map_attempt_transition_error,
-    mark_attempt_approved, mutation_error_evidence, not_submitted_resolution_code,
+    AttemptResolutionStatus, AttemptTransition, BILLING_LOCK_TIMEOUT, GatewayNotSubmittedPolicy,
+    INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation, OutcomeResolutionBoundary,
+    OutcomeResolutionCommand, PreparedAttemptReplay, RENEWAL_APPROVED_STORAGE_FAILURE_TEXT,
+    RENEWAL_INCOMPLETE_APPROVAL_TEXT, RENEWAL_STALE_STATE_TEXT, RateLimitCooldown,
+    SubscriptionEnrollmentApplicationError, advance_subscription_discount_after_successful_charge,
+    clear_resolved_attempt_submission, commit_rate_limit_cooldown, finalize_approved_application,
+    is_retryable_evidence_error, load_applied_subscription, load_subscription,
+    lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
+    map_attempt_transition_error, mark_attempt_approved, mutation_error_evidence,
     park_locked_attempt, payment_result_for_attempt, payment_result_for_reservation_attempt,
     persist_attempt_transition, renewal_subscription_matches, resolve_pool_outcome,
     set_application_timeouts,
@@ -72,6 +71,9 @@ pub enum SubscriptionRenewalAdmissionOutcome {
 #[derive(Debug)]
 pub enum SubscriptionRenewalProviderResult {
     Payment(SubscriptionEnrollmentPaymentResult),
+    /// The provider mutation was not contacted. Renewal has no prepared replay
+    /// path, so its returned payment remains a terminal canonical result. A
+    /// concurrent terminal result is returned as `Payment` instead.
     NotSubmitted {
         payment: SubscriptionEnrollmentPaymentResult,
         error: GatewayNotSubmittedError,
@@ -134,9 +136,10 @@ pub async fn submit_admitted_subscription_renewal(
     pool: &PgPool,
     coordinator: &dyn BillingTransactionCoordinator,
     admission: AdmittedSubscriptionRenewal,
-    gateway: &ResolvedGateway,
+    gateway: crate::ModeVerifiedGateway<'_>,
 ) -> Result<SubscriptionRenewalProviderResult, SubscriptionEnrollmentApplicationError> {
     let identity = admission.reservation.identity();
+    let resolved_gateway = gateway.resolved_gateway();
     if admission.attempt.identity() != identity
         || admission.attempt.request() != admission.reservation.request()
         || admission.attempt.status() != PaymentAttemptStatus::Pending
@@ -146,13 +149,13 @@ pub async fn submit_admitted_subscription_renewal(
             .timestamps()
             .submitted_at()
             .is_none()
-        || gateway.billing_scope_id() != identity.billing_scope_id()
-        || gateway.gateway_account_id() != identity.gateway_account_id()
-        || gateway.gateway_configuration_id() != identity.gateway_configuration_id()
-        || gateway.provider_key() != admission.reservation.provider_key()
+        || resolved_gateway.provider_key() != admission.reservation.provider_key()
     {
         return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
     }
+    let Some(gateway) = gateway.authorize_attempt(&identity) else {
+        return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
+    };
     let charge =
         syrup_rail::ChargeAmount::try_from(admission.attempt.request().amount()).map_err(|_| {
             SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
@@ -181,19 +184,30 @@ pub async fn submit_admitted_subscription_renewal(
         .map(SubscriptionRenewalProviderResult::Payment),
         Err(GatewayMutationError::NotSubmitted(error)) => {
             let evidence = mutation_error_evidence(error.detail());
-            let cooldown = matches!(error, GatewayNotSubmittedError::RateLimited(_))
-                .then_some(RateLimitCooldown::Account);
-            let payment = resolve_renewal_non_approved_outcome(
+            let policy = GatewayNotSubmittedPolicy::for_error(&error);
+            let application = resolve_renewal_non_approved_outcome(
+                pool,
                 coordinator,
                 &admission.reservation,
                 &evidence,
-                AttemptResolutionStatus::Failed,
-                Some(not_submitted_resolution_code(&error)),
-                cooldown,
-                OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                OutcomeResolutionCommand::non_approved(
+                    AttemptResolutionStatus::Failed,
+                    Some(policy.resolution_code()),
+                    policy.cooldown(),
+                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                ),
             )
             .await?;
-            Ok(SubscriptionRenewalProviderResult::NotSubmitted { payment, error })
+            if application.should_surface_not_submitted(policy) {
+                Ok(SubscriptionRenewalProviderResult::NotSubmitted {
+                    payment: application.payment,
+                    error,
+                })
+            } else {
+                Ok(SubscriptionRenewalProviderResult::Payment(
+                    application.payment,
+                ))
+            }
         }
         Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => {
             resolve_renewal_unknown_outcome(
@@ -255,30 +269,34 @@ pub async fn apply_subscription_renewal_gateway_outcome(
             )
             .await
         }
-        GatewayPaymentStatus::Declined => {
-            resolve_renewal_non_approved_outcome(
-                coordinator,
-                reservation,
-                outcome.evidence(),
+        GatewayPaymentStatus::Declined => resolve_renewal_non_approved_outcome(
+            pool,
+            coordinator,
+            reservation,
+            outcome.evidence(),
+            OutcomeResolutionCommand::non_approved(
                 AttemptResolutionStatus::Declined,
                 None,
                 None,
                 OutcomeResolutionBoundary::Submitted,
-            )
-            .await
-        }
-        GatewayPaymentStatus::Failed => {
-            resolve_renewal_non_approved_outcome(
-                coordinator,
-                reservation,
-                outcome.evidence(),
+            ),
+        )
+        .await
+        .map(OutcomeApplication::into_payment),
+        GatewayPaymentStatus::Failed => resolve_renewal_non_approved_outcome(
+            pool,
+            coordinator,
+            reservation,
+            outcome.evidence(),
+            OutcomeResolutionCommand::non_approved(
                 AttemptResolutionStatus::Failed,
                 None,
                 None,
                 OutcomeResolutionBoundary::Submitted,
-            )
-            .await
-        }
+            ),
+        )
+        .await
+        .map(OutcomeApplication::into_payment),
         GatewayPaymentStatus::Unknown => {
             resolve_renewal_unknown_outcome(pool, reservation, outcome.evidence(), None).await
         }
@@ -574,19 +592,18 @@ async fn apply_renewal_approved_on_connection(
 }
 
 pub(crate) async fn resolve_renewal_non_approved_outcome(
+    pool: &PgPool,
     coordinator: &dyn BillingTransactionCoordinator,
     reservation: &SubscriptionRenewalReservation,
     evidence: &ProcessorEvidence,
-    status: AttemptResolutionStatus,
-    resolution_code: Option<PaymentResolutionCode>,
-    cooldown: Option<RateLimitCooldown>,
-    boundary: OutcomeResolutionBoundary,
-) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    resolution: OutcomeResolutionCommand,
+) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     let renewal = reservation;
     let reservation = OutcomeReservation::Renewal(renewal);
     let identity = reservation.identity();
-    let resolution =
-        OutcomeResolutionCommand::non_approved(status, resolution_code, cooldown, boundary);
+    if let Some(cooldown) = resolution.cooldown {
+        commit_rate_limit_cooldown(pool, reservation, cooldown).await?;
+    }
     let mut transaction = coordinator
         .begin(
             BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id()),
@@ -604,6 +621,9 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
             attempt.state().timestamps().submitted_at().is_some(),
         );
         let mut events = Vec::new();
+        // Renewal has no prepared-attempt replay entrypoint. Even when the
+        // shared policy identifies a not-submitted failure as retry-safe for
+        // resumable flows, renewal preserves its established terminal result.
         if may_resolve {
             let status = resolution.resolved_status(reservation.operation(), attempt.status());
             persist_attempt_transition(
@@ -618,7 +638,7 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
             .await
             .map_err(map_attempt_transition_error)?;
             if resolution.clears_submitted_at() {
-                clear_attempt_submission(connection, &attempt).await?;
+                clear_resolved_attempt_submission(connection, &attempt).await?;
             } else if resolution.marks_renewal_past_due(status)
                 && resolution.resolution_code.is_none()
             {
@@ -641,14 +661,11 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
                 }
             }
         }
-        if let Some(cooldown) = resolution.cooldown {
-            extend_rate_limit_cooldown(connection, reservation, cooldown).await?;
-        }
         let result = payment_result_for_reservation_attempt(connection, reservation).await?;
-        Ok::<_, SubscriptionEnrollmentApplicationError>((result, events))
+        Ok::<_, SubscriptionEnrollmentApplicationError>((result, events, may_resolve))
     }
     .await;
-    let (result, events) = match result {
+    let (result, events, applied) = match result {
         Ok(result) => result,
         Err(error) => {
             let _ = transaction.rollback().await;
@@ -662,7 +679,11 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
         }
     }
     transaction.commit().await?;
-    Ok(result)
+    Ok(OutcomeApplication {
+        payment: result,
+        applied,
+        prepared_attempt_replay: PreparedAttemptReplay::Unsupported,
+    })
 }
 
 async fn resolve_renewal_unknown_outcome(
@@ -678,6 +699,7 @@ async fn resolve_renewal_unknown_outcome(
         OutcomeResolutionCommand::unknown(cooldown),
     )
     .await
+    .map(OutcomeApplication::into_payment)
 }
 
 async fn park_renewal_approved_outcome(

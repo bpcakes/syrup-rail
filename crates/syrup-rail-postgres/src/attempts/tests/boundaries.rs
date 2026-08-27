@@ -37,6 +37,7 @@ async fn active_grant_blocks_only_its_exact_plan() -> Result<(), Box<dyn Error>>
             full_price("basic", 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     assert_eq!(
@@ -57,6 +58,7 @@ async fn active_grant_blocks_only_its_exact_plan() -> Result<(), Box<dyn Error>>
             full_price("premium", 2_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
@@ -90,6 +92,7 @@ async fn gateway_configuration_rotation_rejects_prepared_submission() -> Result<
             full_price(plan_key, 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
@@ -126,6 +129,127 @@ async fn gateway_configuration_rotation_rejects_prepared_submission() -> Result<
             && attempt.state().timestamps().submitted_at().is_none()
     ));
     transaction.commit().await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn enrollment_admission_returns_typed_rejection_for_changed_required_mode()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("enr_mode_admit").await?;
+    install_host_offers(&database).await?;
+    let account = create_gateway_account(&database.pool, "nmi").await?;
+    let plan_key = "base_subscription";
+    set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+    let gateway = resolved_gateway(account);
+    let command = enrollment_command(
+        account,
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        "admission-mode-change",
+        full_price(plan_key, 1_000),
+    );
+    let live_reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    assert!(matches!(
+        reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &live_reservation,
+        )
+        .await?,
+        SubscriptionEnrollmentReservationOutcome::Reserved(_)
+    ));
+    transaction.commit().await?;
+
+    let test_reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Test,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    let rejected = admit_subscription_enrollment_submission_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &test_reservation,
+    )
+    .await?;
+    assert!(matches!(
+        rejected,
+        SubscriptionEnrollmentSubmissionOutcome::Rejected {
+            ref attempt,
+            reason: SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged,
+        } if attempt.status() == PaymentAttemptStatus::Pending
+            && attempt.state().timestamps().submitted_at().is_none()
+    ));
+    transaction.commit().await?;
+    let mut transaction = database.pool.begin().await?;
+    assert!(matches!(
+        admit_subscription_enrollment_submission_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &live_reservation,
+        )
+        .await?,
+        SubscriptionEnrollmentSubmissionOutcome::Admitted(_)
+    ));
+    transaction.rollback().await?;
+
+    let withdrawn_command = enrollment_command(
+        account,
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        "withdrawn-offer-mode-change",
+        full_price(plan_key, 1_000),
+    );
+    let withdrawn_live_reservation = SubscriptionEnrollmentReservation::from_command(
+        &withdrawn_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    assert!(matches!(
+        reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &withdrawn_live_reservation,
+        )
+        .await?,
+        SubscriptionEnrollmentReservationOutcome::Reserved(_)
+    ));
+    transaction.commit().await?;
+    sqlx::query(
+        "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
+    )
+    .bind(account.billing_scope_id)
+    .bind(plan_key)
+    .execute(&database.pool)
+    .await?;
+    let withdrawn_test_reservation = SubscriptionEnrollmentReservation::from_command(
+        &withdrawn_command,
+        &gateway,
+        GatewayAccountMode::Test,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    let rejected = admit_subscription_enrollment_submission_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &withdrawn_test_reservation,
+    )
+    .await?;
+    assert!(matches!(
+        rejected,
+        SubscriptionEnrollmentSubmissionOutcome::Rejected {
+            ref attempt,
+            reason: SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged,
+        } if attempt.status() == PaymentAttemptStatus::Pending
+            && attempt.state().timestamps().submitted_at().is_none()
+    ));
+    transaction.commit().await?;
     database.cleanup().await
 }
 
@@ -138,6 +262,7 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
@@ -147,6 +272,7 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
                 gateway_condition, billing_first_name, billing_last_name,
                 billing_email
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
                 1000, 'USD', $7, $8, $9, $10, $11, $12, $13, $14,
                 $15, $16, $17, $18
@@ -258,6 +384,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
     sqlx::query(
         r#"
             INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
@@ -265,6 +392,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
                 recurring_period_count, dunning_retry_delays_seconds,
                 dunning_exhaustion, past_due_access, next_payment_attempt_at
             ) VALUES (
+                'live',
                 $1, $2, $3, 'premium', 'active', $4, $5, 1000, 'USD',
                 $6, $7, $7, 'txn-initial', 'recurring', 'calendar_months', 1,
                 ARRAY[]::bigint[], 'remain_past_due', 'suspend_immediately', $7
@@ -288,6 +416,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key,
                 subscription_id, payment_method_id, attempt_kind, status,
                 idempotency_key, request_fingerprint, amount_cents, currency,
@@ -298,6 +427,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
                 subscription_expected_initial_transaction_id,
                 subscription_expected_status
             ) VALUES (
+                'live',
                 $1, $2, $3, 'premium', $4, $5,
                 'subscription_recovery', 'approved', $6, $7, 1000, 'USD',
                 $8, $9, $10, $11, $12, 'txn-recovery', now(), now(),

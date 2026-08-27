@@ -2,11 +2,11 @@ use std::fmt;
 
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
-    ChargeAmount, DiscountClaimId, DiscountCodeId, GatewayConfigurationId, GatewayOrderId,
-    GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget, PaymentToken, PlanKey,
-    ProcessorEvidence, ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountSnapshot,
-    SubscriptionOffer, SubscriptionPaymentContext,
+    ChargeAmount, DiscountClaimId, DiscountCodeId, GatewayAccountMode, GatewayConfigurationId,
+    GatewayOrderId, GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget,
+    PaymentToken, PlanKey, ProcessorEvidence, ResolvedGateway, SubscriberId, Subscription,
+    SubscriptionDiscountSnapshot, SubscriptionOffer, SubscriptionPaymentContext,
 };
 use thiserror::Error;
 
@@ -401,8 +401,14 @@ impl SubscriptionEnrollmentReservation {
     pub fn from_command(
         command: &EnrollSubscription,
         gateway: &ResolvedGateway,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionEnrollmentReservationBuildError> {
-        Self::from_command_for_attempt(command, gateway, command.attempt_id())
+        Self::from_command_for_attempt(
+            command,
+            gateway,
+            command.attempt_id(),
+            required_gateway_account_mode,
+        )
     }
 
     /// Builds the same request for an already-durable matching attempt.
@@ -414,6 +420,7 @@ impl SubscriptionEnrollmentReservation {
         command: &EnrollSubscription,
         gateway: &ResolvedGateway,
         attempt_id: PaymentAttemptId,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionEnrollmentReservationBuildError> {
         if gateway.billing_scope_id() != command.billing_scope_id()
             || gateway.gateway_configuration_id() != command.gateway_configuration_id()
@@ -426,6 +433,7 @@ impl SubscriptionEnrollmentReservation {
             command.subscriber_id(),
             gateway.gateway_account_id(),
             gateway.gateway_configuration_id(),
+            required_gateway_account_mode,
         );
         let gateway_order_id = gateway
             .mutation_reference_factory()
@@ -527,6 +535,7 @@ pub enum SubscriptionEnrollmentReservationRejection {
     UnresolvedProcessorCharge,
     EnrollmentTermsChanged,
     GatewayConfigurationChanged,
+    GatewayAccountModeChanged,
     AttemptInProgress,
 }
 
@@ -556,6 +565,7 @@ pub enum SubscriptionEnrollmentSubmissionRejection {
     BillingStateChanged,
     EnrollmentTermsChanged,
     GatewayConfigurationChanged,
+    GatewayAccountModeChanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

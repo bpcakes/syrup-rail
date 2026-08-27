@@ -28,16 +28,18 @@ use syrup_rail::{
 };
 use thiserror::Error;
 
+use crate::enrollment_application::GatewayNotSubmittedPolicy;
 use crate::host_charge_application::{
     HostChargeBeforeSubmissionResolution, resolve_host_charge_before_submission,
 };
+use crate::mode_verified_gateway::gateway_account_mode_mismatch_detail;
 use crate::{
-    BillingTransactionCoordinator, HostChargeAdmissionOutcome, HostChargeApplicationError,
-    HostChargePreflightOutcome, HostChargeProviderResult, HostChargeReservationOutcome,
-    HostChargeStoreError, HostChargeTargetStore, PaymentAttemptStoreError,
-    SubscriptionEnrollmentAdmissionOutcome, SubscriptionEnrollmentApplicationError,
-    SubscriptionEnrollmentProviderResult, SubscriptionOfferStore,
-    SubscriptionPaymentMethodReplacementAdmissionOutcome,
+    BillingTransactionCoordinator, GatewayAccountModeVerificationError, HostChargeAdmissionOutcome,
+    HostChargeApplicationError, HostChargePreflightOutcome, HostChargeProviderResult,
+    HostChargeReservationOutcome, HostChargeStoreError, HostChargeTargetStore, ModeVerifiedGateway,
+    PaymentAttemptStoreError, SubscriptionEnrollmentAdmissionOutcome,
+    SubscriptionEnrollmentApplicationError, SubscriptionEnrollmentProviderResult,
+    SubscriptionOfferStore, SubscriptionPaymentMethodReplacementAdmissionOutcome,
     SubscriptionPaymentMethodReplacementProviderResult, SubscriptionRecoveryAdmissionOutcome,
     SubscriptionRecoveryProviderResult, SubscriptionRenewalAdmissionOutcome,
     SubscriptionRenewalProviderResult, admit_host_charge_submission,
@@ -53,9 +55,12 @@ use crate::{
         attempt_replay_disposition,
     },
     enrollment_application::{
-        OutcomeResolutionBoundary, RateLimitCooldown, payment_result_for_attempt,
-        resolve_non_approved_outcome, resolve_payment_method_replacement_non_approved_outcome,
+        OutcomeApplication, OutcomeResolutionBoundary, OutcomeResolutionCommand, RateLimitCooldown,
+        RateLimitCooldownPersistence, payment_result_for_attempt,
+        persist_bound_provider_rate_limit_cooldown, resolve_non_approved_outcome,
+        resolve_payment_method_replacement_non_approved_outcome,
         resolve_recovery_non_approved_outcome, resolve_renewal_non_approved_outcome,
+        set_application_timeouts,
     },
     preflight_host_charge_in_transaction, preflight_subscription_enrollment_in_transaction,
     preflight_subscription_payment_method_replacement_in_transaction,
@@ -65,7 +70,7 @@ use crate::{
     reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
     submit_admitted_host_charge, submit_admitted_subscription_enrollment,
     submit_admitted_subscription_payment_method_replacement, submit_admitted_subscription_recovery,
-    submit_admitted_subscription_renewal,
+    submit_admitted_subscription_renewal, verify_gateway_account_mode,
 };
 
 mod enrollment;
@@ -79,8 +84,6 @@ mod subscriber;
 mod subscriber_mutation;
 
 const INVALID_SERVICE_STATE: &str = "canonical subscription billing service state is invalid";
-const LIVE_READINESS_FAILED_TEXT: &str =
-    "Payment was not submitted because the payment processor was not ready for live transactions.";
 
 /// Canonical cooldown level that stopped a gateway mutation before submission.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,6 +92,15 @@ pub enum GatewayMutationCooldownScope {
     Account,
     /// Cooldown applies to every configured account for the provider.
     Provider,
+}
+
+impl GatewayMutationCooldownScope {
+    const fn from_rate_limit_cooldown(cooldown: RateLimitCooldown) -> Self {
+        match cooldown {
+            RateLimitCooldown::Account => Self::Account,
+            RateLimitCooldown::Provider => Self::Provider,
+        }
+    }
 }
 
 /// A stable, conservative operational category for a
@@ -415,6 +427,7 @@ pub struct SubscriptionBillingService {
     resolver: Arc<dyn GatewayResolver>,
     admission: Arc<dyn EndUserMutationAdmission>,
     coordinator: Arc<dyn BillingTransactionCoordinator>,
+    required_gateway_account_mode: GatewayAccountMode,
     host_charge_targets: Option<Arc<dyn HostChargeTargetStore>>,
 }
 
@@ -433,8 +446,27 @@ impl SubscriptionBillingService {
             resolver,
             admission,
             coordinator,
+            required_gateway_account_mode: GatewayAccountMode::Live,
             host_charge_targets: None,
         }
+    }
+
+    /// Requires an exact gateway account mode before any provider mutation.
+    ///
+    /// The default is [`GatewayAccountMode::Live`]. Selecting
+    /// [`GatewayAccountMode::Test`] permits test-mode mutations and rejects a
+    /// live account before submission. Hosts should bind this requirement to
+    /// their trusted deployment environment, never to end-user input.
+    ///
+    /// This service setting does not automatically partition entitlement or
+    /// billing-portal reads. Test-mode subscriptions are ordinary paid
+    /// subscriptions to the domain model and can satisfy
+    /// `Entitlement::permits_product_access`; constrain `EntitlementQuery` and
+    /// `EntitlementGuard` separately when modes share a database, and enforce
+    /// any remaining environment isolation before granting production access.
+    pub fn with_required_gateway_account_mode(mut self, mode: GatewayAccountMode) -> Self {
+        self.required_gateway_account_mode = mode;
+        self
     }
 
     /// Adds the optional host-charge target store to this service instance.
@@ -507,9 +539,29 @@ impl SubscriberInitiatedReservation<'_> {
 /// shared by subscriber-initiated mutations.
 enum SubscriberReadinessFailure {
     Cooldown(GatewayMutationCooldownScope),
-    ProviderRateLimited(GatewayDiagnostic),
     Gateway(GatewayError),
-    LiveModeUnavailable,
+    AccountMode(GatewayAccountMode),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SubscriberReadinessPolicy {
+    resolution_code: PaymentResolutionCode,
+    cooldown: Option<RateLimitCooldown>,
+    cooldown_error_scope: Option<GatewayMutationCooldownScope>,
+}
+
+impl SubscriberReadinessPolicy {
+    const fn resolution_code(self) -> PaymentResolutionCode {
+        self.resolution_code
+    }
+
+    const fn cooldown(self) -> Option<RateLimitCooldown> {
+        self.cooldown
+    }
+
+    const fn cooldown_error_scope(self) -> Option<GatewayMutationCooldownScope> {
+        self.cooldown_error_scope
+    }
 }
 
 impl SubscriberReadinessFailure {
@@ -528,62 +580,48 @@ impl SubscriberReadinessFailure {
             Self::Cooldown(GatewayMutationCooldownScope::Provider) => {
                 GatewayDiagnostic::new("gateway provider cooldown is active")
             }
-            Self::ProviderRateLimited(detail) => detail,
             Self::Gateway(error) => error.detail().clone(),
-            Self::LiveModeUnavailable => GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
+            Self::AccountMode(_) => gateway_account_mode_mismatch_detail(),
         }
     }
 
-    const fn resolution_code(&self) -> PaymentResolutionCode {
+    const fn policy(&self) -> SubscriberReadinessPolicy {
         match self {
-            Self::Cooldown(GatewayMutationCooldownScope::Account) => {
-                PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission
+            Self::Cooldown(GatewayMutationCooldownScope::Account) => SubscriberReadinessPolicy {
+                resolution_code:
+                    PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission,
+                cooldown: None,
+                cooldown_error_scope: Some(GatewayMutationCooldownScope::Account),
+            },
+            Self::Cooldown(GatewayMutationCooldownScope::Provider) => SubscriberReadinessPolicy {
+                resolution_code: PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
+                cooldown: None,
+                cooldown_error_scope: Some(GatewayMutationCooldownScope::Provider),
+            },
+            Self::Gateway(error) => {
+                let policy = GatewayNotSubmittedPolicy::for_readiness_error(error);
+                let cooldown = policy.cooldown();
+                SubscriberReadinessPolicy {
+                    resolution_code: policy.resolution_code(),
+                    cooldown,
+                    cooldown_error_scope: match cooldown {
+                        Some(cooldown) => Some(
+                            GatewayMutationCooldownScope::from_rate_limit_cooldown(cooldown),
+                        ),
+                        None => None,
+                    },
+                }
             }
-            Self::Cooldown(GatewayMutationCooldownScope::Provider)
-            | Self::ProviderRateLimited(_) => {
-                PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
+            Self::AccountMode(required) => {
+                let policy = GatewayNotSubmittedPolicy::for_account_mode_mismatch(*required);
+                SubscriberReadinessPolicy {
+                    resolution_code: policy.resolution_code(),
+                    cooldown: policy.cooldown(),
+                    cooldown_error_scope: None,
+                }
             }
-            Self::Gateway(error) => gateway_readiness_resolution_code(error),
-            Self::LiveModeUnavailable => {
-                PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
-            }
         }
     }
-
-    const fn cooldown(&self) -> Option<RateLimitCooldown> {
-        match self {
-            Self::ProviderRateLimited(_) => Some(RateLimitCooldown::Provider),
-            Self::Cooldown(_) | Self::Gateway(_) | Self::LiveModeUnavailable => None,
-        }
-    }
-
-    const fn cooldown_error_scope(&self) -> Option<GatewayMutationCooldownScope> {
-        match self {
-            Self::Cooldown(scope) => Some(*scope),
-            Self::ProviderRateLimited(_) => Some(GatewayMutationCooldownScope::Provider),
-            Self::Gateway(_) | Self::LiveModeUnavailable => None,
-        }
-    }
-}
-
-const fn gateway_readiness_resolution_code(error: &GatewayError) -> PaymentResolutionCode {
-    match error {
-        GatewayError::RequestRejected(_) => {
-            PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission
-        }
-        GatewayError::Malformed(_) => PaymentResolutionCode::GatewayMalformedBeforeSubmission,
-        GatewayError::Configuration(_) => {
-            PaymentResolutionCode::GatewayConfigurationBeforeSubmission
-        }
-        GatewayError::Unavailable(_) => PaymentResolutionCode::GatewayUnavailableBeforeSubmission,
-        GatewayError::RateLimited(_) => {
-            PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
-        }
-    }
-}
-
-const fn preserves_prepared_attempt_for_retry(error: &GatewayError) -> bool {
-    matches!(error, GatewayError::Unavailable(_))
 }
 
 fn clone_gateway_error(error: &GatewayError) -> GatewayError {
@@ -615,29 +653,18 @@ fn map_subscriber_mutation_admission(
     }
 }
 
-async fn subscriber_gateway_readiness_failure(
+async fn subscriber_gateway_readiness(
     gateway: &syrup_rail::ResolvedGateway,
-) -> Option<SubscriberReadinessFailure> {
-    match gateway.account_mode().await {
-        Ok(GatewayAccountMode::Live) => None,
-        Ok(GatewayAccountMode::Test) => Some(SubscriberReadinessFailure::LiveModeUnavailable),
-        Err(GatewayError::RateLimited(detail)) => {
-            Some(SubscriberReadinessFailure::ProviderRateLimited(detail))
+    required_mode: GatewayAccountMode,
+) -> Result<ModeVerifiedGateway<'_>, SubscriberReadinessFailure> {
+    match verify_gateway_account_mode(gateway, required_mode).await {
+        Ok(verified) => Ok(verified),
+        Err(GatewayAccountModeVerificationError::AccountModeMismatch { required, .. }) => {
+            Err(SubscriberReadinessFailure::AccountMode(required))
         }
-        Err(error) => Some(SubscriberReadinessFailure::Gateway(error)),
-    }
-}
-
-fn preserve_concurrent_terminal_payment(
-    payment: SubscriptionEnrollmentPaymentResult,
-    error: GatewayNotSubmittedError,
-) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
-    if payment.attempt().state().resolution_code()
-        == Some(crate::enrollment_application::not_submitted_resolution_code(&error))
-    {
-        Err(SubscriptionBillingServiceError::GatewayNotSubmitted(error))
-    } else {
-        Ok(payment)
+        Err(GatewayAccountModeVerificationError::Gateway(error)) => {
+            Err(SubscriberReadinessFailure::Gateway(error))
+        }
     }
 }
 

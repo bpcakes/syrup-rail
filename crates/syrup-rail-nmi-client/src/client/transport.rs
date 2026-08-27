@@ -188,14 +188,16 @@ pub(super) fn gateway_error_for_http_status(status: StatusCode, message: String)
         StatusCode::BAD_REQUEST | StatusCode::UNPROCESSABLE_ENTITY => {
             WireError::RequestRejected(message)
         }
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => WireError::Configuration(message),
+        StatusCode::UNAUTHORIZED
+        | StatusCode::FORBIDDEN
+        | StatusCode::NOT_FOUND
+        | StatusCode::METHOD_NOT_ALLOWED => WireError::Configuration(message),
         StatusCode::TOO_MANY_REQUESTS => WireError::TransportRateLimited(message),
-        // Only endpoint/method mismatches prove that NMI rejected the request
-        // before transaction processing. In particular, never add a 5xx here:
-        // the billing layer releases reservations and permits a fresh-key
-        // retry for `Unavailable`, while any accepted 5xx mutation may have
-        // charged and must remain indeterminate.
-        StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => WireError::Unavailable(message),
+        // Never add an accepted HTTP response here: `Unavailable` proves that
+        // no request reached NMI and authorizes same-attempt, same-order replay.
+        // Endpoint/method mismatches also prove non-submission, but they are a
+        // durable configuration defect rather than a transient transport
+        // outage and are therefore classified above as `Configuration`.
         _ => WireError::Indeterminate(message),
     }
 }

@@ -3,18 +3,25 @@ use super::*;
 #[derive(Clone, Copy)]
 enum HostChargePreSubmissionStage<'a> {
     Unreserved,
-    Prepared {
+    Reserved {
         targets: &'a dyn HostChargeTargetStore,
         reservation: &'a HostChargeReservation,
+        resolution: HostChargeBeforeSubmissionResolution,
     },
 }
 
-enum HostChargePreSubmissionOutcome {
-    Ready,
+enum HostChargePreSubmissionOutcome<T = ()> {
+    Ready(T),
     Resolved(Box<HostChargePaymentResult>),
 }
 
-impl HostChargePreSubmissionOutcome {
+#[derive(Clone, Copy)]
+struct HostChargeCooldownSurface {
+    scope: GatewayMutationCooldownScope,
+    code: PaymentResolutionCode,
+}
+
+impl<T> HostChargePreSubmissionOutcome<T> {
     fn resolved(payment: HostChargePaymentResult) -> Self {
         Self::Resolved(Box::new(payment))
     }
@@ -61,6 +68,12 @@ impl SubscriptionBillingService {
                 return Err(SubscriptionBillingServiceError::HostChargeReservationRejected(reason));
             }
         };
+        if prepared_reservation.as_ref().is_some_and(|reservation| {
+            reservation.identity().required_gateway_account_mode()
+                != self.required_gateway_account_mode
+        }) {
+            return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+        }
 
         let account = self
             .gateway_account(
@@ -77,13 +90,14 @@ impl SubscriptionBillingService {
         }
         let cooldown_stage = prepared_reservation.as_ref().map_or(
             HostChargePreSubmissionStage::Unreserved,
-            |reservation| HostChargePreSubmissionStage::Prepared {
+            |reservation| HostChargePreSubmissionStage::Reserved {
                 targets,
                 reservation,
+                resolution: HostChargeBeforeSubmissionResolution::prepared(),
             },
         );
         match self.host_charge_cooldown(&account, cooldown_stage).await? {
-            HostChargePreSubmissionOutcome::Ready => {}
+            HostChargePreSubmissionOutcome::Ready(()) => {}
             HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
         }
         let gateway = self
@@ -114,18 +128,19 @@ impl SubscriptionBillingService {
                 INVALID_SERVICE_STATE,
             ));
         }
-        if prepared_reservation.is_none() {
+        let verified_gateway = if let Some(reservation) = prepared_reservation.as_ref() {
             match self
-                .host_charge_gateway_readiness(
-                    &account,
-                    &gateway,
-                    HostChargePreSubmissionStage::Unreserved,
-                )
+                .host_charge_prepared_gateway_readiness(&gateway, targets, reservation)
                 .await?
             {
-                HostChargePreSubmissionOutcome::Ready => {}
+                HostChargePreSubmissionOutcome::Ready(verified_gateway) => verified_gateway,
                 HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
             }
+        } else {
+            self.host_charge_unreserved_gateway_readiness(&account, &gateway)
+                .await?
+        };
+        if prepared_reservation.is_none() {
             self.admit_subscriber_mutation(
                 command.billing_scope_id(),
                 command.subscriber_id(),
@@ -140,10 +155,14 @@ impl SubscriptionBillingService {
         );
         let mut reservation = match prepared_reservation {
             Some(reservation) => reservation,
-            None => HostChargeReservation::from_command(&command, snapshot, &gateway, candidate_id)
-                .map_err(|_| {
-                    SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
-                })?,
+            None => HostChargeReservation::from_command(
+                &command,
+                snapshot,
+                &gateway,
+                candidate_id,
+                self.required_gateway_account_mode,
+            )
+            .map_err(|_| SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE))?,
         };
         let attempt = match self.reserve_host_charge(targets, &reservation).await? {
             HostChargeReservationOutcome::Reserved(attempt)
@@ -158,6 +177,9 @@ impl SubscriptionBillingService {
             HostChargeReservationOutcome::IdempotencyConflict => {
                 return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
+            HostChargeReservationOutcome::GatewayAccountModeChanged => {
+                return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+            }
             HostChargeReservationOutcome::Rejected { reason } => {
                 return Err(SubscriptionBillingServiceError::HostChargeReservationRejected(reason));
             }
@@ -171,6 +193,11 @@ impl SubscriptionBillingService {
             reservation = HostChargeReservation::from_attempt(&attempt).map_err(|_| {
                 SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
             })?;
+            if reservation.identity().required_gateway_account_mode()
+                != self.required_gateway_account_mode
+            {
+                return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+            }
             if reservation.identity().gateway_account_id() != gateway.gateway_account_id()
                 || reservation.request().gateway_order_id()
                     != &gateway.mutation_reference_factory().for_attempt(
@@ -184,19 +211,13 @@ impl SubscriptionBillingService {
             }
         }
 
-        let prepared_stage = HostChargePreSubmissionStage::Prepared {
+        let prepared_stage = HostChargePreSubmissionStage::Reserved {
             targets,
             reservation: &reservation,
+            resolution: HostChargeBeforeSubmissionResolution::prepared(),
         };
         match self.host_charge_cooldown(&account, prepared_stage).await? {
-            HostChargePreSubmissionOutcome::Ready => {}
-            HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
-        }
-        match self
-            .host_charge_gateway_readiness(&account, &gateway, prepared_stage)
-            .await?
-        {
-            HostChargePreSubmissionOutcome::Ready => {}
+            HostChargePreSubmissionOutcome::Ready(()) => {}
             HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
         }
 
@@ -210,16 +231,14 @@ impl SubscriptionBillingService {
                     return host_charge_payment_result(attempt);
                 }
             };
-        if let Some(scope) = self.active_cooldown(&account).await? {
-            return self
-                .resolve_host_charge_cooldown(
-                    targets,
-                    &reservation,
-                    &account.provider_key,
-                    scope,
-                    HostChargeBeforeSubmissionResolution::admitted_not_submitted(),
-                )
-                .await;
+        let admitted_stage = HostChargePreSubmissionStage::Reserved {
+            targets,
+            reservation: &reservation,
+            resolution: HostChargeBeforeSubmissionResolution::admitted_not_submitted(),
+        };
+        match self.host_charge_cooldown(&account, admitted_stage).await? {
+            HostChargePreSubmissionOutcome::Ready(()) => {}
+            HostChargePreSubmissionOutcome::Resolved(payment) => return Ok(*payment),
         }
         match submit_admitted_host_charge(
             &self.pool,
@@ -227,19 +246,13 @@ impl SubscriptionBillingService {
             targets,
             admission,
             &command,
-            &gateway,
+            verified_gateway,
         )
         .await?
         {
             HostChargeProviderResult::Payment(payment) => Ok(payment),
-            HostChargeProviderResult::NotSubmitted { payment, error } => {
-                if payment.attempt().state().resolution_code()
-                    == Some(crate::enrollment_application::not_submitted_resolution_code(&error))
-                {
-                    Err(SubscriptionBillingServiceError::GatewayNotSubmitted(error))
-                } else {
-                    Ok(payment)
-                }
+            HostChargeProviderResult::NotSubmitted { error, .. } => {
+                Err(SubscriptionBillingServiceError::GatewayNotSubmitted(error))
             }
         }
     }
@@ -273,8 +286,13 @@ impl SubscriptionBillingService {
         command: &ChargeHostTarget,
     ) -> Result<HostChargePreflightOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
-        let outcome =
-            preflight_host_charge_in_transaction(&mut transaction, targets, command).await?;
+        let outcome = preflight_host_charge_in_transaction(
+            &mut transaction,
+            targets,
+            command,
+            self.required_gateway_account_mode,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(outcome)
     }
@@ -301,93 +319,131 @@ impl SubscriptionBillingService {
                 HostChargePreSubmissionStage::Unreserved => {
                     Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope })
                 }
-                HostChargePreSubmissionStage::Prepared {
+                HostChargePreSubmissionStage::Reserved {
                     targets,
                     reservation,
+                    resolution,
                 } => self
                     .resolve_host_charge_cooldown(
                         targets,
                         reservation,
                         &account.provider_key,
                         scope,
-                        HostChargeBeforeSubmissionResolution::prepared(),
+                        resolution,
                     )
                     .await
                     .map(HostChargePreSubmissionOutcome::resolved),
             };
         }
-        Ok(HostChargePreSubmissionOutcome::Ready)
+        Ok(HostChargePreSubmissionOutcome::Ready(()))
     }
 
-    async fn host_charge_gateway_readiness(
+    async fn host_charge_unreserved_gateway_readiness<'gateway>(
         &self,
         account: &GatewayAccountSnapshot,
-        gateway: &syrup_rail::ResolvedGateway,
-        stage: HostChargePreSubmissionStage<'_>,
-    ) -> Result<HostChargePreSubmissionOutcome, SubscriptionBillingServiceError> {
-        let readiness = gateway.account_mode().await;
-        match stage {
-            HostChargePreSubmissionStage::Unreserved => match readiness {
-                Ok(GatewayAccountMode::Live) => Ok(HostChargePreSubmissionOutcome::Ready),
-                Ok(GatewayAccountMode::Test) => Err(
-                    SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Configuration(
-                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
-                    )),
-                ),
-                Err(GatewayError::RateLimited(_)) => {
-                    self.extend_provider_cooldown(&account.provider_key).await?;
-                    Err(SubscriptionBillingServiceError::GatewayMutationCooldown {
-                        scope: GatewayMutationCooldownScope::Provider,
-                    })
-                }
-                Err(error) => Err(SubscriptionBillingServiceError::GatewayReadiness(error)),
-            },
-            HostChargePreSubmissionStage::Prepared {
-                targets,
-                reservation,
-            } => match readiness {
-                Ok(GatewayAccountMode::Live) => Ok(HostChargePreSubmissionOutcome::Ready),
-                Ok(GatewayAccountMode::Test) => self
+        gateway: &'gateway syrup_rail::ResolvedGateway,
+    ) -> Result<ModeVerifiedGateway<'gateway>, SubscriptionBillingServiceError> {
+        match verify_gateway_account_mode(gateway, self.required_gateway_account_mode).await {
+            Ok(verified_gateway) => Ok(verified_gateway),
+            Err(GatewayAccountModeVerificationError::AccountModeMismatch { .. }) => {
+                Err(SubscriptionBillingServiceError::GatewayReadiness(
+                    GatewayError::Configuration(gateway_account_mode_mismatch_detail()),
+                ))
+            }
+            Err(GatewayAccountModeVerificationError::Gateway(GatewayError::RateLimited(_))) => {
+                self.extend_provider_cooldown(
+                    gateway.billing_scope_id(),
+                    gateway.gateway_account_id(),
+                    &account.provider_key,
+                )
+                .await?;
+                Err(SubscriptionBillingServiceError::GatewayMutationCooldown {
+                    scope: GatewayMutationCooldownScope::Provider,
+                })
+            }
+            Err(GatewayAccountModeVerificationError::Gateway(error)) => {
+                Err(SubscriptionBillingServiceError::GatewayReadiness(error))
+            }
+        }
+    }
+
+    async fn host_charge_prepared_gateway_readiness<'gateway>(
+        &self,
+        gateway: &'gateway syrup_rail::ResolvedGateway,
+        targets: &dyn HostChargeTargetStore,
+        reservation: &HostChargeReservation,
+    ) -> Result<
+        HostChargePreSubmissionOutcome<ModeVerifiedGateway<'gateway>>,
+        SubscriptionBillingServiceError,
+    > {
+        let readiness =
+            verify_gateway_account_mode(gateway, self.required_gateway_account_mode).await;
+        let resolution = HostChargeBeforeSubmissionResolution::prepared();
+        match readiness {
+            Ok(verified_gateway) => Ok(HostChargePreSubmissionOutcome::Ready(verified_gateway)),
+            Err(GatewayAccountModeVerificationError::AccountModeMismatch { required, .. }) => {
+                let detail = gateway_account_mode_mismatch_detail();
+                let policy = GatewayNotSubmittedPolicy::for_account_mode_mismatch(required);
+                let code = policy.resolution_code();
+                let payment = self
                     .resolve_host_charge_readiness(
                         targets,
                         reservation,
-                        GatewayDiagnostic::new(LIVE_READINESS_FAILED_TEXT),
-                        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
-                        HostChargeBeforeSubmissionResolution::prepared(),
+                        gateway.provider_key(),
+                        detail.clone(),
+                        code,
+                        resolution.with_not_submitted_policy(policy),
                     )
-                    .await
-                    .map(HostChargePreSubmissionOutcome::resolved),
-                Err(GatewayError::RateLimited(detail)) => self
-                    .resolve_host_charge_cooldown_with_detail(
-                        targets,
-                        reservation,
-                        GatewayMutationCooldownScope::Provider,
-                        detail,
-                        HostChargeBeforeSubmissionResolution::prepared_provider_rate_limited(),
-                    )
-                    .await
-                    .map(HostChargePreSubmissionOutcome::resolved),
-                Err(error) if preserves_prepared_attempt_for_retry(&error) => {
-                    Err(SubscriptionBillingServiceError::GatewayReadiness(error))
+                    .await?;
+                if payment.attempt().state().resolution_code() == Some(code) {
+                    Err(SubscriptionBillingServiceError::GatewayReadiness(
+                        GatewayError::Configuration(detail),
+                    ))
+                } else {
+                    Ok(HostChargePreSubmissionOutcome::resolved(payment))
                 }
-                Err(error) => {
-                    let code = gateway_readiness_resolution_code(&error);
-                    let payment = self
-                        .resolve_host_charge_readiness(
+            }
+            Err(GatewayAccountModeVerificationError::Gateway(error)) => {
+                let policy = GatewayNotSubmittedPolicy::for_readiness_error(&error);
+                if policy.restores_prepared_attempt_when_supported() {
+                    return Err(SubscriptionBillingServiceError::GatewayReadiness(error));
+                }
+                let resolution = resolution.with_not_submitted_policy(policy);
+                if let Some(cooldown) = policy.cooldown() {
+                    return self
+                        .resolve_host_charge_cooldown_with_detail(
                             targets,
                             reservation,
+                            gateway.provider_key(),
                             error.detail().clone(),
-                            code,
-                            HostChargeBeforeSubmissionResolution::prepared(),
+                            HostChargeCooldownSurface {
+                                scope: GatewayMutationCooldownScope::from_rate_limit_cooldown(
+                                    cooldown,
+                                ),
+                                code: policy.resolution_code(),
+                            },
+                            resolution,
                         )
-                        .await?;
-                    if payment.attempt().state().resolution_code() == Some(code) {
-                        Err(SubscriptionBillingServiceError::GatewayReadiness(error))
-                    } else {
-                        Ok(HostChargePreSubmissionOutcome::resolved(payment))
-                    }
+                        .await
+                        .map(HostChargePreSubmissionOutcome::resolved);
                 }
-            },
+                let code = policy.resolution_code();
+                let payment = self
+                    .resolve_host_charge_readiness(
+                        targets,
+                        reservation,
+                        gateway.provider_key(),
+                        error.detail().clone(),
+                        code,
+                        resolution,
+                    )
+                    .await?;
+                if payment.attempt().state().resolution_code() == Some(code) {
+                    Err(SubscriptionBillingServiceError::GatewayReadiness(error))
+                } else {
+                    Ok(HostChargePreSubmissionOutcome::resolved(payment))
+                }
+            }
         }
     }
 
@@ -395,6 +451,7 @@ impl SubscriptionBillingService {
         &self,
         targets: &dyn HostChargeTargetStore,
         reservation: &HostChargeReservation,
+        provider_key: &GatewayProviderKey,
         detail: GatewayDiagnostic,
         code: PaymentResolutionCode,
         resolution: HostChargeBeforeSubmissionResolution,
@@ -403,6 +460,7 @@ impl SubscriptionBillingService {
             &self.pool,
             targets,
             reservation,
+            provider_key,
             detail,
             code,
             resolution,
@@ -428,24 +486,6 @@ impl SubscriptionBillingService {
                 "{provider_name} system provider cooldown is active."
             )),
         };
-        self.resolve_host_charge_cooldown_with_detail(
-            targets,
-            reservation,
-            scope,
-            detail,
-            resolution,
-        )
-        .await
-    }
-
-    pub(super) async fn resolve_host_charge_cooldown_with_detail(
-        &self,
-        targets: &dyn HostChargeTargetStore,
-        reservation: &HostChargeReservation,
-        scope: GatewayMutationCooldownScope,
-        detail: GatewayDiagnostic,
-        resolution: HostChargeBeforeSubmissionResolution,
-    ) -> Result<HostChargePaymentResult, SubscriptionBillingServiceError> {
         let code = match scope {
             GatewayMutationCooldownScope::Account => {
                 PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission
@@ -454,11 +494,40 @@ impl SubscriptionBillingService {
                 PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
             }
         };
+        self.resolve_host_charge_cooldown_with_detail(
+            targets,
+            reservation,
+            provider_key,
+            detail,
+            HostChargeCooldownSurface { scope, code },
+            resolution,
+        )
+        .await
+    }
+
+    async fn resolve_host_charge_cooldown_with_detail(
+        &self,
+        targets: &dyn HostChargeTargetStore,
+        reservation: &HostChargeReservation,
+        provider_key: &GatewayProviderKey,
+        detail: GatewayDiagnostic,
+        cooldown: HostChargeCooldownSurface,
+        resolution: HostChargeBeforeSubmissionResolution,
+    ) -> Result<HostChargePaymentResult, SubscriptionBillingServiceError> {
         let payment = self
-            .resolve_host_charge_readiness(targets, reservation, detail, code, resolution)
+            .resolve_host_charge_readiness(
+                targets,
+                reservation,
+                provider_key,
+                detail,
+                cooldown.code,
+                resolution,
+            )
             .await?;
-        if payment.attempt().state().resolution_code() == Some(code) {
-            Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope })
+        if payment.attempt().state().resolution_code() == Some(cooldown.code) {
+            Err(SubscriptionBillingServiceError::GatewayMutationCooldown {
+                scope: cooldown.scope,
+            })
         } else {
             Ok(payment)
         }

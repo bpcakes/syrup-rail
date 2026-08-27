@@ -118,15 +118,17 @@ impl SubscriptionBillingService {
         let gateway_error = failure.gateway_error();
         if boundary == OutcomeResolutionBoundary::Prepared
             && let Some(error) = gateway_error.as_ref()
-            && preserves_prepared_attempt_for_retry(error)
+            && GatewayNotSubmittedPolicy::for_readiness_error(error)
+                .restores_prepared_attempt_when_supported()
         {
             return Err(SubscriptionBillingServiceError::GatewayReadiness(
                 clone_gateway_error(error),
             ));
         }
-        let code = failure.resolution_code();
-        let cooldown = failure.cooldown();
-        let cooldown_error_scope = failure.cooldown_error_scope();
+        let policy = failure.policy();
+        let code = policy.resolution_code();
+        let cooldown = policy.cooldown();
+        let cooldown_error_scope = policy.cooldown_error_scope();
         let detail = failure.into_detail();
         let evidence = ProcessorEvidence::new(
             None,

@@ -4,6 +4,17 @@ use super::*;
 use crate::{CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError};
 
 #[test]
+fn gateway_account_mode_storage_values_round_trip_exhaustively() {
+    for mode in [GatewayAccountMode::Live, GatewayAccountMode::Test] {
+        assert_eq!(mode.as_str().parse::<GatewayAccountMode>(), Ok(mode));
+        assert_eq!(mode.to_string(), mode.as_str());
+    }
+    assert!("LIVE".parse::<GatewayAccountMode>().is_err());
+    assert!("unknown".parse::<GatewayAccountMode>().is_err());
+    assert!("".parse::<GatewayAccountMode>().is_err());
+}
+
+#[test]
 fn query_and_report_requests_reject_invalid_shapes() {
     assert!(matches!(
         GatewayQueryRequest::new(None, None),
@@ -286,6 +297,23 @@ fn gateway_errors_preserve_value_free_debug_and_stable_messages() {
     let debug = format!("{not_submitted:?}");
     assert!(debug.starts_with("Malformed"));
     assert!(debug.contains("has_detail: true"));
+    assert!(!debug.contains(SENTINEL));
+
+    let mode_mismatch = GatewayNotSubmittedError::AccountModeMismatch {
+        required: GatewayAccountMode::Live,
+        observed: GatewayAccountMode::Test,
+        detail: GatewayDiagnostic::new(SENTINEL),
+    };
+    let debug = format!("{mode_mismatch:?}");
+    assert!(debug.starts_with("AccountModeMismatch"));
+    assert!(debug.contains("has_detail: true"));
+    assert!(!debug.contains(SENTINEL));
+
+    let mode_verification = GatewayNotSubmittedError::AccountModeVerification(
+        GatewayError::Unavailable(GatewayDiagnostic::new(SENTINEL)),
+    );
+    let debug = format!("{mode_verification:?}");
+    assert!(debug.starts_with("AccountModeVerification"));
     assert!(!debug.contains(SENTINEL));
 
     let mutation = GatewayMutationError::Indeterminate(GatewayDiagnostic::new(SENTINEL));

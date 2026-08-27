@@ -9,8 +9,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, postgres::PgRow};
 use syrup_rail::{
     BillingPeriod, ChargeAmount, CurrencyCode, DunningExhaustion, DunningRetryDelay,
-    DunningSchedule, PastDueAccessPolicy, PaymentMethodId, PlanKey, RenewalFailurePolicy,
-    Subscription, SubscriptionId, SubscriptionPeriodRule, SubscriptionPhase, SubscriptionStatus,
+    DunningSchedule, GatewayAccountMode, PastDueAccessPolicy, PaymentMethodId, PlanKey,
+    RenewalFailurePolicy, Subscription, SubscriptionId, SubscriptionPeriodRule, SubscriptionPhase,
+    SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -123,6 +124,7 @@ struct FullSubscriptionRow {
     id: Uuid,
     plan_key: String,
     status: String,
+    required_gateway_account_mode: String,
     payment_method_id: Uuid,
     amount_cents: i32,
     currency: String,
@@ -144,6 +146,7 @@ impl FullSubscriptionRow {
             id: row.try_get("id")?,
             plan_key: row.try_get("plan_key")?,
             status: row.try_get("status")?,
+            required_gateway_account_mode: row.try_get("required_gateway_account_mode")?,
             payment_method_id: row.try_get("payment_method_id")?,
             amount_cents: row.try_get("amount_cents")?,
             currency: row.try_get("currency")?,
@@ -165,6 +168,7 @@ impl FullSubscriptionRow {
             id,
             plan_key,
             status,
+            required_gateway_account_mode,
             payment_method_id,
             amount_cents,
             currency,
@@ -197,6 +201,9 @@ impl FullSubscriptionRow {
                 .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             phase
                 .parse::<SubscriptionPhase>()
+                .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
+            required_gateway_account_mode
+                .parse::<GatewayAccountMode>()
                 .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             PaymentMethodId::new(payment_method_id),
             ChargeAmount::new(

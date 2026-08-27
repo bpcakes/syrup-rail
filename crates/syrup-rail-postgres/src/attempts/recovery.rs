@@ -52,6 +52,7 @@ async fn recovery_attempt_matches_replay_context(
             SELECT 1 FROM billing_subscriptions
             WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
                 AND plan_key = $4
+                AND required_gateway_account_mode = $7
                 AND (
                     (
                         status IN ('active', 'past_due')
@@ -72,6 +73,7 @@ async fn recovery_attempt_matches_replay_context(
     .bind(plan_key.as_str())
     .bind(period.start_at())
     .bind(attempt.status().as_str())
+    .bind(identity.required_gateway_account_mode().as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -92,6 +94,29 @@ async fn recovery_attempt_for_replay(
     } else {
         Ok(None)
     }
+}
+
+async fn recovery_reservation_replay_outcome(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: PaymentAttempt,
+    required_gateway_account_mode: GatewayAccountMode,
+) -> Result<SubscriptionRecoveryReservationOutcome, PaymentAttemptStoreError> {
+    Ok(
+        match recovery_attempt_for_replay(transaction, attempt).await? {
+            Some(existing)
+                if prepared_replay_required_mode_changed(
+                    &existing,
+                    required_gateway_account_mode,
+                ) =>
+            {
+                SubscriptionRecoveryReservationOutcome::Rejected(
+                    SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged,
+                )
+            }
+            Some(existing) => SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing)),
+            None => SubscriptionRecoveryReservationOutcome::IdempotencyConflict,
+        },
+    )
 }
 
 fn recovery_attempt_matches_reservation(
@@ -220,11 +245,11 @@ async fn insert_recovery_attempt(
             billing_first_name, billing_last_name, billing_email,
             subscription_expected_payment_method_id,
             subscription_expected_initial_transaction_id,
-            subscription_expected_status
+            subscription_expected_status, required_gateway_account_mode
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'subscription_recovery', 'pending',
             $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-            $18, $19, $20, $21
+            $18, $19, $20, $21, $22
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -250,6 +275,7 @@ async fn insert_recovery_attempt(
     .bind(expected.payment_method_id().as_uuid())
     .bind(expected.initial_transaction_id().expose())
     .bind(expected.status().as_str())
+    .bind(identity.required_gateway_account_mode().as_str())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -332,6 +358,7 @@ pub async fn reserve_subscription_recovery_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: &syrup_rail::RecoverSubscriptionPayment,
     gateway: &syrup_rail::ResolvedGateway,
+    required_gateway_account_mode: GatewayAccountMode,
 ) -> Result<SubscriptionRecoveryReservationOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
@@ -348,14 +375,12 @@ pub async fn reserve_subscription_recovery_in_transaction(
         if !recovery_attempt_matches_command(&existing, command) {
             return Ok(SubscriptionRecoveryReservationOutcome::IdempotencyConflict);
         }
-        return Ok(
-            match recovery_attempt_for_replay(transaction, existing).await? {
-                Some(existing) => {
-                    SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
-                }
-                None => SubscriptionRecoveryReservationOutcome::IdempotencyConflict,
-            },
-        );
+        return recovery_reservation_replay_outcome(
+            transaction,
+            existing,
+            required_gateway_account_mode,
+        )
+        .await;
     }
 
     let row = sqlx::query(
@@ -363,6 +388,7 @@ pub async fn reserve_subscription_recovery_in_transaction(
         SELECT id, gateway_account_id, payment_method_id, amount_cents, currency,
             next_renewal_at, initial_transaction_id, status,
             recurring_period_kind, recurring_period_count,
+            required_gateway_account_mode,
             next_renewal_at <= clock_timestamp() AS is_due
         FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
@@ -385,6 +411,15 @@ pub async fn reserve_subscription_recovery_in_transaction(
     if !row.try_get::<bool, _>("is_due")? {
         return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
             SubscriptionRecoveryReservationRejection::PaymentNotDue,
+        ));
+    }
+    let subscription_mode = row
+        .try_get::<String, _>("required_gateway_account_mode")?
+        .parse::<GatewayAccountMode>()
+        .map_err(|_| invalid_state())?;
+    if subscription_mode != required_gateway_account_mode {
+        return Ok(SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged,
         ));
     }
 
@@ -421,6 +456,7 @@ pub async fn reserve_subscription_recovery_in_transaction(
         gateway,
         command.attempt_id(),
         terms,
+        subscription_mode,
     )
     .map_err(|_| invalid_state())?;
 
@@ -453,14 +489,12 @@ pub async fn reserve_subscription_recovery_in_transaction(
         if !recovery_attempt_matches_command(&existing, command) {
             return Ok(SubscriptionRecoveryReservationOutcome::IdempotencyConflict);
         }
-        return Ok(
-            match recovery_attempt_for_replay(transaction, existing).await? {
-                Some(existing) => {
-                    SubscriptionRecoveryReservationOutcome::Replay(Box::new(existing))
-                }
-                None => SubscriptionRecoveryReservationOutcome::IdempotencyConflict,
-            },
-        );
+        return recovery_reservation_replay_outcome(
+            transaction,
+            existing,
+            required_gateway_account_mode,
+        )
+        .await;
     }
     Ok(SubscriptionRecoveryReservationOutcome::Rejected(
         SubscriptionRecoveryReservationRejection::AttemptInProgress,

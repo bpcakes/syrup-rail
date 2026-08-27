@@ -281,6 +281,7 @@ mod tests {
         .unwrap();
         let subscriber_id = SubscriberId::new(Uuid::from_u128(7));
         let plan_key = PlanKey::new("premium").unwrap();
+        let required_mode = GatewayAccountMode::Test;
 
         let renewal =
             crate::ChargeRenewal::new(gateway.billing_scope_id(), subscription_id, start_at);
@@ -298,6 +299,7 @@ mod tests {
                 period.clone(),
                 charge,
                 3,
+                required_mode,
             )
             .unwrap(),
             crate::SubscriptionRenewalReservation::from_locked_subscription_terms(
@@ -313,6 +315,7 @@ mod tests {
                     charge,
                     3,
                 ),
+                required_mode,
             )
             .unwrap(),
         );
@@ -340,6 +343,7 @@ mod tests {
                 status,
                 period.clone(),
                 charge,
+                required_mode,
             )
             .unwrap(),
             crate::SubscriptionRecoveryReservation::from_locked_subscription_terms(
@@ -352,6 +356,7 @@ mod tests {
                     period.clone(),
                     charge,
                 ),
+                required_mode,
             )
             .unwrap(),
         );
@@ -377,6 +382,7 @@ mod tests {
                 payment_method_id,
                 initial_transaction_id.clone(),
                 currency,
+                required_mode,
             )
             .unwrap(),
             crate::SubscriptionPaymentMethodReplacement::from_locked_subscription_terms(
@@ -391,6 +397,7 @@ mod tests {
                     ),
                     currency,
                 ),
+                required_mode,
             )
             .unwrap(),
         );
@@ -450,6 +457,7 @@ mod tests {
                 SubscriptionStatus::PastDue,
                 BillingPeriod::new(start_at, start_at + Duration::days(30)).unwrap(),
                 ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+                GatewayAccountMode::Live,
             )
             .unwrap();
         let recovery_retry = crate::RecoverSubscriptionPayment::new(
@@ -504,6 +512,7 @@ mod tests {
                 payment_method_id,
                 initial_transaction_id,
                 CurrencyCode::new("USD").unwrap(),
+                GatewayAccountMode::Live,
             )
             .unwrap();
         let replacement_retry = crate::ReplaceSubscriptionPaymentMethod::new(

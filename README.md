@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.3.0"
-syrup-rail-postgres = "0.3.0"
-syrup-rail-nmi = "0.3.0" # only for NMI-backed hosts
+syrup-rail = "0.4.0"
+syrup-rail-postgres = "0.4.0"
+syrup-rail-nmi = "0.4.0" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.3.0"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.4.0"`
 directly.
 
 ## Subscription terms
@@ -60,6 +60,14 @@ decision after the host has authenticated and authorized its subject.
 `Suspended` denies them. The compiled [`entitlement_access`
 example](crates/syrup-rail/examples/entitlement_access.rs) shows the host
 security boundary and canonical method call.
+
+Gateway account mode constrains payment mutations. Entitlement reads and
+guards default to live paid subscriptions; test workers select `Test`, while
+trusted administrative tooling can opt into both modes explicitly. Current-
+subscription, billing-portal, and payment-history reads remain mode-neutral,
+so hosts that mix modes still need a trusted environment or tenant partition
+around those surfaces. Separate databases or merchant accounts remain the
+simplest hard isolation boundary.
 
 For a protected write, start an `EntitlementWriteTransaction` from the pool,
 make any preparatory host writes through its connection, and pass it by value
@@ -97,11 +105,13 @@ subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
 at that boundary. Hosts that mirror access outside Syrup Rail must consume the
 event's `access` outcome from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v3 is the
+PostgreSQL 18 is the only supported database major, and schema v4 is the
 current contract. New hosts install
-[`schema/v3/install.sql`](crates/syrup-rail-postgres/schema/v3/install.sql).
-Existing hosts first reach schema v2 when necessary, then follow the checked-in
-[`v2` to `v3` cutover guide](crates/syrup-rail-postgres/schema/v3/README.md).
+[`schema/v4/install.sql`](crates/syrup-rail-postgres/schema/v4/install.sql).
+Existing schema-v3 hosts follow the checked-in
+[`v3` to `v4` cutover guide](crates/syrup-rail-postgres/schema/v4/README.md).
+Hosts on schema v1 or v2 must first follow the immutable versioned artifacts
+to reach schema v3, then perform the staged v3-to-v4 cutover.
 
 ## PostgreSQL host integration
 
@@ -123,16 +133,16 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v3 install or forward-only v2-to-v3
-upgrade migration, call
-`assert_runtime_schema_v3_compatible(&pool).await` during process startup and
+After the host has applied its immutable v4 install or completed every staged
+forward-only v3-to-v4 upgrade artifact, call
+`assert_runtime_schema_v4_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v3 catalog and fingerprint inside one repeatable-read, read-only transaction.
+v4 catalog and fingerprint inside one repeatable-read, read-only transaction.
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even
 a host-prefixed column to a canonical relation is unsupported and fails the
-fingerprint check. The assertion also fails closed for v1, v2, or other
+fingerprint check. The assertion also fails closed for v1, v2, v3, or other
 canonical drift. It never executes install, upgrade, preflight, or audit SQL.
 Hosts remain responsible for applying and coordinating their own migrations.
 The compiled host integration example includes a default-feature helper for
@@ -163,7 +173,10 @@ For a failed high-level billing command, hosts can branch on
 error variants. The disposition enum is non-exhaustive, so consumer matches
 must retain a conservative wildcard. `is_retryable()` means it is safe to
 resubmit the **same idempotent command and key** later; it does not guarantee
-success. `retry_after()` returns an exact delay only for admission denial.
+success. A transient provider `Unavailable` result that is provably
+not-submitted restores prepared work when that flow supports replay, just like
+a transient final account-mode query. `retry_after()` returns an exact delay
+only for admission denial.
 Gateway and account cooldowns are temporarily unavailable but deliberately do
 not receive a fabricated delay. Conflicts are not retryable as-is: reload and
 rebuild against current authority, or reconcile the existing idempotency key.
@@ -190,21 +203,27 @@ payment-method references, transaction identifiers, contacts, gateway
 responses, and raw diagnostics; hosts still own presentation and
 authorization.
 
-For automatic renewal dispatches, call `due_renewals_page(pool, None)` and
-continue with its returned `RenewalDispatchPageCursor` until no next cursor is
-present. PostgreSQL observes the first page's timestamp and the cursor reuses
-it for every time-based due, cooldown, stale-update, and retry-window gate,
-while strict `(next_payment_attempt_at, subscription_id)` ordering avoids
-offset and timestamp-tie gaps or repeats for unchanged candidates. It is not a
-cross-page MVCC snapshot: concurrently inserted, retimed, or newly unblocked
-candidates behind the continuation key wait for a fresh scan. Persist or
-reconstruct cursors only in trusted host code from a prior page—never accept a
-cursor from an end user. This is not a lease or queue writer: the host writes
-its own outbox/queue record and each eventual renewal still rechecks current
-canonical state. `due_renewals` remains the compatible fixed-100 first-page
-helper. Each scan first applies subscription/account/provider gates, then
-probes only each eligible subscription's exact current-period attempt history;
-unrelated historical attempts are not globally aggregated on every page.
+For automatic renewal dispatches, a mode-specific worker calls
+`due_renewals_page_for_mode(pool, required_mode, None)` and continues with its
+returned `RenewalDispatchPageCursor` until no next cursor is present. Keep the
+same required mode for the whole cursor chain; the cursor records it and rejects
+cross-mode reuse. A central router that owns both modes can instead call
+`due_renewals_page(pool, None)`. A dedicated mode-leading index prevents one
+mode's work from consuming the other worker's bounded page.
+PostgreSQL observes the first page's timestamp and the cursor reuses it for
+every time-based due, cooldown, stale-update, and retry-window gate, while
+strict `(next_payment_attempt_at, subscription_id)` ordering avoids offset and
+timestamp-tie gaps or repeats for unchanged candidates. It is not a cross-page
+MVCC snapshot: concurrently inserted, retimed, or newly unblocked candidates
+behind the continuation key wait for a fresh scan. Persist or reconstruct
+cursors only in trusted host code from a prior page—never accept a cursor from
+an end user. This is not a lease or queue writer: the host writes its own
+outbox/queue record and each eventual renewal still rechecks current canonical
+state. `due_renewals` remains the compatible fixed-100 first-page helper; use
+`due_renewals_for_mode` for a mode-specific fixed-100 first page. Each scan
+first applies subscription/account/provider gates, then probes only each
+eligible subscription's exact current-period attempt history; unrelated
+historical attempts are not globally aggregated on every page.
 
 Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
 compile the integration boundary without contacting a database or provider.

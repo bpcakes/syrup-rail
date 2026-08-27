@@ -6,9 +6,9 @@ use syrup_rail::{
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
     GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId,
     PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
-    ProcessorEvidence, RecoverSubscriptionPayment, ResolvedGateway,
-    SubscriptionEnrollmentPaymentResult, SubscriptionRecoveryReservation,
-    SubscriptionRecoverySubmissionOutcome, SubscriptionRecoverySubmissionRejection,
+    ProcessorEvidence, RecoverSubscriptionPayment, SubscriptionEnrollmentPaymentResult,
+    SubscriptionRecoveryReservation, SubscriptionRecoverySubmissionOutcome,
+    SubscriptionRecoverySubmissionRejection,
 };
 
 use crate::{
@@ -21,14 +21,15 @@ use crate::{
 
 use super::{
     APPROVED_APPLICATION_ATTEMPTS, APPROVED_EVIDENCE_RETRY_DELAY, APPROVED_EVIDENCE_WRITE_ATTEMPTS,
-    AttemptResolutionStatus, BILLING_LOCK_TIMEOUT, INVALID_APPLICATION_STATE, OutcomeReservation,
-    OutcomeResolutionBoundary, OutcomeResolutionCommand, RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
+    AttemptResolutionStatus, BILLING_LOCK_TIMEOUT, GatewayNotSubmittedPolicy,
+    INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation, OutcomeResolutionBoundary,
+    OutcomeResolutionCommand, RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
     RECOVERY_INCOMPLETE_APPROVAL_TEXT, RECOVERY_STALE_STATE_TEXT, RateLimitCooldown,
     SubscriptionEnrollmentApplicationError, advance_subscription_discount_after_successful_charge,
-    disable_payment_method_if_unreferenced, finalize_approved_application,
-    is_retryable_evidence_error, load_applied_subscription, load_subscription,
-    lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
-    mark_attempt_approved, mutation_error_evidence, not_submitted_resolution_code,
+    apply_resumable_not_submitted_policy, disable_payment_method_if_unreferenced,
+    finalize_approved_application, is_retryable_evidence_error, load_applied_subscription,
+    load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
+    lock_subscription_aggregate, mark_attempt_approved, mutation_error_evidence,
     park_locked_attempt, payment_result_for_attempt,
     persist_approved_evidence_without_attempt_lock, recovery_subscription_matches,
     resolve_pool_outcome, set_application_timeouts, upsert_payment_method,
@@ -70,6 +71,9 @@ pub enum SubscriptionRecoveryAdmissionOutcome {
 #[derive(Debug)]
 pub enum SubscriptionRecoveryProviderResult {
     Payment(SubscriptionEnrollmentPaymentResult),
+    /// The provider mutation was not contacted. A retry-safe readiness failure
+    /// can carry the same pending, prepared payment for same-key replay. A
+    /// concurrent terminal result is returned as `Payment` instead.
     NotSubmitted {
         payment: SubscriptionEnrollmentPaymentResult,
         error: GatewayNotSubmittedError,
@@ -124,8 +128,9 @@ pub async fn submit_admitted_subscription_recovery(
     coordinator: &dyn BillingTransactionCoordinator,
     admission: AdmittedSubscriptionRecovery,
     command: &RecoverSubscriptionPayment,
-    gateway: &ResolvedGateway,
+    gateway: crate::ModeVerifiedGateway<'_>,
 ) -> Result<SubscriptionRecoveryProviderResult, SubscriptionEnrollmentApplicationError> {
+    let resolved_gateway = gateway.resolved_gateway();
     if admission.attempt.identity() != admission.reservation.identity()
         || admission.attempt.request() != admission.reservation.request()
         || admission.attempt.status() != PaymentAttemptStatus::Pending
@@ -135,10 +140,15 @@ pub async fn submit_admitted_subscription_recovery(
             .timestamps()
             .submitted_at()
             .is_none()
-        || !admission.reservation.matches_submission(command, gateway)
+        || !admission
+            .reservation
+            .matches_submission(command, resolved_gateway)
     {
         return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
     }
+    let Some(gateway) = gateway.authorize_attempt(&admission.reservation.identity()) else {
+        return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
+    };
     let charge =
         syrup_rail::ChargeAmount::try_from(admission.attempt.request().amount()).map_err(|_| {
             SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
@@ -162,19 +172,24 @@ pub async fn submit_admitted_subscription_recovery(
         .map(SubscriptionRecoveryProviderResult::Payment),
         Err(GatewayMutationError::NotSubmitted(error)) => {
             let evidence = mutation_error_evidence(error.detail());
-            let cooldown = matches!(error, GatewayNotSubmittedError::RateLimited(_))
-                .then_some(RateLimitCooldown::Account);
-            let payment = resolve_recovery_non_approved_outcome(
+            let policy = GatewayNotSubmittedPolicy::for_error(&error);
+            let application = apply_resumable_not_submitted_policy(
                 pool,
-                &admission.reservation,
+                OutcomeReservation::Recovery(&admission.reservation),
                 &evidence,
-                AttemptResolutionStatus::Failed,
-                Some(not_submitted_resolution_code(&error)),
-                cooldown,
-                OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                policy,
             )
             .await?;
-            Ok(SubscriptionRecoveryProviderResult::NotSubmitted { payment, error })
+            if application.should_surface_not_submitted(policy) {
+                Ok(SubscriptionRecoveryProviderResult::NotSubmitted {
+                    payment: application.payment,
+                    error,
+                })
+            } else {
+                Ok(SubscriptionRecoveryProviderResult::Payment(
+                    application.payment,
+                ))
+            }
         }
         Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => {
             resolve_recovery_unknown_outcome(
@@ -594,6 +609,7 @@ pub(crate) async fn resolve_recovery_non_approved_outcome(
         OutcomeResolutionCommand::non_approved(status, resolution_code, cooldown, boundary),
     )
     .await
+    .map(OutcomeApplication::into_payment)
 }
 
 async fn resolve_recovery_unknown_outcome(
@@ -609,6 +625,7 @@ async fn resolve_recovery_unknown_outcome(
         OutcomeResolutionCommand::unknown(cooldown),
     )
     .await
+    .map(OutcomeApplication::into_payment)
 }
 
 async fn park_recovery_approved_outcome(

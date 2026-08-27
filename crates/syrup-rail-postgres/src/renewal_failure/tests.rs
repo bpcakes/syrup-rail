@@ -1,7 +1,7 @@
 use super::*;
 use syrup_rail::{
-    BillingScopeId, DunningExhaustion, DunningSchedule, GatewayAccountId, GatewayConfigurationId,
-    SubscriberId,
+    BillingScopeId, DunningExhaustion, DunningSchedule, GatewayAccountId, GatewayAccountMode,
+    GatewayConfigurationId, SubscriberId,
 };
 
 fn timestamp(seconds: i64) -> DateTime<Utc> {
@@ -44,6 +44,7 @@ fn validated_attempt(
             SubscriberId::new(Uuid::from_u128(11)),
             GatewayAccountId::new(Uuid::from_u128(12)),
             GatewayConfigurationId::new(Uuid::from_u128(13)),
+            GatewayAccountMode::Live,
         ),
         subscription_id: SubscriptionId::new(Uuid::from_u128(14)),
         plan_key: PlanKey::new("decision-test").expect("valid plan key"),

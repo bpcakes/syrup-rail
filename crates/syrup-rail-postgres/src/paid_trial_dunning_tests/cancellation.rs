@@ -75,9 +75,13 @@ async fn paid_trial_and_scheduled_dunning_cancellation_preserve_exact_access_and
         trial_end,
     );
     let mut transaction = database.pool.begin().await?;
-    let stale =
-        reserve_subscription_renewal_in_transaction(&mut transaction, stale_trial_job, &gateway)
-            .await?;
+    let stale = reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        stale_trial_job,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         stale,
@@ -172,9 +176,13 @@ async fn paid_trial_and_scheduled_dunning_cancellation_preserve_exact_access_and
         CancelSubscriptionOutcome::AlreadyCanceled(_)
     ));
     let mut transaction = database.pool.begin().await?;
-    let stale =
-        reserve_subscription_renewal_in_transaction(&mut transaction, queued_dunning_job, &gateway)
-            .await?;
+    let stale = reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        queued_dunning_job,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         stale,

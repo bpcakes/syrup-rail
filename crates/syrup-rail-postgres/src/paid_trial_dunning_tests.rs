@@ -334,15 +334,17 @@ async fn reserve_and_admit_renewal(
     command: ChargeRenewal,
 ) -> Result<syrup_rail::SubscriptionRenewalReservation, Box<dyn Error>> {
     let mut transaction = pool.begin().await?;
-    let reservation =
-        match reserve_subscription_renewal_in_transaction(&mut transaction, command, gateway)
-            .await?
-        {
-            syrup_rail::SubscriptionRenewalReservationOutcome::Reserved(reservation, _) => {
-                *reservation
-            }
-            other => return Err(format!("unexpected renewal reservation: {other:?}").into()),
-        };
+    let reservation = match reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        command,
+        gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?
+    {
+        syrup_rail::SubscriptionRenewalReservationOutcome::Reserved(reservation, _) => *reservation,
+        other => return Err(format!("unexpected renewal reservation: {other:?}").into()),
+    };
     transaction.commit().await?;
     match admit_subscription_renewal_submission(pool, &reservation).await? {
         SubscriptionRenewalAdmissionOutcome::Admitted(_) => Ok(reservation),
@@ -356,15 +358,19 @@ async fn reserve_and_admit_recovery(
     command: &RecoverSubscriptionPayment,
 ) -> Result<syrup_rail::SubscriptionRecoveryReservation, Box<dyn Error>> {
     let mut transaction = pool.begin().await?;
-    let reservation =
-        match reserve_subscription_recovery_in_transaction(&mut transaction, command, gateway)
-            .await?
-        {
-            syrup_rail::SubscriptionRecoveryReservationOutcome::Reserved(reservation, _) => {
-                *reservation
-            }
-            other => return Err(format!("unexpected recovery reservation: {other:?}").into()),
-        };
+    let reservation = match reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        command,
+        gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?
+    {
+        syrup_rail::SubscriptionRecoveryReservationOutcome::Reserved(reservation, _) => {
+            *reservation
+        }
+        other => return Err(format!("unexpected recovery reservation: {other:?}").into()),
+    };
     transaction.commit().await?;
     match admit_subscription_recovery_submission(pool, &reservation).await? {
         SubscriptionRecoveryAdmissionOutcome::Admitted(_) => Ok(reservation),
@@ -471,7 +477,11 @@ async fn approve_enrollment(
         ),
         expected_terms,
     );
-    let reservation = SubscriptionEnrollmentReservation::from_command(&command, gateway)?;
+    let reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = pool.begin().await?;
     match reserve_subscription_enrollment_in_transaction(&mut transaction, offers, &reservation)
         .await?

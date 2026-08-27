@@ -1,11 +1,12 @@
 use super::*;
 use support::{
-    active_grant_exists, attempt_identity_matches_requested_gateway,
+    active_grant_exists, attempt_identity_matches_requested_gateway_without_required_mode,
     blocking_initial_attempt_exists, current_subscription_exists,
     enrollment_request_from_locked_terms, gateway_identity_matches_scope, initial_attempt_is_stale,
-    insert_initial_attempt, map_discount_error, pending_attempt_matches_request,
-    reject_locked_prepared_initial, reject_prepared_initial, replay_matches_command,
-    replay_matches_reservation, unresolved_initial_charge_exists,
+    insert_initial_attempt, map_discount_error,
+    pending_attempt_matches_request_without_required_mode, reject_locked_prepared_initial,
+    replay_matches_command, replay_matches_reservation_without_required_mode,
+    unresolved_initial_charge_exists,
 };
 
 mod support;
@@ -39,7 +40,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
     )
     .await?
     {
-        if !replay_matches_reservation(&existing, reservation) {
+        if !replay_matches_reservation_without_required_mode(&existing, reservation) {
             return Ok(SubscriptionEnrollmentReservationOutcome::IdempotencyConflict);
         }
         if initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
@@ -74,6 +75,14 @@ pub async fn reserve_subscription_enrollment_in_transaction(
             .await?
             .ok_or_else(invalid_state)?;
             return Ok(SubscriptionEnrollmentReservationOutcome::Replay(expired));
+        }
+        if prepared_replay_required_mode_changed(
+            &existing,
+            identity.required_gateway_account_mode(),
+        ) {
+            return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
+                SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged,
+            ));
         }
         if matches!(
             attempt_replay_disposition(&existing),
@@ -148,11 +157,10 @@ pub async fn reserve_subscription_enrollment_in_transaction(
                 | AttemptReplayDisposition::ReturnCanonical
         )
     {
-        return Ok(if replay_matches_reservation(&existing, reservation) {
-            SubscriptionEnrollmentReservationOutcome::Replay(existing)
-        } else {
-            SubscriptionEnrollmentReservationOutcome::IdempotencyConflict
-        });
+        if replay_matches_reservation_without_required_mode(&existing, reservation) {
+            return Ok(SubscriptionEnrollmentReservationOutcome::Replay(existing));
+        }
+        return Ok(SubscriptionEnrollmentReservationOutcome::IdempotencyConflict);
     }
 
     if current_subscription_exists(
@@ -215,13 +223,9 @@ pub async fn reserve_subscription_enrollment_in_transaction(
     )
     .await?
     {
-        return Ok(
-            if pending_attempt_matches_request(&existing, identity, &request) {
-                SubscriptionEnrollmentReservationOutcome::Replay(existing)
-            } else {
-                SubscriptionEnrollmentReservationOutcome::IdempotencyConflict
-            },
-        );
+        return Ok(pending_attempt_reservation_outcome(
+            existing, identity, &request,
+        ));
     }
     if blocking_initial_attempt_exists(
         transaction,
@@ -258,13 +262,32 @@ pub async fn reserve_subscription_enrollment_in_transaction(
     )
     .await?
     .ok_or_else(invalid_state)?;
-    Ok(
-        if pending_attempt_matches_request(&existing, identity, &request) {
-            SubscriptionEnrollmentReservationOutcome::Replay(existing)
-        } else {
-            SubscriptionEnrollmentReservationOutcome::IdempotencyConflict
-        },
-    )
+    Ok(pending_attempt_reservation_outcome(
+        existing, identity, &request,
+    ))
+}
+
+fn pending_attempt_reservation_outcome(
+    existing: PaymentAttempt,
+    requested_identity: PaymentAttemptIdentity,
+    requested: &PaymentAttemptRequest,
+) -> SubscriptionEnrollmentReservationOutcome {
+    if !pending_attempt_matches_request_without_required_mode(
+        &existing,
+        requested_identity,
+        requested,
+    ) {
+        return SubscriptionEnrollmentReservationOutcome::IdempotencyConflict;
+    }
+    if prepared_replay_required_mode_changed(
+        &existing,
+        requested_identity.required_gateway_account_mode(),
+    ) {
+        return SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged,
+        );
+    }
+    SubscriptionEnrollmentReservationOutcome::Replay(existing)
 }
 
 /// Resolves subscriber-wide enrollment idempotency before host admission.
@@ -363,8 +386,10 @@ pub async fn preflight_subscription_enrollment_in_transaction(
 
 /// Revalidates a prepared initial attempt and durably admits its one provider mutation.
 ///
-/// No provider I/O may occur after this function returns `Admitted` and before the caller
-/// invokes the sale. Every semantic rejection terminally fails the still-unsubmitted attempt.
+/// No provider I/O may occur after this function returns `Admitted` and before
+/// the caller invokes the sale. A wrong-mode caller leaves the prepared attempt
+/// intact for the matching deployment; other semantic rejections terminally
+/// fail it.
 pub async fn admit_subscription_enrollment_submission_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     offers: &dyn crate::SubscriptionOfferStore,
@@ -379,6 +404,41 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
     )
     .await?;
 
+    // The subscriber/plan aggregate lock above serializes reservation and
+    // admission before their offer/attempt locks diverge in order. Keep it
+    // ahead of both locks; host offer callbacks must not acquire attempt-ledger
+    // locks independently.
+    let attempt = payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+        true,
+    )
+    .await?
+    .ok_or_else(invalid_state)?;
+    if !attempt_identity_matches_requested_gateway_without_required_mode(&attempt, identity)
+        || attempt.kind() != PaymentAttemptKind::SubscriptionInitial
+        || attempt.request().target().plan_key() != Some(reservation.plan_key())
+    {
+        return Err(invalid_state());
+    }
+    if attempt.state().timestamps().submitted_at().is_some()
+        || attempt.status() != PaymentAttemptStatus::Pending
+    {
+        return Ok(SubscriptionEnrollmentSubmissionOutcome::AlreadyAdmitted(
+            attempt,
+        ));
+    }
+    if attempt.identity().required_gateway_account_mode()
+        != identity.required_gateway_account_mode()
+    {
+        return Ok(SubscriptionEnrollmentSubmissionOutcome::Rejected {
+            attempt,
+            reason: SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged,
+        });
+    }
+
     let Some(offer) = offers
         .lock_enrollment_offer(
             transaction,
@@ -389,9 +449,9 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
         )
         .await?
     else {
-        return reject_prepared_initial(
+        return reject_locked_prepared_initial(
             transaction,
-            reservation,
+            attempt,
             SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged,
             INITIAL_TERMS_CHANGED_TEXT,
         )
@@ -405,29 +465,6 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
     )
     .await
     .map_err(map_discount_error)?;
-    let attempt = payment_attempt_by_idempotency(
-        transaction,
-        identity.billing_scope_id(),
-        identity.subscriber_id(),
-        reservation.idempotency_key(),
-        true,
-    )
-    .await?
-    .ok_or_else(invalid_state)?;
-    if !attempt_identity_matches_requested_gateway(&attempt, identity)
-        || attempt.kind() != PaymentAttemptKind::SubscriptionInitial
-        || attempt.request().target().plan_key() != Some(reservation.plan_key())
-    {
-        return Err(invalid_state());
-    }
-    if attempt.state().timestamps().submitted_at().is_some()
-        || attempt.status() != PaymentAttemptStatus::Pending
-    {
-        return Ok(SubscriptionEnrollmentSubmissionOutcome::AlreadyAdmitted(
-            attempt,
-        ));
-    }
-
     lock_initial_charge_rows(
         transaction,
         identity.billing_scope_id(),
@@ -476,7 +513,8 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
         )
         .await;
     };
-    if !pending_attempt_matches_request(&attempt, identity, &expected_request) {
+    if !pending_attempt_matches_request_without_required_mode(&attempt, identity, &expected_request)
+    {
         return reject_locked_prepared_initial(
             transaction,
             attempt,

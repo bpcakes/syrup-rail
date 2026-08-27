@@ -1,4 +1,8 @@
 use super::*;
+use crate::{
+    reserve_subscription_payment_method_replacement_in_transaction,
+    reserve_subscription_recovery_in_transaction,
+};
 
 mod readiness;
 mod reservation;
@@ -46,9 +50,10 @@ async fn foreground_service_applies_once_and_replays_before_host_admission()
 async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stale_job()
 -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("service_renewal", false, false, false).await?;
-    let initial_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
-        "txn_renewal_initial",
-    ))));
+    let initial_gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome("txn_renewal_initial")),
+    ));
     let initial_service = SubscriptionBillingService::new(
         fixture.database.pool.clone(),
         Arc::new(TestOfferStore),
@@ -63,7 +68,8 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
             calls: AtomicUsize::new(0),
         }),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let initial = initial_service.enroll(fixture.command.clone()).await?;
     let subscription_id = initial
         .subscription()
@@ -90,9 +96,10 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
             .fetch_one(&fixture.database.pool)
             .await?;
 
-    let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
-        "txn_renewal_recurring",
-    ))));
+    let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome("txn_renewal_recurring")),
+    ));
     let resolved_gateway = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
     let resolver = Arc::new(StaticResolver {
         gateway: resolved_gateway.clone(),
@@ -107,7 +114,8 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
         resolver.clone(),
         admission.clone(),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let command = ChargeRenewal::new(
         fixture.command.billing_scope_id(),
         subscription_id,
@@ -130,6 +138,7 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
         &mut transaction,
         &stale_update_command,
         &resolved_gateway,
+        GatewayAccountMode::Test,
     )
     .await?
     {
@@ -170,6 +179,7 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
         &period_start_at
     );
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 2);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
     let stale_update_status: String =
@@ -184,6 +194,7 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
         SubscriptionRenewalOutcome::Noop
     ));
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 2);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     let events = fixture.coordinator.events.lock().await;
     assert_eq!(events.len(), 2);
@@ -199,9 +210,10 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
 async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
 -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("service_recovery", true, false, false).await?;
-    let initial_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
-        "txn_recovery_initial",
-    ))));
+    let initial_gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome("txn_recovery_initial")),
+    ));
     let initial_resolver = Arc::new(StaticResolver {
         gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&initial_gateway)),
         calls: AtomicUsize::new(0),
@@ -214,7 +226,8 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             calls: AtomicUsize::new(0),
         }),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let initial = initial_service.enroll(fixture.command.clone()).await?;
     let subscription_id = initial
         .subscription()
@@ -241,10 +254,13 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     .fetch_one(&fixture.database.pool)
     .await?;
 
-    let recovery_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome_with_reference(
-        Some("txn_recovery_approved"),
-        "vault_recovery",
-    ))));
+    let recovery_gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome_with_reference(
+            Some("txn_recovery_approved"),
+            "vault_recovery",
+        )),
+    ));
     let resolved_gateway =
         scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&recovery_gateway));
     let resolver = Arc::new(StaticResolver {
@@ -260,7 +276,8 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         resolver.clone(),
         admission.clone(),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let prepared_command = RecoverSubscriptionPayment::new(
         syrup_rail::SubscriptionPaymentContext::new(
             PaymentAttemptId::new(Uuid::now_v7()),
@@ -275,10 +292,27 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     );
 
     let mut transaction = fixture.database.pool.begin().await?;
+    let fresh_cross_mode = reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        &prepared_command,
+        &resolved_gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
+    transaction.rollback().await?;
+    assert!(matches!(
+        fresh_cross_mode,
+        SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged
+        )
+    ));
+
+    let mut transaction = fixture.database.pool.begin().await?;
     let prepared_attempt = match reserve_subscription_recovery_in_transaction(
         &mut transaction,
         &prepared_command,
         &resolved_gateway,
+        GatewayAccountMode::Test,
     )
     .await?
     {
@@ -288,6 +322,39 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     transaction.commit().await?;
     let original_attempt_id = prepared_attempt.identity().attempt_id();
     let original_order_id = prepared_attempt.request().gateway_order_id().clone();
+    let mut transaction = fixture.database.pool.begin().await?;
+    let cross_mode = reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        &prepared_command,
+        &resolved_gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
+    transaction.rollback().await?;
+    assert!(matches!(
+        cross_mode,
+        SubscriptionRecoveryReservationOutcome::Rejected(
+            SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged
+        )
+    ));
+    let live_admission = Arc::new(PermitAdmission {
+        calls: AtomicUsize::new(0),
+    });
+    let live_service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        Arc::new(StaticResolver {
+            gateway: resolved_gateway.clone(),
+            calls: AtomicUsize::new(0),
+        }),
+        live_admission.clone(),
+        Arc::new(fixture.coordinator.clone()),
+    );
+    assert!(matches!(
+        live_service.recover(prepared_command.clone()).await,
+        Err(SubscriptionBillingServiceError::GatewayConfigurationChanged)
+    ));
+    assert_eq!(live_admission.calls.load(Ordering::SeqCst), 0);
     let mut connection = fixture.database.pool.acquire().await?;
     let prepared_result =
         payment_result_for_attempt(&mut connection, prepared_attempt.clone()).await?;
@@ -361,6 +428,10 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             .unwrap()
     );
     assert_eq!(recovery_gateway.sale_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        recovery_gateway.account_mode_calls.load(Ordering::SeqCst),
+        2
+    );
     assert_eq!(
         recovery_gateway.sale_order_ids.lock().await.as_slice(),
         &[original_order_id]
@@ -443,6 +514,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         &mut transaction,
         &stale_command,
         &stale_resolved_gateway,
+        GatewayAccountMode::Test,
     )
     .await?
     {
@@ -478,7 +550,8 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         stale_resolver.clone(),
         stale_admission.clone(),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let stale_result = stale_service.recover(stale_command).await?;
     assert_eq!(
         stale_result.attempt().status(),
@@ -503,10 +576,13 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
 async fn foreground_payment_method_replacement_applies_once_and_replays_before_admission()
 -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("replace_method", false, false, false).await?;
-    let initial_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome_with_reference(
-        Some("txn_method_initial"),
-        "vault_method_old",
-    ))));
+    let initial_gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome_with_reference(
+            Some("txn_method_initial"),
+            "vault_method_old",
+        )),
+    ));
     let initial_service = SubscriptionBillingService::new(
         fixture.database.pool.clone(),
         Arc::new(TestOfferStore),
@@ -521,7 +597,8 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             calls: AtomicUsize::new(0),
         }),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let initial = initial_service.enroll(fixture.command.clone()).await?;
     let subscription = initial
         .subscription()
@@ -529,9 +606,13 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     let subscription_id = subscription.id();
     let old_method_id = subscription.payment_method_id();
 
-    let gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
-        approved_outcome_with_reference(Some("txn_method_new"), "vault_method_new"),
-    )));
+    let gateway = Arc::new(ScriptedGateway::for_stored_method_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome_with_reference(
+            Some("txn_method_new"),
+            "vault_method_new",
+        )),
+    ));
     let resolved_gateway = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
     let resolver = Arc::new(StaticResolver {
         gateway: resolved_gateway.clone(),
@@ -546,7 +627,8 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         resolver.clone(),
         admission.clone(),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let prepared_command = ReplaceSubscriptionPaymentMethod::new(
         syrup_rail::SubscriptionPaymentContext::new(
             PaymentAttemptId::new(Uuid::now_v7()),
@@ -561,10 +643,27 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     );
 
     let mut transaction = fixture.database.pool.begin().await?;
+    let fresh_cross_mode = reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &prepared_command,
+        &resolved_gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
+    transaction.rollback().await?;
+    assert!(matches!(
+        fresh_cross_mode,
+        SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
+            SubscriptionPaymentMethodReplacementRejection::GatewayAccountModeChanged
+        )
+    ));
+
+    let mut transaction = fixture.database.pool.begin().await?;
     let prepared_attempt = match reserve_subscription_payment_method_replacement_in_transaction(
         &mut transaction,
         &prepared_command,
         &resolved_gateway,
+        GatewayAccountMode::Test,
     )
     .await?
     {
@@ -576,6 +675,41 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     transaction.commit().await?;
     let original_attempt_id = prepared_attempt.identity().attempt_id();
     let original_order_id = prepared_attempt.request().gateway_order_id().clone();
+    let mut transaction = fixture.database.pool.begin().await?;
+    let cross_mode = reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &prepared_command,
+        &resolved_gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
+    transaction.rollback().await?;
+    assert!(matches!(
+        cross_mode,
+        SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
+            SubscriptionPaymentMethodReplacementRejection::GatewayAccountModeChanged
+        )
+    ));
+    let live_admission = Arc::new(PermitAdmission {
+        calls: AtomicUsize::new(0),
+    });
+    let live_service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        Arc::new(StaticResolver {
+            gateway: resolved_gateway.clone(),
+            calls: AtomicUsize::new(0),
+        }),
+        live_admission.clone(),
+        Arc::new(fixture.coordinator.clone()),
+    );
+    assert!(matches!(
+        live_service
+            .replace_payment_method(prepared_command.clone())
+            .await,
+        Err(SubscriptionBillingServiceError::GatewayConfigurationChanged)
+    ));
+    assert_eq!(live_admission.calls.load(Ordering::SeqCst), 0);
     let command = ReplaceSubscriptionPaymentMethod::new(
         syrup_rail::SubscriptionPaymentContext::new(
             PaymentAttemptId::new(Uuid::now_v7()),
@@ -649,6 +783,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             .await?;
     assert_eq!(old_status, "disabled");
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 2);
     assert_eq!(
         gateway.store_order_ids.lock().await.as_slice(),
         &[original_order_id]
@@ -710,6 +845,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         &mut transaction,
         &stale_command,
         &resolved_gateway,
+        GatewayAccountMode::Test,
     )
     .await?
     {
@@ -739,6 +875,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         &mut transaction,
         &stale_command,
         &resolved_gateway,
+        GatewayAccountMode::Test,
     )
     .await?
     {
@@ -769,7 +906,8 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         parked_resolver.clone(),
         parked_admission.clone(),
         Arc::new(fixture.coordinator.clone()),
-    );
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
     let parked_command = ReplaceSubscriptionPaymentMethod::new(
         syrup_rail::SubscriptionPaymentContext::new(
             PaymentAttemptId::new(Uuid::now_v7()),
@@ -787,6 +925,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         &mut transaction,
         &parked_command,
         &parked_resolved_gateway,
+        GatewayAccountMode::Test,
     )
     .await?
     {

@@ -5,27 +5,32 @@ use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, ChargeHostTarget,
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
-    GatewaySaleIntent, GatewaySaleRequest, HostChargePaymentResult,
+    GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, HostChargePaymentResult,
     HostChargePaymentResultBuildError, HostChargeReservation, HostChargeTargetTransition,
     HostChargeTargetTransitionKind, HostChargeTargetTransitionOutcome, PaymentAttempt,
     PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
-    ProcessorEvidence, ResolvedGateway,
+    ProcessorEvidence,
 };
 use thiserror::Error;
 
+use crate::host_charges::host_charge_attempt_matches_reservation;
 use crate::{
     BillingTransactionCoordinator, BillingTransactionError, BillingTransactionSubjectState,
     HostChargeStoreError, HostChargeSubmissionOutcome, HostChargeTargetError,
-    HostChargeTargetStore, ProcessorChargeStoreError, admit_host_charge_submission_in_transaction,
+    HostChargeTargetStore, ModeVerifiedGateway, ProcessorChargeStoreError,
+    admit_host_charge_submission_in_transaction,
     attempts::{
         AttemptApproval, AttemptResolutionStatus, AttemptTransition, PaymentAttemptStoreError,
         find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
         persist_attempt_transition,
     },
     enrollment_application::{
-        OutcomeResolutionBoundary, RateLimitCooldown, SubscriptionEnrollmentApplicationError,
-        map_attempt_transition_error, mutation_error_evidence, not_submitted_resolution_code,
-        park_locked_attempt, set_application_timeouts,
+        GatewayNotSubmittedPolicy, OutcomeResolutionBoundary, PreparedAttemptReplay,
+        RateLimitCooldown, RateLimitCooldownCommitError, RateLimitCooldownOperation,
+        SubscriptionEnrollmentApplicationError, commit_rate_limit_cooldown_for_operation,
+        map_attempt_transition_error, mutation_error_evidence, park_locked_attempt,
+        restore_prepared_attempt_submission, set_application_timeouts,
+        should_surface_not_submitted_application,
     },
     processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
 };
@@ -103,19 +108,56 @@ pub enum HostChargeAdmissionOutcome {
 #[derive(Debug)]
 pub enum HostChargeProviderResult {
     Payment(HostChargePaymentResult),
+    /// The provider mutation was not contacted. A retry-safe readiness failure
+    /// can carry the same pending, prepared payment for same-key replay. A
+    /// concurrent terminal result is returned as `Payment` instead.
     NotSubmitted {
         payment: HostChargePaymentResult,
         error: GatewayNotSubmittedError,
     },
 }
 
-/// The only pre-submission states host charge can resolve from. Keeping the
-/// boundary and cooldown together makes the two formerly positional flags
-/// explicit at the application boundary.
+struct HostChargeResolutionApplication {
+    payment: HostChargePaymentResult,
+    applied: bool,
+}
+
+impl HostChargeResolutionApplication {
+    fn into_payment(self) -> HostChargePaymentResult {
+        self.payment
+    }
+
+    fn should_surface_not_submitted(&self, policy: GatewayNotSubmittedPolicy) -> bool {
+        should_surface_not_submitted_application(
+            self.applied,
+            self.payment.attempt(),
+            policy,
+            PreparedAttemptReplay::Supported,
+        )
+    }
+}
+
+/// Complete persistence behavior for a host charge resolved before provider
+/// submission.
 #[derive(Clone, Copy)]
 pub(crate) struct HostChargeBeforeSubmissionResolution {
     boundary: OutcomeResolutionBoundary,
     cooldown: Option<RateLimitCooldown>,
+}
+
+#[derive(Clone, Copy)]
+struct HostChargeNonApprovedResolution<'provider> {
+    boundary: OutcomeResolutionBoundary,
+    cooldown: Option<(&'provider GatewayProviderKey, RateLimitCooldown)>,
+}
+
+impl HostChargeNonApprovedResolution<'_> {
+    const fn submitted() -> Self {
+        Self {
+            boundary: OutcomeResolutionBoundary::Submitted,
+            cooldown: None,
+        }
+    }
 }
 
 impl HostChargeBeforeSubmissionResolution {
@@ -133,10 +175,23 @@ impl HostChargeBeforeSubmissionResolution {
         }
     }
 
-    pub(crate) const fn prepared_provider_rate_limited() -> Self {
+    pub(crate) const fn with_not_submitted_policy(self, policy: GatewayNotSubmittedPolicy) -> Self {
         Self {
-            boundary: OutcomeResolutionBoundary::Prepared,
-            cooldown: Some(RateLimitCooldown::Provider),
+            boundary: self.boundary,
+            cooldown: policy.cooldown(),
+        }
+    }
+
+    const fn with_provider(
+        self,
+        provider_key: &GatewayProviderKey,
+    ) -> HostChargeNonApprovedResolution<'_> {
+        HostChargeNonApprovedResolution {
+            boundary: self.boundary,
+            cooldown: match self.cooldown {
+                Some(cooldown) => Some((provider_key, cooldown)),
+                None => None,
+            },
         }
     }
 }
@@ -172,13 +227,18 @@ pub async fn submit_admitted_host_charge(
     targets: &dyn HostChargeTargetStore,
     admission: AdmittedHostCharge,
     command: &ChargeHostTarget,
-    gateway: &ResolvedGateway,
+    gateway: ModeVerifiedGateway<'_>,
 ) -> Result<HostChargeProviderResult, HostChargeApplicationError> {
+    let resolved_gateway = gateway.resolved_gateway();
     let reconstructed = HostChargeReservation::from_command(
         command,
         admission.reservation.snapshot(),
-        gateway,
+        resolved_gateway,
         admission.attempt.identity().attempt_id(),
+        admission
+            .reservation
+            .identity()
+            .required_gateway_account_mode(),
     )
     .map_err(|_| HostChargeApplicationError::SubmissionIdentityMismatch)?;
     if reconstructed != admission.reservation
@@ -194,6 +254,9 @@ pub async fn submit_admitted_host_charge(
     {
         return Err(HostChargeApplicationError::SubmissionIdentityMismatch);
     }
+    let Some(gateway) = gateway.authorize_attempt(&admission.reservation.identity()) else {
+        return Err(HostChargeApplicationError::SubmissionIdentityMismatch);
+    };
     let request = GatewaySaleRequest::new(
         admission.reservation.snapshot().charge(),
         admission.attempt.request().gateway_order_id().clone(),
@@ -202,6 +265,7 @@ pub async fn submit_admitted_host_charge(
         },
         command.billing_contact().cloned(),
     );
+    let provider_key = gateway.provider_key().clone();
     match gateway.sale(request).await {
         Ok(outcome) => apply_host_charge_gateway_outcome(
             pool,
@@ -214,26 +278,37 @@ pub async fn submit_admitted_host_charge(
         .map(HostChargeProviderResult::Payment),
         Err(GatewayMutationError::NotSubmitted(error)) => {
             let evidence = mutation_error_evidence(error.detail());
-            let release_target = !matches!(error, GatewayNotSubmittedError::RateLimited(_));
-            let payment = resolve_host_charge_non_approved(
-                pool,
-                targets,
-                &admission.reservation,
-                &evidence,
-                AttemptResolutionStatus::Failed,
-                Some(not_submitted_resolution_code(&error)),
-                OutcomeResolutionBoundary::AdmittedNotSubmitted,
-                release_target,
-                None,
-            )
-            .await?;
-            Ok(HostChargeProviderResult::NotSubmitted { payment, error })
+            let policy = GatewayNotSubmittedPolicy::for_error(&error);
+            let application = if policy.restores_prepared_attempt_when_supported() {
+                restore_admitted_host_charge_for_retry(pool, &admission.reservation).await?
+            } else {
+                resolve_host_charge_non_approved(
+                    pool,
+                    targets,
+                    &admission.reservation,
+                    &evidence,
+                    AttemptResolutionStatus::Failed,
+                    Some(policy.resolution_code()),
+                    HostChargeBeforeSubmissionResolution::admitted_not_submitted()
+                        .with_not_submitted_policy(policy)
+                        .with_provider(&provider_key),
+                )
+                .await?
+            };
+            if application.should_surface_not_submitted(policy) {
+                Ok(HostChargeProviderResult::NotSubmitted {
+                    payment: application.payment,
+                    error,
+                })
+            } else {
+                Ok(HostChargeProviderResult::Payment(application.payment))
+            }
         }
         Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => resolve_host_charge_unknown(
             pool,
             &admission.reservation,
             &mutation_error_evidence(&detail),
-            Some(RateLimitCooldown::Provider),
+            Some((&provider_key, RateLimitCooldown::Provider)),
         )
         .await
         .map(HostChargeProviderResult::Payment),
@@ -285,34 +360,28 @@ pub async fn apply_host_charge_gateway_outcome(
             }
             durably_park_host_charge_approved(pool, reservation, &approved_evidence).await
         }
-        GatewayPaymentStatus::Declined => {
-            resolve_host_charge_non_approved(
-                pool,
-                targets,
-                reservation,
-                outcome.evidence(),
-                AttemptResolutionStatus::Declined,
-                None,
-                OutcomeResolutionBoundary::Submitted,
-                true,
-                None,
-            )
-            .await
-        }
-        GatewayPaymentStatus::Failed => {
-            resolve_host_charge_non_approved(
-                pool,
-                targets,
-                reservation,
-                outcome.evidence(),
-                AttemptResolutionStatus::Failed,
-                None,
-                OutcomeResolutionBoundary::Submitted,
-                true,
-                None,
-            )
-            .await
-        }
+        GatewayPaymentStatus::Declined => resolve_host_charge_non_approved(
+            pool,
+            targets,
+            reservation,
+            outcome.evidence(),
+            AttemptResolutionStatus::Declined,
+            None,
+            HostChargeNonApprovedResolution::submitted(),
+        )
+        .await
+        .map(HostChargeResolutionApplication::into_payment),
+        GatewayPaymentStatus::Failed => resolve_host_charge_non_approved(
+            pool,
+            targets,
+            reservation,
+            outcome.evidence(),
+            AttemptResolutionStatus::Failed,
+            None,
+            HostChargeNonApprovedResolution::submitted(),
+        )
+        .await
+        .map(HostChargeResolutionApplication::into_payment),
         GatewayPaymentStatus::Unknown => {
             resolve_host_charge_unknown(pool, reservation, outcome.evidence(), None).await
         }
@@ -347,6 +416,7 @@ pub(crate) async fn resolve_host_charge_before_submission(
     pool: &PgPool,
     targets: &dyn HostChargeTargetStore,
     reservation: &HostChargeReservation,
+    provider_key: &GatewayProviderKey,
     detail: syrup_rail::GatewayDiagnostic,
     resolution_code: PaymentResolutionCode,
     resolution: HostChargeBeforeSubmissionResolution,
@@ -354,6 +424,7 @@ pub(crate) async fn resolve_host_charge_before_submission(
     let condition = if matches!(
         resolution_code,
         PaymentResolutionCode::GatewayAccountMutationCooldownBeforeSubmission
+            | PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission
             | PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
     ) {
         None
@@ -376,11 +447,10 @@ pub(crate) async fn resolve_host_charge_before_submission(
         &evidence,
         AttemptResolutionStatus::Failed,
         Some(resolution_code),
-        resolution.boundary,
-        false,
-        resolution.cooldown,
+        resolution.with_provider(provider_key),
     )
     .await
+    .map(HostChargeResolutionApplication::into_payment)
 }
 
 async fn apply_host_charge_approved(
@@ -423,6 +493,10 @@ async fn apply_host_charge_approved(
         .await?;
     let attempt = lock_expected_host_charge(connection, reservation).await?;
     if attempt.status() == PaymentAttemptStatus::Approved {
+        // Host target callbacks establish the repository-wide target -> attempt
+        // lock order. Once this lock proves approval already committed, a
+        // refused Paid replay is harmless: lifecycle reconciliation may have
+        // legitimately advanced the target to a reversed state.
         observe_processor_charge(
             connection,
             &attempt,
@@ -571,7 +645,6 @@ async fn observe_terminal_host_charge_approval(
     )?)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn resolve_host_charge_non_approved(
     pool: &PgPool,
     targets: &dyn HostChargeTargetStore,
@@ -579,95 +652,103 @@ async fn resolve_host_charge_non_approved(
     evidence: &ProcessorEvidence,
     status: AttemptResolutionStatus,
     resolution_code: Option<PaymentResolutionCode>,
-    boundary: OutcomeResolutionBoundary,
-    release_target: bool,
-    cooldown: Option<RateLimitCooldown>,
-) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
+    resolution: HostChargeNonApprovedResolution<'_>,
+) -> Result<HostChargeResolutionApplication, HostChargeApplicationError> {
     let identity = reservation.identity();
+    // Provider/account backoff is independent of whether this attempt still
+    // owns the host target or can still be resolved. Commit it first so a
+    // concurrent operator/reconciliation resolution, stale target, or later
+    // host callback failure cannot roll the observed throttle back. A crash
+    // after this commit is fail-safe: it may delay work, but same-key replay
+    // can still finish the unresolved attempt.
+    if let Some((provider_key, cooldown)) = resolution.cooldown {
+        commit_host_charge_cooldown(pool, reservation, provider_key, cooldown).await?;
+    }
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
-    if release_target {
-        let effective_at = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *transaction)
-            .await?;
-        let target_outcome = targets
-            .apply_transition(
-                &mut transaction,
-                HostChargeTargetTransition::new(
-                    identity.billing_scope_id(),
-                    identity.subscriber_id(),
-                    identity.attempt_id(),
-                    reservation.snapshot().target_id(),
-                    HostChargeTargetTransitionKind::PaymentFailed,
-                    effective_at,
-                ),
-            )
-            .await?;
-        if target_outcome == HostChargeTargetTransitionOutcome::StaleTarget {
+    let effective_at = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let target_outcome = targets
+        .apply_transition(
+            &mut transaction,
+            HostChargeTargetTransition::new(
+                identity.billing_scope_id(),
+                identity.subscriber_id(),
+                identity.attempt_id(),
+                reservation.snapshot().target_id(),
+                match resolution.boundary {
+                    OutcomeResolutionBoundary::Prepared
+                    | OutcomeResolutionBoundary::AdmittedNotSubmitted => {
+                        HostChargeTargetTransitionKind::ReleasedBeforeSubmission
+                    }
+                    OutcomeResolutionBoundary::Submitted => {
+                        HostChargeTargetTransitionKind::PaymentFailed
+                    }
+                },
+                effective_at,
+            ),
+        )
+        .await?;
+    if !target_outcome.is_applied() {
+        tracing::warn!(
+            target: "syrup_rail::host_charge_target",
+            billing_scope_id = %identity.billing_scope_id().as_uuid(),
+            subscriber_id = %identity.subscriber_id().as_uuid(),
+            attempt_id = %identity.attempt_id().as_uuid(),
+            target_id = %reservation.snapshot().target_id().as_uuid(),
+            boundary = ?resolution.boundary,
+            ?target_outcome,
+            "host target refused a payment outcome; leaving the canonical attempt unresolved"
+        );
+        transaction.rollback().await?;
+        let application = canonical_host_charge_resolution_application(pool, reservation).await?;
+        if !host_charge_attempt_may_resolve(application.payment.attempt(), resolution.boundary) {
+            return Ok(application);
+        }
+        return Err(HostChargeApplicationError::InvalidState(
+            INVALID_HOST_CHARGE_STATE,
+        ));
+    }
+    let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
+    let may_resolve = host_charge_attempt_may_resolve(&attempt, resolution.boundary);
+    if !may_resolve {
+        transaction.rollback().await?;
+        return canonical_host_charge_resolution_application(pool, reservation).await;
+    }
+    persist_attempt_transition(
+        &mut transaction,
+        &attempt,
+        evidence,
+        AttemptTransition::Resolved {
+            status,
+            resolution_code,
+        },
+    )
+    .await
+    .map_err(map_attempt_transition_error)?;
+    if evidence.indicates_approved_payment() {
+        observe_processor_charge(
+            &mut transaction,
+            &attempt,
+            evidence,
+            ProcessorChargeProgression::Pending,
+        )
+        .await?;
+    }
+    if resolution.boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
+        let cleared = sqlx::query(
+            "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2",
+        )
+        .bind(identity.attempt_id().as_uuid())
+        .bind(status.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if cleared.rows_affected() != 1 {
             return Err(HostChargeApplicationError::InvalidState(
                 INVALID_HOST_CHARGE_STATE,
             ));
         }
-    }
-    let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
-    let may_resolve = attempt.status().is_resolvable()
-        && match boundary {
-            OutcomeResolutionBoundary::Prepared => {
-                attempt.state().timestamps().submitted_at().is_none()
-            }
-            OutcomeResolutionBoundary::AdmittedNotSubmitted => {
-                attempt.state().timestamps().submitted_at().is_some()
-            }
-            OutcomeResolutionBoundary::Submitted => true,
-        };
-    if !may_resolve && release_target {
-        transaction.rollback().await?;
-        let mut reload = pool.begin().await?;
-        let attempt = crate::find_payment_attempt_by_id_in_transaction(
-            &mut reload,
-            identity.billing_scope_id(),
-            identity.attempt_id(),
-        )
-        .await?
-        .ok_or(HostChargeApplicationError::InvalidState(
-            INVALID_HOST_CHARGE_STATE,
-        ))?;
-        reload.commit().await?;
-        return Ok(HostChargePaymentResult::new(attempt)?);
-    }
-    if may_resolve {
-        persist_attempt_transition(
-            &mut transaction,
-            &attempt,
-            evidence,
-            AttemptTransition::Resolved {
-                status,
-                resolution_code,
-            },
-        )
-        .await
-        .map_err(map_attempt_transition_error)?;
-        if evidence.indicates_approved_payment() {
-            observe_processor_charge(
-                &mut transaction,
-                &attempt,
-                evidence,
-                ProcessorChargeProgression::Pending,
-            )
-            .await?;
-        }
-        if boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
-            sqlx::query(
-                "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2",
-            )
-            .bind(identity.attempt_id().as_uuid())
-            .bind(status.as_str())
-            .execute(&mut *transaction)
-            .await?;
-        }
-    }
-    if host_charge_provider_cooldown_requested(cooldown) {
-        extend_host_charge_provider_cooldown(&mut transaction, reservation).await?;
     }
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,
@@ -679,16 +760,101 @@ async fn resolve_host_charge_non_approved(
         INVALID_HOST_CHARGE_STATE,
     ))?;
     transaction.commit().await?;
-    Ok(HostChargePaymentResult::new(attempt)?)
+    Ok(HostChargeResolutionApplication {
+        payment: HostChargePaymentResult::new(attempt)?,
+        applied: true,
+    })
+}
+
+fn host_charge_attempt_may_resolve(
+    attempt: &PaymentAttempt,
+    boundary: OutcomeResolutionBoundary,
+) -> bool {
+    attempt.status().is_resolvable()
+        && match boundary {
+            OutcomeResolutionBoundary::Prepared => {
+                attempt.state().timestamps().submitted_at().is_none()
+            }
+            OutcomeResolutionBoundary::AdmittedNotSubmitted => {
+                attempt.state().timestamps().submitted_at().is_some()
+            }
+            OutcomeResolutionBoundary::Submitted => true,
+        }
+}
+
+async fn canonical_host_charge_resolution_application(
+    pool: &PgPool,
+    reservation: &HostChargeReservation,
+) -> Result<HostChargeResolutionApplication, HostChargeApplicationError> {
+    let identity = reservation.identity();
+    let mut reload = pool.begin().await?;
+    let attempt = crate::find_payment_attempt_by_id_in_transaction(
+        &mut reload,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(HostChargeApplicationError::InvalidState(
+        INVALID_HOST_CHARGE_STATE,
+    ))?;
+    reload.commit().await?;
+    Ok(HostChargeResolutionApplication {
+        payment: HostChargePaymentResult::new(attempt)?,
+        applied: false,
+    })
+}
+
+async fn restore_admitted_host_charge_for_retry(
+    pool: &PgPool,
+    reservation: &HostChargeReservation,
+) -> Result<HostChargeResolutionApplication, HostChargeApplicationError> {
+    // Keep this domain wrapper separate from subscriber restoration: host
+    // charges have their own exact lock and result projection. Both wrappers
+    // delegate the atomic submitted-at transition to the shared primitive.
+    let identity = reservation.identity();
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
+    let restored = attempt.status() == PaymentAttemptStatus::Pending
+        && attempt.state().timestamps().submitted_at().is_some();
+    if restored {
+        restore_prepared_attempt_submission(&mut transaction, &attempt).await?;
+    }
+    let attempt = find_payment_attempt_by_id_on_connection(
+        &mut transaction,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(HostChargeApplicationError::InvalidState(
+        INVALID_HOST_CHARGE_STATE,
+    ))?;
+    transaction.commit().await?;
+    if restored {
+        tracing::warn!(
+            target: "syrup_rail::gateway_control_plane",
+            attempt_id = %identity.attempt_id().as_uuid(),
+            attempt_kind = attempt.kind().as_str(),
+            required_gateway_account_mode = identity.required_gateway_account_mode().as_str(),
+            "restored admitted host charge after pre-submission control-plane failure"
+        );
+    }
+    Ok(HostChargeResolutionApplication {
+        payment: HostChargePaymentResult::new(attempt)?,
+        applied: restored,
+    })
 }
 
 async fn resolve_host_charge_unknown(
     pool: &PgPool,
     reservation: &HostChargeReservation,
     evidence: &ProcessorEvidence,
-    cooldown: Option<RateLimitCooldown>,
+    cooldown: Option<(&GatewayProviderKey, RateLimitCooldown)>,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
     let identity = reservation.identity();
+    if let Some((provider_key, cooldown)) = cooldown {
+        commit_host_charge_cooldown(pool, reservation, provider_key, cooldown).await?;
+    }
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
@@ -714,9 +880,6 @@ async fn resolve_host_charge_unknown(
             .await?;
         }
     }
-    if host_charge_provider_cooldown_requested(cooldown) {
-        extend_host_charge_provider_cooldown(&mut transaction, reservation).await?;
-    }
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,
         identity.billing_scope_id(),
@@ -730,41 +893,27 @@ async fn resolve_host_charge_unknown(
     Ok(HostChargePaymentResult::new(attempt)?)
 }
 
-const fn host_charge_provider_cooldown_requested(cooldown: Option<RateLimitCooldown>) -> bool {
-    matches!(cooldown, Some(RateLimitCooldown::Provider))
-}
-
-async fn extend_host_charge_provider_cooldown(
-    connection: &mut PgConnection,
+async fn commit_host_charge_cooldown(
+    pool: &PgPool,
     reservation: &HostChargeReservation,
+    provider_key: &GatewayProviderKey,
+    cooldown: RateLimitCooldown,
 ) -> Result<(), HostChargeApplicationError> {
-    let updated = sqlx::query(
-        r#"
-        UPDATE billing_gateway_provider_rate_limits
-        SET rate_limited_until = GREATEST(
-            rate_limited_until,
-            clock_timestamp() + make_interval(secs => $4)
-        )
-        WHERE provider_key = (
-            SELECT provider_key
-            FROM billing_gateway_accounts
-            WHERE id = $1 AND billing_scope_id = $2
-                AND gateway_configuration_id = $3
-        )
-        "#,
+    match commit_rate_limit_cooldown_for_operation(
+        pool,
+        reservation.identity(),
+        provider_key,
+        cooldown,
+        RateLimitCooldownOperation::HostCharge,
     )
-    .bind(reservation.identity().gateway_account_id().as_uuid())
-    .bind(reservation.identity().billing_scope_id().as_uuid())
-    .bind(reservation.identity().gateway_configuration_id().as_uuid())
-    .bind(syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS)
-    .execute(connection)
-    .await?;
-    if updated.rows_affected() != 1 {
-        return Err(HostChargeApplicationError::InvalidState(
-            INVALID_HOST_CHARGE_STATE,
-        ));
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(RateLimitCooldownCommitError::Sql(error)) => Err(error.into()),
+        Err(RateLimitCooldownCommitError::MissingProviderCooldown) => Err(
+            HostChargeApplicationError::InvalidState(INVALID_HOST_CHARGE_STATE),
+        ),
     }
-    Ok(())
 }
 
 async fn park_host_charge_approved(
@@ -844,7 +993,7 @@ async fn lock_expected_host_charge(
     .ok_or(HostChargeApplicationError::InvalidState(
         INVALID_HOST_CHARGE_STATE,
     ))?;
-    if attempt.identity() != identity || attempt.request() != reservation.request() {
+    if !host_charge_attempt_matches_reservation(&attempt, reservation) {
         return Err(HostChargeApplicationError::InvalidState(
             INVALID_HOST_CHARGE_STATE,
         ));
@@ -905,23 +1054,25 @@ mod tests {
         );
         assert!(admitted.cooldown.is_none());
 
-        let rate_limited = HostChargeBeforeSubmissionResolution::prepared_provider_rate_limited();
+        let rate_limited = HostChargeBeforeSubmissionResolution::prepared()
+            .with_not_submitted_policy(GatewayNotSubmittedPolicy::for_readiness_error(
+                &syrup_rail::GatewayError::RateLimited(GatewayDiagnostic::new("rate limited")),
+            ));
         assert_eq!(rate_limited.boundary, OutcomeResolutionBoundary::Prepared);
         assert!(matches!(
             rate_limited.cooldown,
             Some(RateLimitCooldown::Provider)
         ));
-    }
 
-    #[test]
-    fn host_charge_cooldown_only_extends_provider_scope() {
-        assert!(!host_charge_provider_cooldown_requested(None));
-        assert!(!host_charge_provider_cooldown_requested(Some(
-            RateLimitCooldown::Account
-        )));
-        assert!(host_charge_provider_cooldown_requested(Some(
-            RateLimitCooldown::Provider
-        )));
+        let terminal_failure = HostChargeBeforeSubmissionResolution::prepared()
+            .with_not_submitted_policy(GatewayNotSubmittedPolicy::for_readiness_error(
+                &syrup_rail::GatewayError::Configuration(GatewayDiagnostic::new("configuration")),
+            ));
+        assert_eq!(
+            terminal_failure.boundary,
+            OutcomeResolutionBoundary::Prepared
+        );
+        assert!(terminal_failure.cooldown.is_none());
     }
 
     struct TestReferenceFactory;
@@ -941,6 +1092,7 @@ mod tests {
     }
 
     struct ScriptedGateway {
+        account_mode: GatewayAccountMode,
         sale_calls: AtomicUsize,
         outcome: Mutex<Option<GatewayPaymentOutcome>>,
     }
@@ -948,7 +1100,7 @@ mod tests {
     #[async_trait]
     impl PaymentGateway for ScriptedGateway {
         async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
-            Ok(GatewayAccountMode::Live)
+            Ok(self.account_mode)
         }
 
         async fn sale(
@@ -1008,7 +1160,7 @@ mod tests {
     #[async_trait]
     impl PaymentGateway for RacingPreparedRetryGateway {
         async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
-            if self.readiness_calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            if self.readiness_calls.fetch_add(1, Ordering::SeqCst) == 0 {
                 if let Some(started) = self.blocked_readiness_started.lock().await.take() {
                     let _ = started.send(());
                 }
@@ -1106,13 +1258,10 @@ mod tests {
     #[async_trait]
     impl PaymentGateway for RateLimitedAfterReservationGateway {
         async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
-            if self.readiness_calls.fetch_add(1, Ordering::SeqCst) == 0 {
-                Ok(GatewayAccountMode::Live)
-            } else {
-                Err(GatewayError::RateLimited(GatewayDiagnostic::new(
-                    "provider throttled the readiness check",
-                )))
-            }
+            self.readiness_calls.fetch_add(1, Ordering::SeqCst);
+            Err(GatewayError::RateLimited(GatewayDiagnostic::new(
+                "provider throttled the readiness check",
+            )))
         }
 
         async fn sale(
@@ -1266,6 +1415,43 @@ mod tests {
 
     struct TestTargets;
 
+    struct AdmissionMustNotRun;
+
+    #[async_trait]
+    impl HostChargeTargetStore for AdmissionMustNotRun {
+        async fn preflight_target(
+            &self,
+            _connection: &mut PgConnection,
+            _reservation: &HostChargeTargetReservation,
+        ) -> Result<HostChargeReservationDecision, HostChargeTargetError> {
+            panic!("terminal admission replay must not preflight the host target")
+        }
+
+        async fn reserve_target(
+            &self,
+            _connection: &mut PgConnection,
+            _reservation: &HostChargeTargetReservation,
+        ) -> Result<HostChargeReservationDecision, HostChargeTargetError> {
+            panic!("terminal admission replay must not reserve the host target")
+        }
+
+        async fn ensure_submission_admitted(
+            &self,
+            _connection: &mut PgConnection,
+            _admission: &HostChargeSubmissionAdmission,
+        ) -> Result<HostChargeSubmissionDecision, HostChargeTargetError> {
+            panic!("terminal admission replay must not invoke the host target")
+        }
+
+        async fn apply_transition(
+            &self,
+            _connection: &mut PgConnection,
+            _transition: HostChargeTargetTransition,
+        ) -> Result<HostChargeTargetTransitionOutcome, HostChargeTargetError> {
+            panic!("terminal admission replay must not transition the host target")
+        }
+    }
+
     #[async_trait]
     impl HostChargeTargetStore for TestTargets {
         async fn preflight_target(
@@ -1313,21 +1499,23 @@ mod tests {
             )
             .await
             .map_err(HostChargeTargetError::new)?;
+            let charge = ChargeAmount::new(cents, CurrencyCode::new(&currency).unwrap()).unwrap();
             if ledger == HostChargeLedgerAdmission::IdempotentContender {
-                return Ok(HostChargeReservationDecision::IdempotentContender);
+                return Ok(HostChargeReservationDecision::IdempotentContender(
+                    syrup_rail::HostChargeTargetSnapshot::new(reservation.target_id(), charge),
+                ));
             }
             if ledger != HostChargeLedgerAdmission::Safe || status != "pending" {
                 return Ok(HostChargeReservationDecision::Rejected {
                     reason: syrup_rail::HostChargeTargetRejection::LedgerUnsafe,
                 });
             }
-            let charge = ChargeAmount::new(cents, CurrencyCode::new(&currency).unwrap()).unwrap();
             Ok(HostChargeReservationDecision::Reserved(
                 syrup_rail::HostChargeTargetSnapshot::new(reservation.target_id(), charge),
             ))
         }
 
-        async fn admit_submission(
+        async fn ensure_submission_admitted(
             &self,
             connection: &mut PgConnection,
             admission: &HostChargeSubmissionAdmission,
@@ -1418,13 +1606,57 @@ mod tests {
                 HostChargeTargetTransitionKind::Paid => {
                     Ok(HostChargeTargetTransitionOutcome::StaleTarget)
                 }
-                HostChargeTargetTransitionKind::PaymentFailed if current == "pending" => {
+                HostChargeTargetTransitionKind::ReleasedBeforeSubmission
+                | HostChargeTargetTransitionKind::PaymentFailed
+                    if current == "pending" =>
+                {
                     Ok(HostChargeTargetTransitionOutcome::Applied)
                 }
                 _ => Ok(HostChargeTargetTransitionOutcome::Unchanged {
                     reason: HostChargeTargetNoChange::InapplicableState,
                 }),
             }
+        }
+    }
+
+    struct RefusingTransitionTargets;
+
+    #[async_trait]
+    impl HostChargeTargetStore for RefusingTransitionTargets {
+        async fn preflight_target(
+            &self,
+            connection: &mut PgConnection,
+            reservation: &HostChargeTargetReservation,
+        ) -> Result<HostChargeReservationDecision, HostChargeTargetError> {
+            TestTargets.preflight_target(connection, reservation).await
+        }
+
+        async fn reserve_target(
+            &self,
+            connection: &mut PgConnection,
+            reservation: &HostChargeTargetReservation,
+        ) -> Result<HostChargeReservationDecision, HostChargeTargetError> {
+            TestTargets.reserve_target(connection, reservation).await
+        }
+
+        async fn ensure_submission_admitted(
+            &self,
+            connection: &mut PgConnection,
+            admission: &HostChargeSubmissionAdmission,
+        ) -> Result<HostChargeSubmissionDecision, HostChargeTargetError> {
+            TestTargets
+                .ensure_submission_admitted(connection, admission)
+                .await
+        }
+
+        async fn apply_transition(
+            &self,
+            _connection: &mut PgConnection,
+            _transition: HostChargeTargetTransition,
+        ) -> Result<HostChargeTargetTransitionOutcome, HostChargeTargetError> {
+            Ok(HostChargeTargetTransitionOutcome::Unchanged {
+                reason: HostChargeTargetNoChange::ReleaseUnsafe,
+            })
         }
     }
 
@@ -1499,6 +1731,7 @@ mod tests {
             .await?;
 
             let gateway = Arc::new(ScriptedGateway {
+                account_mode: GatewayAccountMode::Test,
                 sale_calls: AtomicUsize::new(0),
                 outcome: Mutex::new(Some(approved_outcome("host_txn_approved"))),
             });
@@ -1520,8 +1753,9 @@ mod tests {
                 Arc::new(UnusedOffers),
                 resolver.clone(),
                 admission.clone(),
-                coordinator,
+                coordinator.clone(),
             )
+            .with_required_gateway_account_mode(GatewayAccountMode::Test)
             .with_host_charge_targets(targets);
             let command = ChargeHostTarget::new(
                 syrup_rail::BillingScopeId::new(account.billing_scope_id),
@@ -1542,7 +1776,25 @@ mod tests {
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
             assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
-            let replay = service.charge_host_target(command).await?;
+            sqlx::query("UPDATE host_charge_targets SET status = 'reversed' WHERE id = $1")
+                .bind(target_id)
+                .execute(&database.pool)
+                .await?;
+            let approved_replay = approved_outcome("host_txn_approved");
+            let reconciled_replay = apply_reconciled_host_charge_gateway_outcome(
+                &database.pool,
+                coordinator.as_ref(),
+                &RefusingTransitionTargets,
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                first.attempt().identity().attempt_id(),
+                &approved_replay,
+            )
+            .await?;
+            assert_eq!(reconciled_replay.attempt(), first.attempt());
+            let live_service = service
+                .clone()
+                .with_required_gateway_account_mode(GatewayAccountMode::Live);
+            let replay = live_service.charge_host_target(command).await?;
             assert_eq!(replay.attempt(), first.attempt());
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
@@ -1553,7 +1805,7 @@ mod tests {
                     .bind(target_id)
                     .fetch_one(&database.pool)
                     .await?;
-            assert_eq!(target_status, "paid");
+            assert_eq!(target_status, "reversed");
             let charge_state: String = sqlx::query_scalar(
                 "SELECT progression_state FROM billing_processor_charges WHERE attempt_id = $1",
             )
@@ -1573,6 +1825,122 @@ mod tests {
                     target_id
                 ))]
             );
+            Ok::<_, Box<dyn Error>>(())
+        }
+        .await;
+        let cleanup = database.cleanup().await;
+        result?;
+        cleanup?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn submission_admission_validates_identity_and_skips_nonprepared_replay()
+    -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("rail_host_ident").await?;
+        let result = async {
+            sqlx::query(
+                r#"
+                CREATE TABLE host_charge_targets (
+                    id uuid PRIMARY KEY,
+                    billing_scope_id uuid NOT NULL,
+                    subscriber_id uuid NOT NULL,
+                    status text NOT NULL,
+                    amount_cents integer NOT NULL,
+                    currency text NOT NULL,
+                    paid_at timestamptz
+                )
+                "#,
+            )
+            .execute(&database.pool)
+            .await?;
+            let account = create_gateway_account(&database.pool, "nmi").await?;
+            let subscriber_id = Uuid::now_v7();
+            let target_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
+            )
+            .bind(target_id)
+            .bind(account.billing_scope_id)
+            .bind(subscriber_id)
+            .execute(&database.pool)
+            .await?;
+            let gateway = resolved_gateway(
+                account,
+                Arc::new(ScriptedGateway {
+                    account_mode: GatewayAccountMode::Live,
+                    sale_calls: AtomicUsize::new(0),
+                    outcome: Mutex::new(None),
+                }),
+            );
+            let snapshot = syrup_rail::HostChargeTargetSnapshot::new(
+                HostChargeTargetId::new(target_id),
+                ChargeAmount::new(1250, CurrencyCode::new("USD")?)?,
+            );
+            let command = ChargeHostTarget::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                HostChargeTargetId::new(target_id),
+                GatewayConfigurationId::new(account.gateway_configuration_id),
+                PaymentToken::new("tok_host_admission_identity")?,
+                IdempotencyKey::new("host-admission-identity")?,
+                None,
+            );
+            let attempt_id = PaymentAttemptId::new(Uuid::now_v7());
+            let reservation = HostChargeReservation::from_command(
+                &command,
+                snapshot,
+                &gateway,
+                attempt_id,
+                GatewayAccountMode::Live,
+            )?;
+            let mut transaction = database.pool.begin().await?;
+            assert!(matches!(
+                reserve_host_charge_in_transaction(&mut transaction, &TestTargets, &reservation)
+                    .await?,
+                HostChargeReservationOutcome::Reserved(_)
+            ));
+            transaction.commit().await?;
+
+            let wrong_mode = HostChargeReservation::from_command(
+                &command,
+                snapshot,
+                &gateway,
+                attempt_id,
+                GatewayAccountMode::Test,
+            )?;
+            assert!(matches!(
+                admit_host_charge_submission(&database.pool, &TestTargets, &wrong_mode).await,
+                Err(HostChargeApplicationError::Store(
+                    HostChargeStoreError::InvalidState
+                ))
+            ));
+
+            let mut transaction = database.pool.begin().await?;
+            let attempt = crate::find_payment_attempt_by_id_in_transaction(
+                &mut transaction,
+                command.billing_scope_id(),
+                attempt_id,
+            )
+            .await?
+            .expect("reserved attempt");
+            transaction.commit().await?;
+            assert_eq!(attempt.status(), PaymentAttemptStatus::Pending);
+            assert!(attempt.state().timestamps().submitted_at().is_none());
+
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+            )
+            .bind(attempt_id.as_uuid())
+            .execute(&database.pool)
+            .await?;
+            let HostChargeAdmissionOutcome::AlreadyAdmitted(review) =
+                admit_host_charge_submission(&database.pool, &AdmissionMustNotRun, &wrong_mode)
+                    .await?
+            else {
+                panic!("wrong-mode review replay must return the canonical attempt");
+            };
+            assert_eq!(review.status(), PaymentAttemptStatus::ReviewRequired);
             Ok::<_, Box<dyn Error>>(())
         }
         .await;
@@ -1616,6 +1984,7 @@ mod tests {
             let gateway = resolved_gateway(
                 account,
                 Arc::new(ScriptedGateway {
+                    account_mode: GatewayAccountMode::Live,
                     sale_calls: AtomicUsize::new(0),
                     outcome: Mutex::new(None),
                 }),
@@ -1638,8 +2007,13 @@ mod tests {
                 )?),
             );
             let winner_id = PaymentAttemptId::new(Uuid::now_v7());
-            let winner =
-                HostChargeReservation::from_command(&command, snapshot, &gateway, winner_id)?;
+            let winner = HostChargeReservation::from_command(
+                &command,
+                snapshot,
+                &gateway,
+                winner_id,
+                GatewayAccountMode::Live,
+            )?;
             let mut transaction = database.pool.begin().await?;
             let outcome =
                 reserve_host_charge_in_transaction(&mut transaction, &TestTargets, &winner).await?;
@@ -1660,6 +2034,7 @@ mod tests {
                 snapshot,
                 &gateway,
                 PaymentAttemptId::new(Uuid::now_v7()),
+                GatewayAccountMode::Live,
             )?;
             let mut transaction = database.pool.begin().await?;
             let outcome =
@@ -1674,6 +2049,46 @@ mod tests {
                 attempt.request().billing_contact().email(),
                 Some("winner@example.test")
             );
+
+            let changed_mode_contender = HostChargeReservation::from_command(
+                &retry,
+                snapshot,
+                &gateway,
+                PaymentAttemptId::new(Uuid::now_v7()),
+                GatewayAccountMode::Test,
+            )?;
+            let mut transaction = database.pool.begin().await?;
+            let outcome = reserve_host_charge_in_transaction(
+                &mut transaction,
+                &TestTargets,
+                &changed_mode_contender,
+            )
+            .await?;
+            transaction.rollback().await?;
+            assert_eq!(
+                outcome,
+                HostChargeReservationOutcome::GatewayAccountModeChanged
+            );
+
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+            )
+            .bind(winner_id.as_uuid())
+            .execute(&database.pool)
+            .await?;
+            let mut transaction = database.pool.begin().await?;
+            let outcome = reserve_host_charge_in_transaction(
+                &mut transaction,
+                &TestTargets,
+                &changed_mode_contender,
+            )
+            .await?;
+            transaction.commit().await?;
+            let HostChargeReservationOutcome::Replay(review) = outcome else {
+                panic!("an unsubmitted review attempt cannot resume provider submission");
+            };
+            assert_eq!(review.identity().attempt_id(), winner_id);
+            assert_eq!(review.status(), PaymentAttemptStatus::ReviewRequired);
 
             let changed_contact_retry = ChargeHostTarget::new(
                 command.billing_scope_id(),
@@ -1693,6 +2108,7 @@ mod tests {
                 snapshot,
                 &gateway,
                 PaymentAttemptId::new(Uuid::now_v7()),
+                GatewayAccountMode::Live,
             )?;
             let mut transaction = database.pool.begin().await?;
             let outcome = reserve_host_charge_in_transaction(
@@ -1713,7 +2129,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_reservation_rate_limit_resolves_attempt_and_extends_provider_cooldown()
+    async fn unreserved_rate_limit_avoids_attempt_and_extends_provider_cooldown()
     -> Result<(), Box<dyn Error>> {
         let database = TestDatabase::start("rail_host_rate").await?;
         let result = async {
@@ -1759,7 +2175,7 @@ mod tests {
                 database.pool.clone(),
                 Arc::new(UnusedOffers),
                 resolver,
-                admission,
+                admission.clone(),
                 Arc::new(TestCoordinator {
                     pool: database.pool.clone(),
                     events: Arc::new(Mutex::new(Vec::new())),
@@ -1786,26 +2202,19 @@ mod tests {
                     scope: crate::GatewayMutationCooldownScope::Provider
                 }
             ));
-            assert_eq!(gateway.readiness_calls.load(Ordering::SeqCst), 2);
+            assert_eq!(gateway.readiness_calls.load(Ordering::SeqCst), 1);
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
 
-            let attempt = sqlx::query_as::<_, (String, Option<String>, Option<DateTime<Utc>>)>(
-                r#"
-                SELECT status, resolution_code, submitted_at
-                FROM billing_payment_attempts
-                WHERE billing_scope_id = $1 AND subscriber_id = $2
-                "#,
+            let attempt_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM billing_payment_attempts \
+                 WHERE billing_scope_id = $1 AND subscriber_id = $2",
             )
             .bind(account.billing_scope_id)
             .bind(subscriber_id)
             .fetch_one(&database.pool)
             .await?;
-            assert_eq!(attempt.0, "failed");
-            assert_eq!(
-                attempt.1.as_deref(),
-                Some("gateway_provider_rate_limited_before_submission")
-            );
-            assert!(attempt.2.is_none());
+            assert_eq!(attempt_count, 0);
+            assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
             let cooldown_is_active: bool = sqlx::query_scalar(
                 "SELECT rate_limited_until > clock_timestamp() FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
             )
@@ -1960,11 +2369,38 @@ mod tests {
                 release_readiness: Notify::new(),
                 release_sale: Notify::new(),
             });
+            let command = ChargeHostTarget::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                HostChargeTargetId::new(target_id),
+                GatewayConfigurationId::new(account.gateway_configuration_id),
+                PaymentToken::new("tok_host_resume")?,
+                IdempotencyKey::new("host-resume")?,
+                None,
+            );
+            let resolved = resolved_gateway(account, gateway.clone());
+            let reservation = HostChargeReservation::from_command(
+                &command,
+                syrup_rail::HostChargeTargetSnapshot::new(
+                    HostChargeTargetId::new(target_id),
+                    ChargeAmount::new(1250, CurrencyCode::new("USD")?)?,
+                ),
+                &resolved,
+                PaymentAttemptId::new(Uuid::now_v7()),
+                GatewayAccountMode::Live,
+            )?;
+            let mut transaction = database.pool.begin().await?;
+            assert!(matches!(
+                reserve_host_charge_in_transaction(&mut transaction, &TestTargets, &reservation,)
+                    .await?,
+                HostChargeReservationOutcome::Reserved(_)
+            ));
+            transaction.commit().await?;
             let service = SubscriptionBillingService::new(
                 database.pool.clone(),
                 Arc::new(UnusedOffers),
                 Arc::new(StaticResolver {
-                    gateway: resolved_gateway(account, gateway.clone()),
+                    gateway: resolved,
                     calls: AtomicUsize::new(0),
                 }),
                 Arc::new(PermitAdmission {
@@ -1976,15 +2412,6 @@ mod tests {
                 }),
             )
             .with_host_charge_targets(Arc::new(TestTargets));
-            let command = ChargeHostTarget::new(
-                syrup_rail::BillingScopeId::new(account.billing_scope_id),
-                syrup_rail::SubscriberId::new(subscriber_id),
-                HostChargeTargetId::new(target_id),
-                GatewayConfigurationId::new(account.gateway_configuration_id),
-                PaymentToken::new("tok_host_resume")?,
-                IdempotencyKey::new("host-resume")?,
-                None,
-            );
 
             let first_service = service.clone();
             let first_command = command.clone();

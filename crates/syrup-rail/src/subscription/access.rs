@@ -89,22 +89,16 @@ impl Entitlement {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EntitlementQuery {
+#[derive(Clone, Eq, PartialEq)]
+struct EntitlementSelector {
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
     plan_key: PlanKey,
+    required_gateway_account_mode: Option<GatewayAccountMode>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct EntitlementGuard {
-    billing_scope_id: BillingScopeId,
-    subscriber_id: SubscriberId,
-    plan_key: PlanKey,
-}
-
-impl EntitlementGuard {
-    pub const fn new(
+impl EntitlementSelector {
+    const fn new(
         billing_scope_id: BillingScopeId,
         subscriber_id: SubscriberId,
         plan_key: PlanKey,
@@ -113,45 +107,137 @@ impl EntitlementGuard {
             billing_scope_id,
             subscriber_id,
             plan_key,
+            required_gateway_account_mode: Some(GatewayAccountMode::Live),
         }
     }
 
+    const fn require_gateway_account_mode(&mut self, mode: GatewayAccountMode) {
+        self.required_gateway_account_mode = Some(mode);
+    }
+
+    const fn allow_all_gateway_account_modes(&mut self) {
+        self.required_gateway_account_mode = None;
+    }
+
+    fn fmt_as(&self, name: &str, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct(name)
+            .field("billing_scope_id", &self.billing_scope_id)
+            .field("subscriber_id", &self.subscriber_id)
+            .field("plan_key", &self.plan_key)
+            .field(
+                "required_gateway_account_mode",
+                &self.required_gateway_account_mode,
+            )
+            .finish()
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct EntitlementQuery {
+    selector: EntitlementSelector,
+}
+
+impl fmt::Debug for EntitlementQuery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.selector.fmt_as("EntitlementQuery", formatter)
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct EntitlementGuard {
+    selector: EntitlementSelector,
+}
+
+impl fmt::Debug for EntitlementGuard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.selector.fmt_as("EntitlementGuard", formatter)
+    }
+}
+
+impl EntitlementGuard {
+    /// Creates a production-safe guard that admits live paid subscriptions.
+    /// Host-issued grants remain mode-neutral.
+    pub const fn new(
+        billing_scope_id: BillingScopeId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+    ) -> Self {
+        Self {
+            selector: EntitlementSelector::new(billing_scope_id, subscriber_id, plan_key),
+        }
+    }
+
+    /// Restricts paid-subscription access to one durable gateway mode.
+    /// Host-issued grants remain mode-neutral.
+    pub const fn with_required_gateway_account_mode(mut self, mode: GatewayAccountMode) -> Self {
+        self.selector.require_gateway_account_mode(mode);
+        self
+    }
+
+    /// Explicitly admits paid subscriptions from either gateway mode.
+    pub const fn across_gateway_account_modes(mut self) -> Self {
+        self.selector.allow_all_gateway_account_modes();
+        self
+    }
+
     pub const fn billing_scope_id(&self) -> BillingScopeId {
-        self.billing_scope_id
+        self.selector.billing_scope_id
     }
 
     pub const fn subscriber_id(&self) -> SubscriberId {
-        self.subscriber_id
+        self.selector.subscriber_id
     }
 
     pub const fn plan_key(&self) -> &PlanKey {
-        &self.plan_key
+        &self.selector.plan_key
+    }
+
+    pub const fn required_gateway_account_mode(&self) -> Option<GatewayAccountMode> {
+        self.selector.required_gateway_account_mode
     }
 }
 
 impl EntitlementQuery {
+    /// Creates a production-safe query for live paid subscriptions.
+    /// Host-issued grants remain mode-neutral.
     pub const fn new(
         billing_scope_id: BillingScopeId,
         subscriber_id: SubscriberId,
         plan_key: PlanKey,
     ) -> Self {
         Self {
-            billing_scope_id,
-            subscriber_id,
-            plan_key,
+            selector: EntitlementSelector::new(billing_scope_id, subscriber_id, plan_key),
         }
     }
 
+    /// Restricts paid-subscription access to one durable gateway mode.
+    /// Host-issued grants remain mode-neutral.
+    pub const fn with_required_gateway_account_mode(mut self, mode: GatewayAccountMode) -> Self {
+        self.selector.require_gateway_account_mode(mode);
+        self
+    }
+
+    /// Explicitly reads paid subscriptions from either gateway mode.
+    pub const fn across_gateway_account_modes(mut self) -> Self {
+        self.selector.allow_all_gateway_account_modes();
+        self
+    }
+
     pub const fn billing_scope_id(&self) -> BillingScopeId {
-        self.billing_scope_id
+        self.selector.billing_scope_id
     }
 
     pub const fn subscriber_id(&self) -> SubscriberId {
-        self.subscriber_id
+        self.selector.subscriber_id
     }
 
     pub const fn plan_key(&self) -> &PlanKey {
-        &self.plan_key
+        &self.selector.plan_key
+    }
+
+    pub const fn required_gateway_account_mode(&self) -> Option<GatewayAccountMode> {
+        self.selector.required_gateway_account_mode
     }
 }
 

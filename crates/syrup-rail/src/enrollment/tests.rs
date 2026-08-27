@@ -50,6 +50,7 @@ fn result_test_attempt_with_target(
             SubscriberId::new(Uuid::from_u128(3)),
             GatewayAccountId::new(Uuid::from_u128(4)),
             GatewayConfigurationId::new(Uuid::from_u128(5)),
+            GatewayAccountMode::Live,
         ),
         PaymentAttemptRequest::new(
             target,
@@ -92,6 +93,7 @@ fn result_test_subscription_with(subscription_id: SubscriptionId, plan_key: &str
         plan(plan_key),
         SubscriptionStatus::Active,
         SubscriptionPhase::Recurring,
+        GatewayAccountMode::Live,
         PaymentMethodId::new(Uuid::from_u128(7)),
         ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
         SubscriptionPeriodRule::calendar_months(1).unwrap(),

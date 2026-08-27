@@ -93,7 +93,8 @@ pub async fn subscription_billing_portal(
         query.billing_scope_id(),
         query.subscriber_id(),
         query.plan_key().clone(),
-    );
+    )
+    .across_gateway_account_modes();
     let entitlement = entitlement_on_connection(&mut transaction, &entitlement_query)
         .await
         .map_err(map_entitlement_error)?;

@@ -546,6 +546,7 @@ async fn insert_pending_initial_attempt(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, attempt_kind,
                 status, idempotency_key, request_fingerprint, amount_cents,
                 currency, gateway_account_id, gateway_configuration_id,
@@ -558,6 +559,7 @@ async fn insert_pending_initial_attempt(
                 subscription_initial_dunning_exhaustion,
                 subscription_initial_past_due_access
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
                 100, 'USD', $7, $8, $9, 2, 'recurring_immediately', 100,
                 'calendar_months', 1, ARRAY[]::bigint[],

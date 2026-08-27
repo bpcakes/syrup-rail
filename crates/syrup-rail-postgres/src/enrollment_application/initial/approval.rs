@@ -361,10 +361,11 @@ async fn insert_subscription(
             initial_transaction_id, phase, recurring_period_kind,
             recurring_period_count, trial_amount_cents, trial_period_kind,
             trial_period_count, dunning_retry_delays_seconds,
-            dunning_exhaustion, past_due_access, next_payment_attempt_at
+            dunning_exhaustion, past_due_access, next_payment_attempt_at,
+            required_gateway_account_mode
         ) VALUES (
             $1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $10,
-            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $10
+            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $10, $21
         )
         "#,
     )
@@ -388,6 +389,7 @@ async fn insert_subscription(
     .bind(retry_delays)
     .bind(offer.renewal_failure().exhaustion().as_str())
     .bind(offer.renewal_failure().past_due_access().as_str())
+    .bind(identity.required_gateway_account_mode().as_str())
     .execute(connection)
     .await?;
     Ok(())

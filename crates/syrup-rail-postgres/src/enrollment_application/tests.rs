@@ -26,9 +26,11 @@ use syrup_rail::{
     PercentOffBasisPoints, RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod,
     ResolvedGateway, SubscriptionDiscountCode, SubscriptionDiscountDuration,
     SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
-    SubscriptionEnrollmentReservationOutcome,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentMethodReplacementRejection,
     SubscriptionPaymentMethodReplacementReservationOutcome, SubscriptionRecoveryReservationOutcome,
-    SubscriptionRenewalOutcome, SubscriptionStatus,
+    SubscriptionRecoveryReservationRejection, SubscriptionRenewalOutcome,
+    SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
+    SubscriptionStatus,
 };
 use tokio::sync::Mutex;
 
@@ -36,10 +38,10 @@ use super::*;
 use crate::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
     BillingTransactionSubjectState, GatewayMutationCooldownScope, SubscriptionBillingService,
-    SubscriptionBillingServiceError, SubscriptionOfferStore,
+    SubscriptionBillingServiceError, SubscriptionOfferStore, due_renewals,
     reserve_subscription_enrollment_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
-    reserve_subscription_recovery_in_transaction,
+    reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
     test_support::{TestDatabase, create_gateway_account, immediate_offer},
 };
 
@@ -257,6 +259,22 @@ impl ScriptedGateway {
         Self {
             account_mode_calls: AtomicUsize::new(0),
             account_mode_results: Mutex::new(VecDeque::new()),
+            sale_calls: AtomicUsize::new(0),
+            sale_order_ids: Mutex::new(Vec::new()),
+            sale_result: Mutex::new(None),
+            store_calls: AtomicUsize::new(0),
+            store_order_ids: Mutex::new(Vec::new()),
+            store_result: Mutex::new(Some(result)),
+        }
+    }
+
+    fn for_stored_method_with_readiness(
+        readiness: impl IntoIterator<Item = Result<GatewayAccountMode, GatewayError>>,
+        result: Result<GatewayPaymentOutcome, GatewayMutationError>,
+    ) -> Self {
+        Self {
+            account_mode_calls: AtomicUsize::new(0),
+            account_mode_results: Mutex::new(readiness.into_iter().collect()),
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
             sale_result: Mutex::new(None),
@@ -613,7 +631,11 @@ async fn enrollment_fixture(
         Arc::new(TestReferenceFactory),
         Arc::new(NeverCalledGateway),
     );
-    let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let admission = if prepare_submission {
         let mut transaction = database.pool.begin().await?;
         assert!(matches!(

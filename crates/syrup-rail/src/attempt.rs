@@ -4,11 +4,11 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::{
-    BillingContact, BillingPeriod, BillingScopeId, GatewayAccountId, GatewayConfigurationId,
-    GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId, GatewayTransactionId,
-    HostChargeTargetId, IdempotencyKey, Money, PaymentAttemptId, PaymentAttemptKind,
-    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence,
-    SubscriberId, SubscriptionDiscountDuration, SubscriptionDiscountKind,
+    BillingContact, BillingPeriod, BillingScopeId, GatewayAccountId, GatewayAccountMode,
+    GatewayConfigurationId, GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId,
+    GatewayTransactionId, HostChargeTargetId, IdempotencyKey, Money, PaymentAttemptId,
+    PaymentAttemptKind, PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey,
+    ProcessorEvidence, SubscriberId, SubscriptionDiscountDuration, SubscriptionDiscountKind,
     SubscriptionEnrollmentDiscountSnapshot, SubscriptionId, SubscriptionOffer, SubscriptionStatus,
 };
 
@@ -244,6 +244,7 @@ pub struct PaymentAttemptIdentity {
     subscriber_id: SubscriberId,
     gateway_account_id: GatewayAccountId,
     gateway_configuration_id: GatewayConfigurationId,
+    required_gateway_account_mode: GatewayAccountMode,
 }
 
 impl PaymentAttemptIdentity {
@@ -253,6 +254,7 @@ impl PaymentAttemptIdentity {
         subscriber_id: SubscriberId,
         gateway_account_id: GatewayAccountId,
         gateway_configuration_id: GatewayConfigurationId,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Self {
         Self {
             attempt_id,
@@ -260,6 +262,7 @@ impl PaymentAttemptIdentity {
             subscriber_id,
             gateway_account_id,
             gateway_configuration_id,
+            required_gateway_account_mode,
         }
     }
 
@@ -281,6 +284,10 @@ impl PaymentAttemptIdentity {
 
     pub const fn gateway_configuration_id(self) -> GatewayConfigurationId {
         self.gateway_configuration_id
+    }
+
+    pub const fn required_gateway_account_mode(self) -> GatewayAccountMode {
+        self.required_gateway_account_mode
     }
 }
 

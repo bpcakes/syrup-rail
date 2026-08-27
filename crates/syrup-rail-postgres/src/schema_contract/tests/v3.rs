@@ -5,7 +5,7 @@ async fn runtime_schema_v3_accepts_fresh_install_and_v2_upgrade() -> Result<(), 
     if V3_INSTALL_SQL.trim().is_empty() || V2_TO_V3_UPGRADE_SQL.trim().is_empty() {
         return Err(io::Error::other("schema-v3 artifacts must not be empty").into());
     }
-    let fresh = TestDatabase::start("sr_fresh_v3").await?;
+    let fresh = TestDatabase::start_v3("sr_fresh_v3").await?;
     let upgraded = TestDatabase::start_v2_then_upgrade("sr_upgrade_v3").await?;
     let upgraded_from_v1 = TestDatabase::start_v1_then_upgrade("sr_v1_to_v3").await?;
     let result = async {
@@ -95,7 +95,7 @@ async fn v2_upgrade_canonicalizes_legacy_combined_name_without_losing_display()
 #[tokio::test]
 async fn runtime_schema_v3_rejects_v2_and_canonical_column_drift() -> Result<(), Box<dyn Error>> {
     let v2 = TestDatabase::start_v2("sr_v3_reject_v2").await?;
-    let drifted = TestDatabase::start("sr_v3_drift").await?;
+    let drifted = TestDatabase::start_v3("sr_v3_drift").await?;
     let result = async {
         assert!(matches!(
             crate::assert_runtime_schema_v3_compatible(&v2.pool).await,

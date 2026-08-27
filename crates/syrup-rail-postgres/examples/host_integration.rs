@@ -1,10 +1,11 @@
 //! Compile-tested host wiring for subscriber-owned subscription billing.
 //!
 //! The host authenticates and authorizes the subscriber before constructing a
-//! command. Its implementations of the four ports below retain ownership of
+//! command. Its implementations of the five ports below retain ownership of
 //! plan pricing, gateway credentials, abuse controls, subject authorization,
-//! and transactional outbox encoding. `main` performs no database or provider
-//! I/O; this example is intended to be copied into a host application.
+//! host-charge target state, and transactional outbox encoding. `main` performs
+//! no database or provider I/O; this example is intended to be copied into a
+//! host application.
 
 #[path = "host_integration/outbox.rs"]
 mod outbox;
@@ -21,20 +22,20 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use syrup_rail::{
     BillingEvent, BillingEventSubject, CancelSubscription, CancelSubscriptionOutcome,
     ClearSubscriptionDiscount, EndUserMutationAdmission, EnrollSubscription, EntitlementGuard,
-    GatewayResolver, PaymentAttemptId, PaymentAttemptStatus, RenewalDispatchPage,
-    RenewalDispatchPageCursor, SubscriptionBillingPortalQuery, SubscriptionBillingPortalSnapshot,
-    SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome, SubscriptionDiscountClearOutcome,
-    SubscriptionEnrollmentExpectedTerms, SubscriptionId, SubscriptionPaymentContext,
-    SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
+    GatewayAccountMode, GatewayResolver, PaymentAttemptId, PaymentAttemptStatus,
+    RenewalDispatchPage, RenewalDispatchPageCursor, SubscriptionBillingPortalQuery,
+    SubscriptionBillingPortalSnapshot, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
+    SubscriptionDiscountClearOutcome, SubscriptionEnrollmentExpectedTerms, SubscriptionId,
+    SubscriptionPaymentContext, SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
     SubscriptionPaymentHistoryPageLimit,
 };
 use syrup_rail_postgres::{
     AdmittedEntitlementWriteTransaction, BillingEventWriteError, BillingTransaction,
     BillingTransactionCoordinator, BillingTransactionError, BillingTransactionSubjectState,
-    EntitlementGuardError, EntitlementWriteTransaction, RenewalStoreError, SchemaConformanceError,
-    SubscriptionBillingPortalQueryError, SubscriptionBillingService,
+    EntitlementGuardError, EntitlementWriteTransaction, HostChargeTargetStore, RenewalStoreError,
+    SchemaConformanceError, SubscriptionBillingPortalQueryError, SubscriptionBillingService,
     SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
-    SubscriptionOfferStore, assert_runtime_schema_v3_compatible, due_renewals_page,
+    SubscriptionOfferStore, assert_runtime_schema_v4_compatible, due_renewals_page_for_mode,
     require_entitlement_for_update, subscription_billing_portal, subscription_payment_history_page,
 };
 
@@ -49,12 +50,18 @@ use syrup_rail_postgres::{
 /// `gateways` resolves the exact canonical configuration to a provider adapter
 /// without placing credentials in Syrup Rail's durable model. `admission`
 /// applies host abuse controls after host authentication and authorization.
+/// `host_charge_targets` owns the optional host-charge target state machine;
+/// its callbacks use only Syrup Rail's supplied connection, preserve the
+/// target-before-attempt lock order, make submission admission repeat-safe,
+/// and persist every successful transition so exact replay is distinguishable
+/// from a stale or inapplicable target.
 /// `billing_boundary` locks the host billing subject before shared billing rows
 /// and writes every [`BillingEvent`] to the host outbox before commit.
 pub struct HostBillingPorts {
     offers: Arc<dyn SubscriptionOfferStore>,
     gateways: Arc<dyn GatewayResolver>,
     admission: Arc<dyn EndUserMutationAdmission>,
+    host_charge_targets: Arc<dyn HostChargeTargetStore>,
     billing_boundary: Arc<dyn HostBillingBoundary>,
 }
 
@@ -63,12 +70,14 @@ impl HostBillingPorts {
         offers: Arc<dyn SubscriptionOfferStore>,
         gateways: Arc<dyn GatewayResolver>,
         admission: Arc<dyn EndUserMutationAdmission>,
+        host_charge_targets: Arc<dyn HostChargeTargetStore>,
         billing_boundary: Arc<dyn HostBillingBoundary>,
     ) -> Self {
         Self {
             offers,
             gateways,
             admission,
+            host_charge_targets,
             billing_boundary,
         }
     }
@@ -77,10 +86,12 @@ impl HostBillingPorts {
 /// Constructs the service without installing or running a database migrator.
 ///
 /// Materialize Syrup Rail's versioned schema through the host's normal
-/// migration deployment before serving traffic.
+/// migration deployment before serving traffic. Pass the deployment's trusted
+/// mode and route only matching renewal dispatch pages to the returned service.
 pub fn build_subscription_billing_service(
     pool: PgPool,
     ports: HostBillingPorts,
+    required_gateway_account_mode: GatewayAccountMode,
 ) -> SubscriptionBillingService {
     let transactions = Arc::new(HostTransactionCoordinator::new(
         pool.clone(),
@@ -93,6 +104,8 @@ pub fn build_subscription_billing_service(
         ports.admission,
         transactions,
     )
+    .with_required_gateway_account_mode(required_gateway_account_mode)
+    .with_host_charge_targets(ports.host_charge_targets)
 }
 
 /// Verifies the host-applied database migration before this process serves
@@ -106,7 +119,7 @@ pub fn build_subscription_billing_service(
 pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
-    assert_runtime_schema_v3_compatible(pool).await
+    assert_runtime_schema_v4_compatible(pool).await
 }
 
 /// Admits a host-authorized protected write and returns its only valid transaction.
@@ -391,17 +404,20 @@ pub async fn read_authorized_subscription_payment_history(
 
 /// Reads one stable page of automatic renewal dispatch candidates.
 ///
-/// The host keeps the returned cursor until the scan ends, then writes each
-/// selected dispatch to its own queue/outbox. This page is deliberately not a
+/// The host uses the same trusted deployment mode for the entire cursor chain,
+/// then writes each selected dispatch to its own queue/outbox for a service
+/// configured with that mode. The cursor records its mode and rejects accidental
+/// cross-mode reuse. This page is deliberately not a
 /// lease, claim, or cross-page snapshot: concurrent candidates behind the key
 /// can wait for a fresh scan, and eventual renewal submission still revalidates
 /// current canonical state. Persist/reconstruct a cursor only from trusted
 /// host state returned by a prior page, never from end-user input.
 pub async fn read_renewal_dispatch_page(
     pool: &PgPool,
+    required_gateway_account_mode: GatewayAccountMode,
     cursor: Option<&RenewalDispatchPageCursor>,
 ) -> Result<RenewalDispatchPage, RenewalStoreError> {
-    due_renewals_page(pool, cursor).await
+    due_renewals_page_for_mode(pool, required_gateway_account_mode, cursor).await
 }
 
 fn main() {}

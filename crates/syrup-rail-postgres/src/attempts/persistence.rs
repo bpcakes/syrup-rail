@@ -6,7 +6,8 @@ pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = r#"
         attempt_kind, status, idempotency_key, request_fingerprint,
         amount_cents, currency, billing_period_start_at,
         billing_period_end_at, gateway_account_id,
-        gateway_configuration_id, gateway_order_id,
+        gateway_configuration_id, required_gateway_account_mode,
+        gateway_order_id,
         gateway_transaction_id, gateway_payment_method_reference,
         gateway_response, gateway_response_code, gateway_response_text,
         gateway_condition, payment_type, card_brand, card_last4,
@@ -56,6 +57,29 @@ pub async fn find_payment_attempt_by_id_in_transaction(
     let row = sqlx::query(&query)
         .bind(billing_scope_id.as_uuid())
         .bind(attempt_id.as_uuid())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    row.as_ref().map(payment_attempt_from_row).transpose()
+}
+
+/// Observes an owner-scoped idempotency row without changing lock order.
+///
+/// Callers that will mutate the result must lock and revalidate it after any
+/// host-owned target lock has been acquired.
+pub(crate) async fn find_payment_attempt_by_idempotency_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    idempotency_key: &IdempotencyKey,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    let query = format!(
+        "{PAYMENT_ATTEMPT_SELECT} \
+         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3"
+    );
+    let row = sqlx::query(&query)
+        .bind(billing_scope_id.as_uuid())
+        .bind(subscriber_id.as_uuid())
+        .bind(idempotency_key.expose())
         .fetch_optional(&mut **transaction)
         .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
@@ -115,12 +139,17 @@ pub(crate) fn payment_attempt_from_row(
     row: &PgRow,
 ) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
     let attempt_id = PaymentAttemptId::new(row.try_get("id")?);
+    let required_gateway_account_mode = row
+        .try_get::<String, _>("required_gateway_account_mode")?
+        .parse::<GatewayAccountMode>()
+        .map_err(|_| invalid_state())?;
     let identity = PaymentAttemptIdentity::new(
         attempt_id,
         BillingScopeId::new(row.try_get("billing_scope_id")?),
         SubscriberId::new(row.try_get("subscriber_id")?),
         GatewayAccountId::new(row.try_get("gateway_account_id")?),
         GatewayConfigurationId::new(row.try_get("gateway_configuration_id")?),
+        required_gateway_account_mode,
     );
     let kind = row
         .try_get::<String, _>("attempt_kind")?

@@ -143,10 +143,12 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::UnresolvedProcessorCharge) => Rejected,
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged) => Conflict,
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::AttemptInProgress) => Rejected,
         SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::BillingStateChanged) => Conflict,
         SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged) => Conflict,
         SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::TargetUnavailable) => Rejected,
         SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::ChargeChanged) => Conflict,
         SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::LedgerUnsafe) => Rejected,
@@ -158,6 +160,7 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
         SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::AttemptInProgress) => Rejected,
         SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::PaymentMethodUpdateInProgress) => Rejected,
         SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection::BillingStateChanged) => Conflict,
         SubscriptionBillingServiceError::RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged) => Conflict,
         SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::SubscriptionNotFound) => Rejected,
@@ -171,13 +174,22 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
         SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::ChargeAttemptInProgress) => Rejected,
         SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::PaymentMethodUpdateInProgress) => Rejected,
         SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::PaymentMethodReplacementSubmissionRejected(SubscriptionPaymentMethodReplacementSubmissionRejection::BillingStateChanged) => Conflict,
         SubscriptionBillingServiceError::PaymentMethodReplacementSubmissionRejected(SubscriptionPaymentMethodReplacementSubmissionRejection::GatewayConfigurationChanged) => Conflict,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::RequestRejected(GatewayDiagnostic::new("test"))) => Rejected,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Malformed(GatewayDiagnostic::new("test"))) => Internal,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Configuration(GatewayDiagnostic::new("test"))) => Misconfigured,
-        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Unavailable(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::NotTransmitted(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::RateLimited(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::AccountModeMismatch {
+            required: GatewayAccountMode::Live,
+            observed: GatewayAccountMode::Test,
+            detail: GatewayDiagnostic::new("test"),
+        }) => Misconfigured,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::AccountModeVerification(
+            GatewayError::Unavailable(GatewayDiagnostic::new("test")),
+        )) => TemporarilyUnavailable,
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::RequestRejected(GatewayDiagnostic::new("test"))) => Rejected,
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Malformed(GatewayDiagnostic::new("test"))) => Internal,
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Configuration(GatewayDiagnostic::new("test"))) => Misconfigured,
@@ -255,7 +267,7 @@ fn service_error_retry_helpers_preserve_exact_admission_delay_only() {
     }
 
     let unavailable = SubscriptionBillingServiceError::GatewayNotSubmitted(
-        GatewayNotSubmittedError::Unavailable(GatewayDiagnostic::new("test")),
+        GatewayNotSubmittedError::NotTransmitted(GatewayDiagnostic::new("test")),
     );
     assert!(unavailable.is_retryable());
     assert_eq!(unavailable.retry_after(), None);
@@ -304,25 +316,27 @@ fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         ),
     ] {
         let failure = SubscriberReadinessFailure::Cooldown(scope);
-        assert_eq!(failure.resolution_code(), code);
-        assert!(failure.cooldown().is_none());
-        assert_eq!(failure.cooldown_error_scope(), Some(scope));
+        let policy = failure.policy();
+        assert_eq!(policy.resolution_code(), code);
+        assert!(policy.cooldown().is_none());
+        assert_eq!(policy.cooldown_error_scope(), Some(scope));
         assert_eq!(failure.into_detail().expose(), detail);
     }
 
-    let provider = SubscriberReadinessFailure::ProviderRateLimited(GatewayDiagnostic::new(
-        "provider asked to retry later",
+    let provider = SubscriberReadinessFailure::Gateway(GatewayError::RateLimited(
+        GatewayDiagnostic::new("provider asked to retry later"),
     ));
+    let policy = provider.policy();
     assert_eq!(
-        provider.resolution_code(),
+        policy.resolution_code(),
         PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
     );
     assert!(matches!(
-        provider.cooldown(),
+        policy.cooldown(),
         Some(RateLimitCooldown::Provider)
     ));
     assert_eq!(
-        provider.cooldown_error_scope(),
+        policy.cooldown_error_scope(),
         Some(GatewayMutationCooldownScope::Provider)
     );
     assert_eq!(
@@ -350,32 +364,45 @@ fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
     ] {
         let detail = error.detail().clone();
         let failure = SubscriberReadinessFailure::Gateway(error);
-        assert_eq!(failure.resolution_code(), code);
+        let policy = failure.policy();
+        assert_eq!(policy.resolution_code(), code);
         assert_eq!(
-            gateway_readiness_resolution_code(
+            GatewayNotSubmittedPolicy::for_readiness_error(
                 &failure.gateway_error().expect("gateway error is retained")
-            ),
+            )
+            .resolution_code(),
             code
         );
-        assert!(failure.cooldown().is_none());
-        assert!(failure.cooldown_error_scope().is_none());
+        assert!(policy.cooldown().is_none());
+        assert!(policy.cooldown_error_scope().is_none());
+        let gateway_error = failure.gateway_error().expect("gateway error is retained");
         assert_eq!(
-            preserves_prepared_attempt_for_retry(
-                &failure.gateway_error().expect("gateway error is retained")
-            ),
+            GatewayNotSubmittedPolicy::for_readiness_error(&gateway_error)
+                .restores_prepared_attempt_when_supported(),
             code == PaymentResolutionCode::GatewayUnavailableBeforeSubmission
         );
         assert_eq!(failure.into_detail().expose(), detail.expose());
     }
 
-    let readiness = SubscriberReadinessFailure::LiveModeUnavailable;
-    assert_eq!(
-        readiness.resolution_code(),
-        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
-    );
-    assert!(readiness.cooldown().is_none());
-    assert!(readiness.cooldown_error_scope().is_none());
-    assert_eq!(readiness.into_detail().expose(), LIVE_READINESS_FAILED_TEXT);
+    for (required, code, detail) in [
+        (
+            GatewayAccountMode::Live,
+            PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+            "Payment was not submitted because the payment processor account mode did not match this deployment.",
+        ),
+        (
+            GatewayAccountMode::Test,
+            PaymentResolutionCode::GatewayTestReadinessFailedBeforeSubmission,
+            "Payment was not submitted because the payment processor account mode did not match this deployment.",
+        ),
+    ] {
+        let readiness = SubscriberReadinessFailure::AccountMode(required);
+        let policy = readiness.policy();
+        assert_eq!(policy.resolution_code(), code);
+        assert!(policy.cooldown().is_none());
+        assert!(policy.cooldown_error_scope().is_none());
+        assert_eq!(readiness.into_detail().expose(), detail);
+    }
 }
 
 #[test]

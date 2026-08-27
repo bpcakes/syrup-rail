@@ -33,8 +33,12 @@ impl SubscriptionBillingService {
                 command.gateway_configuration_id(),
             )
             .await?;
-        let mut reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)
-            .map_err(map_reservation_build_error)?;
+        let mut reservation = SubscriptionEnrollmentReservation::from_command(
+            &command,
+            &gateway,
+            self.required_gateway_account_mode,
+        )
+        .map_err(map_reservation_build_error)?;
 
         let attempt = match self.reserve(&reservation).await? {
             SubscriptionEnrollmentReservationOutcome::Reserved(attempt)
@@ -50,6 +54,11 @@ impl SubscriptionBillingService {
             SubscriptionEnrollmentReservationOutcome::IdempotencyConflict => {
                 return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
+            SubscriptionEnrollmentReservationOutcome::Rejected(
+                SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged,
+            ) => {
+                return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+            }
             SubscriptionEnrollmentReservationOutcome::Rejected(reason) => {
                 return Err(SubscriptionBillingServiceError::ReservationRejected(reason));
             }
@@ -64,6 +73,7 @@ impl SubscriptionBillingService {
                 &command,
                 &gateway,
                 attempt.identity().attempt_id(),
+                self.required_gateway_account_mode,
             )
             .map_err(map_reservation_build_error)?;
         }
@@ -77,15 +87,23 @@ impl SubscriptionBillingService {
                 )
                 .await;
         }
-        if let Some(failure) = subscriber_gateway_readiness_failure(&gateway).await {
-            return self
-                .resolve_subscriber_readiness_failure(
-                    SubscriberInitiatedReservation::Initial(&reservation),
-                    failure,
-                    OutcomeResolutionBoundary::Prepared,
-                )
-                .await;
-        }
+        let verified_gateway = match subscriber_gateway_readiness(
+            &gateway,
+            self.required_gateway_account_mode,
+        )
+        .await
+        {
+            Ok(verified_gateway) => verified_gateway,
+            Err(failure) => {
+                return self
+                    .resolve_subscriber_readiness_failure(
+                        SubscriberInitiatedReservation::Initial(&reservation),
+                        failure,
+                        OutcomeResolutionBoundary::Prepared,
+                    )
+                    .await;
+            }
+        };
 
         let admission = match admit_subscription_enrollment_submission(
             &self.pool,
@@ -97,6 +115,12 @@ impl SubscriptionBillingService {
             SubscriptionEnrollmentAdmissionOutcome::Admitted(admission) => *admission,
             SubscriptionEnrollmentAdmissionOutcome::AlreadyAdmitted(attempt) => {
                 return self.payment_result(attempt).await;
+            }
+            SubscriptionEnrollmentAdmissionOutcome::Rejected {
+                reason: SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged,
+                ..
+            } => {
+                return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
             }
             SubscriptionEnrollmentAdmissionOutcome::Rejected { reason, .. } => {
                 return Err(SubscriptionBillingServiceError::SubmissionRejected(reason));
@@ -117,13 +141,13 @@ impl SubscriptionBillingService {
             self.coordinator.as_ref(),
             admission,
             &command,
-            &gateway,
+            verified_gateway,
         )
         .await?
         {
             SubscriptionEnrollmentProviderResult::Payment(payment) => Ok(payment),
-            SubscriptionEnrollmentProviderResult::NotSubmitted { payment, error } => {
-                preserve_concurrent_terminal_payment(payment, error)
+            SubscriptionEnrollmentProviderResult::NotSubmitted { error, .. } => {
+                Err(SubscriptionBillingServiceError::GatewayNotSubmitted(error))
             }
         }
     }

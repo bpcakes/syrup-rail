@@ -2,10 +2,10 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
-    ChargeAmount, GatewayConfigurationId, HostChargeTargetId, IdempotencyKey, PaymentAttempt,
-    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptRequest, PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind,
-    PaymentToken, ProcessorEvidence, ResolvedGateway, SubscriberId,
+    ChargeAmount, GatewayAccountMode, GatewayConfigurationId, HostChargeTargetId, IdempotencyKey,
+    PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptStatus, PaymentAttemptTarget,
+    PaymentReversalKind, PaymentToken, ProcessorEvidence, ResolvedGateway, SubscriberId,
 };
 use thiserror::Error;
 
@@ -121,6 +121,7 @@ impl HostChargeReservation {
         snapshot: HostChargeTargetSnapshot,
         gateway: &ResolvedGateway,
         attempt_id: PaymentAttemptId,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, HostChargeReservationBuildError> {
         if snapshot.target_id() != command.target_id() {
             return Err(HostChargeReservationBuildError::TargetIdentityMismatch);
@@ -136,6 +137,7 @@ impl HostChargeReservation {
             command.subscriber_id(),
             gateway.gateway_account_id(),
             command.gateway_configuration_id(),
+            required_gateway_account_mode,
         );
         let amount = snapshot.charge().money();
         let request = PaymentAttemptRequest::new(
@@ -198,9 +200,16 @@ pub enum HostChargeTargetRejection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostChargeTargetTransitionKind {
     Paid,
+    /// Releases a claimed target after the provider mutation was provably not
+    /// submitted. This can occur before or after submission admission.
+    ReleasedBeforeSubmission,
     PaymentFailed,
-    ReleasedAfterExternalReversal { kind: PaymentReversalKind },
-    Reversed { kind: PaymentReversalKind },
+    ReleasedAfterExternalReversal {
+        kind: PaymentReversalKind,
+    },
+    Reversed {
+        kind: PaymentReversalKind,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,6 +279,13 @@ pub enum HostChargeTargetTransitionOutcome {
     ExactReplay,
     StaleTarget,
     Unchanged { reason: HostChargeTargetNoChange },
+}
+
+impl HostChargeTargetTransitionOutcome {
+    /// Returns whether the requested transition is durably reflected in host state.
+    pub const fn is_applied(self) -> bool {
+        matches!(self, Self::Applied | Self::ExactReplay)
+    }
 }
 
 /// Durable result of applying one host-target payment outcome.
@@ -362,5 +378,18 @@ mod tests {
             "host_charge:00000000-0000-0000-0000-000000000001:1250:USD"
         );
         assert_eq!(fingerprint.to_string(), "[redacted]");
+    }
+
+    #[test]
+    fn target_transition_outcome_identifies_durable_application() {
+        assert!(HostChargeTargetTransitionOutcome::Applied.is_applied());
+        assert!(HostChargeTargetTransitionOutcome::ExactReplay.is_applied());
+        assert!(!HostChargeTargetTransitionOutcome::StaleTarget.is_applied());
+        assert!(
+            !HostChargeTargetTransitionOutcome::Unchanged {
+                reason: HostChargeTargetNoChange::ReleaseUnsafe,
+            }
+            .is_applied()
+        );
     }
 }

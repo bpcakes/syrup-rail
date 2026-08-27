@@ -193,7 +193,10 @@ pub trait SubscriptionOfferStore: Send + Sync {
     /// same reservation. Attempt-history eligibility queries must exclude
     /// [`SubscriptionEnrollmentOfferContext::attempt_id`]; the result may
     /// change only because locked host policy or eligibility state external to
-    /// that in-flight attempt changed.
+    /// that in-flight attempt changed. The subscriber/plan aggregate lock
+    /// serializes reservation and admission before this callback. Implementations
+    /// must not acquire Syrup Rail payment-attempt ledger locks independently;
+    /// doing so would invert admission's aggregate -> attempt -> offer order.
     async fn lock_enrollment_offer(
         &self,
         connection: &mut PgConnection,
