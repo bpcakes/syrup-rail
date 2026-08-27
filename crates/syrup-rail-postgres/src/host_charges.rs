@@ -202,7 +202,8 @@ pub trait HostChargeTargetStore: Send + Sync {
     ///
     /// Return [`HostChargeTargetTransitionOutcome::ExactReplay`] when the same
     /// transition was already applied. In particular,
-    /// [`HostChargeTargetTransitionKind::ReleasedBeforeSubmission`] releases a
+    /// [`syrup_rail::HostChargeTargetTransitionKind::ReleasedBeforeSubmission`]
+    /// releases a
     /// claimed target after a determinate pre-submission failure and must not
     /// be interpreted as a card decline.
     ///
