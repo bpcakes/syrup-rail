@@ -2,10 +2,11 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
-    ChargeAmount, GatewayAccountMode, GatewayConfigurationId, HostChargeTargetId, IdempotencyKey,
-    PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptStatus, PaymentAttemptTarget,
-    PaymentReversalKind, PaymentToken, ProcessorEvidence, ResolvedGateway, SubscriberId,
+    ChargeAmount, GatewayAccountMode, GatewayConfigurationId, GatewayPaymentDiagnostic,
+    HostChargeTargetId, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
+    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
+    PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind, PaymentToken,
+    ProcessorEvidence, ResolvedGateway, SubscriberId,
 };
 use thiserror::Error;
 
@@ -289,11 +290,25 @@ impl HostChargeTargetTransitionOutcome {
 }
 
 /// Durable result of applying one host-target payment outcome.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Equality compares the durable attempt and pending-confirmation evidence.
+/// Call-scoped gateway diagnostics are intentionally excluded because an exact
+/// replay may not reproduce them.
+#[derive(Clone, Debug)]
 pub struct HostChargePaymentResult {
     attempt: PaymentAttempt,
     pending_confirmation_evidence: Option<ApprovedProcessorEvidence>,
+    gateway_diagnostics: Vec<GatewayPaymentDiagnostic>,
 }
+
+impl PartialEq for HostChargePaymentResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.attempt == other.attempt
+            && self.pending_confirmation_evidence == other.pending_confirmation_evidence
+    }
+}
+
+impl Eq for HostChargePaymentResult {}
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum HostChargePaymentResultBuildError {
@@ -309,6 +324,7 @@ impl HostChargePaymentResult {
         Ok(Self {
             attempt,
             pending_confirmation_evidence: None,
+            gateway_diagnostics: Vec::new(),
         })
     }
 
@@ -323,7 +339,25 @@ impl HostChargePaymentResult {
         Ok(Self {
             attempt,
             pending_confirmation_evidence: Some(evidence),
+            gateway_diagnostics: Vec::new(),
         })
+    }
+
+    /// Attaches payload-free diagnostics from the gateway observation applied
+    /// by the current call.
+    ///
+    /// These diagnostics are foreground routing facts, not durable attempt
+    /// state. A later replay reconstructs the canonical payment result from
+    /// persisted processor evidence and may not contain them.
+    pub fn with_gateway_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
+        self.gateway_diagnostics = diagnostics;
+        self
+    }
+
+    /// Returns payload-free diagnostics from the gateway observation applied
+    /// by the current call.
+    pub fn gateway_diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
+        &self.gateway_diagnostics
     }
 
     pub const fn attempt(&self) -> &PaymentAttempt {

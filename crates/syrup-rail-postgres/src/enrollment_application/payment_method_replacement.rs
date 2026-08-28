@@ -230,6 +230,22 @@ pub async fn apply_subscription_payment_method_replacement_gateway_outcome(
     reservation: &SubscriptionPaymentMethodReplacement,
     outcome: &GatewayPaymentOutcome,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    apply_subscription_payment_method_replacement_gateway_decision(
+        pool,
+        coordinator,
+        reservation,
+        outcome,
+    )
+    .await
+    .map(|result| result.with_gateway_diagnostics(outcome.diagnostics().to_vec()))
+}
+
+async fn apply_subscription_payment_method_replacement_gateway_decision(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionPaymentMethodReplacement,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     match outcome.status() {
         GatewayPaymentStatus::Approved => {
             let approved_evidence = outcome.approved_evidence().ok_or(
@@ -413,6 +429,7 @@ fn reconciled_outcome_with_persisted_evidence(
             descriptor,
         ),
     )
+    .with_diagnostics(outcome.diagnostics().to_vec())
 }
 
 pub(crate) async fn resolve_payment_method_replacement_non_approved_outcome(

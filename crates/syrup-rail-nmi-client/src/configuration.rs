@@ -28,6 +28,28 @@ pub struct Credentials {
     pub(crate) query_security_key: Zeroizing<String>,
 }
 
+/// Per-sale NMI duplicate-check behavior for an account-bound client.
+///
+/// NMI applies this as a processor-dependent heuristic. It does not replace a
+/// caller's durable idempotency or reconciliation policy.
+///
+/// See NMI's [`dup_seconds` payment field](https://docs.nmi.com/reference/create-sale-v5)
+/// and [processor duplicate-check settings](https://docs.nmi.com/reference/add-processor-service).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DuplicateCheck {
+    /// Omits `dup_seconds` and uses the NMI account's processor configuration.
+    ProcessorConfigured,
+    /// Sends a positive duplicate-check window with every sale.
+    ///
+    /// Some processor configurations reject this per-transaction override.
+    Window(DuplicateCheckWindow),
+}
+
+/// A validated positive NMI duplicate-check window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DuplicateCheckWindow(u32);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigurationError {
@@ -49,6 +71,41 @@ pub enum ConfigurationError {
     CredentialTooLong,
     #[error("NMI private API key is invalid for the Authorization header")]
     PrivateApiKeyInvalidHeader,
+    #[error("NMI duplicate-check window is outside the supported positive range")]
+    DuplicateCheckWindowOutOfRange,
+}
+
+impl DuplicateCheck {
+    pub(crate) const fn wire_seconds(self) -> Option<u32> {
+        match self {
+            Self::ProcessorConfigured => None,
+            Self::Window(window) => Some(window.seconds()),
+        }
+    }
+}
+
+impl DuplicateCheckWindow {
+    /// Smallest value represented by this positive-window type.
+    ///
+    /// Zero is deliberately excluded: it is not a duplicate-check window and
+    /// this client never sends `dup_seconds=0`.
+    pub const MIN_SECONDS: u32 = 1;
+
+    /// Largest duplicate-check window documented by NMI's
+    /// [`dup_seconds` field](https://docs.nmi.com/reference/create-sale-v5).
+    pub const MAX_SECONDS: u32 = 7_862_400;
+
+    /// Creates a duplicate-check window in this client's supported positive range.
+    pub const fn new(seconds: u32) -> Result<Self, ConfigurationError> {
+        if seconds < Self::MIN_SECONDS || seconds > Self::MAX_SECONDS {
+            return Err(ConfigurationError::DuplicateCheckWindowOutOfRange);
+        }
+        Ok(Self(seconds))
+    }
+
+    pub const fn seconds(self) -> u32 {
+        self.0
+    }
 }
 
 impl Endpoint {

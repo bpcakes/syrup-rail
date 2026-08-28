@@ -18,7 +18,9 @@ mod responses;
 pub use client::{Client, ClientFactory};
 #[cfg(test)]
 pub(crate) use configuration::MAX_CREDENTIAL_BYTES;
-pub use configuration::{ConfigurationError, Credentials, Endpoint};
+pub use configuration::{
+    ConfigurationError, Credentials, DuplicateCheck, DuplicateCheckWindow, Endpoint,
+};
 pub use errors::{MutationCertainty, MutationError, QueryError};
 pub use requests::{
     BillingContact, PaymentSource, ReportQuery, SaleRequest, StorePaymentMethodRequest,

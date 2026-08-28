@@ -2801,6 +2801,7 @@ dependencies = [
  "syrup-rail",
  "syrup-rail-nmi-client",
  "thiserror",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",

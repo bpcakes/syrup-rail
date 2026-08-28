@@ -16,13 +16,13 @@ use syrup_rail::{
     EndUserMutationCommand, EnrollSubscription, GatewayAccountId, GatewayAccountMode,
     GatewayConfigurationId, GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy,
     GatewayMutationError, GatewayMutationReferenceFactory, GatewayOrderId,
-    GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayPaymentOutcome,
-    GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest, GatewayResolutionError,
-    GatewayResolver, GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId,
-    GatewayTransactionReport, GatewayTransactionReportRequest, IdempotencyKey, Money,
-    PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptTarget,
-    PaymentAttemptTimestamps, PaymentCardBrand, PaymentGateway, PaymentToken,
+    GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentMethodReference,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest,
+    GatewayResolutionError, GatewayResolver, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
+    GatewayTransactionId, GatewayTransactionReport, GatewayTransactionReportRequest,
+    IdempotencyKey, Money, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState,
+    PaymentAttemptTarget, PaymentAttemptTimestamps, PaymentCardBrand, PaymentGateway, PaymentToken,
     PercentOffBasisPoints, RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod,
     ResolvedGateway, SubscriptionDiscountCode, SubscriptionDiscountDuration,
     SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
@@ -694,6 +694,22 @@ async fn hold_subscription_aggregate_lock(
 
 fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
     approved_outcome_with_reference(Some(transaction_id), "vault_application")
+}
+
+fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
+    GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Unknown,
+        ProcessorEvidence::new(
+            None,
+            None,
+            Some(GatewayDiagnostic::new("3")),
+            Some(GatewayDiagnostic::new("430")),
+            Some(GatewayDiagnostic::new("Duplicate transaction")),
+            None,
+            GatewayPaymentDescriptor::default(),
+        ),
+    )
+    .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
 }
 
 fn approved_outcome_with_transaction(transaction_id: Option<&str>) -> GatewayPaymentOutcome {

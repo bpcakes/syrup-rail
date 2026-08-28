@@ -184,14 +184,20 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     .await?;
     let second_reservation =
         reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
+    let second_outcome = declined_outcome("trial_renewal_decline_2")
+        .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let second = apply_reconciled_subscription_renewal_gateway_outcome(
         &database.pool,
         &coordinator,
         BillingScopeId::new(account.billing_scope_id),
         second_reservation.identity().attempt_id(),
-        &declined_outcome("trial_renewal_decline_2"),
+        &second_outcome,
     )
     .await?;
+    assert_eq!(
+        second.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let failure_two_at =
         resolved_at(&database.pool, second.attempt().identity().attempt_id()).await?;
     let retry_at: Option<DateTime<Utc>> = sqlx::query_scalar(
@@ -210,7 +216,8 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     .await?;
     let final_reservation =
         reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
-    let final_outcome = declined_outcome("trial_renewal_decline_3");
+    let final_outcome = declined_outcome("trial_renewal_decline_3")
+        .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let final_result = apply_subscription_renewal_gateway_outcome(
         &database.pool,
         &coordinator,
@@ -218,6 +225,10 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
         &final_outcome,
     )
     .await?;
+    assert_eq!(
+        final_result.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let failure_three_at = resolved_at(
         &database.pool,
         final_result.attempt().identity().attempt_id(),

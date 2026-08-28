@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
 
-use crate::{BillingContact, PaymentSource, SaleRequest, StoredCredential};
+use crate::{BillingContact, DuplicateCheck, PaymentSource, SaleRequest, StoredCredential};
 
+use super::WireError;
 use super::validation::trimmed_optional;
-use super::{NMI_DUP_SECONDS, WireError};
 
 fn payment_details_json(source: &PaymentSource) -> Value {
     // serde_json owns a temporary copy of these sensitive identifiers. The
@@ -37,14 +37,20 @@ pub(super) fn amount_value(amount_cents: i32) -> Result<Value, WireError> {
     )))
 }
 
-pub(super) fn sale_body_json(request: &SaleRequest, amount: Value) -> Value {
+pub(super) fn sale_body_json(
+    request: &SaleRequest,
+    amount: Value,
+    duplicate_check: DuplicateCheck,
+) -> Value {
     let mut body = json!({
         "amount": amount,
         "currency": request.currency.as_str(),
-        "dup_seconds": NMI_DUP_SECONDS,
         "payment_details": payment_details_json(&request.source),
         "order_details": order_details_json(&request.order_id),
     });
+    if let Some(seconds) = duplicate_check.wire_seconds() {
+        body["dup_seconds"] = json!(seconds);
+    }
     if let Some(contact) = &request.billing_contact {
         body["billing_address"] = billing_address_json(contact);
     }

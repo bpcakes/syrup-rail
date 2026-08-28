@@ -330,6 +330,18 @@ pub async fn apply_host_charge_gateway_outcome(
     reservation: &HostChargeReservation,
     outcome: &GatewayPaymentOutcome,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
+    apply_host_charge_gateway_decision(pool, coordinator, targets, reservation, outcome)
+        .await
+        .map(|result| result.with_gateway_diagnostics(outcome.diagnostics().to_vec()))
+}
+
+async fn apply_host_charge_gateway_decision(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    targets: &dyn HostChargeTargetStore,
+    reservation: &HostChargeReservation,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
     match outcome.status() {
         GatewayPaymentStatus::Approved => {
             let approved_evidence =
@@ -1020,11 +1032,11 @@ mod tests {
         GatewayAccountMode, GatewayConfigurationId, GatewayDiagnostic, GatewayError,
         GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy, GatewayMutationError,
         GatewayMutationReferenceFactory, GatewayOrderId, GatewayPaymentDescriptor,
-        GatewayProviderKey, GatewayQueryRequest, GatewayResolutionError, GatewayResolver,
-        GatewayStorePaymentMethodRequest, GatewayTransactionId, GatewayTransactionReport,
-        GatewayTransactionReportRequest, HostChargeTargetId, HostChargeTargetNoChange,
-        IdempotencyKey, PaymentAttemptId, PaymentAttemptKind, PaymentGateway, PaymentToken,
-        ResolvedGateway,
+        GatewayPaymentDiagnostic, GatewayProviderKey, GatewayQueryRequest, GatewayResolutionError,
+        GatewayResolver, GatewayStorePaymentMethodRequest, GatewayTransactionId,
+        GatewayTransactionReport, GatewayTransactionReportRequest, HostChargeTargetId,
+        HostChargeTargetNoChange, IdempotencyKey, PaymentAttemptId, PaymentAttemptKind,
+        PaymentGateway, PaymentToken, ResolvedGateway,
     };
     use tokio::sync::{Mutex, Notify, oneshot};
     use uuid::Uuid;
@@ -1733,7 +1745,11 @@ mod tests {
             let gateway = Arc::new(ScriptedGateway {
                 account_mode: GatewayAccountMode::Test,
                 sale_calls: AtomicUsize::new(0),
-                outcome: Mutex::new(Some(approved_outcome("host_txn_approved"))),
+                outcome: Mutex::new(Some(
+                    approved_outcome("host_txn_approved").with_diagnostics(vec![
+                        GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+                    ]),
+                )),
             });
             let resolver = Arc::new(StaticResolver {
                 gateway: resolved_gateway(account, gateway.clone()),
@@ -1773,6 +1789,10 @@ mod tests {
 
             let first = service.charge_host_target(command.clone()).await?;
             assert_eq!(first.status(), PaymentAttemptStatus::Approved);
+            assert_eq!(
+                first.gateway_diagnostics(),
+                &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+            );
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
             assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
@@ -1780,7 +1800,8 @@ mod tests {
                 .bind(target_id)
                 .execute(&database.pool)
                 .await?;
-            let approved_replay = approved_outcome("host_txn_approved");
+            let approved_replay = approved_outcome("host_txn_approved")
+                .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
             let reconciled_replay = apply_reconciled_host_charge_gateway_outcome(
                 &database.pool,
                 coordinator.as_ref(),
@@ -1791,11 +1812,16 @@ mod tests {
             )
             .await?;
             assert_eq!(reconciled_replay.attempt(), first.attempt());
+            assert_eq!(
+                reconciled_replay.gateway_diagnostics(),
+                &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+            );
             let live_service = service
                 .clone()
                 .with_required_gateway_account_mode(GatewayAccountMode::Live);
             let replay = live_service.charge_host_target(command).await?;
             assert_eq!(replay.attempt(), first.attempt());
+            assert!(replay.gateway_diagnostics().is_empty());
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
             assert_eq!(admission.calls.load(Ordering::SeqCst), 1);

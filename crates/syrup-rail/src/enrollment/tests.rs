@@ -4,14 +4,15 @@ use uuid::Uuid;
 use super::*;
 use crate::{
     BillingPeriod, CurrencyCode, DunningExhaustion, DunningSchedule, GatewayAccountId,
-    GatewayDiagnostic, GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayPaymentStatus,
-    GatewayTransactionId, HostChargePaymentResult, HostChargePaymentResultBuildError,
-    HostChargeTargetId, LimitedDiscountMonths, Money, PaidTrialTerms, PastDueAccessPolicy,
-    PaymentAttemptFingerprint, PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState,
-    PaymentAttemptTimestamps, PaymentMethodId, PercentOffBasisPoints, RecurringSubscriptionTerms,
-    RenewalFailurePolicy, SubscriptionDiscountCode, SubscriptionDiscountDuration,
-    SubscriptionDiscountKind, SubscriptionId, SubscriptionPaymentStateSnapshot,
-    SubscriptionPeriodRule, SubscriptionPhase, SubscriptionStart, SubscriptionStatus,
+    GatewayDiagnostic, GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentOutcome,
+    GatewayPaymentStatus, GatewayTransactionId, HostChargePaymentResult,
+    HostChargePaymentResultBuildError, HostChargeTargetId, LimitedDiscountMonths, Money,
+    PaidTrialTerms, PastDueAccessPolicy, PaymentAttemptFingerprint, PaymentAttemptLifecycle,
+    PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptTimestamps, PaymentMethodId,
+    PercentOffBasisPoints, RecurringSubscriptionTerms, RenewalFailurePolicy,
+    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
+    SubscriptionId, SubscriptionPaymentStateSnapshot, SubscriptionPeriodRule, SubscriptionPhase,
+    SubscriptionStart, SubscriptionStatus,
 };
 
 fn result_test_instant(second: u32) -> DateTime<Utc> {
@@ -148,7 +149,15 @@ fn payment_result_constructors_reject_crossed_state_invariants() {
         },
     );
 
-    assert!(HostChargePaymentResult::new(host_attempt.clone()).is_ok());
+    let durable_host_result = HostChargePaymentResult::new(host_attempt.clone()).unwrap();
+    let host_result = durable_host_result
+        .clone()
+        .with_gateway_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+    assert_eq!(host_result, durable_host_result);
+    assert_eq!(
+        host_result.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     assert_eq!(
         HostChargePaymentResult::new(pending.clone()).unwrap_err(),
         HostChargePaymentResultBuildError::AttemptNotHostCharge,
@@ -234,14 +243,30 @@ fn payment_result_constructors_reject_crossed_state_invariants() {
     assert_eq!(applied.status(), PaymentAttemptStatus::Approved);
     assert_eq!(applied.subscription(), Some(&subscription));
     assert!(!applied.is_confirmation_pending());
-    let (_, applied_subscription, applied_confirmation) = applied.into_parts();
+    let (_, applied_subscription, applied_confirmation, applied_diagnostics) =
+        applied.into_parts_with_gateway_diagnostics();
     assert_eq!(applied_subscription, Some(subscription));
     assert_eq!(applied_confirmation, None);
+    assert!(applied_diagnostics.is_empty());
 
-    let not_applied = SubscriptionEnrollmentPaymentResult::not_applied(pending.clone()).unwrap();
+    let durable_not_applied =
+        SubscriptionEnrollmentPaymentResult::not_applied(pending.clone()).unwrap();
+    let not_applied = durable_not_applied
+        .clone()
+        .with_gateway_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+    assert_eq!(not_applied, durable_not_applied);
     assert_eq!(not_applied.status(), PaymentAttemptStatus::Pending);
     assert_eq!(not_applied.subscription(), None);
     assert!(!not_applied.is_confirmation_pending());
+    assert_eq!(
+        not_applied.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
+    let (_, _, _, diagnostics) = not_applied.into_parts_with_gateway_diagnostics();
+    assert_eq!(
+        diagnostics,
+        vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
 
     let confirmation_pending = SubscriptionEnrollmentPaymentResult::confirmation_pending(
         pending,

@@ -7,10 +7,34 @@ use zeroize::Zeroizing;
 
 use crate::configuration::{MAX_NMI_CONCURRENT_REPORTS, configured_http_client};
 use crate::{
-    BillingContact, ClientFactory, ConfigurationError, Credentials, Endpoint, MAX_CREDENTIAL_BYTES,
-    MutationCertainty, MutationError, PaymentSource, SaleRequest, SensitiveText, StoredCredential,
-    VaultAction,
+    BillingContact, ClientFactory, ConfigurationError, Credentials, DuplicateCheck,
+    DuplicateCheckWindow, Endpoint, MAX_CREDENTIAL_BYTES, MutationCertainty, MutationError,
+    PaymentSource, SaleRequest, SensitiveText, StoredCredential, VaultAction,
 };
+
+#[test]
+fn duplicate_check_window_enforces_the_documented_nmi_range() {
+    assert!(matches!(
+        DuplicateCheckWindow::new(0),
+        Err(ConfigurationError::DuplicateCheckWindowOutOfRange)
+    ));
+    assert_eq!(
+        DuplicateCheckWindow::new(DuplicateCheckWindow::MIN_SECONDS)
+            .expect("minimum positive window should validate")
+            .seconds(),
+        DuplicateCheckWindow::MIN_SECONDS
+    );
+    assert_eq!(
+        DuplicateCheckWindow::new(DuplicateCheckWindow::MAX_SECONDS)
+            .expect("documented maximum window should validate")
+            .seconds(),
+        DuplicateCheckWindow::MAX_SECONDS
+    );
+    assert!(matches!(
+        DuplicateCheckWindow::new(DuplicateCheckWindow::MAX_SECONDS + 1),
+        Err(ConfigurationError::DuplicateCheckWindowOutOfRange)
+    ));
+}
 
 #[test]
 fn endpoint_parsers_keep_https_and_loopback_http_explicit() {
@@ -35,7 +59,11 @@ fn endpoint_parsers_keep_https_and_loopback_http_explicit() {
     assert!(matches!(
         ClientFactory::new()
             .expect("HTTPS factory should construct")
-            .client(loopback_endpoint, credentials),
+            .client_with_duplicate_check(
+                loopback_endpoint,
+                credentials,
+                DuplicateCheck::ProcessorConfigured,
+            ),
         Err(ConfigurationError::LoopbackHttpDisabled)
     ));
     for invalid in [
@@ -66,10 +94,11 @@ fn credential_client_and_sensitive_text_formatting_is_value_free() {
 
     let client = ClientFactory::new()
         .expect("HTTP client should construct")
-        .client(
+        .client_with_duplicate_check(
             Endpoint::parse_https("https://merchant.example.test")
                 .expect("endpoint should validate"),
             credentials,
+            DuplicateCheck::ProcessorConfigured,
         )
         .expect("HTTPS client should construct");
     let client_debug = format!("{client:?}");
@@ -192,10 +221,11 @@ async fn http2_refused_stream_sale_is_indeterminate_and_never_retried() {
         loopback_http: Some(http),
         report_admission: Arc::new(tokio::sync::Semaphore::new(MAX_NMI_CONCURRENT_REPORTS)),
     }
-    .client(
+    .client_with_duplicate_check(
         Endpoint::parse_loopback_http(endpoint_url).expect("test endpoint should validate"),
         Credentials::new("private_key".to_owned(), "query_key".to_owned())
             .expect("test credentials should validate"),
+        DuplicateCheck::ProcessorConfigured,
     )
     .expect("explicit loopback client should construct");
 

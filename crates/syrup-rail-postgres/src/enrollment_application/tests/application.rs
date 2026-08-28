@@ -1,6 +1,33 @@
 use super::*;
 
 #[tokio::test]
+async fn foreground_duplicate_diagnostic_crosses_the_application_boundary()
+-> Result<(), Box<dyn Error>> {
+    let fixture = application_fixture("duplicate_diag", false, false).await?;
+    let result = apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &processor_duplicate_outcome(),
+    )
+    .await?;
+
+    assert_eq!(result.status(), PaymentAttemptStatus::Unknown);
+    assert_eq!(
+        result.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
+    assert_eq!(
+        result
+            .processor_evidence()
+            .response_code()
+            .map(GatewayDiagnostic::expose),
+        Some("430")
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
 async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()
 -> Result<(), Box<dyn Error>> {
     let fixture = application_fixture("enroll_apply", true, false).await?;
@@ -52,14 +79,32 @@ async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()
             .await?;
     assert_eq!(progression, "applied");
 
-    let replay = apply_subscription_enrollment_gateway_outcome(
+    let identical_replay = apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
         &fixture.reservation,
         &outcome,
     )
     .await?;
-    assert_eq!(replay.attempt().status(), PaymentAttemptStatus::Approved);
+    assert_eq!(identical_replay, result);
+    assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
+
+    let diagnostic_replay = apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &processor_duplicate_outcome(),
+    )
+    .await?;
+    assert_eq!(
+        diagnostic_replay.attempt().status(),
+        PaymentAttemptStatus::Approved
+    );
+    assert_eq!(
+        diagnostic_replay.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate],
+        "a current observation annotates but never overrides the durable result"
+    );
     assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
     fixture.cleanup().await
 }

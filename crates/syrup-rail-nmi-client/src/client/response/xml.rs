@@ -203,11 +203,12 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
             .finish_decision(DecisionFieldKind::GatewayState),
         collect_xml_scalar(transaction, &["condition"], false)
             .finish_decision(DecisionFieldKind::GatewayState),
-    );
+    )
+    .resolve();
     let (response_text, _) =
         resolve_optional_scalar(collect_xml_scalar(transaction, &["response_text"], true).finish());
-    let (mut status, decision_diagnostic) = decision.payment_status();
-    let mut diagnostics = decision_diagnostic.into_iter().collect();
+    let mut status = decision.status;
+    let mut diagnostics = decision.diagnostics;
     let order_identifier =
         collect_xml_identifier(transaction, &["order_id"], IdentifierPresence::Optional);
     let transaction_identifier = collect_xml_identifier(
@@ -238,10 +239,10 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
             status,
             transaction_id,
             customer_vault_id,
-            response: sensitive_gateway_field(decision.response.raw),
-            response_code: sensitive_gateway_field(decision.response_code.raw),
+            response: sensitive_gateway_field(decision.response),
+            response_code: sensitive_gateway_field(decision.response_code),
             response_text: sensitive_gateway_field(response_text),
-            condition: sensitive_gateway_field(decision.condition.raw),
+            condition: sensitive_gateway_field(decision.condition),
             descriptor: PaymentDescriptor {
                 payment_type: sensitive_gateway_field(payment_type),
                 card_brand: sensitive_gateway_field(card_brand),

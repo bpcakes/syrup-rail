@@ -223,9 +223,104 @@ fn classic_payment_outcome_preserves_vault_disabled_failure() {
 }
 
 #[test]
+fn classic_noncanonical_301_evidence_is_order_independent_and_reconcilable() {
+    for response in [
+        "response=3&response_code=301&responsecode=%2B0301",
+        "response=3&responsecode=%2B0301&response_code=301",
+        "response=3&response_code=0301",
+        "response=+3+&response_code=301",
+        "response=3&response_code=+301+",
+        "response=3&response_code=301&responsecode=+301+",
+        "response=3&responsecode=+301+&response_code=301",
+    ] {
+        let outcome = classic_payment_outcome_from_form(response)
+            .expect("noncanonical Classic 301 evidence must remain reconcilable");
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{response}");
+    }
+}
+
+#[test]
+fn classic_duplicate_response_code_requires_reconciliation() {
+    let outcome = classic_payment_outcome_from_form(
+        "response=3&responsetext=Duplicate+transaction&response_code=430&transactionid=txn_duplicate_evidence",
+    )
+    .expect("duplicate Classic response should parse");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.transaction_id.as_ref().map(SensitiveText::expose),
+        Some("txn_duplicate_evidence")
+    );
+    assert_eq!(
+        outcome.response_code.as_ref().map(SensitiveText::expose),
+        Some("430")
+    );
+    assert_eq!(
+        outcome.diagnostics,
+        vec![
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+            PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+        ]
+    );
+}
+
+#[test]
+fn classic_duplicate_response_keeps_malformed_identity_diagnostic() {
+    let outcome = classic_payment_outcome_from_form(
+        "response=3&responsetext=Duplicate+transaction&response_code=430&transactionid=",
+    )
+    .expect("duplicate Classic response with an empty identity should parse");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.diagnostics,
+        vec![
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+            PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ]
+    );
+}
+
+#[test]
+fn classic_duplicate_response_keeps_unrecognized_decision_diagnostic() {
+    let outcome = classic_payment_outcome_from_form(
+        "response_code=430&status=processor_surprise&transactionid=txn_duplicate_unknown_status",
+    )
+    .expect("duplicate Classic response with an unknown status should parse");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.diagnostics,
+        vec![
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+            PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence,
+        ]
+    );
+}
+
+#[test]
+fn classic_numeric_duplicate_code_aliases_are_semantically_consistent() {
+    let outcome = classic_payment_outcome_from_form(
+        "response_code=430&responsecode=%2B0430&transactionid=txn_duplicate_code_aliases",
+    )
+    .expect("equivalent duplicate response-code aliases should parse");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.response_code.as_ref().map(SensitiveText::expose),
+        Some("430")
+    );
+    assert_eq!(
+        outcome.diagnostics,
+        vec![PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor]
+    );
+}
+
+#[test]
 fn classic_301_without_lifecycle_evidence_is_known_not_submitted() {
     let error = classic_payment_outcome_from_form(
-        "response=3&responsetext=Rate+limit+exceeded&response_code=301&transactionid=&customer_vault_id=&authcode=&avsresponse=&cvvresponse=",
+        "response=3&responsetext=Rate+limit+exceeded&response_code=301&transactionid=&authcode=&avsresponse=&cvvresponse=&orderid=&type=",
     )
     .expect_err("a Classic 301 without lifecycle evidence must be known not submitted");
 
@@ -249,6 +344,13 @@ fn classic_301_with_lifecycle_evidence_is_never_known_not_submitted() {
         "cvv_response=N&cvvresponse=M",
         "transactionid=txn_first&transaction_id=txn_second",
         "transaction_id=txn_second&transactionid=txn_first",
+        "type=sale",
+        "cctype=visa",
+        "card_type=visa",
+        "ccnumber=xxxx4242",
+        "cc_number=xxxx4242",
+        "responsetext=Unexpected+message",
+        "future_provider_field=",
     ] {
         for response in [
             format!("response=3&response_code=301&{lifecycle_fields}"),

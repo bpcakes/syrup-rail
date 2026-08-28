@@ -237,6 +237,29 @@ fn approved_payment_evidence_requires_identity_and_an_authoritative_decision() {
 }
 
 #[test]
+fn gateway_outcome_carries_only_provider_neutral_payment_diagnostics() {
+    let outcome =
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, ProcessorEvidence::default())
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+    assert_eq!(
+        outcome.diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
+    let (status, evidence, diagnostics) = outcome.into_parts_with_diagnostics();
+    assert_eq!(status, GatewayPaymentStatus::Unknown);
+    assert_eq!(evidence, ProcessorEvidence::default());
+    assert_eq!(
+        diagnostics,
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
+    assert!(
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, ProcessorEvidence::default())
+            .diagnostics()
+            .is_empty()
+    );
+}
+
+#[test]
 fn quarantine_resolution_reason_is_normalized_bounded_and_card_safe() {
     let reason = GatewayLifecycleQuarantineResolutionReason::new("  reviewed evidence  ").unwrap();
     assert_eq!(reason.expose(), "reviewed evidence");

@@ -27,7 +27,8 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
             .finish_decision(DecisionFieldKind::GatewayState),
         collect_classic_scalar(&fields, &["condition"], false)
             .finish_decision(DecisionFieldKind::GatewayState),
-    );
+    )
+    .resolve();
     let (transaction_evidence, transaction_identifier) =
         collect_classic_transaction_identifier(&fields);
     let customer_vault_identifier =
@@ -41,6 +42,7 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
     let cvv_response =
         collect_classic_optional_identifier(&fields, &["cvvresponse", "cvv_response"]);
     if classic_is_known_preprocessing_rate_limit(
+        &fields,
         &decision,
         [
             &transaction_evidence,
@@ -55,9 +57,10 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
     let (response_text, invalid_response_text) = resolve_optional_scalar(
         collect_classic_scalar(&fields, &["responsetext", "response_text"], true).finish(),
     );
-    let (mut status, decision_diagnostic) = decision.payment_status();
-    let mut diagnostics: Vec<_> = decision_diagnostic.into_iter().collect();
-    if !decision.has_structured_evidence() {
+    let has_structured_evidence = decision.has_structured_evidence();
+    let mut status = decision.status;
+    let mut diagnostics = decision.diagnostics;
+    if !has_structured_evidence {
         let response_text_reports_unknown = response_text
             .as_deref()
             .map(|value| value.trim().to_ascii_lowercase())
@@ -92,10 +95,10 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
         status,
         transaction_id,
         customer_vault_id,
-        response: sensitive_gateway_field(decision.response.raw),
-        response_code: sensitive_gateway_field(decision.response_code.raw),
+        response: sensitive_gateway_field(decision.response),
+        response_code: sensitive_gateway_field(decision.response_code),
         response_text: sensitive_gateway_field(response_text),
-        condition: sensitive_gateway_field(decision.condition.raw),
+        condition: sensitive_gateway_field(decision.condition),
         descriptor: PaymentDescriptor {
             payment_type: sensitive_gateway_field(payment_type),
             card_brand: sensitive_gateway_field(card_brand),
@@ -105,6 +108,63 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
         },
         diagnostics,
     })
+}
+
+pub(in crate::client) fn classic_form_has_payment_processing_evidence(
+    text: &str,
+    http_status: u16,
+) -> bool {
+    if !is_classic_form_candidate(text) {
+        return false;
+    }
+    let fields: Vec<_> = form_urlencoded::parse(text.as_bytes()).collect();
+    let decision = PaymentDecisionFields::new(
+        collect_classic_scalar(&fields, &["response"], false)
+            .finish_decision(DecisionFieldKind::Response),
+        collect_classic_scalar(&fields, &["response_code", "responsecode"], false)
+            .finish_decision(DecisionFieldKind::ResponseCode),
+        collect_classic_scalar(&fields, &["status"], false)
+            .finish_decision(DecisionFieldKind::GatewayState),
+        collect_classic_scalar(&fields, &["condition"], false)
+            .finish_decision(DecisionFieldKind::GatewayState),
+    )
+    .resolve();
+    if decision.has_payment_processing_evidence(http_status) {
+        return true;
+    }
+    let (transaction, _) = collect_classic_transaction_identifier(&fields);
+    if !matches!(transaction, ResolvedScalar::Missing) {
+        return true;
+    }
+    [
+        &["customer_vault_id", "customer_vaultid"][..],
+        &["authcode", "auth_code", "authorization_code"][..],
+        &["avsresponse", "avs_response"][..],
+        &["cvvresponse", "cvv_response"][..],
+        &["type"][..],
+        &["cctype", "card_type"][..],
+        &["cc_number", "ccnumber"][..],
+    ]
+    .into_iter()
+    .any(|aliases| {
+        !matches!(
+            collect_classic_optional_identifier(&fields, aliases),
+            ResolvedScalar::Missing
+        )
+    })
+}
+
+fn is_classic_form_candidate(text: &str) -> bool {
+    !text.is_empty()
+        && text.split('&').all(|pair| {
+            let Some((name, _)) = pair.split_once('=') else {
+                return false;
+            };
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        })
 }
 
 fn collect_classic_scalar(
@@ -127,13 +187,22 @@ fn collect_classic_scalar(
 }
 
 fn classic_is_known_preprocessing_rate_limit(
-    decision: &PaymentDecisionFields,
+    fields: &[(Cow<'_, str>, Cow<'_, str>)],
+    decision: &super::common::ResolvedPaymentDecision,
     evidence: [&ResolvedScalar; 5],
 ) -> bool {
-    decision.is_rate_limited()
+    decision.is_known_preprocessing_rate_limit()
         && evidence
             .iter()
             .all(|channel| matches!(channel, ResolvedScalar::Missing))
+        && fields.iter().all(|(name, value)| match name.as_ref() {
+            "response" | "response_code" => true,
+            "responsetext" => value == "Rate limit exceeded",
+            "authcode" | "transactionid" | "avsresponse" | "cvvresponse" | "orderid" | "type" => {
+                value.is_empty()
+            }
+            _ => false,
+        })
 }
 
 fn collect_classic_optional_identifier(

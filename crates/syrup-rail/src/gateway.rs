@@ -286,6 +286,21 @@ pub enum GatewayPaymentStatus {
     Failed,
 }
 
+/// Provider-neutral diagnostics that require host policy beyond the payment
+/// status alone.
+///
+/// These diagnostics intentionally contain no provider payload. Exact gateway
+/// response fields remain available through [`ProcessorEvidence`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum GatewayPaymentDiagnostic {
+    /// The processor reported the payment as a duplicate.
+    ///
+    /// This does not prove that the current attempt was submitted or identify
+    /// an earlier transaction. Reconcile the durable attempt before retrying.
+    ProcessorReportedDuplicate,
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct CardLastFour(String);
 
@@ -604,11 +619,22 @@ impl fmt::Debug for ProcessorEvidence {
 pub struct GatewayPaymentOutcome {
     status: GatewayPaymentStatus,
     evidence: ProcessorEvidence,
+    diagnostics: Vec<GatewayPaymentDiagnostic>,
 }
 
 impl GatewayPaymentOutcome {
     pub const fn new(status: GatewayPaymentStatus, evidence: ProcessorEvidence) -> Self {
-        Self { status, evidence }
+        Self {
+            status,
+            evidence,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// Attaches provider-neutral diagnostics derived by a gateway adapter.
+    pub fn with_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 
     pub const fn status(&self) -> GatewayPaymentStatus {
@@ -619,6 +645,11 @@ impl GatewayPaymentOutcome {
         &self.evidence
     }
 
+    /// Returns payload-free diagnostics suitable for host policy and routing.
+    pub fn diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
+        &self.diagnostics
+    }
+
     /// Refines this outcome's evidence only when the provider decision is
     /// authoritatively approved.
     pub fn approved_evidence(&self) -> Option<ApprovedProcessorEvidence> {
@@ -627,8 +658,26 @@ impl GatewayPaymentOutcome {
         })
     }
 
+    /// Consumes the outcome into its original durable decision parts.
+    ///
+    /// This compatibility method does not return provider-neutral diagnostics;
+    /// use [`Self::into_parts_with_diagnostics`] when routing them matters.
+    #[deprecated(
+        note = "this drops gateway diagnostics; use GatewayPaymentOutcome::into_parts_with_diagnostics"
+    )]
     pub fn into_parts(self) -> (GatewayPaymentStatus, ProcessorEvidence) {
         (self.status, self.evidence)
+    }
+
+    /// Consumes the outcome without discarding provider-neutral diagnostics.
+    pub fn into_parts_with_diagnostics(
+        self,
+    ) -> (
+        GatewayPaymentStatus,
+        ProcessorEvidence,
+        Vec<GatewayPaymentDiagnostic>,
+    ) {
+        (self.status, self.evidence, self.diagnostics)
     }
 
     pub const fn transaction_id(&self) -> Option<&GatewayTransactionId> {
