@@ -1,0 +1,1 @@
+Merge tag v0.5.0 into the current integration line. Preserve released schema v4, retain unreleased schema v5, reconcile NMI duplicate-payment hardening with the newer runtime, advance crate and documentation versions to 0.6.0, and run all required gates.
