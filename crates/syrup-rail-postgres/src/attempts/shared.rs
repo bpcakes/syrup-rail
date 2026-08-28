@@ -44,6 +44,17 @@ pub(crate) enum AttemptReplayDisposition {
     ReturnCanonical,
 }
 
+impl AttemptReplayDisposition {
+    /// Whether replay can still continue to a first provider submission.
+    ///
+    /// Unsubmitted review-required attempts are locally repairable, but the
+    /// repair path can only expire or return their canonical result. They no
+    /// longer need the deployment mode that was captured at reservation.
+    pub(crate) const fn may_reach_provider(self) -> bool {
+        matches!(self, Self::ResumePrepared)
+    }
+}
+
 /// The database policy for attempts that are still wholly local.
 ///
 /// The status classification is global because provider submission and replay
@@ -117,6 +128,20 @@ pub(crate) fn attempt_replay_disposition(attempt: &PaymentAttempt) -> AttemptRep
         attempt.status(),
         attempt.state().timestamps().submitted_at().is_some(),
     )
+}
+
+/// Whether a replay can still reach the provider but its requested deployment
+/// mode differs from the mode captured by the durable attempt.
+///
+/// Terminal and locally repairable attempts remain canonical across a service
+/// mode change. Only a prepared attempt can be submitted for the first time,
+/// so only that state rejects a changed required mode.
+pub(crate) fn prepared_replay_required_mode_changed(
+    attempt: &PaymentAttempt,
+    requested_mode: GatewayAccountMode,
+) -> bool {
+    attempt_replay_disposition(attempt).may_reach_provider()
+        && attempt.identity().required_gateway_account_mode() != requested_mode
 }
 
 const fn attempt_replay_disposition_for(
@@ -538,6 +563,14 @@ mod replay_disposition_tests {
         assert_eq!(
             attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, false),
             AttemptReplayDisposition::RepairUnsubmittedReview,
+        );
+        assert!(
+            attempt_replay_disposition_for(PaymentAttemptStatus::Pending, false)
+                .may_reach_provider()
+        );
+        assert!(
+            !attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, false)
+                .may_reach_provider()
         );
 
         for status in PaymentAttemptStatus::ALL {

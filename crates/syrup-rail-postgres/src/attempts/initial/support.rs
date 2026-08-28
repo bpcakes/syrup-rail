@@ -186,7 +186,7 @@ pub(super) async fn gateway_identity_matches_scope(
     )
 }
 
-pub(super) fn replay_matches_reservation(
+pub(super) fn replay_matches_reservation_without_required_mode(
     attempt: &PaymentAttempt,
     reservation: &SubscriptionEnrollmentReservation,
 ) -> bool {
@@ -249,7 +249,7 @@ pub(super) fn initial_attempt_matches_expected(
     }
 }
 
-pub(super) fn pending_attempt_matches_request(
+pub(super) fn pending_attempt_matches_request_without_required_mode(
     attempt: &PaymentAttempt,
     requested_identity: PaymentAttemptIdentity,
     requested: &PaymentAttemptRequest,
@@ -267,7 +267,7 @@ pub(super) fn pending_attempt_matches_request(
         && attempt.request().billing_contact() == requested.billing_contact()
 }
 
-pub(super) fn attempt_identity_matches_requested_gateway(
+pub(super) fn attempt_identity_matches_requested_gateway_without_required_mode(
     attempt: &PaymentAttempt,
     requested: PaymentAttemptIdentity,
 ) -> bool {
@@ -334,12 +334,14 @@ pub(super) async fn insert_initial_attempt(
             subscription_initial_dunning_retry_delays_seconds,
             subscription_initial_dunning_exhaustion,
             subscription_initial_past_due_access,
-            billing_first_name, billing_last_name, billing_email
+            billing_first_name, billing_last_name, billing_email,
+            required_gateway_account_mode
         ) VALUES (
             $1, $2, $3, $4, 'subscription_initial', 'pending',
             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
             $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-            $28, $29, $30, $31, $32, $33, $34, $35, $36, $37
+            $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
+            $38
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
@@ -381,6 +383,7 @@ pub(super) async fn insert_initial_attempt(
     .bind(request.billing_contact().first_name())
     .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
+    .bind(identity.required_gateway_account_mode().as_str())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -405,36 +408,6 @@ pub(super) fn discount_duration_months(duration: SubscriptionDiscountDuration) -
         SubscriptionDiscountDuration::Indefinite => None,
         SubscriptionDiscountDuration::LimitedMonths(value) => Some(i32::from(value.get())),
     }
-}
-
-pub(super) async fn reject_prepared_initial(
-    transaction: &mut Transaction<'_, Postgres>,
-    reservation: &SubscriptionEnrollmentReservation,
-    reason: SubscriptionEnrollmentSubmissionRejection,
-    message: &'static str,
-) -> Result<SubscriptionEnrollmentSubmissionOutcome, PaymentAttemptStoreError> {
-    let identity = reservation.identity();
-    let attempt = lock_payment_attempt_by_idempotency(
-        transaction,
-        identity.billing_scope_id(),
-        identity.subscriber_id(),
-        reservation.idempotency_key(),
-    )
-    .await?
-    .ok_or_else(invalid_state)?;
-    if !attempt_identity_matches_requested_gateway(&attempt, identity)
-        || attempt.kind() != PaymentAttemptKind::SubscriptionInitial
-    {
-        return Err(invalid_state());
-    }
-    if attempt.status() != PaymentAttemptStatus::Pending
-        || attempt.state().timestamps().submitted_at().is_some()
-    {
-        return Ok(SubscriptionEnrollmentSubmissionOutcome::AlreadyAdmitted(
-            attempt,
-        ));
-    }
-    reject_locked_prepared_initial(transaction, attempt, reason, message).await
 }
 
 pub(super) async fn reject_locked_prepared_initial(

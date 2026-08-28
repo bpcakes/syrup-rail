@@ -51,12 +51,51 @@ async fn due_selection_is_provider_keyed_and_has_a_fixed_shared_bound() -> Resul
 }
 
 #[tokio::test]
+async fn mode_specific_due_selection_does_not_spend_page_capacity_on_other_mode()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("renew_mode_page").await?;
+    let account = create_gateway_account(&database.pool, "nmi").await?;
+    let live_subscription = insert_due_subscription(&database.pool, account, "live-plan").await?;
+    let test_subscription = insert_due_subscription(&database.pool, account, "test-plan").await?;
+    sqlx::query(
+        "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id = $1",
+    )
+    .bind(test_subscription)
+    .execute(&database.pool)
+    .await?;
+
+    let live = due_renewals_for_mode(&database.pool, GatewayAccountMode::Live).await?;
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].subscription_id().into_uuid(), live_subscription);
+    assert_eq!(
+        live[0].required_gateway_account_mode(),
+        GatewayAccountMode::Live
+    );
+    let test = due_renewals_for_mode(&database.pool, GatewayAccountMode::Test).await?;
+    assert_eq!(test.len(), 1);
+    assert_eq!(test[0].subscription_id().into_uuid(), test_subscription);
+    assert_eq!(
+        test[0].required_gateway_account_mode(),
+        GatewayAccountMode::Test
+    );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
 async fn representative_first_and_continuation_plans_are_limit_driven_and_index_ordered()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("renew_plan_v18").await?;
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let due_at = Utc::now() - Duration::minutes(5);
     insert_due_subscription_population(&database.pool, account, due_at, 4_096).await?;
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET required_gateway_account_mode = 'test' \
+         WHERE id IN (SELECT id FROM billing_subscriptions ORDER BY id LIMIT 2048)",
+    )
+    .execute(&database.pool)
+    .await?;
     sqlx::raw_sql(
         r#"
         ANALYZE billing_subscriptions;
@@ -73,53 +112,86 @@ async fn representative_first_and_continuation_plans_are_limit_driven_and_index_
         due_at,
         due_at - Duration::minutes(8),
         SubscriptionId::new(Uuid::from_u128(u128::MAX / 2)),
+        None,
     );
 
-    for (page_kind, page_query) in [
-        ("first", DueRenewalPageQuery::First(due_at)),
+    for (scan_kind, required_mode, index_name, keyset_parameters) in [
         (
-            "continuation",
-            DueRenewalPageQuery::Continuation(continuation_cursor),
+            "all-mode",
+            None,
+            "billing_subscriptions_due_idx",
+            ("$13", "$14"),
+        ),
+        (
+            "mode-specific",
+            Some(GatewayAccountMode::Test),
+            "billing_subscriptions_due_mode_idx",
+            ("$14", "$15"),
         ),
     ] {
-        let explain_sql = format!(
-            "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
-            page_query.sql()
-        );
-        let plan_row = sqlx::raw_sql(&explain_sql)
-            .fetch_one(&mut *transaction)
-            .await?;
-        let plan: serde_json::Value = plan_row.try_get(0)?;
-        let root = explain_plan_root(&plan)?;
-        let rendered = serde_json::to_string_pretty(root)?;
-        if root.get("Node Type").and_then(serde_json::Value::as_str) != Some("Limit") {
-            return Err(io::Error::other(format!(
-                "{page_kind} representative renewal plan lost its top-level Limit:\n{rendered}"
-            ))
-            .into());
-        }
-        if plan_has_node_type(root, "CTE Scan")
-            || plan_has_node_type(root, "Sort")
-            || plan_has_node_type(root, "Incremental Sort")
-        {
-            return Err(io::Error::other(format!(
-                "{page_kind} representative renewal plan materialized or sorted its due candidates:\n{rendered}"
-            ))
-            .into());
-        }
-        let index_node = find_plan_index_node(root, "billing_subscriptions_due_idx").ok_or_else(|| {
-            io::Error::other(format!(
-                "{page_kind} renewal dispatch plan did not use its ordered due index:\n{rendered}"
-            ))
-        })?;
-        if matches!(page_query, DueRenewalPageQuery::Continuation(_)) {
+        for (page_kind, page_query) in [
+            ("first", DueRenewalPageQuery::First(due_at)),
+            (
+                "continuation",
+                DueRenewalPageQuery::Continuation(continuation_cursor),
+            ),
+        ] {
+            let explain_sql = format!(
+                "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
+                page_query.sql(required_mode)
+            );
+            let plan_row = sqlx::raw_sql(&explain_sql)
+                .fetch_one(&mut *transaction)
+                .await?;
+            let plan: serde_json::Value = plan_row.try_get(0)?;
+            let root = explain_plan_root(&plan)?;
+            let rendered = serde_json::to_string_pretty(root)?;
+            if root.get("Node Type").and_then(serde_json::Value::as_str) != Some("Limit") {
+                return Err(io::Error::other(format!(
+                    "{scan_kind} {page_kind} representative renewal plan lost its top-level Limit:\n{rendered}"
+                ))
+                .into());
+            }
+            if plan_has_node_type(root, "CTE Scan")
+                || plan_has_node_type(root, "Sort")
+                || plan_has_node_type(root, "Incremental Sort")
+            {
+                return Err(io::Error::other(format!(
+                    "{scan_kind} {page_kind} representative renewal plan materialized or sorted its due candidates:\n{rendered}"
+                ))
+                .into());
+            }
+            let index_node = find_plan_index_node(root, index_name).ok_or_else(|| {
+                io::Error::other(format!(
+                    "{scan_kind} {page_kind} renewal dispatch plan did not use {index_name}:\n{rendered}"
+                ))
+            })?;
+            if index_node
+                .get("Node Type")
+                .and_then(serde_json::Value::as_str)
+                != Some("Index Only Scan")
+            {
+                return Err(io::Error::other(format!(
+                    "{scan_kind} {page_kind} renewal dispatch plan lost its covering index-only scan:\n{rendered}"
+                ))
+                .into());
+            }
             let index_condition = index_node
                 .get("Index Cond")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            if !index_condition.contains("$13") || !index_condition.contains("$14") {
+            if required_mode.is_some() && !index_condition.contains("$13") {
                 return Err(io::Error::other(format!(
-                    "continuation keyset was not pushed into the due-index condition:\n{rendered}"
+                    "mode filter was not pushed into the mode-specific index condition:\n{rendered}"
+                ))
+                .into());
+            }
+            if matches!(page_query, DueRenewalPageQuery::Continuation(_))
+                && (!index_condition.contains(keyset_parameters.0)
+                    || !index_condition.contains(keyset_parameters.1))
+            {
+                return Err(io::Error::other(format!(
+                    "{scan_kind} continuation keyset was not pushed into the due-index condition:\n{rendered}"
                 ))
                 .into());
             }
@@ -171,6 +243,16 @@ async fn pages_drain_205_tied_due_subscriptions_once_and_legacy_wrapper_keeps_fi
     let first_cursor = first
         .next_cursor()
         .expect("the first 205-row page has another page");
+    assert_eq!(first_cursor.required_gateway_account_mode(), None);
+    assert!(matches!(
+        due_renewals_page_for_mode(
+            &database.pool,
+            GatewayAccountMode::Live,
+            Some(&first_cursor)
+        )
+        .await,
+        Err(RenewalStoreError::CursorModeMismatch)
+    ));
 
     let second = due_renewals_page(&database.pool, Some(&first_cursor)).await?;
     assert_eq!(second.dispatches().len(), 100);
@@ -199,6 +281,25 @@ async fn pages_drain_205_tied_due_subscriptions_once_and_legacy_wrapper_keeps_fi
         .map(|dispatch| dispatch.subscription_id().into_uuid())
         .collect::<Vec<_>>();
     assert_eq!(legacy_ids, expected_ids[..100]);
+
+    let mode_first =
+        due_renewals_page_for_mode(&database.pool, GatewayAccountMode::Live, None).await?;
+    let mode_cursor = mode_first
+        .next_cursor()
+        .expect("the mode-specific scan also has another page");
+    assert_eq!(
+        mode_cursor.required_gateway_account_mode(),
+        Some(GatewayAccountMode::Live)
+    );
+    assert!(matches!(
+        due_renewals_page(&database.pool, Some(&mode_cursor)).await,
+        Err(RenewalStoreError::CursorModeMismatch)
+    ));
+    assert!(matches!(
+        due_renewals_page_for_mode(&database.pool, GatewayAccountMode::Test, Some(&mode_cursor))
+            .await,
+        Err(RenewalStoreError::CursorModeMismatch)
+    ));
 
     database.cleanup().await
 }
@@ -357,7 +458,7 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
         &database.pool,
         account,
         "stale-review-update-plan",
-        Uuid::from_u128(14),
+        Uuid::from_u128(15),
         due_at,
     )
     .await?;
@@ -558,6 +659,26 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
     )
     .await?;
 
+    let account_rate_pacing = insert_due_subscription_at(
+        &database.pool,
+        account,
+        "account-rate-pacing-plan",
+        Uuid::from_u128(14),
+        due_at,
+    )
+    .await?;
+    insert_renewal_attempt(
+        &database.pool,
+        account,
+        &account_rate_pacing,
+        due_at,
+        "subscription_renewal",
+        "failed",
+        Some(PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission.as_str()),
+        Some(Utc::now()),
+    )
+    .await?;
+
     let page = due_renewals_page(&database.pool, None).await?;
     let included_dispatch = page
         .dispatches()
@@ -588,6 +709,7 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
         infrastructure_limit.subscription_id,
         infrastructure_pacing.subscription_id,
         provider_rate_pacing.subscription_id,
+        account_rate_pacing.subscription_id,
     ] {
         assert!(!actual.contains(&excluded));
     }
@@ -725,7 +847,7 @@ async fn continuation_keeps_every_clock_dependent_gate_at_the_first_page_time()
         Some(
             observed_at
                 - Duration::seconds(
-                    syrup_rail::RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS - 1,
+                    syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS - 1,
                 ),
         ),
     )
@@ -770,11 +892,16 @@ async fn period_state_counts_both_kinds_but_renewal_only_infrastructure()
             "subscription_recovery",
             PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission.as_str(),
         ),
+        (
+            "subscription_renewal",
+            PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission.as_str(),
+        ),
     ] {
         let attempt_id = Uuid::now_v7();
         sqlx::query(
             r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency,
@@ -785,6 +912,7 @@ async fn period_state_counts_both_kinds_but_renewal_only_infrastructure()
                 subscription_expected_initial_transaction_id,
                 subscription_expected_status
             ) VALUES (
+                'live',
                 $1, $2, $3, 'base-plan', $4, $5, $6, 'failed', $7, $8,
                 1900, 'USD', $9, $10, $11, $12, $13, $14, clock_timestamp(),
                 $5, $15, $16
@@ -819,8 +947,9 @@ async fn period_state_counts_both_kinds_but_renewal_only_infrastructure()
     )
     .await?;
     transaction.rollback().await?;
-    assert_eq!(state.attempt_sequence_count, 2);
-    assert_eq!(state.automatic_infrastructure_attempt_count, 1);
+    assert_eq!(state.attempt_sequence_count, 3);
+    assert_eq!(state.automatic_infrastructure_attempt_count, 2);
+    assert_eq!(state.rate_limited_attempt_count, 1);
 
     database.cleanup().await
 }

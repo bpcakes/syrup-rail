@@ -6,7 +6,8 @@ pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = r#"
         attempt_kind, status, idempotency_key, request_fingerprint,
         amount_cents, currency, billing_period_start_at,
         billing_period_end_at, gateway_account_id,
-        gateway_configuration_id, gateway_order_id,
+        gateway_configuration_id, required_gateway_account_mode,
+        gateway_order_id,
         gateway_transaction_id, gateway_payment_method_reference,
         gateway_response, gateway_response_code, gateway_response_text,
         gateway_condition, payment_type, card_brand, card_last4,
@@ -144,14 +145,15 @@ pub(super) async fn insert_subscription_charge_attempt(
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency,
             billing_period_start_at, billing_period_end_at,
-            gateway_account_id, gateway_configuration_id, gateway_order_id,
+            gateway_account_id, gateway_configuration_id,
+            required_gateway_account_mode, gateway_order_id,
             billing_first_name, billing_last_name, billing_email,
             subscription_expected_payment_method_id,
             subscription_expected_initial_transaction_id,
             subscription_expected_status
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11,
-            $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
+            $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -171,6 +173,7 @@ pub(super) async fn insert_subscription_charge_attempt(
     .bind(period.end_at())
     .bind(identity.gateway_account_id().as_uuid())
     .bind(identity.gateway_configuration_id().as_uuid())
+    .bind(identity.required_gateway_account_mode().as_str())
     .bind(request.gateway_order_id().expose())
     .bind(contact.first_name())
     .bind(contact.last_name())
@@ -181,6 +184,25 @@ pub(super) async fn insert_subscription_charge_attempt(
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)
+}
+
+/// Observes an owner-scoped idempotency row without changing lock order.
+///
+/// Callers that will mutate the result must lock and revalidate it after any
+/// host-owned target lock has been acquired.
+pub(crate) async fn find_payment_attempt_by_idempotency_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    idempotency_key: &IdempotencyKey,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    find_payment_attempt_by_idempotency(
+        transaction,
+        billing_scope_id,
+        subscriber_id,
+        idempotency_key,
+    )
+    .await
 }
 
 /// Locks the exact owner-scoped idempotency row for replay or mutation.
@@ -232,12 +254,17 @@ pub(crate) fn payment_attempt_from_row(
     row: &PgRow,
 ) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
     let attempt_id = PaymentAttemptId::new(row.try_get("id")?);
+    let required_gateway_account_mode = row
+        .try_get::<String, _>("required_gateway_account_mode")?
+        .parse::<GatewayAccountMode>()
+        .map_err(|_| invalid_state())?;
     let identity = PaymentAttemptIdentity::new(
         attempt_id,
         BillingScopeId::new(row.try_get("billing_scope_id")?),
         SubscriberId::new(row.try_get("subscriber_id")?),
         GatewayAccountId::new(row.try_get("gateway_account_id")?),
         GatewayConfigurationId::new(row.try_get("gateway_configuration_id")?),
+        required_gateway_account_mode,
     );
     let kind = row
         .try_get::<String, _>("attempt_kind")?

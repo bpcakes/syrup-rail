@@ -5,8 +5,8 @@ use thiserror::Error;
 
 use crate::{
     ActorId, BillingPeriod, BillingScopeId, ChargeAmount, CurrencyCode, DiscountClaimId,
-    PastDueAccessPolicy, PaymentMethodId, PlanKey, RenewalFailurePolicy, SubscriberId,
-    SubscriptionGrantId, SubscriptionId, SubscriptionPeriodRule, SubscriptionPhase,
+    GatewayAccountMode, PastDueAccessPolicy, PaymentMethodId, PlanKey, RenewalFailurePolicy,
+    SubscriberId, SubscriptionGrantId, SubscriptionId, SubscriptionPeriodRule, SubscriptionPhase,
     SubscriptionStatus,
 };
 
@@ -208,6 +208,7 @@ pub struct Subscription {
     plan_key: PlanKey,
     status: SubscriptionStatus,
     phase: SubscriptionPhase,
+    required_gateway_account_mode: GatewayAccountMode,
     payment_method_id: PaymentMethodId,
     recurring_charge: ChargeAmount,
     recurring_period: SubscriptionPeriodRule,
@@ -229,6 +230,7 @@ impl Subscription {
         plan_key: PlanKey,
         status: SubscriptionStatus,
         phase: SubscriptionPhase,
+        required_gateway_account_mode: GatewayAccountMode,
         payment_method_id: PaymentMethodId,
         recurring_charge: ChargeAmount,
         recurring_period: SubscriptionPeriodRule,
@@ -242,6 +244,7 @@ impl Subscription {
             plan_key,
             status,
             phase,
+            required_gateway_account_mode,
             payment_method_id,
             recurring_charge,
             recurring_period,
@@ -258,6 +261,7 @@ impl Subscription {
         id: SubscriptionId,
         plan_key: PlanKey,
         phase: SubscriptionPhase,
+        required_gateway_account_mode: GatewayAccountMode,
         payment_method_id: PaymentMethodId,
         recurring_charge: ChargeAmount,
         recurring_period: SubscriptionPeriodRule,
@@ -271,6 +275,7 @@ impl Subscription {
             plan_key,
             status,
             phase,
+            required_gateway_account_mode,
             payment_method_id,
             recurring_charge,
             recurring_period,
@@ -295,6 +300,11 @@ impl Subscription {
 
     pub const fn phase(&self) -> SubscriptionPhase {
         self.phase
+    }
+
+    /// Deployment mode durably authorized when this subscription was created.
+    pub const fn required_gateway_account_mode(&self) -> GatewayAccountMode {
+        self.required_gateway_account_mode
     }
 
     pub const fn payment_method_id(&self) -> PaymentMethodId {

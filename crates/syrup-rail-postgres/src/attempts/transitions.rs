@@ -198,17 +198,20 @@ pub(crate) async fn persist_attempt_transition(
 /// Marks one still-pending prepared attempt as submitted and reloads its
 /// canonical representation. The caller remains responsible for aggregate
 /// locking and semantic revalidation before admission.
-pub(super) async fn admit_prepared_attempt(
+pub(crate) async fn admit_prepared_attempt(
     transaction: &mut Transaction<'_, Postgres>,
     attempt: &PaymentAttempt,
 ) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
     let identity = attempt.identity();
-    sqlx::query(
+    let updated = sqlx::query(
         "UPDATE billing_payment_attempts SET submitted_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL",
     )
     .bind(identity.attempt_id().as_uuid())
     .execute(&mut **transaction)
     .await?;
+    if updated.rows_affected() != 1 {
+        return Err(invalid_state());
+    }
     find_payment_attempt_by_id_in_transaction(
         transaction,
         identity.billing_scope_id(),

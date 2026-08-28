@@ -181,7 +181,7 @@ async fn current_subscription(
                 current_period_start_at, current_period_end_at, next_renewal_at,
                 phase, recurring_period_kind, recurring_period_count,
                 dunning_retry_delays_seconds, dunning_exhaustion, past_due_access,
-                next_payment_attempt_at
+                next_payment_attempt_at, required_gateway_account_mode
             FROM billing_subscriptions
             WHERE id = $1
                 AND billing_scope_id = $2
@@ -352,7 +352,7 @@ async fn cancel_current_subscription(
             current_period_start_at, current_period_end_at, next_renewal_at,
             phase, recurring_period_kind, recurring_period_count,
             dunning_retry_delays_seconds, dunning_exhaustion, past_due_access,
-            next_payment_attempt_at, canceled_at
+            next_payment_attempt_at, required_gateway_account_mode, canceled_at
         "#,
     )
     .bind(subscription_id.as_uuid())

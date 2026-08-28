@@ -366,7 +366,7 @@ fn map_mutation_error(error: MutationError) -> GatewayMutationError {
             GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::Configuration(detail))
         }
         MutationError::Unavailable(_) => {
-            GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::Unavailable(detail))
+            GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::NotTransmitted(detail))
         }
         MutationError::RateLimited(_) => {
             GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::RateLimited(detail))

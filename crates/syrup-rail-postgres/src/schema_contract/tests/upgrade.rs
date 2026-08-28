@@ -276,7 +276,7 @@ async fn schema_v1_upgrade_anomaly_rolls_back_with_named_diagnostic() -> Result<
 }
 
 #[tokio::test]
-async fn schema_v1_upgrade_backfills_legacy_lifecycle_and_attempt_terms()
+async fn schema_v1_upgrade_backfills_legacy_lifecycle_attempt_terms_and_mode()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start_v1("sr_up_data").await?;
     let result = async {
@@ -436,6 +436,8 @@ async fn schema_v1_upgrade_backfills_legacy_lifecycle_and_attempt_terms()
         assert_v2_conforms(&database.pool).await?;
         database.upgrade_v2_to_v3().await?;
         assert_v3_conforms(&database.pool).await?;
+        database.upgrade_v3_to_v4().await?;
+        assert_v4_conforms(&database.pool).await?;
 
         let active_is_legacy_recurring = sqlx::query_scalar::<_, bool>(
             r#"

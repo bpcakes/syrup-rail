@@ -92,7 +92,11 @@ async fn enrollment_offer_hook_excludes_one_in_flight_identity_across_both_stage
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(offer),
     );
-    let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let context_debug = format!(
         "{:?}",
         crate::SubscriptionEnrollmentOfferContext::from_reservation(
@@ -150,8 +154,11 @@ async fn enrollment_offer_hook_excludes_one_in_flight_identity_across_both_stage
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(paid_trial_offer()?),
     );
-    let later_reservation =
-        SubscriptionEnrollmentReservation::from_command(&later_command, &gateway)?;
+    let later_reservation = SubscriptionEnrollmentReservation::from_command(
+        &later_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert_eq!(
         reserve_subscription_enrollment_in_transaction(
@@ -391,8 +398,11 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer.clone()),
     );
-    let declined_reservation =
-        SubscriptionEnrollmentReservation::from_command(&declined_command, &gateway)?;
+    let declined_reservation = SubscriptionEnrollmentReservation::from_command(
+        &declined_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(
@@ -447,8 +457,11 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer.clone()),
     );
-    let reconciled_reservation =
-        SubscriptionEnrollmentReservation::from_command(&reconciled_command, &gateway)?;
+    let reconciled_reservation = SubscriptionEnrollmentReservation::from_command(
+        &reconciled_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(
@@ -536,8 +549,11 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer),
     );
-    let mismatch_reservation =
-        SubscriptionEnrollmentReservation::from_command(&mismatch_command, &gateway)?;
+    let mismatch_reservation = SubscriptionEnrollmentReservation::from_command(
+        &mismatch_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     let mismatch = reserve_subscription_enrollment_in_transaction(
         &mut transaction,

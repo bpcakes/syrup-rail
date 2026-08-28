@@ -1,0 +1,1 @@
+Centralize not-submitted policy, release host targets on terminal final mode failures, normalize error surfaces, verify gates, and repeat comprehensive Opus review until clean.

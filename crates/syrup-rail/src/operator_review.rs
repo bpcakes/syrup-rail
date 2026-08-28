@@ -849,6 +849,7 @@ mod tests {
                 SubscriberId::new(Uuid::from_u128(3)),
                 GatewayAccountId::new(Uuid::from_u128(4)),
                 GatewayConfigurationId::new(Uuid::from_u128(5)),
+                crate::GatewayAccountMode::Live,
             ),
             crate::PaymentAttemptRequest::new(
                 target,

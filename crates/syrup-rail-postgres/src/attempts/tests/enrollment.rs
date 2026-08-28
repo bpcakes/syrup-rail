@@ -46,8 +46,12 @@ async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
         full_price("base_subscription", 1_000),
     );
     assert_eq!(
-        SubscriptionEnrollmentReservation::from_command(&mismatched_command, &gateway)
-            .expect_err("reservation must bind to the resolved configuration"),
+        SubscriptionEnrollmentReservation::from_command(
+            &mismatched_command,
+            &gateway,
+            GatewayAccountMode::Live,
+        )
+        .expect_err("reservation must bind to the resolved configuration"),
         syrup_rail::SubscriptionEnrollmentReservationBuildError::GatewayIdentityMismatch,
     );
     let command = enrollment_command(
@@ -57,7 +61,11 @@ async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
         "same-key",
         full_price("base_subscription", 1_000),
     );
-    let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     let reserved = reserve_subscription_enrollment_in_transaction(
         &mut transaction,
@@ -93,8 +101,11 @@ async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
         "same-key",
         full_price("base_subscription", 1_000),
     );
-    let replay_reservation =
-        SubscriptionEnrollmentReservation::from_command(&replay_command, &gateway)?;
+    let replay_reservation = SubscriptionEnrollmentReservation::from_command(
+        &replay_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     let replay = reserve_subscription_enrollment_in_transaction(
         &mut transaction,
@@ -125,8 +136,11 @@ async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
         ),
         full_price("base_subscription", 1_000),
     );
-    let changed_contact_reservation =
-        SubscriptionEnrollmentReservation::from_command(&changed_contact_command, &gateway)?;
+    let changed_contact_reservation = SubscriptionEnrollmentReservation::from_command(
+        &changed_contact_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert_eq!(
         reserve_subscription_enrollment_in_transaction(
@@ -146,8 +160,11 @@ async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
         "same-key",
         full_price("premium", 1_000),
     );
-    let changed_plan_reservation =
-        SubscriptionEnrollmentReservation::from_command(&changed_plan_command, &gateway)?;
+    let changed_plan_reservation = SubscriptionEnrollmentReservation::from_command(
+        &changed_plan_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert_eq!(
         reserve_subscription_enrollment_in_transaction(
@@ -197,6 +214,7 @@ async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offe
             full_price(plan_key, 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     let before_boundary_attempt = match reserve_subscription_enrollment_in_transaction(
@@ -254,6 +272,7 @@ async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offe
             full_price(plan_key, 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     let boundary_attempt = match reserve_subscription_enrollment_in_transaction(
@@ -289,6 +308,7 @@ async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offe
             full_price(plan_key, 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
 
     let mut transaction = database.pool.begin().await?;
@@ -333,7 +353,11 @@ async fn legacy_unsubmitted_review_replay_expires_before_live_policy() -> Result
         "legacy-review",
         full_price(plan_key, 1_000),
     );
-    let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     let prepared = match reserve_subscription_enrollment_in_transaction(
         &mut transaction,
@@ -401,6 +425,7 @@ async fn legacy_unsubmitted_review_replay_expires_before_live_policy() -> Result
             full_price(plan_key, 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
@@ -443,7 +468,11 @@ async fn saved_discount_survives_repricing_but_not_pre_submission_expiry()
         "discount-a",
         discounted_expected(plan_key),
     );
-    let reservation_a = SubscriptionEnrollmentReservation::from_command(&command_a, &gateway)?;
+    let reservation_a = SubscriptionEnrollmentReservation::from_command(
+        &command_a,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     let attempt_a = match reserve_subscription_enrollment_in_transaction(
         &mut transaction,
@@ -503,7 +532,11 @@ async fn saved_discount_survives_repricing_but_not_pre_submission_expiry()
         "discount-b",
         discounted_expected(plan_key),
     );
-    let reservation_b = SubscriptionEnrollmentReservation::from_command(&command_b, &gateway)?;
+    let reservation_b = SubscriptionEnrollmentReservation::from_command(
+        &command_b,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(

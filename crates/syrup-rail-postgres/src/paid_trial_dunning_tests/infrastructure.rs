@@ -29,6 +29,7 @@ async fn infrastructure_failure_is_paced_for_twenty_four_hours_without_consuming
         r#"
         WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -36,7 +37,7 @@ async fn infrastructure_failure_is_paced_for_twenty_four_hours_without_consuming
             recurring_period_count, dunning_retry_delays_seconds,
             dunning_exhaustion, past_due_access, next_payment_attempt_at
         ) SELECT
-            $1, $2, $3, 'identity_pro', 'active', $4, $5, 2900, 'USD',
+            'live', $1, $2, $3, 'identity_pro', 'active', $4, $5, 2900, 'USD',
             observed_at - interval '1 month' - interval '1 hour',
             observed_at - interval '1 hour', observed_at - interval '1 hour',
             $6, 'recurring', 'calendar_months', 1, ARRAY[60]::bigint[],
@@ -67,13 +68,14 @@ async fn infrastructure_failure_is_paced_for_twenty_four_hours_without_consuming
             resolution_code, resolved_at, created_at, updated_at,
             subscription_expected_payment_method_id,
             subscription_expected_initial_transaction_id,
-            subscription_expected_status
+            subscription_expected_status,
+            required_gateway_account_mode
         ) SELECT
             $1, $2, $3, 'identity_pro', $4, $5, 'subscription_renewal',
             'failed', $6, $7, 2900, 'USD', $8, $8 + interval '1 month',
             $9, $10, $11, $12, observed_at,
             observed_at - interval '25 hours', observed_at,
-            $5, subscriptions.initial_transaction_id, 'active'
+            $5, subscriptions.initial_transaction_id, 'active', 'live'
         FROM clock
         JOIN billing_subscriptions AS subscriptions ON subscriptions.id = $4
         "#,

@@ -67,7 +67,11 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         ),
         SubscriptionEnrollmentExpectedTerms::discounted(offer, discount)?,
     );
-    let enrollment = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let enrollment = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(&mut transaction, &offers, &enrollment)
@@ -114,6 +118,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         r#"
         WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -121,7 +126,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
             recurring_period_count, dunning_retry_delays_seconds,
             dunning_exhaustion, past_due_access, next_payment_attempt_at, unpaid_at
         ) SELECT
-            $1, $2, $3, 'identity_pro', 'unpaid', $4, $5, 2900, 'USD',
+            'live', $1, $2, $3, 'identity_pro', 'unpaid', $4, $5, 2900, 'USD',
             observed_at - interval '2 months', observed_at - interval '1 month',
             observed_at - interval '1 month', $6, 'recurring',
             'calendar_months', 1, ARRAY[]::bigint[], 'mark_unpaid',
@@ -238,9 +243,13 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         PlanKey::new("identity_pro")?,
     );
     let mut transaction = database.pool.begin().await?;
-    let blocked =
-        reserve_subscription_recovery_in_transaction(&mut transaction, &blocked_recovery, &gateway)
-            .await?;
+    let blocked = reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        &blocked_recovery,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         blocked,
@@ -291,9 +300,13 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     assert_eq!(original_method_status, "disabled");
 
     let mut transaction = database.pool.begin().await?;
-    let stale =
-        reserve_subscription_renewal_in_transaction(&mut transaction, queued_renewal, &gateway)
-            .await?;
+    let stale = reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        queued_renewal,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         stale,

@@ -503,6 +503,7 @@ async fn insert_subscription(
     sqlx::query(
         r#"
             INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
@@ -510,6 +511,7 @@ async fn insert_subscription(
                 recurring_period_count, dunning_retry_delays_seconds,
                 dunning_exhaustion, past_due_access, next_payment_attempt_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6, $7, 5900, 'USD', $8, $9, $9, $10,
                 'recurring', 'calendar_months', 1, ARRAY[]::bigint[],
                 'remain_past_due', 'suspend_immediately', $9
@@ -548,6 +550,7 @@ async fn insert_payment_method_update(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, gateway_account_id,
@@ -556,6 +559,7 @@ async fn insert_payment_method_update(
                 payment_method_update_expected_initial_transaction_id,
                 created_at, updated_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6,
                 'subscription_payment_method_update', 'pending', $7, $8, 0, 'USD',
                 $9, $10, $11, $6, $12, $13, $13
@@ -589,6 +593,7 @@ async fn insert_renewal(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, billing_period_start_at,
@@ -597,6 +602,7 @@ async fn insert_renewal(
                 subscription_expected_initial_transaction_id, subscription_expected_status,
                 created_at, updated_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'pending',
                 $7, $8, 5900, 'USD', $9, $10, $11, $12, $13, $6, $14, 'active',
                 $15, $15
@@ -631,6 +637,7 @@ async fn insert_failed_renewal(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, billing_period_start_at,
@@ -639,6 +646,7 @@ async fn insert_failed_renewal(
                 subscription_expected_initial_transaction_id, subscription_expected_status,
                 submitted_at, resolved_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'declined',
                 $7, $8, 5900, 'USD', $9, $10, $11, $12, $13, $6, $14, 'active',
                 clock_timestamp() - interval '1 minute',

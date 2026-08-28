@@ -2,10 +2,10 @@ use std::fmt;
 
 use crate::{
     BillingContact, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
-    GatewayAccountId, GatewayConfigurationId, GatewayProviderKey, GatewayTransactionId,
-    IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PaymentToken, PlanKey,
-    ResolvedGateway, SubscriberId, SubscriptionId, SubscriptionPaymentContext,
+    GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayProviderKey,
+    GatewayTransactionId, IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PaymentToken,
+    PlanKey, ResolvedGateway, SubscriberId, SubscriptionId, SubscriptionPaymentContext,
     SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 use thiserror::Error;
@@ -139,6 +139,7 @@ impl SubscriptionRecoveryReservation {
         status: SubscriptionStatus,
         period: BillingPeriod,
         charge: ChargeAmount,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionRecoveryReservationBuildError> {
         if gateway.billing_scope_id() != command.billing_scope_id()
             || gateway.gateway_configuration_id() != command.gateway_configuration_id()
@@ -162,6 +163,7 @@ impl SubscriptionRecoveryReservation {
                 period,
                 charge,
             ),
+            required_gateway_account_mode,
         )
     }
 
@@ -172,6 +174,7 @@ impl SubscriptionRecoveryReservation {
         gateway: &ResolvedGateway,
         attempt_id: PaymentAttemptId,
         terms: SubscriptionRecoveryLockedTerms,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionRecoveryReservationBuildError> {
         let SubscriptionRecoveryLockedTerms {
             gateway_account_id,
@@ -191,6 +194,7 @@ impl SubscriptionRecoveryReservation {
             command.subscriber_id(),
             gateway_account_id,
             gateway.gateway_configuration_id(),
+            required_gateway_account_mode,
         );
         let target = PaymentAttemptTarget::SubscriptionRecovery {
             plan_key: command.plan_key().clone(),
@@ -273,6 +277,7 @@ impl SubscriptionRecoveryReservation {
                 self.period().clone(),
                 charge,
             ),
+            self.identity.required_gateway_account_mode(),
         )
         .is_ok_and(|candidate| candidate.eq(self))
     }
@@ -336,6 +341,7 @@ pub enum SubscriptionRecoveryReservationRejection {
     AttemptInProgress,
     PaymentMethodUpdateInProgress,
     GatewayConfigurationChanged,
+    GatewayAccountModeChanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

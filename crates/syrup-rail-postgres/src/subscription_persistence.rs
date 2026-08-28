@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, postgres::PgRow};
 use syrup_rail::{
     BillingPeriod, ChargeAmount, CurrencyCode, DunningExhaustion, DunningRetryDelay,
-    DunningSchedule, PastDueAccessPolicy, PaymentMethodId, PlanKey, RenewalFailurePolicy,
-    Subscription, SubscriptionId, SubscriptionLifecycle, SubscriptionPeriodRule, SubscriptionPhase,
-    SubscriptionStatus,
+    DunningSchedule, GatewayAccountMode, PastDueAccessPolicy, PaymentMethodId, PlanKey,
+    RenewalFailurePolicy, Subscription, SubscriptionId, SubscriptionLifecycle,
+    SubscriptionPeriodRule, SubscriptionPhase, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -124,6 +124,7 @@ struct FullSubscriptionRow {
     id: Uuid,
     plan_key: String,
     status: String,
+    required_gateway_account_mode: String,
     payment_method_id: Uuid,
     amount_cents: i32,
     currency: String,
@@ -145,6 +146,7 @@ impl FullSubscriptionRow {
             id: row.try_get("id")?,
             plan_key: row.try_get("plan_key")?,
             status: row.try_get("status")?,
+            required_gateway_account_mode: row.try_get("required_gateway_account_mode")?,
             payment_method_id: row.try_get("payment_method_id")?,
             amount_cents: row.try_get("amount_cents")?,
             currency: row.try_get("currency")?,
@@ -166,6 +168,7 @@ impl FullSubscriptionRow {
             id,
             plan_key,
             status,
+            required_gateway_account_mode,
             payment_method_id,
             amount_cents,
             currency,
@@ -209,6 +212,9 @@ impl FullSubscriptionRow {
             phase
                 .parse::<SubscriptionPhase>()
                 .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
+            required_gateway_account_mode
+                .parse::<GatewayAccountMode>()
+                .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             PaymentMethodId::new(payment_method_id),
             ChargeAmount::new(
                 amount_cents,
@@ -235,6 +241,7 @@ mod tests {
             id: Uuid::from_u128(1),
             plan_key: "plan".to_owned(),
             status: "active".to_owned(),
+            required_gateway_account_mode: "live".to_owned(),
             payment_method_id: Uuid::from_u128(2),
             amount_cents: 1_000,
             currency: "USD".to_owned(),

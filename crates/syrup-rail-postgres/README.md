@@ -1,39 +1,31 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. The current
-development line supports PostgreSQL 18 only and uses schema v4.
+SQLx operations, and high-level subscription billing service. Version 0.5
+supports PostgreSQL 18 only and uses schema v5.
 
 ```toml
 [dependencies]
-syrup-rail = "0.4.0"
-syrup-rail-postgres = "0.4.0"
+syrup-rail = "0.5.0"
+syrup-rail-postgres = "0.5.0"
 ```
 
-New hosts install `schema/v4/install.sql` through their normal migration
-system. Existing hosts reach schema v3 using its immutable artifacts when
-necessary, then stop every schema-v3 billing writer and apply
-`schema/v4/upgrade_from_v3.sql` transactionally before rolling forward.
-Schemas v1 through v3 are immutable. The detailed versioned guides explain the
-required lock, maintenance, and rehearsal boundaries.
+New hosts install `schema/v5/install.sql` through their normal migration
+system. Existing schema-v4 hosts run the read-only v5 preflight and audit,
+remediate incompatible retained attestations through an authorized process,
+then apply `schema/v5/upgrade_from_v4.sql` transactionally. Schemas v1 through
+v4 are immutable. The detailed versioned guides explain the required lock,
+maintenance, audit, and rehearsal boundaries.
 
 After the host applies its migration and before it serves billing traffic,
-verify the runtime contract:
+verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v4_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v5_compatible(pool).await?;
 # Ok(())
 # }
 ```
-
-The assertion checks the canonical catalog and validated schema-v4 constraints.
-The v3-to-v4 migration validates retained external-reversal attestations once
-and fails closed when a tuple cannot be represented by the typed runtime. Keep
-the prior application version stopped while investigating such a migration
-failure; do not bypass validation or rewrite financial evidence without an
-audited data-repair plan. Successful v4 startup checks do not scan that retained
-financial evidence.
 
 During `REINDEX CONCURRENTLY`, PostgreSQL exposes the command, phase, and
 target details only to the maintenance role and statistics-privileged roles.
@@ -57,6 +49,63 @@ them to core display methods. The example keeps subject identifiers and
 payload values out of `Debug` output; its card payload uses the core canonical
 brand vocabulary and never copies an unknown provider string into the host
 event.
+
+The service requires a live gateway account by default. A host exercising a
+dedicated test environment can call
+`with_required_gateway_account_mode(GatewayAccountMode::Test)` to require an
+exact test account instead. That setting permits test-mode mutations but still
+rejects an observed live account before submission; bind it only to trusted
+deployment configuration. A single NMI account can therefore be used only for
+a carefully serialized staging/live cutover, but NMI mode lookup and sale are
+separate requests and a Merchant Portal user can change the same account-wide
+switch out of process. Use separate NMI test and production merchant accounts
+when test/live isolation matters. The service performs an early account-mode
+query before final admission and a mandatory second query immediately before
+provider submission. The second query narrows the race window and makes the
+safety check structural for supported low-level submitters; it cannot make two
+NMI requests atomic. Initial enrollments and prepared host-charge replays change
+from `query → mutation` to `query → query → mutation`, roughly 50% more provider
+requests for those flows. Renewals check before reservation, after reservation,
+and at submission, so their successful path uses three mode queries. Recoveries,
+payment-method replacements, and fresh host charges retain their existing
+readiness boundaries. A transient failure of the final query
+occurs after durable admission, but the provider mutation endpoint was not
+contacted. Resumable enrollment, recovery, payment-method replacement, and
+host-charge attempts are therefore atomically restored to prepared state and
+can retry with the same command and idempotency key. Automatic renewal retains
+terminal not-submitted handling because its scheduler does not resume prepared
+attempts.
+Approved enrollments also persist the required mode on the subscription.
+Renewal dispatches expose it for host routing, and renewal, recovery, and
+payment-method replacement reservations reject a service configured for the
+other mode before creating new provider work. A mode-specific scheduler should
+use `due_renewals_page_for_mode`; the returned cursor records that mode and
+rejects cross-mode reuse. Its dedicated mode-leading index filters before the
+bounded SQL page limit. The unfiltered
+`due_renewals_page` remains available to a central router that owns both modes.
+Entitlement queries and guards default to live paid subscriptions; test workers
+select `Test`, while trusted administrative tooling can opt into both modes
+with `across_gateway_account_modes`. Current-subscription, portal, and history
+projections remain mode-neutral, so a host that mixes modes must enforce its
+own trusted production access partition around those reads.
+
+Supported low-level provider submission functions consume an opaque
+`ModeVerifiedGateway` created by `verify_gateway_account_mode`; they do not
+accept a raw gateway. The value captures early readiness and the expected mode,
+then revalidates that mode when consumed. A successful test-mode capability
+still executes the real NMI API request, whose processing is controlled by
+NMI's account-wide TEST mode.
+All matching reservation constructors require the trusted account mode
+explicitly rather than defaulting to live.
+When a transient final mode query restores a host charge for same-key retry,
+`HostChargeTargetStore::ensure_submission_admitted` is invoked again for that
+attempt.
+Hosts must make that callback repeat-safe and reserve one-shot paid/failed
+business effects for `apply_transition`.
+Terminal host-charge replay and prepared replay owned by the other deployment
+mode resolve by idempotency before `HostChargeTargetStore::preflight_target`.
+A same-mode prepared replay invokes the snapshot callback again so a changed
+target charge becomes an idempotency conflict before gateway I/O.
 
 Errors returned by host transaction, event, charge-target, and operator-review
 callbacks remain opaque through ordinary formatting and the standard

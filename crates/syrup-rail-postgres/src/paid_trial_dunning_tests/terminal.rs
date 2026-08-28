@@ -23,7 +23,11 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(offer),
     );
-    let enrollment = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let enrollment = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(&mut transaction, &offers, &enrollment)

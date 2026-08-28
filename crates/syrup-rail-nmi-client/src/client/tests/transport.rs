@@ -576,7 +576,7 @@ fn http_status_mapping_keeps_gateway_errors_from_becoming_card_declines() {
     for status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
         assert!(matches!(
             gateway_error_for_http_status(status, "endpoint rejected".to_owned()),
-            WireError::Unavailable(_)
+            WireError::Configuration(_)
         ));
     }
     for status in [

@@ -1,4 +1,4 @@
--- Read-only audit of schema-v3 external-reversal attestations that block v4.
+-- Read-only audit of schema-v4 external-reversal attestations that block v5.
 --
 -- The result deliberately exposes only canonical internal identifiers and the
 -- incompatible resolution tuple. Keep access to and exports of this protected

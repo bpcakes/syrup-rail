@@ -471,6 +471,7 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
@@ -484,6 +485,7 @@ mod tests {
                 gateway_lifecycle_action, gateway_lifecycle_at,
                 gateway_lifecycle_reconciled_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'approved', $5, $6,
                 1200, 'USD', $7, $8, $9, $10, $11,
                 '1', '100', 'approved processor response', 'complete',

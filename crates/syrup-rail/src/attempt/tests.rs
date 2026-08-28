@@ -29,6 +29,7 @@ fn identity() -> PaymentAttemptIdentity {
         SubscriberId::new(Uuid::from_u128(12)),
         GatewayAccountId::new(Uuid::from_u128(13)),
         GatewayConfigurationId::new(Uuid::from_u128(14)),
+        GatewayAccountMode::Live,
     )
 }
 

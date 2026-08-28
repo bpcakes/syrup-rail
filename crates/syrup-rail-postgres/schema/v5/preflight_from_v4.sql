@@ -1,8 +1,8 @@
--- Read-only preflight for upgrading Syrup Rail schema v3 to v4.
+-- Read-only preflight for upgrading Syrup Rail schema v4 to v5.
 --
 -- Run this result query before scheduling the cutover to measure the retained
 -- attestation scan and identify whether audited remediation is required. Run
--- it again after stopping schema-v3 writers if a zero-blocker observation is
+-- it again after stopping schema-v4 writers if a zero-blocker observation is
 -- required immediately before the transactional migration.
 
 SELECT

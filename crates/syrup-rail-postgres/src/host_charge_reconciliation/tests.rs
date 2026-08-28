@@ -40,7 +40,7 @@ impl HostChargeTargetStore for ReconciliationTargets {
         unreachable!("host-charge cleanup never reserves a target")
     }
 
-    async fn admit_submission(
+    async fn ensure_submission_admitted(
         &self,
         _connection: &mut PgConnection,
         _admission: &HostChargeSubmissionAdmission,
@@ -71,7 +71,7 @@ impl HostChargeTargetStore for ReconciliationTargets {
             return Ok(HostChargeTargetTransitionOutcome::StaleTarget);
         };
         if attempt_id != transition.attempt_id().into_uuid()
-            || transition.kind() != HostChargeTargetTransitionKind::PaymentFailed
+            || transition.kind() != HostChargeTargetTransitionKind::ReleasedBeforeSubmission
         {
             return Ok(HostChargeTargetTransitionOutcome::StaleTarget);
         }
@@ -243,11 +243,13 @@ async fn insert_host_charge(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, host_charge_target_id,
             attempt_kind, status, idempotency_key, request_fingerprint,
             amount_cents, currency, gateway_account_id,
             gateway_configuration_id, gateway_order_id, created_at, updated_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
             100, 'USD', $7, $8, $9, $10, $10
         )

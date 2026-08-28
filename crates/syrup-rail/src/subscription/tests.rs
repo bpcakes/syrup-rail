@@ -166,6 +166,7 @@ fn subscription_from_lifecycle_derives_status_and_schedule_projections() {
         SubscriptionId::new(Uuid::from_u128(1)),
         PlanKey::new("plan").unwrap(),
         SubscriptionPhase::Recurring,
+        GatewayAccountMode::Live,
         PaymentMethodId::new(Uuid::from_u128(2)),
         ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
         SubscriptionPeriodRule::calendar_months(1).unwrap(),
@@ -344,6 +345,7 @@ fn entitlement_product_access_policy_covers_every_variant() {
         PlanKey::new("plan").unwrap(),
         SubscriptionStatus::Active,
         SubscriptionPhase::Recurring,
+        GatewayAccountMode::Live,
         PaymentMethodId::new(Uuid::from_u128(2)),
         ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
         SubscriptionPeriodRule::calendar_months(1).unwrap(),
@@ -412,4 +414,57 @@ fn entitlement_product_access_policy_covers_every_variant() {
     for (entitlement, expected_access) in decisions {
         assert_eq!(entitlement.permits_product_access(), expected_access);
     }
+}
+
+#[test]
+fn entitlement_query_and_guard_share_selector_rules_without_sharing_type_identity() {
+    let billing_scope_id = BillingScopeId::new(Uuid::from_u128(10));
+    let subscriber_id = SubscriberId::new(Uuid::from_u128(11));
+    let plan_key = PlanKey::new("selector_plan").unwrap();
+    let query = EntitlementQuery::new(billing_scope_id, subscriber_id, plan_key.clone());
+    let guard = EntitlementGuard::new(billing_scope_id, subscriber_id, plan_key.clone());
+
+    assert_eq!(query.billing_scope_id(), guard.billing_scope_id());
+    assert_eq!(query.subscriber_id(), guard.subscriber_id());
+    assert_eq!(query.plan_key(), guard.plan_key());
+    assert_eq!(
+        query.required_gateway_account_mode(),
+        guard.required_gateway_account_mode()
+    );
+    assert_eq!(
+        query.required_gateway_account_mode(),
+        Some(GatewayAccountMode::Live)
+    );
+
+    let query = query.with_required_gateway_account_mode(GatewayAccountMode::Test);
+    let guard = guard.with_required_gateway_account_mode(GatewayAccountMode::Test);
+    assert_eq!(
+        query.required_gateway_account_mode(),
+        Some(GatewayAccountMode::Test)
+    );
+    assert_eq!(
+        guard.required_gateway_account_mode(),
+        Some(GatewayAccountMode::Test)
+    );
+    assert_eq!(
+        query
+            .clone()
+            .across_gateway_account_modes()
+            .required_gateway_account_mode(),
+        None
+    );
+    assert_eq!(
+        guard
+            .clone()
+            .across_gateway_account_modes()
+            .required_gateway_account_mode(),
+        None
+    );
+
+    let query_debug = format!("{query:?}");
+    let guard_debug = format!("{guard:?}");
+    assert!(query_debug.starts_with("EntitlementQuery { billing_scope_id:"));
+    assert!(guard_debug.starts_with("EntitlementGuard { billing_scope_id:"));
+    assert!(!query_debug.contains("selector:"));
+    assert!(!guard_debug.contains("selector:"));
 }

@@ -155,6 +155,49 @@ async fn protected_write_guard_uses_database_state_and_restores_the_host_timeout
                 insert_paid_subscription(&database.pool, "active").await?;
             let paid_guard = guard(paid_scope, paid_subscriber)?;
             require_guard(&database.pool, &paid_guard).await?;
+            require_guard(
+                &database.pool,
+                &paid_guard
+                    .clone()
+                    .with_required_gateway_account_mode(syrup_rail::GatewayAccountMode::Live),
+            )
+            .await?;
+            if !matches!(
+                guard_result(
+                    &database.pool,
+                    &paid_guard
+                        .clone()
+                        .with_required_gateway_account_mode(syrup_rail::GatewayAccountMode::Test),
+                )
+                .await?,
+                Err(EntitlementGuardError::Required)
+            ) {
+                return Err(io::Error::other(
+                    "a test-only guard admitted a live-mode paid subscription",
+                )
+                .into());
+            }
+            sqlx::query(
+                "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id = $1",
+            )
+            .bind(subscription)
+            .execute(&database.pool)
+            .await?;
+            assert!(matches!(
+                guard_result(&database.pool, &paid_guard).await?,
+                Err(EntitlementGuardError::Required)
+            ));
+            require_guard(
+                &database.pool,
+                &paid_guard.clone().across_gateway_account_modes(),
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE billing_subscriptions SET required_gateway_account_mode = 'live' WHERE id = $1",
+            )
+            .bind(subscription)
+            .execute(&database.pool)
+            .await?;
             sqlx::query("UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1")
                 .bind(subscription)
                 .execute(&database.pool)
@@ -273,6 +316,7 @@ async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Resul
                 subscriber_id uuid NOT NULL,
                 plan_key text NOT NULL,
                 status text NOT NULL,
+                required_gateway_account_mode text NOT NULL,
                 current_period_end_at text NOT NULL,
                 past_due_access text NOT NULL,
                 next_payment_attempt_at timestamptz
@@ -285,8 +329,9 @@ async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Resul
             r#"
             INSERT INTO billing_subscriptions (
                 id, billing_scope_id, subscriber_id, plan_key, status,
-                current_period_end_at, past_due_access, next_payment_attempt_at
-            ) VALUES ($1, $2, $3, 'base_subscription', 'active',
+                required_gateway_account_mode, current_period_end_at,
+                past_due_access, next_payment_attempt_at
+            ) VALUES ($1, $2, $3, 'base_subscription', 'active', 'live',
                 'not-a-timestamp', 'suspend_immediately', NULL)
             "#,
         )
@@ -583,6 +628,7 @@ async fn insert_paid_subscription(
     sqlx::query(
         r#"
             INSERT INTO billing_subscriptions (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents,
                 currency, current_period_start_at, current_period_end_at,
@@ -591,7 +637,7 @@ async fn insert_paid_subscription(
                 dunning_retry_delays_seconds, dunning_exhaustion,
                 past_due_access, next_payment_attempt_at
             ) SELECT
-                $1, $2, $3, 'base_subscription', $4, $5, $6, 100, 'USD',
+                'live', $1, $2, $3, 'base_subscription', $4, $5, $6, 100, 'USD',
                 observed_at - interval '1 day', observed_at + interval '1 day',
                 observed_at + interval '1 day', $7,
                 CASE WHEN $4 = 'canceled' THEN observed_at ELSE NULL END,

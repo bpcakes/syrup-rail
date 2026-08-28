@@ -7,7 +7,7 @@ use syrup_rail::{
     GatewayPaymentOutcome, GatewayPaymentStatus, GatewayStorePaymentMethodRequest, PaymentAttempt,
     PaymentAttemptId, PaymentAttemptStatus, PaymentCardDisplay, PaymentMethodId,
     PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
-    ReplaceSubscriptionPaymentMethod, ResolvedGateway, SubscriptionEnrollmentPaymentResult,
+    ReplaceSubscriptionPaymentMethod, SubscriptionEnrollmentPaymentResult,
     SubscriptionPaymentMethodReplacement, SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection,
 };
@@ -20,15 +20,16 @@ use crate::{
 
 use super::{
     APPROVED_APPLICATION_ATTEMPTS, APPROVED_EVIDENCE_RETRY_DELAY, AttemptResolutionStatus,
-    BILLING_LOCK_TIMEOUT, INVALID_APPLICATION_STATE, OutcomeReservation, OutcomeResolutionBoundary,
-    OutcomeResolutionCommand, PAYMENT_METHOD_REPLACEMENT_INCOMPLETE_APPROVAL_TEXT,
+    BILLING_LOCK_TIMEOUT, GatewayNotSubmittedPolicy, INVALID_APPLICATION_STATE, OutcomeApplication,
+    OutcomeReservation, OutcomeResolutionBoundary, OutcomeResolutionCommand,
+    PAYMENT_METHOD_REPLACEMENT_INCOMPLETE_APPROVAL_TEXT,
     PAYMENT_METHOD_REPLACEMENT_STALE_STATE_TEXT, PAYMENT_METHOD_REPLACEMENT_STORAGE_FAILURE_TEXT,
     RateLimitCooldown, SubscriptionEnrollmentApplicationError,
-    disable_payment_method_if_unreferenced, finalize_approved_application,
-    load_applied_subscription, load_subscription, lock_expected_reservation_attempt,
-    lock_payment_method_domain, lock_subscription_aggregate, mark_attempt_approved,
-    mutation_error_evidence, not_submitted_resolution_code, park_locked_attempt,
-    resolve_pool_outcome, set_application_timeouts, upsert_payment_method,
+    apply_resumable_not_submitted_policy, disable_payment_method_if_unreferenced,
+    finalize_approved_application, load_applied_subscription, load_subscription,
+    lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
+    mark_attempt_approved, mutation_error_evidence, park_locked_attempt, resolve_pool_outcome,
+    set_application_timeouts, upsert_payment_method,
 };
 
 mod approval;
@@ -71,6 +72,9 @@ pub enum SubscriptionPaymentMethodReplacementAdmissionOutcome {
 #[derive(Debug)]
 pub enum SubscriptionPaymentMethodReplacementProviderResult {
     Payment(SubscriptionEnrollmentPaymentResult),
+    /// The provider mutation was not contacted. A retry-safe readiness failure
+    /// can carry the same pending, prepared payment for same-key replay. A
+    /// concurrent terminal result is returned as `Payment` instead.
     NotSubmitted {
         payment: SubscriptionEnrollmentPaymentResult,
         error: GatewayNotSubmittedError,
@@ -131,11 +135,12 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
     coordinator: &dyn BillingTransactionCoordinator,
     admission: AdmittedSubscriptionPaymentMethodReplacement,
     command: &ReplaceSubscriptionPaymentMethod,
-    gateway: &ResolvedGateway,
+    gateway: crate::ModeVerifiedGateway<'_>,
 ) -> Result<
     SubscriptionPaymentMethodReplacementProviderResult,
     SubscriptionEnrollmentApplicationError,
 > {
+    let resolved_gateway = gateway.resolved_gateway();
     if admission.attempt.identity() != admission.reservation.identity()
         || admission.attempt.request() != admission.reservation.request()
         || admission.attempt.status() != PaymentAttemptStatus::Pending
@@ -145,10 +150,15 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
             .timestamps()
             .submitted_at()
             .is_none()
-        || !admission.reservation.matches_submission(command, gateway)
+        || !admission
+            .reservation
+            .matches_submission(command, resolved_gateway)
     {
         return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
     }
+    let Some(gateway) = gateway.authorize_attempt(&admission.reservation.identity()) else {
+        return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
+    };
     let request = GatewayStorePaymentMethodRequest::new(
         command.payment_token().clone(),
         admission.attempt.request().gateway_order_id().clone(),
@@ -165,19 +175,26 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
         .map(SubscriptionPaymentMethodReplacementProviderResult::Payment),
         Err(GatewayMutationError::NotSubmitted(error)) => {
             let evidence = mutation_error_evidence(error.detail());
-            let cooldown = matches!(error, GatewayNotSubmittedError::RateLimited(_))
-                .then_some(RateLimitCooldown::Account);
-            let payment = resolve_payment_method_replacement_non_approved_outcome(
+            let policy = GatewayNotSubmittedPolicy::for_error(&error);
+            let application = apply_resumable_not_submitted_policy(
                 pool,
-                &admission.reservation,
+                OutcomeReservation::PaymentMethodReplacement(&admission.reservation),
                 &evidence,
-                AttemptResolutionStatus::Failed,
-                Some(not_submitted_resolution_code(&error)),
-                cooldown,
-                OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                policy,
             )
             .await?;
-            Ok(SubscriptionPaymentMethodReplacementProviderResult::NotSubmitted { payment, error })
+            if application.should_surface_not_submitted(policy) {
+                Ok(
+                    SubscriptionPaymentMethodReplacementProviderResult::NotSubmitted {
+                        payment: application.payment,
+                        error,
+                    },
+                )
+            } else {
+                Ok(SubscriptionPaymentMethodReplacementProviderResult::Payment(
+                    application.payment,
+                ))
+            }
         }
         Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => {
             resolve_payment_method_replacement_unknown_outcome(
@@ -380,6 +397,7 @@ pub(crate) async fn resolve_payment_method_replacement_non_approved_outcome(
         OutcomeResolutionCommand::non_approved(status, resolution_code, cooldown, boundary),
     )
     .await
+    .map(OutcomeApplication::into_payment)
 }
 
 async fn resolve_payment_method_replacement_unknown_outcome(
@@ -395,4 +413,5 @@ async fn resolve_payment_method_replacement_unknown_outcome(
         OutcomeResolutionCommand::unknown(cooldown),
     )
     .await
+    .map(OutcomeApplication::into_payment)
 }

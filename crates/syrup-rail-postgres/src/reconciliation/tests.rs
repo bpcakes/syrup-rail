@@ -321,6 +321,7 @@ async fn insert_stale_payment_method_replacement(
                 SELECT clock_timestamp() AS observed_at
             )
             INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
@@ -328,7 +329,7 @@ async fn insert_stale_payment_method_replacement(
                 recurring_period_count, dunning_retry_delays_seconds,
                 dunning_exhaustion, past_due_access, next_payment_attempt_at
             ) SELECT
-                $1, $2, $3, 'test_plan', 'active', $4, $5, 100, 'USD',
+                'live', $1, $2, $3, 'test_plan', 'active', $4, $5, 100, 'USD',
                 observed_at - interval '1 day',
                 observed_at + interval '1 day',
                 observed_at + interval '1 day', $6, 'recurring',
@@ -349,6 +350,7 @@ async fn insert_stale_payment_method_replacement(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, gateway_account_id,
@@ -357,6 +359,7 @@ async fn insert_stale_payment_method_replacement(
                 payment_method_update_expected_initial_transaction_id, created_at,
                 updated_at
             ) VALUES (
+                'live',
                 $1, $2, $3, 'test_plan', $4, $5,
                 'subscription_payment_method_update', 'pending', $6, $7, 0,
                 'USD', $8, $9, $10, $5, $11,
@@ -954,6 +957,7 @@ async fn insert_pending_processor_charge(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, attempt_kind,
                 status, idempotency_key, request_fingerprint, amount_cents,
                 currency, gateway_account_id, gateway_configuration_id,
@@ -966,6 +970,7 @@ async fn insert_pending_processor_charge(
                 subscription_initial_dunning_exhaustion,
                 subscription_initial_past_due_access
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
                 100, 'USD', $7, $8, $9, 2, 'recurring_immediately', 100,
                 'calendar_months', 1, ARRAY[]::bigint[],
@@ -1030,6 +1035,7 @@ async fn insert_stale_enrollment(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, attempt_kind,
                 status, idempotency_key, request_fingerprint, amount_cents,
                 currency, gateway_account_id, gateway_configuration_id,
@@ -1043,6 +1049,7 @@ async fn insert_stale_enrollment(
                 subscription_initial_dunning_exhaustion,
                 subscription_initial_past_due_access
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
                 100, 'USD', $7, $8, $9,
                 clock_timestamp() - interval '31 minutes',

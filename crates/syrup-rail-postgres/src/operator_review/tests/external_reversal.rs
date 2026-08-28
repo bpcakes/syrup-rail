@@ -71,11 +71,13 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
                 gateway_configuration_id, gateway_order_id, review_required_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
                 500, 'USD', $7, $8, $9, clock_timestamp()
             )
@@ -321,7 +323,7 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         .await?,
         ExternalReversalAttestationOutcome::ReplayConflict
     );
-    crate::assert_runtime_schema_v4_compatible(&database.pool).await?;
+    crate::assert_runtime_schema_v5_compatible(&database.pool).await?;
 
     database.cleanup().await?;
     Ok(())
@@ -339,6 +341,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
@@ -355,6 +358,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
                 subscription_initial_dunning_exhaustion,
                 subscription_initial_past_due_access
             ) VALUES (
+                'live',
                 $1, $2, $3, 'base', 'subscription_initial', 'review_required',
                 $4, $5, 500, 'USD', $6, $7, $8, 'txn-grant-conflict',
                 '1', '100', 'Approved', 'complete',
@@ -468,7 +472,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
 #[tokio::test]
 async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start_v3("rail_op_tuple").await?;
+    let database = TestDatabase::start_v4("rail_op_tuple").await?;
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let attempt_id = Uuid::now_v7();
     let charge_id = Uuid::now_v7();
@@ -477,12 +481,13 @@ async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
                 gateway_configuration_id, gateway_order_id, review_required_at
             ) VALUES (
-                $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
+                'live', $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
                 500, 'USD', $7, $8, $9, clock_timestamp()
             )
             "#,
@@ -515,7 +520,7 @@ async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
     .bind(transaction_id)
     .execute(&database.pool)
     .await?;
-    crate::assert_runtime_schema_v3_compatible(&database.pool).await?;
+    crate::assert_runtime_schema_v4_compatible(&database.pool).await?;
 
     sqlx::query(
         r#"
@@ -543,8 +548,8 @@ async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
     .await?;
 
     assert!(matches!(
-        crate::assert_runtime_schema_v3_compatible(&database.pool).await,
-        Err(crate::SchemaConformanceError::Contract { version: 3, detail })
+        crate::assert_runtime_schema_v4_compatible(&database.pool).await,
+        Err(crate::SchemaConformanceError::Contract { version: 4, detail })
             if detail == crate::schema_contract::INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL
     ));
     let error = attest_external_reversal(

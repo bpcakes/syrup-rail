@@ -89,6 +89,7 @@ async fn renewal_subscription_state_matches(
         r#"
         SELECT status, payment_method_id, initial_transaction_id,
             amount_cents, currency, next_renewal_at,
+            required_gateway_account_mode,
             COALESCE(next_payment_attempt_at <= clock_timestamp(), false) AS is_due
         FROM billing_subscriptions
         WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
@@ -118,6 +119,8 @@ async fn renewal_subscription_state_matches(
         && row.try_get::<i32, _>("amount_cents")? == reservation.request().amount().cents()
         && row.try_get::<String, _>("currency")?
             == reservation.request().amount().currency().as_str()
+        && row.try_get::<String, _>("required_gateway_account_mode")?
+            == identity.required_gateway_account_mode().as_str()
         && row.try_get::<DateTime<Utc>, _>("next_renewal_at")? == *reservation.period().start_at()
         && row.try_get::<bool, _>("is_due")?)
 }
@@ -144,7 +147,10 @@ async fn reject_locked_renewal(
 fn map_renewal_store_error(error: crate::RenewalStoreError) -> PaymentAttemptStoreError {
     match error {
         crate::RenewalStoreError::Sql(error) => PaymentAttemptStoreError::Sql(error),
-        crate::RenewalStoreError::MissingProviderCooldown => invalid_state(),
+        crate::RenewalStoreError::MissingProviderCooldown
+        // This internal first-page lookup supplies no cursor, so a cursor-mode
+        // mismatch would mean the renewal store violated its own contract.
+        | crate::RenewalStoreError::CursorModeMismatch => invalid_state(),
     }
 }
 
@@ -153,6 +159,7 @@ pub async fn reserve_subscription_renewal_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: syrup_rail::ChargeRenewal,
     gateway: &syrup_rail::ResolvedGateway,
+    required_gateway_account_mode: GatewayAccountMode,
 ) -> Result<SubscriptionRenewalReservationOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
     let locator = sqlx::query_as::<_, (Uuid, String)>(
@@ -179,7 +186,7 @@ pub async fn reserve_subscription_renewal_in_transaction(
         r#"
         SELECT subscriber_id, plan_key, gateway_account_id, payment_method_id,
             amount_cents, currency, next_renewal_at, initial_transaction_id, status,
-            recurring_period_kind, recurring_period_count,
+            recurring_period_kind, recurring_period_count, required_gateway_account_mode,
             COALESCE(next_payment_attempt_at <= clock_timestamp(), false) AS is_due
         FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND id = $2
@@ -209,6 +216,15 @@ pub async fn reserve_subscription_renewal_in_transaction(
         || row.try_get::<String, _>("plan_key")? != plan_key.as_str()
     {
         return Err(invalid_state());
+    }
+    let subscription_mode = row
+        .try_get::<String, _>("required_gateway_account_mode")?
+        .parse::<GatewayAccountMode>()
+        .map_err(|_| invalid_state())?;
+    if subscription_mode != required_gateway_account_mode {
+        return Ok(SubscriptionRenewalReservationOutcome::Rejected(
+            SubscriptionRenewalReservationRejection::GatewayAccountModeChanged,
+        ));
     }
 
     fail_stale_unsubmitted_payment_method_updates(transaction, command.subscription_id()).await?;
@@ -273,6 +289,7 @@ pub async fn reserve_subscription_renewal_in_transaction(
         subscriber_id,
         plan_key,
         terms,
+        subscription_mode,
     )
     .map_err(|_| invalid_state())?;
     if !insert_subscription_charge_attempt(

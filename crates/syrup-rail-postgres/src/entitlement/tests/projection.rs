@@ -146,6 +146,7 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
         sqlx::query(
             r#"
                 INSERT INTO billing_subscriptions (
+                    required_gateway_account_mode,
                     id, billing_scope_id, subscriber_id, plan_key, status,
                     gateway_account_id, payment_method_id, amount_cents,
                     currency, current_period_start_at, current_period_end_at,
@@ -154,7 +155,7 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                     dunning_retry_delays_seconds, dunning_exhaustion,
                     past_due_access, next_payment_attempt_at
                 ) SELECT
-                    $1, $2, $3, 'base_subscription', 'active', $4, $5, 100,
+                    'live', $1, $2, $3, 'base_subscription', 'active', $4, $5, 100,
                     'USD', observed_at - interval '1 day',
                     observed_at + interval '1 day',
                     observed_at + interval '1 day', $6, 'recurring',
@@ -204,6 +205,60 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                 .into());
             }
         }
+        if !matches!(
+            entitlement(
+                &database.pool,
+                &query
+                    .clone()
+                    .with_required_gateway_account_mode(syrup_rail::GatewayAccountMode::Test),
+            )
+            .await?,
+            Entitlement::Missing { .. }
+        ) {
+            return Err(io::Error::other(
+                "a test-only entitlement query returned a live-mode subscription",
+            )
+            .into());
+        }
+        if !matches!(
+            entitlement(
+                &database.pool,
+                &query
+                    .clone()
+                    .with_required_gateway_account_mode(syrup_rail::GatewayAccountMode::Live),
+            )
+            .await?,
+            Entitlement::PaidActive { .. }
+        ) {
+            return Err(io::Error::other(
+                "a live entitlement query did not return its live-mode subscription",
+            )
+            .into());
+        }
+        sqlx::query(
+            "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id = $1",
+        )
+        .bind(subscription)
+        .execute(&database.pool)
+        .await?;
+        assert!(matches!(
+            entitlement(&database.pool, &query).await?,
+            Entitlement::Missing { .. }
+        ));
+        assert!(matches!(
+            entitlement(
+                &database.pool,
+                &query.clone().across_gateway_account_modes(),
+            )
+            .await?,
+            Entitlement::PaidActive { .. }
+        ));
+        sqlx::query(
+            "UPDATE billing_subscriptions SET required_gateway_account_mode = 'live' WHERE id = $1",
+        )
+        .bind(subscription)
+        .execute(&database.pool)
+        .await?;
 
         let overlapping_grant = Uuid::now_v7();
         sqlx::query(

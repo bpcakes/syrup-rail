@@ -4,10 +4,10 @@ use chrono::{DateTime, Utc};
 use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     ActorId, AppliedSubscriptionDiscount, BillingPeriod, ChargeAmount, CurrencyCode,
-    DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, LimitedDiscountMonths,
-    MissingSubscriptionAction, PastDueAccess, PastDueAccessPolicy, PastDueAction,
-    PaymentAttemptKind, PaymentMethodId, PercentOffBasisPoints, PositiveDiscountCents,
-    SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
+    DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, GatewayAccountMode,
+    LimitedDiscountMonths, MissingSubscriptionAction, PastDueAccess, PastDueAccessPolicy,
+    PastDueAction, PaymentAttemptKind, PaymentMethodId, PercentOffBasisPoints,
+    PositiveDiscountCents, SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
     SubscriptionGrant, SubscriptionGrantId, SubscriptionGrantKind, SubscriptionId,
     SubscriptionLifecycle, SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
@@ -248,6 +248,7 @@ async fn lock_and_classify_entitlement(
         WHERE billing_scope_id = $1
             AND subscriber_id = $2
             AND plan_key = $3
+            AND ($4::text IS NULL OR required_gateway_account_mode = $4)
         ORDER BY id
         FOR SHARE
         "#,
@@ -255,6 +256,11 @@ async fn lock_and_classify_entitlement(
     .bind(guard.billing_scope_id().as_uuid())
     .bind(guard.subscriber_id().as_uuid())
     .bind(guard.plan_key().as_str())
+    .bind(
+        guard
+            .required_gateway_account_mode()
+            .map(GatewayAccountMode::as_str),
+    )
     .fetch_all(&mut *connection)
     .await?;
     let grants = sqlx::query_as::<_, GuardGrantTimeState>(
@@ -370,6 +376,7 @@ where
             WHERE subscriptions.billing_scope_id = $1
                 AND subscriptions.subscriber_id = $2
                 AND subscriptions.plan_key = $3
+                AND ($4::text IS NULL OR subscriptions.required_gateway_account_mode = $4)
                 AND (
                     subscriptions.status IN ('active', 'past_due')
                     OR (
@@ -417,6 +424,7 @@ where
             paid.current_period_end_at AS paid_period_end_at,
             paid.next_renewal_at AS paid_next_renewal_at,
             paid.phase AS paid_phase,
+            paid.required_gateway_account_mode AS paid_required_gateway_account_mode,
             paid.recurring_period_kind AS paid_recurring_period_kind,
             paid.recurring_period_count AS paid_recurring_period_count,
             paid.dunning_retry_delays_seconds AS paid_dunning_retry_delays_seconds,
@@ -445,10 +453,10 @@ where
                         )
                     )
                     AND NOT (
-                        attempts.status = ANY($6::text[])
+                        attempts.status = ANY($7::text[])
                         AND attempts.submitted_at IS NULL
                         AND attempts.created_at <= clock.observed_at
-                            - ($4::bigint * interval '1 second')
+                            - ($5::bigint * interval '1 second')
                     )
                     AND NOT EXISTS (
                         SELECT 1
@@ -469,10 +477,10 @@ where
                     )
                     AND attempts.status IN ('pending', 'unknown', 'review_required')
                     AND NOT (
-                        attempts.status = ANY($6::text[])
+                        attempts.status = ANY($7::text[])
                         AND attempts.submitted_at IS NULL
                         AND attempts.created_at <= clock.observed_at
-                            - ($5::bigint * interval '1 second')
+                            - ($6::bigint * interval '1 second')
                     )
             ) AS pending_recovery_confirmation,
             saved.id AS saved_claim_id,
@@ -527,6 +535,11 @@ where
     .bind(query.billing_scope_id().as_uuid())
     .bind(query.subscriber_id().as_uuid())
     .bind(query.plan_key().as_str())
+    .bind(
+        query
+            .required_gateway_account_mode()
+            .map(GatewayAccountMode::as_str),
+    )
     .bind(initial_policy.stale_after_seconds())
     .bind(subscription_charge_policy.stale_after_seconds())
     .bind(LocalAttemptPolicy::expirable_status_values())
@@ -604,6 +617,9 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
             .parse()
             .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
         phase,
+        row.try_get::<String, _>("paid_required_gateway_account_mode")?
+            .parse::<GatewayAccountMode>()
+            .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
         PaymentMethodId::new(row.try_get("paid_payment_method_id")?),
         ChargeAmount::new(
             row.try_get("paid_amount_cents")?,

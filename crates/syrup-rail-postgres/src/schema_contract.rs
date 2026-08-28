@@ -25,6 +25,9 @@ pub const V3_INSTALL_SQL: &str = include_str!("../schema/v3/install.sql");
 /// The immutable version-4 fresh-install artifact.
 pub const V4_INSTALL_SQL: &str = include_str!("../schema/v4/install.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The version-5 fresh-install artifact.
+pub const V5_INSTALL_SQL: &str = include_str!("../schema/v5/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The read-only version-1-to-version-2 upgrade preflight.
 pub const V1_TO_V2_PREFLIGHT_SQL: &str = include_str!("../schema/v2/preflight_from_v1.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -38,15 +41,27 @@ pub const V1_TO_V2_UPGRADE_SQL: &str = include_str!("../schema/v2/upgrade_from_v
 /// The immutable forward-only version-2-to-version-3 upgrade artifact.
 pub const V2_TO_V3_UPGRADE_SQL: &str = include_str!("../schema/v3/upgrade_from_v2.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// The read-only version-3-to-version-4 upgrade preflight.
-pub const V3_TO_V4_PREFLIGHT_SQL: &str = include_str!("../schema/v4/preflight_from_v3.sql");
+/// The first, fast-lock version-3-to-version-4 preparation artifact.
+pub const V3_TO_V4_PREPARE_SQL: &str = include_str!("../schema/v4/prepare_from_v3.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// The read-only audit of incompatible v3 external-reversal attestations.
-pub const V3_TO_V4_INCOMPATIBLE_ATTESTATION_AUDIT_SQL: &str =
-    include_str!("../schema/v4/audit_incompatible_attestations_from_v3.sql");
+/// The separately committed, lower-lock version-3-to-version-4 validation artifact.
+pub const V3_TO_V4_VALIDATE_SQL: &str = include_str!("../schema/v4/validate_from_v3.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// The immutable forward-only version-3-to-version-4 upgrade artifact.
+/// The non-transactional concurrent index stage for the version-3-to-version-4 cutover.
+pub const V3_TO_V4_INDEX_SQL: &str = include_str!("../schema/v4/index_from_v3.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The final version-3-to-version-4 cutover artifact.
 pub const V3_TO_V4_UPGRADE_SQL: &str = include_str!("../schema/v4/upgrade_from_v3.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The read-only version-4-to-version-5 upgrade preflight.
+pub const V4_TO_V5_PREFLIGHT_SQL: &str = include_str!("../schema/v5/preflight_from_v4.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The read-only audit of incompatible v4 external-reversal attestations.
+pub const V4_TO_V5_INCOMPATIBLE_ATTESTATION_AUDIT_SQL: &str =
+    include_str!("../schema/v5/audit_incompatible_attestations_from_v4.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The forward-only version-4-to-version-5 upgrade artifact.
+pub const V4_TO_V5_UPGRADE_SQL: &str = include_str!("../schema/v5/upgrade_from_v4.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
@@ -54,8 +69,11 @@ pub const V3_TO_V4_UPGRADE_SQL: &str = include_str!("../schema/v4/upgrade_from_v
 const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
-const V4_CATALOG_FINGERPRINT: u64 = 0x023d_0171_91be_dc34;
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
+const V5_CATALOG_FINGERPRINT: u64 = 0xa565_eddd_a93b_3368;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 pub(crate) const INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL: &str =
@@ -179,6 +197,44 @@ const RENEWAL_DISPATCH_INDEX_CONTRACT: IndexContract = IndexContract {
     ),
 };
 
+const V4_RENEWAL_DISPATCH_INDEX_CONTRACT: IndexContract = IndexContract {
+    included_expressions: &[
+        "billing_scope_id",
+        "gateway_account_id",
+        "next_renewal_at",
+        "required_gateway_account_mode",
+    ],
+    ..RENEWAL_DISPATCH_INDEX_CONTRACT
+};
+
+const MODE_RENEWAL_DISPATCH_INDEX_CONTRACT: IndexContract = IndexContract {
+    purpose: "mode-specific renewal-dispatch keyset",
+    name: "billing_subscriptions_due_mode_idx",
+    table: "billing_subscriptions",
+    unique: false,
+    keys: &[
+        IndexKeyContract {
+            expression: "required_gateway_account_mode",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.text_ops",
+        },
+        IndexKeyContract {
+            expression: "next_payment_attempt_at",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.timestamptz_ops",
+        },
+        IndexKeyContract {
+            expression: "id",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.uuid_ops",
+        },
+    ],
+    included_expressions: &["billing_scope_id", "gateway_account_id", "next_renewal_at"],
+    predicate: Some(
+        "(status = ANY (ARRAY['active'::text, 'past_due'::text])) AND next_payment_attempt_at IS NOT NULL",
+    ),
+};
+
 const SUBSCRIPTION_HISTORY_INDEX_CONTRACT: IndexContract = IndexContract {
     purpose: "subscription-history keyset",
     name: "billing_payment_attempts_subscription_history_idx",
@@ -252,6 +308,7 @@ const V1_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "current_subscription_rank",
 ];
 
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "id",
     "billing_scope_id",
@@ -283,8 +340,40 @@ const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "unpaid_at",
 ];
 
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V3_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V2_CURRENT_SUBSCRIPTION_COLUMNS;
-const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V3_CURRENT_SUBSCRIPTION_COLUMNS;
+const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
+    "id",
+    "billing_scope_id",
+    "gateway_account_id",
+    "subscriber_id",
+    "plan_key",
+    "status",
+    "payment_method_id",
+    "amount_cents",
+    "currency",
+    "current_period_start_at",
+    "current_period_end_at",
+    "next_renewal_at",
+    "initial_transaction_id",
+    "canceled_at",
+    "created_at",
+    "updated_at",
+    "current_subscription_rank",
+    "phase",
+    "recurring_period_kind",
+    "recurring_period_count",
+    "trial_amount_cents",
+    "trial_period_kind",
+    "trial_period_count",
+    "dunning_retry_delays_seconds",
+    "dunning_exhaustion",
+    "past_due_access",
+    "next_payment_attempt_at",
+    "unpaid_at",
+    "required_gateway_account_mode",
+];
+const V5_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V4_CURRENT_SUBSCRIPTION_COLUMNS;
 
 /// Why a host database does not satisfy a canonical schema contract.
 ///
@@ -326,11 +415,10 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 }
 
 /// Asserts that a host database still on schema v3 is compatible while the host
-/// stages the required schema-v4 cutover.
+/// stages its forward-only cutovers.
 ///
-/// Syrup Rail 0.4 hosts must apply schema v4 and call
-/// [`assert_runtime_schema_v4_compatible`] before accepting billing work. This
-/// retained v3 assertion supports only the pre-cutover validation window.
+/// This retained v3 assertion supports only migration tooling built with the
+/// `schema-contract-test-support` feature.
 /// Call it after the host has applied its immutable schema-v3 install or
 /// forward-only upgrade migration through its normal migration deployment.
 /// This function does not install, upgrade, audit, or otherwise mutate the
@@ -350,6 +438,7 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 /// `pg_stat_progress_create_index` and the backend retains the expected table
 /// and index locks. PostgreSQL hides those details from unrelated roles without
 /// statistics privileges, for which this check deliberately fails closed.
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 pub async fn assert_runtime_schema_v3_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -362,21 +451,13 @@ pub async fn assert_runtime_schema_v3_compatible(
     .await
 }
 
-/// Asserts that a host database is compatible with the canonical schema-v4
-/// contract before the host accepts billing work.
+/// Asserts that a historical host database matches the canonical schema-v4
+/// contract in tests or migration tooling.
 ///
 /// Call this after the host has applied its immutable Syrup Rail install or
 /// forward-only upgrade migration through its normal migration deployment.
-/// This function does not install, upgrade, audit, or otherwise mutate the
-/// database. It runs the complete canonical v4 catalog conformance and
-/// fingerprint check in one `REPEATABLE READ READ ONLY` PostgreSQL transaction.
-/// The validated v4 external-reversal constraint encodes the typed resolution
-/// tuple invariant, so this assertion does not scan retained attestations.
-/// PostgreSQL major version 18 is required; other majors are rejected before
-/// catalog comparison.
-///
-/// Concurrent-reindex transition handling and visibility requirements are the
-/// same as for [`assert_runtime_schema_v3_compatible`].
+/// This function is read-only and requires PostgreSQL major version 18.
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 pub async fn assert_runtime_schema_v4_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -385,6 +466,24 @@ pub async fn assert_runtime_schema_v4_compatible(
         4,
         V4_CURRENT_SUBSCRIPTION_COLUMNS,
         V4_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
+/// Asserts that a host database is compatible with canonical schema v5 before
+/// the host accepts billing work.
+///
+/// Call this after the host has applied its immutable install or forward-only
+/// upgrade through its normal migration deployment. This function is read-only
+/// and requires PostgreSQL major version 18.
+pub async fn assert_runtime_schema_v5_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        5,
+        V5_CURRENT_SUBSCRIPTION_COLUMNS,
+        V5_CATALOG_FINGERPRINT,
     )
     .await
 }
@@ -419,6 +518,13 @@ pub async fn assert_v3_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
 /// objects without exposing a production runtime migrator.
 pub async fn assert_v4_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
     assert_runtime_schema_v4_compatible(pool).await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v5
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v5_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v5_compatible(pool).await
 }
 
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -554,15 +660,24 @@ async fn assert_schema_conforms(
     require_ready_canonical_indexes(version, &billing_indexes)?;
     require_index_contract(connection, version, GATEWAY_ORDER_INDEX_CONTRACT).await?;
     if version >= 2 {
-        require_index_contract(connection, version, RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
+        let renewal_dispatch_contract = if version >= 4 {
+            V4_RENEWAL_DISPATCH_INDEX_CONTRACT
+        } else {
+            RENEWAL_DISPATCH_INDEX_CONTRACT
+        };
+        require_index_contract(connection, version, renewal_dispatch_contract).await?;
         require_index_contract(connection, version, SUBSCRIPTION_HISTORY_INDEX_CONTRACT).await?;
+    }
+    if version >= 4 {
+        require_index_contract(connection, version, MODE_RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
     }
     require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
         .await?;
-    // Shipped v3 cannot express the typed tuple matrix in its constraint, so
-    // its compatibility API retains the live-row preflight. V4 validates the
-    // invariant during cutover and fingerprints the replacement constraint.
-    if version == 3 {
+    // Shipped v3 and v4 cannot express the typed tuple matrix in their
+    // constraints, so their compatibility APIs retain the live-row preflight.
+    // V5 validates the invariant during cutover and fingerprints the
+    // replacement constraint.
+    if matches!(version, 3 | 4) {
         require_compatible_external_reversal_attestations(connection, version).await?;
     }
     require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await

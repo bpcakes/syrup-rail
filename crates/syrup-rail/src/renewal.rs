@@ -3,18 +3,17 @@ use thiserror::Error;
 
 use crate::{
     BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, GatewayAccountId,
-    GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PlanKey,
-    RenewalFailurePolicy, ResolvedGateway, SubscriberId, SubscriptionId,
+    GatewayAccountMode, GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget,
+    PaymentMethodId, PlanKey, RenewalFailurePolicy, ResolvedGateway, SubscriberId, SubscriptionId,
     SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 
 pub const RENEWAL_DISPATCH_LIMIT: i64 = 100;
 pub const RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS: i64 = 24 * 60 * 60;
-pub const RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS: i64 = 24 * 60 * 60;
-pub const RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS: i64 = 60;
+pub const RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS: i64 = 24 * 60 * 60;
 pub const MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION: i64 = 8;
-pub const RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS: i64 = 5;
+pub const RENEWAL_RATE_LIMIT_FAST_RETRY_ATTEMPTS: i64 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RenewalFailureDisposition {
@@ -63,6 +62,7 @@ pub fn renewal_failure_disposition(
 pub struct RenewalDispatch {
     billing_scope_id: BillingScopeId,
     subscription_id: SubscriptionId,
+    required_gateway_account_mode: GatewayAccountMode,
     period_start_at: DateTime<Utc>,
     attempt_sequence_count: i64,
 }
@@ -71,12 +71,14 @@ impl RenewalDispatch {
     pub const fn new(
         billing_scope_id: BillingScopeId,
         subscription_id: SubscriptionId,
+        required_gateway_account_mode: GatewayAccountMode,
         period_start_at: DateTime<Utc>,
         attempt_sequence_count: i64,
     ) -> Self {
         Self {
             billing_scope_id,
             subscription_id,
+            required_gateway_account_mode,
             period_start_at,
             attempt_sequence_count,
         }
@@ -88,6 +90,11 @@ impl RenewalDispatch {
 
     pub const fn subscription_id(&self) -> SubscriptionId {
         self.subscription_id
+    }
+
+    /// Deployment mode of the durable subscription that owns this work.
+    pub const fn required_gateway_account_mode(&self) -> GatewayAccountMode {
+        self.required_gateway_account_mode
     }
 
     pub const fn period_start_at(&self) -> &DateTime<Utc> {
@@ -115,6 +122,7 @@ pub struct RenewalDispatchPageCursor {
     observed_at: DateTime<Utc>,
     next_payment_attempt_at: DateTime<Utc>,
     subscription_id: SubscriptionId,
+    required_gateway_account_mode: Option<GatewayAccountMode>,
 }
 
 impl RenewalDispatchPageCursor {
@@ -122,11 +130,13 @@ impl RenewalDispatchPageCursor {
         observed_at: DateTime<Utc>,
         next_payment_attempt_at: DateTime<Utc>,
         subscription_id: SubscriptionId,
+        required_gateway_account_mode: Option<GatewayAccountMode>,
     ) -> Self {
         Self {
             observed_at,
             next_payment_attempt_at,
             subscription_id,
+            required_gateway_account_mode,
         }
     }
 
@@ -143,6 +153,11 @@ impl RenewalDispatchPageCursor {
     /// Subscription identifier from the last row returned by the prior page.
     pub const fn subscription_id(self) -> SubscriptionId {
         self.subscription_id
+    }
+
+    /// Mode filter that owns this scan, or `None` for a central all-mode scan.
+    pub const fn required_gateway_account_mode(self) -> Option<GatewayAccountMode> {
+        self.required_gateway_account_mode
     }
 }
 
@@ -224,8 +239,8 @@ pub struct RenewalAttemptState {
     pub attempt_sequence_count: i64,
     pub automatic_infrastructure_attempt_count: i64,
     pub last_automatic_infrastructure_failure_at: Option<DateTime<Utc>>,
-    pub provider_rate_limited_attempt_count: i64,
-    pub last_provider_rate_limited_at: Option<DateTime<Utc>>,
+    pub rate_limited_attempt_count: i64,
+    pub last_rate_limited_at: Option<DateTime<Utc>>,
     pub has_blocking_attempt: bool,
 }
 
@@ -240,18 +255,18 @@ impl RenewalAttemptState {
                 RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS,
             )
             || !retry_window_elapsed(
-                self.last_provider_rate_limited_at,
+                self.last_rate_limited_at,
                 now,
-                provider_rate_limit_retry_after_seconds(self.provider_rate_limited_attempt_count),
+                rate_limit_retry_after_seconds(self.rate_limited_attempt_count),
             )
     }
 }
 
-pub const fn provider_rate_limit_retry_after_seconds(attempt_count: i64) -> i64 {
-    if attempt_count >= RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS {
-        RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS
+pub const fn rate_limit_retry_after_seconds(attempt_count: i64) -> i64 {
+    if attempt_count >= RENEWAL_RATE_LIMIT_FAST_RETRY_ATTEMPTS {
+        RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS
     } else {
-        RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS
+        crate::gateway::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS
     }
 }
 
@@ -338,6 +353,7 @@ pub enum SubscriptionRenewalReservationRejection {
     AttemptInProgress,
     PaymentMethodUpdateInProgress,
     RetryBlocked,
+    GatewayAccountModeChanged,
     GatewayConfigurationChanged,
 }
 
@@ -387,6 +403,7 @@ impl SubscriptionRenewalReservation {
         period: BillingPeriod,
         charge: ChargeAmount,
         attempt_sequence_count: i64,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionRenewalReservationBuildError> {
         if gateway.billing_scope_id() != command.billing_scope_id() {
             return Err(SubscriptionRenewalReservationBuildError::GatewayIdentityMismatch);
@@ -411,6 +428,7 @@ impl SubscriptionRenewalReservation {
                 charge,
                 attempt_sequence_count,
             ),
+            required_gateway_account_mode,
         )
     }
 
@@ -423,6 +441,7 @@ impl SubscriptionRenewalReservation {
         subscriber_id: SubscriberId,
         plan_key: PlanKey,
         terms: SubscriptionRenewalLockedTerms,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionRenewalReservationBuildError> {
         let SubscriptionRenewalLockedTerms {
             gateway_account_id,
@@ -445,6 +464,7 @@ impl SubscriptionRenewalReservation {
             subscriber_id,
             gateway_account_id,
             gateway.gateway_configuration_id(),
+            required_gateway_account_mode,
         );
         let idempotency_key = renewal_attempt_idempotency_key(
             command.subscription_id(),
@@ -571,11 +591,16 @@ mod tests {
         let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
         let next_payment_attempt_at = observed_at + Duration::seconds(60);
         let subscription_id = SubscriptionId::new(Uuid::from_u128(2));
-        let cursor =
-            RenewalDispatchPageCursor::new(observed_at, next_payment_attempt_at, subscription_id);
+        let cursor = RenewalDispatchPageCursor::new(
+            observed_at,
+            next_payment_attempt_at,
+            subscription_id,
+            Some(GatewayAccountMode::Test),
+        );
         let dispatch = RenewalDispatch::new(
             BillingScopeId::new(Uuid::from_u128(1)),
             subscription_id,
+            GatewayAccountMode::Test,
             observed_at,
             3,
         );
@@ -584,6 +609,14 @@ mod tests {
         assert_eq!(cursor.observed_at(), observed_at);
         assert_eq!(cursor.next_payment_attempt_at(), next_payment_attempt_at);
         assert_eq!(cursor.subscription_id(), subscription_id);
+        assert_eq!(
+            cursor.required_gateway_account_mode(),
+            Some(GatewayAccountMode::Test)
+        );
+        assert_eq!(
+            dispatch.required_gateway_account_mode(),
+            GatewayAccountMode::Test
+        );
         assert_eq!(page.dispatches(), std::slice::from_ref(&dispatch));
         assert_eq!(page.next_cursor(), Some(cursor));
         assert_eq!(page.into_dispatches(), vec![dispatch]);
@@ -606,11 +639,11 @@ mod tests {
     }
 
     #[test]
-    fn fifth_provider_throttle_switches_to_daily_pacing() {
-        assert_eq!(provider_rate_limit_retry_after_seconds(4), 60);
+    fn fifth_gateway_throttle_switches_to_daily_pacing() {
+        assert_eq!(rate_limit_retry_after_seconds(4), 60);
         assert_eq!(
-            provider_rate_limit_retry_after_seconds(5),
-            RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS
+            rate_limit_retry_after_seconds(5),
+            RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS
         );
     }
 

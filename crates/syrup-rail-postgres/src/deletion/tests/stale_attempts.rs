@@ -56,6 +56,7 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
                 SELECT clock_timestamp() AS observed_at
             )
             INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents,
                 currency, current_period_start_at, current_period_end_at,
@@ -64,7 +65,7 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
                 dunning_retry_delays_seconds, dunning_exhaustion,
                 past_due_access, next_payment_attempt_at
             ) SELECT
-                $1, $2, $3, 'plan_a', 'active', $4, $5, 100, 'USD',
+                'live', $1, $2, $3, 'plan_a', 'active', $4, $5, 100, 'USD',
                 observed_at - interval '1 day',
                 observed_at + interval '1 day',
                 observed_at + interval '1 day', $6, 'recurring',
@@ -87,11 +88,13 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
         sqlx::query(
             r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
                 gateway_configuration_id, gateway_order_id
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'pending', $5, $6, 100,
                 'USD', $7, $8, $9
             )
