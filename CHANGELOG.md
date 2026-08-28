@@ -4,6 +4,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-28
+
 ### Fixed
 
 - Remove the global `dup_seconds=0` hardcode from NMI sale encoders. The new
@@ -37,6 +39,11 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Deprecate the compatibility `GatewayPaymentOutcome::into_parts` and
   `SubscriptionEnrollmentPaymentResult::into_parts` methods because they drop
   diagnostics. Use their diagnostic-preserving replacements.
+
+### Maintenance
+
+- Update the locked test-tooling dependency from yanked `chacha20` 0.10.1 to
+  0.10.2.
 
 ### Action required for hosts
 
@@ -688,7 +695,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/bpcakes/syrup-rail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0
