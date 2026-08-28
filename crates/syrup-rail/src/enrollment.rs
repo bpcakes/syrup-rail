@@ -3,10 +3,10 @@ use std::fmt;
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
     ChargeAmount, DiscountClaimId, DiscountCodeId, GatewayAccountMode, GatewayConfigurationId,
-    GatewayOrderId, GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptId,
-    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget,
-    PaymentToken, PlanKey, ProcessorEvidence, ResolvedGateway, SubscriberId, Subscription,
-    SubscriptionDiscountSnapshot, SubscriptionOffer, SubscriptionPaymentContext,
+    GatewayOrderId, GatewayPaymentDiagnostic, GatewayProviderKey, IdempotencyKey, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptStatus,
+    PaymentAttemptTarget, PaymentToken, PlanKey, ProcessorEvidence, ResolvedGateway, SubscriberId,
+    Subscription, SubscriptionDiscountSnapshot, SubscriptionOffer, SubscriptionPaymentContext,
 };
 use thiserror::Error;
 
@@ -585,10 +585,14 @@ pub enum SubscriptionEnrollmentSubmissionOutcome {
 /// subscription is therefore present only after the approval, payment method,
 /// recurring economics, discount, processor charge, and host event have
 /// committed in one transaction.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Equality compares this durable result only. Call-scoped gateway diagnostics
+/// are intentionally excluded because an exact replay may not reproduce them.
+#[derive(Clone, Debug)]
 pub struct SubscriptionEnrollmentPaymentResult {
     attempt: PaymentAttempt,
     state: SubscriptionEnrollmentPaymentResultState,
+    gateway_diagnostics: Vec<GatewayPaymentDiagnostic>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -597,6 +601,14 @@ enum SubscriptionEnrollmentPaymentResultState {
     NotApplied,
     ConfirmationPending(ApprovedProcessorEvidence),
 }
+
+impl PartialEq for SubscriptionEnrollmentPaymentResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.attempt == other.attempt && self.state == other.state
+    }
+}
+
+impl Eq for SubscriptionEnrollmentPaymentResult {}
 
 /// Invalid attempt state supplied to a payment-result constructor.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -638,6 +650,7 @@ impl SubscriptionEnrollmentPaymentResult {
         Ok(Self {
             attempt,
             state: SubscriptionEnrollmentPaymentResultState::Applied(subscription),
+            gateway_diagnostics: Vec::new(),
         })
     }
 
@@ -652,6 +665,7 @@ impl SubscriptionEnrollmentPaymentResult {
         Ok(Self {
             attempt,
             state: SubscriptionEnrollmentPaymentResultState::NotApplied,
+            gateway_diagnostics: Vec::new(),
         })
     }
 
@@ -672,7 +686,25 @@ impl SubscriptionEnrollmentPaymentResult {
         Ok(Self {
             attempt,
             state: SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence),
+            gateway_diagnostics: Vec::new(),
         })
+    }
+
+    /// Attaches payload-free diagnostics from the gateway observation applied
+    /// by the current call.
+    ///
+    /// These diagnostics are foreground routing facts, not durable attempt
+    /// state. A later replay reconstructs the canonical payment result from
+    /// persisted processor evidence and may not contain them.
+    pub fn with_gateway_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
+        self.gateway_diagnostics = diagnostics;
+        self
+    }
+
+    /// Returns payload-free diagnostics from the gateway observation applied
+    /// by the current call.
+    pub fn gateway_diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
+        &self.gateway_diagnostics
     }
 
     pub const fn attempt(&self) -> &PaymentAttempt {
@@ -716,6 +748,13 @@ impl SubscriptionEnrollmentPaymentResult {
         )
     }
 
+    /// Consumes the result into its original durable parts.
+    ///
+    /// This compatibility method drops foreground gateway diagnostics. Use
+    /// [`Self::into_parts_with_gateway_diagnostics`] when routing them matters.
+    #[deprecated(
+        note = "this drops gateway diagnostics; use SubscriptionEnrollmentPaymentResult::into_parts_with_gateway_diagnostics"
+    )]
     pub fn into_parts(
         self,
     ) -> (
@@ -723,7 +762,22 @@ impl SubscriptionEnrollmentPaymentResult {
         Option<Subscription>,
         Option<ProcessorEvidence>,
     ) {
-        match self.state {
+        let (attempt, subscription, pending_evidence, _) =
+            self.into_parts_with_gateway_diagnostics();
+        (attempt, subscription, pending_evidence)
+    }
+
+    /// Consumes the result without discarding foreground gateway diagnostics.
+    pub fn into_parts_with_gateway_diagnostics(
+        self,
+    ) -> (
+        PaymentAttempt,
+        Option<Subscription>,
+        Option<ProcessorEvidence>,
+        Vec<GatewayPaymentDiagnostic>,
+    ) {
+        let diagnostics = self.gateway_diagnostics;
+        let (attempt, subscription, pending_evidence) = match self.state {
             SubscriptionEnrollmentPaymentResultState::Applied(subscription) => {
                 (self.attempt, Some(subscription), None)
             }
@@ -731,7 +785,8 @@ impl SubscriptionEnrollmentPaymentResult {
             SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence) => {
                 (self.attempt, None, Some(evidence.into_evidence()))
             }
-        }
+        };
+        (attempt, subscription, pending_evidence, diagnostics)
     }
 }
 

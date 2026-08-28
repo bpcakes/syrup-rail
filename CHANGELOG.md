@@ -70,7 +70,7 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Migration
 
-- Version 0.5.0 requires PostgreSQL schema v5. Before scheduling downtime, run
+- Version 0.6.0 requires PostgreSQL schema v5. Before scheduling downtime, run
   `schema/v5/preflight_from_v4.sql` to measure retained external-reversal
   attestations and count incompatible resolution tuples. When blockers exist,
   run `schema/v5/audit_incompatible_attestations_from_v4.sql` through an
@@ -83,7 +83,7 @@ All notable changes to the Syrup Rail crates are documented in this file.
   deployment timeouts from the rehearsal rather than an assumed universal row
   limit. Investigate blockers through an audited host process, never by
   bypassing the constraint or silently rewriting financial evidence. After
-  commit, start 0.5.0 with `assert_runtime_schema_v5_compatible`; do not restart
+  commit, start 0.6.0 with `assert_runtime_schema_v5_compatible`; do not restart
   a v4 writer.
 
 ### Developer experience
@@ -92,6 +92,68 @@ All notable changes to the Syrup Rail crates are documented in this file.
   nounset expansion of an empty optional-argument array. CI now exercises clean
   and `--allow-dirty` packaging under both current Bash and macOS Bash 3.2.
 
+## [0.5.0] - 2026-08-28
+
+### Fixed
+
+- Remove the global `dup_seconds=0` hardcode from NMI sale encoders. The new
+  `ClientFactory::client_with_duplicate_check` constructor requires each
+  account client to choose `ProcessorConfigured` or a validated positive
+  `Window` explicitly. Zero is not a valid window and is no longer modeled or
+  sent by any constructor.
+- Keep payment certainty order-independent when NMI repeats numerically
+  equivalent decision fields. Only exact textual canonical response code `301`
+  proves a pre-processing rate limit; whitespace, numeric JSON, contradictory
+  non-2xx payment evidence, unproven HTTP 400 envelopes, and the undocumented
+  v5 HTTP 422 status remain indeterminate. Classic query/report HTTP 422 keeps
+  its permanent invalid-request classification. Unknown, malformed,
+  conflicting, noncanonical, or outer-status-mismatched `status` fields also
+  remain indeterminate, while generic canonical HTTP metadata does not
+  masquerade as payment evidence. Form-encoded evidence returned from a v5
+  endpoint, unknown or extended JSON error objects, and non-empty top-level JSON
+  arrays also fail closed. The pre-processing `301` proof accepts only NMI's
+  closed documented field set. Equivalent duplicate fields retain a
+  deterministic provider-observed spelling rather than a synthetic token.
+- Preserve provider-neutral gateway diagnostics on foreground subscription and
+  host-charge payment results. The exact response code remains durable;
+  foreground diagnostics are not separately persisted for later replay and do
+  not participate in equality of the durable result.
+
+### Deprecated
+
+- Deprecate `ClientFactory::client`. Releases through 0.4.0 sent
+  `dup_seconds=0`; the deprecated constructor now corrects that invalid
+  override by using the processor-configured policy.
+- Deprecate the compatibility `GatewayPaymentOutcome::into_parts` and
+  `SubscriptionEnrollmentPaymentResult::into_parts` methods because they drop
+  diagnostics. Use their diagnostic-preserving replacements.
+
+### Maintenance
+
+- Update the locked test-tooling dependency from yanked `chacha20` 0.10.1 to
+  0.10.2.
+
+### Action required for hosts
+
+- Migrate every NMI account client to `client_with_duplicate_check`. Use
+  `ProcessorConfigured` to omit `dup_seconds`; select a positive `Window` only
+  after verifying that the account permits that per-transaction override.
+  Retaining the processor policy trades additional defense in depth for
+  possible heuristic rejection of a legitimate later payment. Duplicate
+  response code `430` remains `Unknown` and must be reconciled; NMI does not
+  document it as proof of non-submission. It now carries the payload-free
+  raw-client `DuplicateTransactionAtProcessor` diagnostic, which the adapter
+  maps to provider-neutral
+  `GatewayPaymentDiagnostic::ProcessorReportedDuplicate` on
+  `GatewayPaymentOutcome`, so hosts can route it without parsing provider text.
+- NMI's sandbox does not exercise a payment processor, so validate the
+  effective duplicate-check and merchant-override settings for each controlled
+  pre-production processor account before rollout. Hosts that deny deprecation
+  warnings must migrate from `ClientFactory::client` in the same change as
+  upgrading the dependency. Keep the processor duplicate window shorter than
+  the shortest normal billing or renewal interval and the host's
+  replacement-charge interval, then wait out the window by default after an
+  indeterminate attempt.
 ## [0.4.0] - 2026-08-27
 
 ### Added
@@ -720,7 +782,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/bpcakes/syrup-rail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/bpcakes/syrup-rail/compare/v0.1.1...v0.2.0

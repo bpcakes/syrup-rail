@@ -257,6 +257,160 @@ fn communication_and_duplicate_response_codes_require_reconciliation() {
 }
 
 #[test]
+fn documented_v5_duplicate_rejection_remains_reconcilable() {
+    let outcome = payment_outcome_from_json_text(
+        r#"{
+            "response":"3",
+            "response_code":"430",
+            "response_text":"Duplicate transaction"
+        }"#,
+    )
+    .expect("duplicate v5 response should parse");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(outcome.transaction_id, None);
+    assert_eq!(
+        outcome.diagnostics,
+        vec![
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+            PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+        ]
+    );
+}
+
+#[test]
+fn duplicate_response_code_composes_with_other_decision_diagnostics() {
+    for (extra_field, expected) in [
+        (
+            r#""status":{}"#,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+        ),
+        (
+            r#""status":"processor_surprise""#,
+            PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence,
+        ),
+    ] {
+        let outcome =
+            payment_outcome_from_json_text(&format!(r#"{{"response_code":"430",{extra_field}}}"#))
+                .expect("duplicate response with anomalous evidence should parse conservatively");
+
+        assert_eq!(outcome.status, PaymentStatus::Unknown);
+        assert_eq!(
+            outcome.diagnostics,
+            vec![
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+                expected,
+            ]
+        );
+    }
+}
+
+#[test]
+fn numerically_equivalent_duplicate_response_codes_are_recognized() {
+    for response_code in ["0430", "+430"] {
+        let outcome =
+            payment_outcome_from_json_text(&format!(r#"{{"response_code":"{response_code}"}}"#))
+                .expect("numeric duplicate response code should parse");
+
+        assert_eq!(outcome.status, PaymentStatus::Unknown);
+        assert_eq!(
+            outcome.diagnostics,
+            vec![PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor],
+            "{response_code}"
+        );
+    }
+}
+
+#[test]
+fn noncanonical_301_evidence_never_proves_preprocessing_rate_limiting() {
+    for json in [
+        r#"{"response":"3","response_code":"301","response_code":"+0301"}"#,
+        r#"{"response":"3","response_code":"+0301","response_code":"301"}"#,
+        r#"{"response":"3","response_code":"+0301"}"#,
+        r#"{"response":"3","response_code":"0301"}"#,
+        r#"{"response":" 3 ","response_code":"301"}"#,
+        r#"{"response":"3","response_code":" 301 "}"#,
+        r#"{"response":"3","response_code":"301","response_code":" 301 "}"#,
+        r#"{"response":"3","response_code":" 301 ","response_code":"301"}"#,
+        r#"{"response":3,"response_code":301}"#,
+    ] {
+        let outcome = payment_outcome_from_json_text(json)
+            .expect("noncanonical 301 evidence must remain a reconcilable outcome");
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{json}");
+    }
+}
+
+#[test]
+fn exact_json_301_envelope_is_known_not_submitted() {
+    assert!(matches!(
+        payment_outcome_from_json_text(
+            r#"{"response":"3","response_code":"301","response_text":"Rate limit exceeded"}"#,
+        ),
+        Err(WireError::RateLimited(_))
+    ));
+}
+
+#[test]
+fn equivalent_gateway_state_spellings_are_exposed_order_independently() {
+    for json in [
+        r#"{"condition":"Pending Settlement","condition":"pending_settlement"}"#,
+        r#"{"condition":"pending_settlement","condition":"Pending Settlement"}"#,
+    ] {
+        let outcome = payment_outcome_from_json_text(json)
+            .expect("equivalent gateway states should resolve deterministically");
+        assert_eq!(
+            outcome.condition.as_ref().map(SensitiveText::expose),
+            Some("Pending Settlement"),
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn conflicting_unknown_response_codes_preserve_each_diagnostic() {
+    for json in [
+        r#"{"response_code":"420","response_code":"430"}"#,
+        r#"{"response_code":"430","response_code":"420"}"#,
+    ] {
+        let outcome = payment_outcome_from_json_text(json)
+            .expect("conflicting response codes must remain a reconcilable outcome");
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{json}");
+        assert_eq!(outcome.response_code, None, "{json}");
+        assert_eq!(
+            outcome.diagnostics,
+            vec![
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+                PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+            ],
+            "{json}"
+        );
+    }
+}
+
+#[test]
+fn equivalent_response_code_spellings_are_exposed_order_independently() {
+    for json in [
+        r#"{"response_code":"430","response_code":"+0430"}"#,
+        r#"{"response_code":"+0430","response_code":"430"}"#,
+    ] {
+        let outcome = payment_outcome_from_json_text(json)
+            .expect("equivalent response codes should resolve deterministically");
+        assert_eq!(
+            outcome.response_code.as_ref().map(SensitiveText::expose),
+            Some("430"),
+            "{json}"
+        );
+    }
+
+    let outcome = payment_outcome_from_json_text(r#"{"response_code":"0430"}"#)
+        .expect("one exact provider spelling should be preserved");
+    assert_eq!(
+        outcome.response_code.as_ref().map(SensitiveText::expose),
+        Some("0430")
+    );
+}
+
+#[test]
 fn json_301_with_processing_evidence_is_never_known_not_submitted() {
     for evidence in [
         r#""customer_vault_id":"vault_assigned""#,
@@ -292,6 +446,11 @@ fn json_301_with_processing_evidence_is_never_known_not_submitted() {
         r#""transaction":{"actions":[{"action_type":"sale"}]}"#,
         r#""payment":{"action":{"action_type":"sale"}}"#,
         r#""payment":{"actions":[{"action_type":"sale"}]}"#,
+        r#""transaction":{}"#,
+        r#""payment":{}"#,
+        r#""payment_details":{"card_number":"4***********4242"}"#,
+        r#""card":{"last4":"4242"}"#,
+        r#""future_provider_field":null"#,
     ] {
         for json in [
             format!(r#"{{"response":"3","response_code":"301",{evidence}}}"#),
@@ -303,9 +462,8 @@ fn json_301_with_processing_evidence_is_never_known_not_submitted() {
         }
     }
 
-    assert!(matches!(
-        payment_outcome_from_json_text(
-            r#"{
+    let outcome = payment_outcome_from_json_text(
+        r#"{
                 "response":"3",
                 "response_code":"301",
                 "customer_vault_id":null,
@@ -322,9 +480,9 @@ fn json_301_with_processing_evidence_is_never_known_not_submitted() {
                     "card":{"cvv_response":null}
                 }
             }"#,
-        ),
-        Err(WireError::RateLimited(_))
-    ));
+    )
+    .expect("an extended 301 envelope cannot prove pre-processing");
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
 }
 
 #[test]

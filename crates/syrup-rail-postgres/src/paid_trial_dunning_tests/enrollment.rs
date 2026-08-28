@@ -500,7 +500,8 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         SubscriptionEnrollmentAdmissionOutcome::Admitted(_)
     ));
     let reconciled_outcome =
-        approved_outcome_with_reference("trial_reconciled_approved", "vault_trial_reconciled");
+        approved_outcome_with_reference("trial_reconciled_approved", "vault_trial_reconciled")
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let reconciled = apply_reconciled_subscription_enrollment_gateway_outcome(
         &database.pool,
         &coordinator,
@@ -509,6 +510,10 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         &reconciled_outcome,
     )
     .await?;
+    assert_eq!(
+        reconciled.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     assert_eq!(
         reconciled
             .subscription()

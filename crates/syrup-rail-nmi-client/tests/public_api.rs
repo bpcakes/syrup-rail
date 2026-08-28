@@ -1,7 +1,32 @@
 use syrup_rail_nmi_client::{
-    BillingContact, ClientFactory, ConfigurationError, Credentials, Endpoint, MutationCertainty,
-    MutationError, SaleIntent, SaleRequest, SensitiveText,
+    BillingContact, ClientFactory, ConfigurationError, Credentials, DuplicateCheck,
+    DuplicateCheckWindow, Endpoint, MutationCertainty, MutationError, SaleIntent, SaleRequest,
+    SensitiveText,
 };
+
+#[test]
+fn duplicate_check_windows_are_positive_and_bounded() {
+    assert!(matches!(
+        DuplicateCheckWindow::new(0),
+        Err(ConfigurationError::DuplicateCheckWindowOutOfRange)
+    ));
+    assert_eq!(
+        DuplicateCheckWindow::new(DuplicateCheckWindow::MIN_SECONDS)
+            .expect("minimum window should validate")
+            .seconds(),
+        DuplicateCheckWindow::MIN_SECONDS
+    );
+    assert_eq!(
+        DuplicateCheckWindow::new(DuplicateCheckWindow::MAX_SECONDS)
+            .expect("maximum window should validate")
+            .seconds(),
+        DuplicateCheckWindow::MAX_SECONDS
+    );
+    assert!(matches!(
+        DuplicateCheckWindow::new(DuplicateCheckWindow::MAX_SECONDS + 1),
+        Err(ConfigurationError::DuplicateCheckWindowOutOfRange)
+    ));
+}
 
 #[test]
 fn endpoint_parsers_keep_https_and_loopback_http_explicit() {
@@ -26,7 +51,11 @@ fn endpoint_parsers_keep_https_and_loopback_http_explicit() {
     assert!(matches!(
         ClientFactory::new()
             .expect("HTTPS factory should construct")
-            .client(loopback_endpoint, credentials),
+            .client_with_duplicate_check(
+                loopback_endpoint,
+                credentials,
+                DuplicateCheck::ProcessorConfigured,
+            ),
         Err(ConfigurationError::LoopbackHttpDisabled)
     ));
     for invalid in [
@@ -54,10 +83,11 @@ fn credential_client_and_sensitive_text_formatting_is_value_free() {
 
     let client = ClientFactory::new()
         .expect("HTTP client should construct")
-        .client(
+        .client_with_duplicate_check(
             Endpoint::parse_https("https://merchant.example.test")
                 .expect("endpoint should validate"),
             credentials,
+            DuplicateCheck::ProcessorConfigured,
         )
         .expect("HTTPS client should construct");
     let client_debug = format!("{client:?}");

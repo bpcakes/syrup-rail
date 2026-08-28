@@ -1,4 +1,4 @@
-# Syrup Rail 0.5.0 public API
+# Syrup Rail 0.6.0 public API
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -148,7 +148,7 @@ Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
 Use `assert_runtime_schema_v5_compatible` after host migrations and before
-serving billing traffic. Version 0.5.0 supports PostgreSQL 18 and schema v5 only;
+serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v5 only;
 the assertion is read-only and does not install or upgrade a schema. It
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is

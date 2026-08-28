@@ -214,14 +214,20 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     let recovery = reserve_and_admit_recovery(&database.pool, &gateway, &recovery_command).await?;
     assert_eq!(recovery.request().amount().cents(), 2_320);
     assert_eq!(recovery.period().start_at(), &due_at);
+    let duplicate_outcome = unknown_outcome()
+        .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let unknown = apply_subscription_recovery_gateway_outcome(
         &database.pool,
         &coordinator,
         &recovery,
-        &unknown_outcome(),
+        &duplicate_outcome,
     )
     .await?;
     assert_eq!(unknown.status(), syrup_rail::PaymentAttemptStatus::Unknown);
+    assert_eq!(
+        unknown.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let retry_after_unknown: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
     )
@@ -258,14 +264,21 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         )
     );
 
+    let recovered_outcome =
+        approved_outcome_with_reference("discounted_trial_recovery", "vault_recovery")
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let recovered = apply_reconciled_subscription_recovery_gateway_outcome(
         &database.pool,
         &coordinator,
         BillingScopeId::new(account.billing_scope_id),
         recovery.identity().attempt_id(),
-        &approved_outcome_with_reference("discounted_trial_recovery", "vault_recovery"),
+        &recovered_outcome,
     )
     .await?;
+    assert_eq!(
+        recovered.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let subscription = recovered
         .subscription()
         .expect("approved recovery restores subscription");

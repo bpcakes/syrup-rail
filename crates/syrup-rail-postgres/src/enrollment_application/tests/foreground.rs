@@ -928,7 +928,8 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
 
     let parked_outcome =
-        approved_outcome_with_reference(Some("txn_method_parked"), "vault_method_parked");
+        approved_outcome_with_reference(Some("txn_method_parked"), "vault_method_parked")
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let parked_gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
         parked_outcome.clone()
     )));
@@ -1005,10 +1006,16 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         PaymentAttemptStatus::ReviewRequired
     );
     assert!(parked.subscription().is_none());
+    assert_eq!(
+        parked.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let parked_replay = parked_service
         .replace_payment_method(parked_command)
         .await?;
     assert_eq!(parked_replay, parked);
+    assert_eq!(parked_replay.attempt(), parked.attempt());
+    assert!(parked_replay.gateway_diagnostics().is_empty());
     assert!(parked_replay.subscription().is_none());
     assert_eq!(parked_gateway.store_calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
@@ -1051,19 +1058,25 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
 
     let additional_transaction_id = "txn_method_unexpected_additional";
+    let reconciled_outcome = approved_outcome_with_reference(
+        Some(additional_transaction_id),
+        "vault_method_unexpected_additional",
+    )
+    .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let reconciled = service
         .apply_reconciled_outcome(
             result.attempt().identity().billing_scope_id(),
             result.attempt().identity().attempt_id(),
-            &approved_outcome_with_reference(
-                Some(additional_transaction_id),
-                "vault_method_unexpected_additional",
-            ),
+            &reconciled_outcome,
         )
         .await?;
     assert_eq!(
         reconciled.attempt().status(),
         PaymentAttemptStatus::Approved
+    );
+    assert_eq!(
+        reconciled.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
     );
     let additional_progression: String = sqlx::query_scalar(
         r#"

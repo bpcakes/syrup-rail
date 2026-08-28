@@ -2,11 +2,14 @@ use std::fmt;
 
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
-use crate::{ReportQuery, SaleIntent, SaleRequest, StorePaymentMethodRequest, TransactionQuery};
+use crate::{
+    DuplicateCheck, ReportQuery, SaleIntent, SaleRequest, StorePaymentMethodRequest,
+    TransactionQuery,
+};
 
+use super::WireError;
 use super::request_budget::OutboundRequestBudget;
 use super::validation::trimmed_optional;
-use super::{NMI_DUP_SECONDS, WireError};
 
 pub(super) enum NmiFormValue<'a> {
     Borrowed(&'a str),
@@ -118,13 +121,16 @@ pub(super) fn classic_sale_params<'a>(
     security_key: &'a str,
     request: &'a SaleRequest,
     amount: String,
+    duplicate_check: DuplicateCheck,
 ) -> NmiFormParams<'a> {
     let mut params = NmiFormParams::default();
     params.push_borrowed("security_key", security_key);
     params.push_borrowed("type", "sale");
     params.push_public_owned("amount", amount);
     params.push_borrowed("currency", super::SUPPORTED_NMI_CURRENCY);
-    params.push_public_owned("dup_seconds", NMI_DUP_SECONDS.to_string());
+    if let Some(seconds) = duplicate_check.wire_seconds() {
+        params.push_public_owned("dup_seconds", seconds.to_string());
+    }
     params.push_borrowed("orderid", request.order_id.trim());
     match &request.intent {
         SaleIntent::PaymentToken(payment_token) => {

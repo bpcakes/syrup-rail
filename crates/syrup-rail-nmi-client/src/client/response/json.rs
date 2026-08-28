@@ -6,9 +6,9 @@ use super::super::{
     text::{bounded_gateway_text, last4, parse_expiry, sensitive_gateway_field, valid_last4},
 };
 use super::common::{
-    IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
-    ScalarOccurrenceCollector, finalize_foreground_identifiers, rate_limited_wire_error,
-    resolve_optional_scalar,
+    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedPaymentDecision,
+    ResolvedScalar, ScalarOccurrence, ScalarOccurrenceCollector, finalize_foreground_identifiers,
+    rate_limited_wire_error, resolve_optional_scalar,
 };
 
 const JSON_TRANSACTION_ID_PATHS: &[&[&str]] = &[
@@ -26,41 +26,20 @@ const JSON_CUSTOMER_VAULT_ID_PATHS: &[&[&str]] = &[
     &["customer", "customer_vault_id"],
 ];
 
-const JSON_AUTHORIZATION_CODE_PATHS: &[&[&str]] = &[
-    &["authcode"],
-    &["auth_code"],
-    &["authorization_code"],
-    &["authorization", "code"],
-    &["payment", "auth_code"],
-    &["payment", "authorization_code"],
-    &["payment_details", "auth_code"],
-    &["payment_details", "authorization_code"],
-];
-
-const JSON_AVS_RESPONSE_PATHS: &[&[&str]] = &[
-    &["avsresponse"],
-    &["avs_response"],
-    &["payment_details", "avs_response"],
-    &["payment_details", "card", "avs_response"],
-    &["card", "avs_response"],
-];
-
-const JSON_CVV_RESPONSE_PATHS: &[&[&str]] = &[
-    &["cvvresponse"],
-    &["cvv_response"],
-    &["payment_details", "cvv_response"],
-    &["payment_details", "card", "cvv_response"],
-    &["card", "cvv_response"],
-];
-
-const JSON_ACTION_PATHS: &[&[&str]] = &[
-    &["action"],
-    &["actions"],
-    &["transaction", "action"],
-    &["transaction", "actions"],
-    &["payment", "action"],
-    &["payment", "actions"],
-];
+fn json_scalar_occurrence(value: &LosslessJsonValue) -> ScalarOccurrence<'_> {
+    match value {
+        LosslessJsonValue::String(value) => {
+            ScalarOccurrence::Scalar(std::borrow::Cow::Borrowed(value))
+        }
+        LosslessJsonValue::Number(value) => {
+            ScalarOccurrence::CoercedScalar(std::borrow::Cow::Owned(value.to_string()))
+        }
+        LosslessJsonValue::Null => ScalarOccurrence::Null,
+        LosslessJsonValue::Bool(_) | LosslessJsonValue::Array(_) | LosslessJsonValue::Object(_) => {
+            ScalarOccurrence::InvalidShape
+        }
+    }
+}
 
 fn collect_json_identifier_path(
     value: &LosslessJsonValue,
@@ -76,13 +55,7 @@ fn collect_json_identifier_path(
     };
     for (_, field_value) in fields.iter().filter(|(field, _)| field == segment) {
         if remaining.is_empty() {
-            let occurrence = match field_value {
-                LosslessJsonValue::Null => ScalarOccurrence::Null,
-                _ => field_value
-                    .scalar_text()
-                    .map(ScalarOccurrence::Scalar)
-                    .unwrap_or(ScalarOccurrence::InvalidShape),
-            };
+            let occurrence = json_scalar_occurrence(field_value);
             collector.record_identifier(occurrence, presence);
         } else if matches!(field_value, LosslessJsonValue::Object(_)) {
             collect_json_identifier_path(field_value, remaining, presence, collector);
@@ -114,10 +87,7 @@ fn collect_json_direct_scalar(
         return collector;
     };
     for (_, field_value) in fields.iter().filter(|(field, _)| field == name) {
-        let occurrence = field_value
-            .scalar_text()
-            .map(ScalarOccurrence::Scalar)
-            .unwrap_or(ScalarOccurrence::InvalidShape);
+        let occurrence = json_scalar_occurrence(field_value);
         if bounded {
             collector.record_bounded(occurrence);
         } else {
@@ -127,102 +97,40 @@ fn collect_json_direct_scalar(
     collector
 }
 
-fn json_path_has_processing_evidence(value: &LosslessJsonValue, path: &[&str]) -> bool {
-    let Some((segment, remaining)) = path.split_first() else {
-        return json_action_value_has_processing_evidence(value);
-    };
-    let LosslessJsonValue::Object(fields) = value else {
-        return true;
-    };
-    fields
-        .iter()
-        .filter(|(field, _)| field == segment)
-        .any(|(_, field_value)| {
-            if remaining.is_empty() {
-                json_action_value_has_processing_evidence(field_value)
-            } else {
-                match field_value {
-                    LosslessJsonValue::Null => false,
-                    LosslessJsonValue::String(value) if value.trim().is_empty() => false,
-                    LosslessJsonValue::Object(_) => {
-                        json_path_has_processing_evidence(field_value, remaining)
-                    }
-                    _ => true,
-                }
-            }
-        })
-}
-
-fn json_action_value_has_processing_evidence(value: &LosslessJsonValue) -> bool {
-    match value {
-        LosslessJsonValue::Null => false,
-        LosslessJsonValue::String(value) => !value.trim().is_empty(),
-        LosslessJsonValue::Array(values) => !values.is_empty(),
-        LosslessJsonValue::Bool(_)
-        | LosslessJsonValue::Number(_)
-        | LosslessJsonValue::Object(_) => true,
-    }
-}
-
 fn json_is_known_preprocessing_rate_limit(
     value: &LosslessJsonValue,
-    decision: &PaymentDecisionFields,
-    scalar_evidence: [&ResolvedScalar; 5],
+    decision: &ResolvedPaymentDecision,
 ) -> bool {
-    decision.is_rate_limited()
-        && scalar_evidence
-            .iter()
-            .all(|channel| matches!(channel, ResolvedScalar::Missing))
-        && !JSON_ACTION_PATHS
-            .iter()
-            .any(|path| json_path_has_processing_evidence(value, path))
+    let LosslessJsonValue::Object(fields) = value else {
+        return false;
+    };
+    decision.is_known_preprocessing_rate_limit()
+        && fields.iter().all(|(name, value)| match name.as_str() {
+            "response" | "response_code" => true,
+            "response_text" => matches!(
+                value,
+                LosslessJsonValue::String(message) if message == "Rate limit exceeded"
+            ),
+            _ => false,
+        })
 }
 
 pub(in crate::client) fn payment_outcome_from_json(
     value: &LosslessJsonValue,
 ) -> Result<PaymentOutcome, WireError> {
-    let decision = PaymentDecisionFields::new(
-        collect_json_direct_scalar(value, "response", false),
-        collect_json_direct_scalar(value, "response_code", false),
-        collect_json_direct_scalar(value, "status", false),
-        collect_json_direct_scalar(value, "condition", false),
-    );
-    let transaction_evidence = collect_json_identifier(
-        value,
-        JSON_TRANSACTION_ID_PATHS,
-        IdentifierPresence::Optional,
-    );
+    let decision = payment_decision_from_json(value);
     let customer_vault_id = collect_json_identifier(
         value,
         JSON_CUSTOMER_VAULT_ID_PATHS,
         IdentifierPresence::Optional,
     );
-    let authorization_code = collect_json_identifier(
-        value,
-        JSON_AUTHORIZATION_CODE_PATHS,
-        IdentifierPresence::Optional,
-    );
-    let avs_response =
-        collect_json_identifier(value, JSON_AVS_RESPONSE_PATHS, IdentifierPresence::Optional);
-    let cvv_response =
-        collect_json_identifier(value, JSON_CVV_RESPONSE_PATHS, IdentifierPresence::Optional);
-    if json_is_known_preprocessing_rate_limit(
-        value,
-        &decision,
-        [
-            &transaction_evidence,
-            &customer_vault_id,
-            &authorization_code,
-            &avs_response,
-            &cvv_response,
-        ],
-    ) {
+    if json_is_known_preprocessing_rate_limit(value, &decision) {
         return Err(rate_limited_wire_error());
     }
     let (response_text, _) =
         resolve_optional_scalar(collect_json_direct_scalar(value, "response_text", true).finish());
-    let (mut status, decision_diagnostic) = decision.payment_status();
-    let mut diagnostics = decision_diagnostic.into_iter().collect();
+    let mut status = decision.status;
+    let mut diagnostics = decision.diagnostics;
     let (transaction_id, customer_vault_id) = finalize_foreground_identifiers(
         &mut status,
         collect_json_identifier(
@@ -233,18 +141,137 @@ pub(in crate::client) fn payment_outcome_from_json(
         customer_vault_id,
         &mut diagnostics,
     );
-    let (response, response_code, condition) = decision.into_public_raw_fields();
     Ok(PaymentOutcome {
         status,
         transaction_id,
         customer_vault_id,
-        response: sensitive_gateway_field(response),
-        response_code: sensitive_gateway_field(response_code),
+        response: sensitive_gateway_field(decision.response),
+        response_code: sensitive_gateway_field(decision.response_code),
         response_text: sensitive_gateway_field(response_text),
-        condition: sensitive_gateway_field(condition),
+        condition: sensitive_gateway_field(decision.condition),
         descriptor: descriptor_from_json(value),
         diagnostics,
     })
+}
+
+fn payment_decision_from_json(value: &LosslessJsonValue) -> ResolvedPaymentDecision {
+    PaymentDecisionFields::new(
+        collect_json_direct_scalar(value, "response", false)
+            .finish_decision(DecisionFieldKind::Response),
+        collect_json_direct_scalar(value, "response_code", false)
+            .finish_decision(DecisionFieldKind::ResponseCode),
+        collect_json_direct_scalar(value, "status", false)
+            .finish_decision(DecisionFieldKind::GatewayState),
+        collect_json_direct_scalar(value, "condition", false)
+            .finish_decision(DecisionFieldKind::GatewayState),
+    )
+    .resolve()
+}
+
+pub(in crate::client) fn is_known_preprocessing_http_error_envelope(
+    value: &LosslessJsonValue,
+    http_status: u16,
+) -> bool {
+    let LosslessJsonValue::Object(fields) = value else {
+        return false;
+    };
+    const ALLOWED_FIELDS: &[&str] = &["type", "error_code", "message", "ref_id", "status"];
+    if fields.is_empty()
+        || fields
+            .iter()
+            .any(|(name, _)| !ALLOWED_FIELDS.contains(&name.as_str()))
+        || ALLOWED_FIELDS.iter().any(|name| {
+            fields
+                .iter()
+                .filter(|(candidate, _)| candidate == name)
+                .count()
+                > 1
+        })
+    {
+        return false;
+    }
+    let has_error_marker = fields.iter().any(|(name, value)| {
+        matches!(name.as_str(), "error_code" | "message")
+            && matches!(value, LosslessJsonValue::String(text) if !text.trim().is_empty())
+    });
+    has_error_marker
+        && fields.iter().all(|(name, value)| match name.as_str() {
+            "type" | "error_code" | "message" => {
+                matches!(value, LosslessJsonValue::String(text) if !text.trim().is_empty())
+            }
+            "ref_id" => matches!(
+                value,
+                LosslessJsonValue::Null | LosslessJsonValue::String(_)
+            ),
+            "status" => true,
+            _ => false,
+        })
+        && !payment_decision_from_json(value).has_payment_processing_evidence(http_status)
+}
+
+pub(in crate::client) fn is_documented_v5_validation_error(value: &LosslessJsonValue) -> bool {
+    let LosslessJsonValue::Object(fields) = value else {
+        return false;
+    };
+    const ALLOWED_FIELDS: &[&str] = &["type", "error_code", "message", "ref_id", "details"];
+    if fields
+        .iter()
+        .any(|(name, _)| !ALLOWED_FIELDS.contains(&name.as_str()))
+    {
+        return false;
+    }
+    if ALLOWED_FIELDS.iter().any(|name| {
+        fields
+            .iter()
+            .filter(|(candidate, _)| candidate == name)
+            .count()
+            > 1
+    }) {
+        return false;
+    }
+    matches!(
+        value.last_field("type"),
+        Some(LosslessJsonValue::String(kind)) if kind == "validationError"
+    ) && matches!(
+        value.last_field("error_code"),
+        Some(LosslessJsonValue::String(code)) if code == "E_INVALID_SUBMISSION"
+    ) && matches!(
+        value.last_field("message"),
+        Some(LosslessJsonValue::String(message)) if !message.trim().is_empty()
+    ) && value.last_field("ref_id").is_none_or(|ref_id| {
+        matches!(
+            ref_id,
+            LosslessJsonValue::Null | LosslessJsonValue::String(_)
+        )
+    }) && value
+        .last_field("details")
+        .is_some_and(documented_validation_details)
+}
+
+fn documented_validation_details(value: &LosslessJsonValue) -> bool {
+    let LosslessJsonValue::Array(details) = value else {
+        return false;
+    };
+    !details.is_empty()
+        && details.iter().all(|detail| {
+            let LosslessJsonValue::Object(fields) = detail else {
+                return false;
+            };
+            if fields.len() != 2
+                || fields
+                    .iter()
+                    .any(|(name, _)| !matches!(name.as_str(), "fieldName" | "message"))
+            {
+                return false;
+            }
+            matches!(
+                detail.last_field("fieldName"),
+                Some(LosslessJsonValue::String(field)) if !field.trim().is_empty()
+            ) && matches!(
+                detail.last_field("message"),
+                Some(LosslessJsonValue::String(message)) if !message.trim().is_empty()
+            )
+        })
 }
 
 fn descriptor_from_json(value: &LosslessJsonValue) -> PaymentDescriptor {

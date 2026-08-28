@@ -295,7 +295,7 @@ fn query_transaction_reports_accept_semantically_equivalent_authority_duplicates
         assert_eq!(reports[0].actions.len(), 1);
         assert_eq!(
             reports[0].condition.as_ref().map(SensitiveText::expose),
-            Some("pendingsettlement")
+            Some("pending settlement")
         );
         let action = &reports[0].actions[0];
         assert_eq!(

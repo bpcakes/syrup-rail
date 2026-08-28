@@ -32,6 +32,50 @@ fn every_sale_intent_has_one_explicit_transport_route() {
 }
 
 #[test]
+fn classic_sale_applies_the_configured_duplicate_check_policy() {
+    let request = SaleRequest {
+        amount_cents: 4_900,
+        order_id: "ck_order_123".to_owned(),
+        intent: SaleIntent::PaymentToken("tok_test".to_owned()),
+        billing_contact: None,
+    };
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "49.00".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
+    let form: std::collections::HashMap<&str, &str> = params.iter().collect();
+    assert!(!form.contains_key("dup_seconds"));
+    assert!(!form.contains_key("duplicate_check_seconds"));
+
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "49.00".to_owned(),
+        DuplicateCheck::Window(
+            crate::DuplicateCheckWindow::new(120).expect("window should be valid"),
+        ),
+    );
+    let form: std::collections::HashMap<&str, &str> = params.iter().collect();
+    assert_eq!(form.get("dup_seconds").copied(), Some("120"));
+    assert!(!form.contains_key("duplicate_check_seconds"));
+
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "49.00".to_owned(),
+        DuplicateCheck::Window(
+            crate::DuplicateCheckWindow::new(crate::DuplicateCheckWindow::MAX_SECONDS)
+                .expect("maximum window should be valid"),
+        ),
+    );
+    let form: std::collections::HashMap<&str, &str> = params.iter().collect();
+    assert_eq!(form.get("dup_seconds").copied(), Some("7862400"));
+    assert!(!form.contains_key("duplicate_check_seconds"));
+}
+
+#[test]
 fn sale_customer_vault_form_adds_payment_method_to_vault() {
     let request = SaleRequest {
         amount_cents: 4_900,
@@ -45,7 +89,12 @@ fn sale_customer_vault_form_adds_payment_method_to_vault() {
             email: Some(" ada@example.test ".to_owned()),
         }),
     };
-    let params = classic_sale_params("private_key", &request, "49.00".to_owned());
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "49.00".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
     let form: std::collections::HashMap<&str, &str> = params.iter().collect();
 
     assert_eq!(form.get("security_key").copied(), Some("private_key"));
@@ -58,8 +107,6 @@ fn sale_customer_vault_form_adds_payment_method_to_vault() {
     assert_eq!(form.get("first_name").copied(), Some("Ada"));
     assert_eq!(form.get("last_name").copied(), Some("Lovelace"));
     assert_eq!(form.get("email").copied(), Some("ada@example.test"));
-    assert_eq!(form.get("dup_seconds").copied(), Some("0"));
-    assert!(!form.contains_key("duplicate_check_seconds"));
     assert_eq!(form.get("billing_method").copied(), Some("recurring"));
     assert_eq!(
         form.get("stored_credential_indicator").copied(),
@@ -86,7 +133,12 @@ fn sale_customer_vault_form_includes_recurring_merchant_flags() {
         },
         billing_contact: None,
     };
-    let params = classic_sale_params("private_key", &request, "49.00".to_owned());
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "49.00".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
     let form: std::collections::HashMap<&str, &str> = params.iter().collect();
 
     assert_eq!(form.get("customer_vault_id").copied(), Some("vault_123"));
@@ -100,8 +152,6 @@ fn sale_customer_vault_form_includes_recurring_merchant_flags() {
         form.get("initial_transaction_id").copied(),
         Some("txn_initial_123")
     );
-    assert_eq!(form.get("dup_seconds").copied(), Some("0"));
-    assert!(!form.contains_key("duplicate_check_seconds"));
 }
 
 #[test]
@@ -121,6 +171,7 @@ fn store_payment_method_uses_validate_without_amount() {
     assert_eq!(form.get("security_key").copied(), Some("private_key"));
     assert_eq!(form.get("customer_vault").copied(), Some("add_customer"));
     assert_eq!(form.get("payment_token").copied(), Some("tok_update"));
+    assert!(!form.contains_key("dup_seconds"));
     assert_eq!(form.get("orderid").copied(), Some("ck_payment_method_123"));
     assert_eq!(form.get("type").copied(), Some("validate"));
     assert!(!form.contains_key("duplicate_check_seconds"));
@@ -158,7 +209,12 @@ fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
             email: Some(" ada@example.test ".to_owned()),
         }),
     };
-    let params = classic_sale_params(private_key.as_str(), &request, "49.00".to_owned());
+    let params = classic_sale_params(
+        private_key.as_str(),
+        &request,
+        "49.00".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
 
     let assert_borrowed = |key: &str| {
         assert!(
@@ -233,6 +289,7 @@ fn query_forms_share_borrowing_serializer_and_wire_contract() {
         Some("txn_query")
     );
     assert_eq!(wire.get("order_id").map(String::as_str), Some("ck_query"));
+    assert!(!wire.contains_key("dup_seconds"));
 
     let report = ReportQuery {
         start_date: "20260701000000".to_owned(),
@@ -257,6 +314,7 @@ fn query_forms_share_borrowing_serializer_and_wire_contract() {
     );
     assert_eq!(wire.get("result_limit").map(String::as_str), Some("100"));
     assert_eq!(wire.get("page_number").map(String::as_str), Some("3"));
+    assert!(!wire.contains_key("dup_seconds"));
     assert_eq!(
         wire.get("result_order").map(String::as_str),
         Some("standard")

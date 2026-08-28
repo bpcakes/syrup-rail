@@ -3,7 +3,7 @@ use std::{fmt, mem::size_of, sync::Arc};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::configuration::{
-    ConfigurationError, Credentials, Endpoint, MAX_NMI_CONCURRENT_REPORTS,
+    ConfigurationError, Credentials, DuplicateCheck, Endpoint, MAX_NMI_CONCURRENT_REPORTS,
     MAX_NMI_IDLE_CONNECTIONS_PER_HOST, configured_http_client,
 };
 use crate::{
@@ -60,12 +60,6 @@ const MAX_NMI_REPORT_DATE_BYTES: usize = 64;
 const MAX_NMI_OUTBOUND_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_NMI_FIXED_REQUEST_BYTES: usize = 1_024;
 const SUPPORTED_NMI_CURRENCY: &str = "USD";
-// Callers must reserve durable operation identities before provider I/O and
-// reconcile indeterminate submissions instead of retrying them blindly. Keep
-// NMI's processor-dependent duplicate heuristic disabled so distinct
-// same-card/same-amount charges are not rejected merely for sharing a time
-// window.
-const NMI_DUP_SECONDS: u16 = 0;
 
 /// A credential-free HTTP client factory that can be shared across accounts.
 #[derive(Clone)]
@@ -93,10 +87,37 @@ impl ClientFactory {
         Ok(factory)
     }
 
+    /// Builds an account-bound client using the processor-configured policy.
+    ///
+    /// Releases through 0.4.0 sent the invalid `dup_seconds=0` override from
+    /// this constructor. It now omits the field so NMI applies the account's
+    /// processor configuration. New and migrated callers should use
+    /// [`Self::client_with_duplicate_check`] and choose the account policy
+    /// explicitly.
+    #[deprecated(
+        note = "wire behavior changed: invalid dup_seconds=0 is now omitted; choose an explicit policy with ClientFactory::client_with_duplicate_check"
+    )]
     pub fn client(
         &self,
         endpoint: Endpoint,
         credentials: Credentials,
+    ) -> Result<Client, ConfigurationError> {
+        self.client_with_duplicate_check(endpoint, credentials, DuplicateCheck::ProcessorConfigured)
+    }
+
+    /// Builds an account-bound client with an explicit duplicate-check policy.
+    ///
+    /// This policy applies to every sale submitted by the returned client.
+    /// [`DuplicateCheck::ProcessorConfigured`] retains the account's
+    /// processor-level defense in depth. An account owner may instead choose an
+    /// explicit override after verifying both that the processor configuration
+    /// permits it and that the host accepts the resulting duplicate-risk
+    /// tradeoff.
+    pub fn client_with_duplicate_check(
+        &self,
+        endpoint: Endpoint,
+        credentials: Credentials,
+        duplicate_check: DuplicateCheck,
     ) -> Result<Client, ConfigurationError> {
         let http = match endpoint.url.scheme() {
             "https" => self.https.clone(),
@@ -110,6 +131,7 @@ impl ClientFactory {
             http,
             endpoint,
             credentials,
+            duplicate_check,
             report_admission: self.report_admission.clone(),
         })
     }
@@ -135,6 +157,7 @@ pub struct Client {
     pub(crate) http: reqwest::Client,
     pub(crate) endpoint: Endpoint,
     pub(crate) credentials: Credentials,
+    duplicate_check: DuplicateCheck,
     pub(crate) report_admission: Arc<Semaphore>,
 }
 
@@ -145,6 +168,7 @@ impl fmt::Debug for Client {
             .field("http", &self.http)
             .field("endpoint", &self.endpoint)
             .field("credentials", &self.credentials)
+            .field("duplicate_check", &self.duplicate_check)
             .finish()
     }
 }
@@ -237,7 +261,11 @@ impl Client {
             Endpoint::parse_loopback_http(base_url)?
         };
         let credentials = Credentials::new(private_api_key.into(), query_security_key.into())?;
-        crate::ClientFactory::new_with_loopback_http()?.client(endpoint, credentials)
+        crate::ClientFactory::new_with_loopback_http()?.client_with_duplicate_check(
+            endpoint,
+            credentials,
+            DuplicateCheck::ProcessorConfigured,
+        )
     }
 
     pub async fn account_mode(&self) -> Result<AccountMode, QueryError> {
@@ -266,7 +294,7 @@ impl Client {
             return self.classic_sale(request).await;
         }
         let amount = amount_value(request.amount_cents)?;
-        let body = sale_body_json(&request, amount);
+        let body = sale_body_json(&request, amount, self.duplicate_check);
         let value = self.post_json("/api/v5/payments/sale", body).await?;
         let mut outcome = payment_outcome_from_json(&value).map_err(WireError::after_success)?;
         if outcome.status == PaymentStatus::Approved
@@ -309,7 +337,9 @@ impl Client {
             self.credentials.private_api_key.as_str(),
             &request,
         );
-        let response = self.post_form_text("/api/transact.php", &params).await?;
+        let response = self
+            .post_mutation_form_text("/api/transact.php", &params)
+            .await?;
         classic_payment_outcome_from_form(&response)
             .map(|outcome| {
                 require_approved_identities(
@@ -367,9 +397,15 @@ impl Client {
 
     async fn classic_sale(&self, request: SaleRequest) -> Result<PaymentOutcome, WireError> {
         let amount = amount_string(request.amount_cents)?;
-        let params =
-            classic_sale_params(self.credentials.private_api_key.as_str(), &request, amount);
-        let response = self.post_form_text("/api/transact.php", &params).await?;
+        let params = classic_sale_params(
+            self.credentials.private_api_key.as_str(),
+            &request,
+            amount,
+            self.duplicate_check,
+        );
+        let response = self
+            .post_mutation_form_text("/api/transact.php", &params)
+            .await?;
         classic_payment_outcome_from_form(&response)
             .map(|outcome| {
                 require_approved_identities(

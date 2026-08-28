@@ -216,6 +216,17 @@ pub async fn apply_subscription_recovery_gateway_outcome(
     reservation: &SubscriptionRecoveryReservation,
     outcome: &GatewayPaymentOutcome,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    apply_subscription_recovery_gateway_decision(pool, coordinator, reservation, outcome)
+        .await
+        .map(|result| result.with_gateway_diagnostics(outcome.diagnostics().to_vec()))
+}
+
+async fn apply_subscription_recovery_gateway_decision(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionRecoveryReservation,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     match outcome.status() {
         GatewayPaymentStatus::Approved => {
             let approved_evidence = outcome.approved_evidence().ok_or(

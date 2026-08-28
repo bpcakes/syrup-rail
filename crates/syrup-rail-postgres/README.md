@@ -1,13 +1,13 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.5
+SQLx operations, and high-level subscription billing service. Version 0.6
 supports PostgreSQL 18 only and uses schema v5.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.0"
-syrup-rail-postgres = "0.5.0"
+syrup-rail = "0.6.0"
+syrup-rail-postgres = "0.6.0"
 ```
 
 New hosts install `schema/v5/install.sql` through their normal migration
