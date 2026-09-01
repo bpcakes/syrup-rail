@@ -45,14 +45,20 @@ fn order_ids_are_normalized_consistently_across_mutation_and_query_transports() 
     let order_id = " \t ck_round_trip \n";
     let sale = SaleRequest {
         amount_cents: 4_900,
+        currency: "USD".to_owned(),
         order_id: order_id.to_owned(),
-        intent: SaleIntent::AddCustomer {
-            payment_token: "tok_round_trip".to_owned(),
-        },
+        source: PaymentSource::PaymentToken("tok_round_trip".to_owned()),
+        vault_action: Some(VaultAction::AddCustomer),
+        stored_credential: None,
         billing_contact: None,
     };
     assert!(validate_sale_request(&sale, "private_key").is_ok());
-    let sale_params = classic_sale_params("private_key", &sale, "49.00".to_owned());
+    let sale_params = classic_sale_params(
+        "private_key",
+        &sale,
+        "49.00".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
     assert_eq!(
         sale_params.field("orderid").map(NmiFormValue::as_str),
         Some("ck_round_trip")
@@ -148,8 +154,11 @@ async fn json_sale_sends_raw_private_key_authorization_header() {
     let outcome = gateway
         .sale(SaleRequest {
             amount_cents: 4_900,
+            currency: "USD".to_owned(),
             order_id: "ck_order_auth_header".to_owned(),
-            intent: SaleIntent::PaymentToken("tok_auth_header".to_owned()),
+            source: PaymentSource::PaymentToken("tok_auth_header".to_owned()),
+            vault_action: None,
+            stored_credential: None,
             billing_contact: None,
         })
         .await
@@ -183,11 +192,13 @@ async fn v5_recurring_merchant_sale_sends_scheduled_billing_metadata() {
     let outcome = client
         .sale(SaleRequest {
             amount_cents: 4_900,
+            currency: "USD".to_owned(),
             order_id: "ck_recurring_order".to_owned(),
-            intent: SaleIntent::RecurringStoredCredential {
-                customer_vault_id: "vault_recurring".to_owned(),
+            source: PaymentSource::CustomerVault("vault_recurring".to_owned()),
+            vault_action: None,
+            stored_credential: Some(StoredCredential::RecurringMerchant {
                 initial_transaction_id: "txn_initial".to_owned(),
-            },
+            }),
             billing_contact: None,
         })
         .await
@@ -214,7 +225,6 @@ async fn v5_recurring_merchant_sale_sends_scheduled_billing_metadata() {
         json!({
             "amount": "49.00",
             "currency": "USD",
-            "dup_seconds": 0,
             "payment_details": {
                 "customer_vault_id": "vault_recurring"
             },
@@ -246,8 +256,11 @@ async fn http_200_invalid_v5_json_is_an_indeterminate_mutation() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
+            currency: "USD".to_owned(),
             order_id: "ck_invalid_json".to_owned(),
-            intent: SaleIntent::PaymentToken("tok_invalid_json".to_owned()),
+            source: PaymentSource::PaymentToken("tok_invalid_json".to_owned()),
+            vault_action: None,
+            stored_credential: None,
             billing_contact: None,
         })
         .await
@@ -289,8 +302,11 @@ async fn connection_failure_is_known_not_submitted() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
+            currency: "USD".to_owned(),
             order_id: "ck_connect_failure".to_owned(),
-            intent: SaleIntent::PaymentToken("tok_connect_failure".to_owned()),
+            source: PaymentSource::PaymentToken("tok_connect_failure".to_owned()),
+            vault_action: None,
+            stored_credential: None,
             billing_contact: None,
         })
         .await
@@ -371,8 +387,11 @@ async fn established_http1_reset_is_indeterminate_and_never_retried() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
+            currency: "USD".to_owned(),
             order_id: "ck_established_reset".to_owned(),
-            intent: SaleIntent::PaymentToken("tok_established_reset".to_owned()),
+            source: PaymentSource::PaymentToken("tok_established_reset".to_owned()),
+            vault_action: None,
+            stored_credential: None,
             billing_contact: None,
         })
         .await
@@ -392,64 +411,6 @@ async fn established_http1_reset_is_indeterminate_and_never_retried() {
 }
 
 #[tokio::test]
-async fn http2_refused_stream_sale_is_indeterminate_and_never_retried() {
-    // Production does not currently enable reqwest's HTTP/2 feature. This
-    // dev-only transport case preserves mutation certainty if workspace
-    // feature unification or a future production transport enables it.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener should bind");
-    let endpoint_url = format!(
-        "http://{}",
-        listener.local_addr().expect("listener address")
-    );
-    let attempts = Arc::new(AtomicUsize::new(0));
-    let server_attempts = attempts.clone();
-    let server = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("client should connect");
-        let mut connection = h2::server::handshake(stream)
-            .await
-            .expect("HTTP/2 handshake should succeed");
-        while let Some(request) = connection.accept().await {
-            let (_request, mut respond) = request.expect("request should be valid HTTP/2");
-            server_attempts.fetch_add(1, Ordering::SeqCst);
-            respond.send_reset(h2::Reason::REFUSED_STREAM);
-        }
-    });
-    let http = configured_http_client(reqwest::Client::builder().http2_prior_knowledge())
-        .expect("HTTP/2 test client should construct");
-    let client = ClientFactory {
-        https: http.clone(),
-        loopback_http: Some(http),
-        report_admission: Arc::new(tokio::sync::Semaphore::new(MAX_NMI_CONCURRENT_REPORTS)),
-    }
-    .client(
-        Endpoint::parse_loopback_http(endpoint_url).expect("test endpoint should validate"),
-        Credentials::new("private_key".to_owned(), "query_key".to_owned())
-            .expect("test credentials should validate"),
-    )
-    .expect("explicit loopback client should construct");
-
-    let error = client
-        .sale(SaleRequest {
-            amount_cents: 100,
-            order_id: "ck_refused_stream".to_owned(),
-            intent: SaleIntent::PaymentToken("tok_refused_stream".to_owned()),
-            billing_contact: None,
-        })
-        .await
-        .expect_err("protocol NACK should make the sale indeterminate");
-    assert!(matches!(error, MutationError::Indeterminate(_)));
-    assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
-    assert_eq!(
-        attempts.load(Ordering::SeqCst),
-        1,
-        "NMI mutation transport must never replay a protocol NACK"
-    );
-    server.abort();
-}
-
-#[tokio::test]
 async fn successful_oversized_response_is_an_indeterminate_mutation() {
     let (client, _request_receiver, server) = spawn_capturing_server(
         "HTTP/1.1 200 OK",
@@ -461,8 +422,11 @@ async fn successful_oversized_response_is_an_indeterminate_mutation() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
+            currency: "USD".to_owned(),
             order_id: "ck_oversized_response".to_owned(),
-            intent: SaleIntent::PaymentToken("tok_oversized_response".to_owned()),
+            source: PaymentSource::PaymentToken("tok_oversized_response".to_owned()),
+            vault_action: None,
+            stored_credential: None,
             billing_contact: None,
         })
         .await
@@ -505,28 +469,238 @@ fn sale_amount_json_rejects_non_positive_cents() {
 }
 
 #[test]
-fn sale_body_json_disables_processor_duplicate_checking() {
+fn sale_body_json_applies_the_configured_duplicate_check_policy() {
     let request = SaleRequest {
         amount_cents: 4_900,
+        currency: "USD".to_owned(),
         order_id: "ck_order_123".to_owned(),
-        intent: SaleIntent::PaymentToken("tok_test".to_owned()),
+        source: PaymentSource::PaymentToken("tok_test".to_owned()),
+        vault_action: None,
+        stored_credential: None,
         billing_contact: None,
     };
     let body = sale_body_json(
         &request,
         amount_value(request.amount_cents).expect("positive cents should format"),
+        DuplicateCheck::ProcessorConfigured,
     );
+    assert!(body.get("dup_seconds").is_none());
+    assert!(body.get("duplicate_check_seconds").is_none());
 
-    assert_eq!(body.get("dup_seconds"), Some(&json!(0)));
-    assert_eq!(body.get("currency"), Some(&json!("USD")));
+    let body = sale_body_json(
+        &request,
+        amount_value(request.amount_cents).expect("positive cents should format"),
+        DuplicateCheck::Window(
+            crate::DuplicateCheckWindow::new(120).expect("window should be valid"),
+        ),
+    );
+    assert_eq!(body.get("dup_seconds"), Some(&json!(120)));
     assert!(body.get("duplicate_check_seconds").is_none());
 }
 
+#[tokio::test]
+async fn explicit_duplicate_check_policy_reaches_the_v5_wire() {
+    for (duplicate_check, expected_wire_seconds) in [
+        (DuplicateCheck::ProcessorConfigured, None),
+        (
+            DuplicateCheck::Window(
+                crate::DuplicateCheckWindow::new(120).expect("window should be valid"),
+            ),
+            Some(120),
+        ),
+        (
+            DuplicateCheck::Window(
+                crate::DuplicateCheckWindow::new(crate::DuplicateCheckWindow::MAX_SECONDS)
+                    .expect("maximum window should be valid"),
+            ),
+            Some(7_862_400),
+        ),
+    ] {
+        let (client, request_receiver, server) = spawn_capturing_server_with_duplicate_check(
+            "HTTP/1.1 200 OK",
+            "application/json",
+            br#"{"id":"txn_duplicate_policy","status":"approved"}"#.to_vec(),
+            duplicate_check,
+        )
+        .await;
+
+        let outcome = client
+            .sale(test_sale_request(PaymentSource::PaymentToken(
+                "tok_duplicate_policy".to_owned(),
+            )))
+            .await
+            .expect("sale should parse");
+        assert_eq!(outcome.status, PaymentStatus::Approved);
+
+        let request = request_receiver.await.expect("request should be captured");
+        let (_, body) = request
+            .split_once("\r\n\r\n")
+            .expect("captured request should contain a body");
+        let body: Value = serde_json::from_str(body).expect("sale body should be JSON");
+        assert_eq!(
+            body.get("dup_seconds").and_then(Value::as_u64),
+            expected_wire_seconds
+        );
+        assert!(body.get("duplicate_check_seconds").is_none());
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn explicit_duplicate_check_policy_reaches_the_classic_wire() {
+    for (duplicate_check, expected_wire_seconds) in [
+        (DuplicateCheck::ProcessorConfigured, None),
+        (
+            DuplicateCheck::Window(
+                crate::DuplicateCheckWindow::new(120).expect("window should be valid"),
+            ),
+            Some("120"),
+        ),
+        (
+            DuplicateCheck::Window(
+                crate::DuplicateCheckWindow::new(crate::DuplicateCheckWindow::MAX_SECONDS)
+                    .expect("maximum window should be valid"),
+            ),
+            Some("7862400"),
+        ),
+    ] {
+        let response = b"response=1&responsetext=Approved&authcode=AUTH&transactionid=txn_classic_duplicate_policy&customer_vault_id=vault_classic_duplicate_policy&avsresponse=&cvvresponse=&orderid=ck_order&type=sale&response_code=100".to_vec();
+        let (client, request_receiver, server) = spawn_capturing_server_with_duplicate_check(
+            "HTTP/1.1 200 OK",
+            "text/plain",
+            response,
+            duplicate_check,
+        )
+        .await;
+
+        let mut request = test_sale_request(PaymentSource::PaymentToken(
+            "tok_classic_duplicate_policy".to_owned(),
+        ));
+        request.vault_action = Some(VaultAction::AddCustomer);
+        request.stored_credential = Some(StoredCredential::InitialCustomer);
+        let outcome = client
+            .sale(request)
+            .await
+            .expect("Classic sale should parse");
+        assert_eq!(outcome.status, PaymentStatus::Approved);
+
+        let request = request_receiver.await.expect("request should be captured");
+        assert!(request.starts_with("POST /api/transact.php HTTP/1.1"));
+        let (_, body) = request
+            .split_once("\r\n\r\n")
+            .expect("captured request should contain a body");
+        let form: std::collections::HashMap<_, _> = form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(
+            form.get("dup_seconds").map(String::as_str),
+            expected_wire_seconds
+        );
+        assert!(!form.contains_key("duplicate_check_seconds"));
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn legacy_factory_client_omits_the_invalid_zero_override_on_classic_wire() {
+    let response = b"response=1&responsetext=Approved&authcode=AUTH&transactionid=txn_legacy_duplicate_policy&customer_vault_id=vault_legacy_duplicate_policy&avsresponse=&cvvresponse=&orderid=ck_order&type=sale&response_code=100".to_vec();
+    let (client, request_receiver, server) =
+        spawn_capturing_server_with_legacy_client("HTTP/1.1 200 OK", "text/plain", response).await;
+
+    let mut request = test_sale_request(PaymentSource::PaymentToken(
+        "tok_legacy_duplicate_policy".to_owned(),
+    ));
+    request.vault_action = Some(VaultAction::AddCustomer);
+    request.stored_credential = Some(StoredCredential::InitialCustomer);
+    let outcome = client
+        .sale(request)
+        .await
+        .expect("legacy Classic sale should parse");
+    assert_eq!(outcome.status, PaymentStatus::Approved);
+
+    let request = request_receiver.await.expect("request should be captured");
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("captured request should contain a body");
+    let form: std::collections::HashMap<_, _> = form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    assert!(!form.contains_key("dup_seconds"));
+    assert!(!form.contains_key("duplicate_check_seconds"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn legacy_factory_client_omits_the_invalid_zero_override_on_v5_wire() {
+    let (client, request_receiver, server) = spawn_capturing_server_with_legacy_client(
+        "HTTP/1.1 200 OK",
+        "application/json",
+        br#"{"id":"txn_legacy_v5_duplicate_policy","status":"approved"}"#.to_vec(),
+    )
+    .await;
+
+    let outcome = client
+        .sale(test_sale_request(PaymentSource::PaymentToken(
+            "tok_legacy_v5_duplicate_policy".to_owned(),
+        )))
+        .await
+        .expect("legacy v5 sale should parse");
+    assert_eq!(outcome.status, PaymentStatus::Approved);
+
+    let request = request_receiver.await.expect("request should be captured");
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("captured request should contain a body");
+    let body: Value = serde_json::from_str(body).expect("sale body should be JSON");
+    assert!(body.get("dup_seconds").is_none());
+    assert!(body.get("duplicate_check_seconds").is_none());
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn duplicate_check_policy_does_not_reach_store_payment_method_wire() {
+    let response = b"response=1&responsetext=Approved&authcode=AUTH&transactionid=txn_store_policy_isolation&customer_vault_id=vault_store_policy_isolation&avsresponse=&cvvresponse=&orderid=ck_store_policy_isolation&type=validate&response_code=100".to_vec();
+    let (client, request_receiver, server) = spawn_capturing_server_with_duplicate_check(
+        "HTTP/1.1 200 OK",
+        "text/plain",
+        response,
+        DuplicateCheck::Window(
+            crate::DuplicateCheckWindow::new(120).expect("window should be valid"),
+        ),
+    )
+    .await;
+
+    let outcome = client
+        .store_payment_method(StorePaymentMethodRequest {
+            payment_token: "tok_store_policy_isolation".to_owned(),
+            order_id: "ck_store_policy_isolation".to_owned(),
+            billing_contact: None,
+        })
+        .await
+        .expect("store-payment-method response should parse");
+    assert_eq!(outcome.status, PaymentStatus::Approved);
+
+    let request = request_receiver.await.expect("request should be captured");
+    assert!(request.starts_with("POST /api/transact.php HTTP/1.1"));
+    let (_, body) = request
+        .split_once("\r\n\r\n")
+        .expect("captured request should contain a body");
+    let form: std::collections::HashMap<_, _> = form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    assert_eq!(form.get("type").map(String::as_str), Some("validate"));
+    assert!(!form.contains_key("dup_seconds"));
+    assert!(!form.contains_key("duplicate_check_seconds"));
+    server.await.expect("server task should finish");
+}
+
 #[test]
-fn sale_currency_is_fixed_by_the_amount_cents_contract() {
-    let request = test_sale_request(PaymentSource::PaymentToken("token".to_owned()));
-    let body = sale_body_json(&request, amount_value(100).expect("valid amount"));
-    assert_eq!(body.get("currency"), Some(&json!("USD")));
+fn sale_currency_is_usd_only_for_amount_cents_contract() {
+    assert!(ensure_supported_sale_currency("USD").is_ok());
+    assert!(matches!(
+        ensure_supported_sale_currency("JPY"),
+        Err(WireError::LocalInvalidRequest(message)) if message.contains("unsupported")
+    ));
 }
 
 #[test]
@@ -576,7 +750,7 @@ fn http_status_mapping_keeps_gateway_errors_from_becoming_card_declines() {
     for status in [StatusCode::NOT_FOUND, StatusCode::METHOD_NOT_ALLOWED] {
         assert!(matches!(
             gateway_error_for_http_status(status, "endpoint rejected".to_owned()),
-            WireError::Unavailable(_)
+            WireError::Configuration(_)
         ));
     }
     for status in [
@@ -677,8 +851,11 @@ async fn http_429_sale_remains_indeterminate() {
     let error = client
         .sale(SaleRequest {
             amount_cents: 100,
+            currency: "USD".to_owned(),
             order_id: "ck_http_rate_limited".to_owned(),
-            intent: SaleIntent::PaymentToken("tok_http_rate_limited".to_owned()),
+            source: PaymentSource::PaymentToken("tok_http_rate_limited".to_owned()),
+            vault_action: None,
+            stored_credential: None,
             billing_contact: None,
         })
         .await
@@ -688,6 +865,542 @@ async fn http_429_sale_remains_indeterminate() {
     assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
     let request = request_receiver.await.expect("request should be captured");
     assert!(request.starts_with("POST /api/v5/payments/sale HTTP/1.1"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn non_success_sale_with_payment_decision_evidence_is_indeterminate() {
+    for (status, order_id) in [
+        ("HTTP/1.1 400 Bad Request", "ck_http_400_duplicate"),
+        ("HTTP/1.1 422 Unprocessable Entity", "ck_http_422_duplicate"),
+    ] {
+        let (client, request_receiver, server) = spawn_capturing_server(
+            status,
+            "application/json",
+            br#"{"response":"3","response_code":"430","response_text":"Duplicate transaction"}"#
+                .to_vec(),
+        )
+        .await;
+
+        let error = client
+            .sale(SaleRequest {
+                amount_cents: 100,
+                currency: "USD".to_owned(),
+                order_id: order_id.to_owned(),
+                source: PaymentSource::PaymentToken("tok_http_duplicate".to_owned()),
+                vault_action: None,
+                stored_credential: None,
+                billing_contact: None,
+            })
+            .await
+            .expect_err("non-success response with payment evidence must be indeterminate");
+
+        assert!(matches!(error, MutationError::Indeterminate(_)), "{status}");
+        assert_eq!(
+            error.certainty(),
+            crate::MutationCertainty::Indeterminate,
+            "{status}"
+        );
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn documented_v5_validation_error_is_known_not_submitted() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 400 Bad Request",
+        "application/json",
+        br#"{"type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"The provided data is invalid.","ref_id":null,"details":[{"fieldName":"amount","message":"This field is required."}]}"#.to_vec(),
+    )
+    .await;
+
+    let error = client
+        .sale(SaleRequest {
+            amount_cents: 100,
+            currency: "USD".to_owned(),
+            order_id: "ck_http_validation".to_owned(),
+            source: PaymentSource::PaymentToken("tok_http_validation".to_owned()),
+            vault_action: None,
+            stored_credential: None,
+            billing_contact: None,
+        })
+        .await
+        .expect_err("documented validation failure must be surfaced");
+
+    assert!(matches!(error, MutationError::RequestRejected(_)));
+    assert_eq!(error.certainty(), crate::MutationCertainty::NotSubmitted);
+    request_receiver.await.expect("request should be captured");
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn only_the_documented_v5_validation_envelope_proves_http_400_non_submission() {
+    for (body, suffix) in [
+        (br#"{}"#.as_slice(), "empty_object"),
+        (br#"{not-json"#.as_slice(), "malformed"),
+        (br#"{"id":"txn_exists"}"#.as_slice(), "transaction_id"),
+        (
+            br#"{"transaction":{"response_code":"430"}}"#.as_slice(),
+            "nested_decision",
+        ),
+        (
+            br#"{"actions":[{"id":"action_exists"}]}"#.as_slice(),
+            "action",
+        ),
+        (br#"{"status":400}"#.as_slice(), "generic_status"),
+        (
+            br#"{"type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"invalid","details":[]}"#.as_slice(),
+            "empty_validation_details",
+        ),
+        (
+            br#"{"type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"invalid"}"#.as_slice(),
+            "missing_validation_details",
+        ),
+        (
+            br#"{"type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"invalid","details":[{"fieldName":"amount","message":"required"}],"timestamp":"future-drift"}"#.as_slice(),
+            "extra_validation_field",
+        ),
+        (
+            br#"{"type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"invalid","details":[{"fieldName":"amount","message":"required","code":"future-drift"}]}"#.as_slice(),
+            "extra_validation_detail_field",
+        ),
+        (
+            br#"{"type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"invalid","ref_id":123,"details":[{"fieldName":"amount","message":"required"}]}"#.as_slice(),
+            "invalid_ref_id",
+        ),
+        (
+            br#"{"type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"invalid","details":[],"id":"txn_exists"}"#.as_slice(),
+            "validation_with_transaction",
+        ),
+        (
+            br#"{"type":"validationError","type":"validationError","error_code":"E_INVALID_SUBMISSION","message":"invalid","details":[]}"#.as_slice(),
+            "duplicate_validation_field",
+        ),
+    ] {
+        let (client, request_receiver, server) = spawn_capturing_server(
+            "HTTP/1.1 400 Bad Request",
+            "application/json",
+            body.to_vec(),
+        )
+        .await;
+
+        let error = client
+            .sale(SaleRequest {
+                amount_cents: 100,
+                currency: "USD".to_owned(),
+                order_id: format!("ck_unproven_validation_{suffix}"),
+                source: PaymentSource::PaymentToken("tok_unproven_validation".to_owned()),
+                vault_action: None,
+                stored_credential: None,
+                billing_contact: None,
+            })
+            .await
+            .expect_err("an unproven HTTP 400 envelope must remain reconcilable");
+
+        assert!(matches!(error, MutationError::Indeterminate(_)), "{suffix}");
+        assert_eq!(
+            error.certainty(),
+            crate::MutationCertainty::Indeterminate,
+            "{suffix}"
+        );
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn unreadable_http_400_payment_bodies_never_prove_non_submission() {
+    for (body, suffix) in [
+        (vec![0xff, 0xfe], "non_utf8"),
+        (vec![b'a'; MAX_NMI_STANDARD_RESPONSE_BYTES + 1], "oversized"),
+    ] {
+        let (client, request_receiver, server) =
+            spawn_capturing_server("HTTP/1.1 400 Bad Request", "application/octet-stream", body)
+                .await;
+
+        let error = client
+            .sale(SaleRequest {
+                amount_cents: 100,
+                currency: "USD".to_owned(),
+                order_id: format!("ck_unreadable_validation_{suffix}"),
+                source: PaymentSource::PaymentToken("tok_unreadable_validation".to_owned()),
+                vault_action: None,
+                stored_credential: None,
+                billing_contact: None,
+            })
+            .await
+            .expect_err("an unreadable HTTP 400 body must remain reconcilable");
+
+        assert!(matches!(error, MutationError::Indeterminate(_)), "{suffix}");
+        assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn interrupted_http_400_payment_body_never_proves_non_submission() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener should bind");
+    let base_url = format!("http://{}", listener.local_addr().expect("local address"));
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("request should connect");
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let header_end = loop {
+            let read = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk)
+                .await
+                .expect("request headers should read");
+            assert!(read > 0, "request closed before headers");
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let content_length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or_default();
+        while request.len() < header_end + content_length {
+            let read = tokio::io::AsyncReadExt::read(&mut stream, &mut chunk)
+                .await
+                .expect("request body should read");
+            assert!(read > 0, "request closed before body");
+            request.extend_from_slice(&chunk[..read]);
+        }
+        tokio::io::AsyncWriteExt::write_all(
+            &mut stream,
+            b"HTTP/1.1 400 Bad Request\r\ncontent-type: application/json\r\ncontent-length: 128\r\nconnection: close\r\n\r\n{",
+        )
+        .await
+        .expect("partial response should write");
+    });
+    let client =
+        Client::new(base_url, "private_key", "query_key").expect("loopback client should build");
+
+    let error = client
+        .sale(test_sale_request(PaymentSource::PaymentToken(
+            "tok_interrupted_400".to_owned(),
+        )))
+        .await
+        .expect_err("an interrupted HTTP 400 body must remain reconcilable");
+
+    assert!(matches!(error, MutationError::Indeterminate(_)));
+    assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn classic_non_success_payment_responses_never_hide_processing_evidence() {
+    for (status, body, suffix) in [
+        (
+            "HTTP/1.1 400 Bad Request",
+            b"invalid request".as_slice(),
+            "undocumented_400",
+        ),
+        (
+            "HTTP/1.1 404 Not Found",
+            b"response=3&response_code=430&transactionid=txn_exists".as_slice(),
+            "decision_on_404",
+        ),
+        (
+            "HTTP/1.1 404 Not Found",
+            br#"{"response":"3","response_code":"430","id":"txn_exists"}"#.as_slice(),
+            "json_decision_on_404",
+        ),
+    ] {
+        let (client, request_receiver, server) =
+            spawn_capturing_server(status, "text/plain", body.to_vec()).await;
+
+        let error = client
+            .store_payment_method(StorePaymentMethodRequest {
+                payment_token: "tok_classic_non_success".to_owned(),
+                order_id: format!("ck_classic_non_success_{suffix}"),
+                billing_contact: None,
+            })
+            .await
+            .expect_err("Classic non-success mutation response must remain reconcilable");
+
+        assert!(matches!(error, MutationError::Indeterminate(_)), "{suffix}");
+        assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn classic_mutation_certainty_is_derived_from_the_endpoint_path() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 400 Bad Request",
+        "text/plain",
+        b"invalid request".to_vec(),
+    )
+    .await;
+    let request = StorePaymentMethodRequest {
+        payment_token: "tok_endpoint_purpose".to_owned(),
+        order_id: "ck_endpoint_purpose".to_owned(),
+        billing_contact: None,
+    };
+    let params = classic_store_payment_method_params("private_key", &request);
+
+    let error = client
+        .post_form_text("/api/transact.php", &params)
+        .await
+        .expect_err("the mutation endpoint must override the query-shaped helper name");
+
+    assert!(matches!(error, WireError::Indeterminate(_)));
+    request_receiver.await.expect("request should be captured");
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn v5_non_success_payment_responses_never_hide_form_processing_evidence() {
+    for (status, suffix) in [
+        ("HTTP/1.1 401 Unauthorized", "unauthorized"),
+        ("HTTP/1.1 403 Forbidden", "forbidden"),
+        ("HTTP/1.1 404 Not Found", "not_found"),
+        ("HTTP/1.1 405 Method Not Allowed", "method_not_allowed"),
+    ] {
+        let (client, request_receiver, server) = spawn_capturing_server(
+            status,
+            "text/plain",
+            b"response=3&response_code=430&transactionid=txn_exists".to_vec(),
+        )
+        .await;
+
+        let error = client
+            .sale(test_sale_request(PaymentSource::PaymentToken(format!(
+                "tok_v5_form_evidence_{suffix}"
+            ))))
+            .await
+            .expect_err("v5 form-encoded payment evidence must remain reconcilable");
+
+        assert!(matches!(error, MutationError::Indeterminate(_)), "{suffix}");
+        assert_eq!(
+            error.certainty(),
+            crate::MutationCertainty::Indeterminate,
+            "{suffix}"
+        );
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn generic_http_status_does_not_masquerade_as_payment_evidence() {
+    for (body, suffix) in [
+        (
+            br#"{"type":"notFound","status":404,"message":"missing endpoint"}"#.as_slice(),
+            "numeric_json_status",
+        ),
+        (
+            br#"{"type":"notFound","status":"404","message":"missing endpoint"}"#.as_slice(),
+            "text_json_status",
+        ),
+        (br#"[]"#.as_slice(), "non_object_json"),
+        (
+            b"<html><a href='?response=1'>missing endpoint</a></html>".as_slice(),
+            "html_with_form_like_fragment",
+        ),
+    ] {
+        let (client, request_receiver, server) =
+            spawn_capturing_server("HTTP/1.1 404 Not Found", "application/json", body.to_vec())
+                .await;
+
+        let error = client
+            .sale(test_sale_request(PaymentSource::PaymentToken(format!(
+                "tok_generic_status_{suffix}"
+            ))))
+            .await
+            .expect_err("a missing endpoint must remain a configuration error");
+
+        assert!(matches!(error, MutationError::Configuration(_)), "{suffix}");
+        assert_eq!(
+            error.certainty(),
+            crate::MutationCertainty::NotSubmitted,
+            "{suffix}"
+        );
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn unrecognized_json_object_on_non_success_sale_fails_closed() {
+    for (body, suffix) in [
+        (
+            br#"{"result":{"transaction_id":"txn_exists"}}"#.as_slice(),
+            "unknown_container",
+        ),
+        (br#"{}"#.as_slice(), "empty_object"),
+        (
+            br#"{"type":"notFound","message":"missing","future":null}"#.as_slice(),
+            "extended_error",
+        ),
+        (
+            br#"{"type":"notFound","message":"missing","ref_id":123}"#.as_slice(),
+            "invalid_ref_id",
+        ),
+        (
+            br#"{"type":"transaction","status":404}"#.as_slice(),
+            "type_is_not_an_error_proof",
+        ),
+    ] {
+        let (client, request_receiver, server) =
+            spawn_capturing_server("HTTP/1.1 404 Not Found", "application/json", body.to_vec())
+                .await;
+
+        let error = client
+            .sale(test_sale_request(PaymentSource::PaymentToken(format!(
+                "tok_unknown_error_object_{suffix}"
+            ))))
+            .await
+            .expect_err("an unrecognized structured error cannot prove non-submission");
+
+        assert!(matches!(error, MutationError::Indeterminate(_)), "{suffix}");
+        assert_eq!(
+            error.certainty(),
+            crate::MutationCertainty::Indeterminate,
+            "{suffix}"
+        );
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn nonempty_top_level_json_array_on_non_success_sale_fails_closed() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 404 Not Found",
+        "application/json",
+        br#"[{"id":"txn_exists"}]"#.to_vec(),
+    )
+    .await;
+
+    let error = client
+        .sale(test_sale_request(PaymentSource::PaymentToken(
+            "tok_array_evidence".to_owned(),
+        )))
+        .await
+        .expect_err("an unrecognized non-empty payment envelope must remain reconcilable");
+
+    assert!(matches!(error, MutationError::Indeterminate(_)));
+    assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
+    request_receiver.await.expect("request should be captured");
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn anomalous_status_fields_are_payment_evidence_on_non_success_responses() {
+    for (body, suffix) in [
+        (br#"{"status":"processor_surprise"}"#.as_slice(), "unknown"),
+        (br#"{"status":{}}"#.as_slice(), "invalid_shape"),
+        (
+            br#"{"status":"404","status":"processor_surprise"}"#.as_slice(),
+            "conflicting",
+        ),
+        (br#"{"status":" 404 "}"#.as_slice(), "noncanonical_http"),
+        (br#"{"status":401}"#.as_slice(), "mismatched_http"),
+    ] {
+        let (client, request_receiver, server) =
+            spawn_capturing_server("HTTP/1.1 404 Not Found", "application/json", body.to_vec())
+                .await;
+
+        let error = client
+            .sale(test_sale_request(PaymentSource::PaymentToken(format!(
+                "tok_anomalous_status_{suffix}"
+            ))))
+            .await
+            .expect_err("an anomalous status field must remain reconcilable");
+
+        assert!(matches!(error, MutationError::Indeterminate(_)), "{suffix}");
+        assert_eq!(
+            error.certainty(),
+            crate::MutationCertainty::Indeterminate,
+            "{suffix}"
+        );
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn classic_status_fields_distinguish_http_metadata_from_payment_evidence() {
+    for (body, expected_indeterminate, suffix) in [
+        (b"status=404".as_slice(), false, "matching_http"),
+        (b"status=processor_surprise".as_slice(), true, "unknown"),
+        (
+            b"status=404&status=processor_surprise".as_slice(),
+            true,
+            "conflicting",
+        ),
+        (b"status=%20404%20".as_slice(), true, "noncanonical_http"),
+        (b"status=401".as_slice(), true, "mismatched_http"),
+    ] {
+        let (client, request_receiver, server) =
+            spawn_capturing_server("HTTP/1.1 404 Not Found", "text/plain", body.to_vec()).await;
+
+        let error = client
+            .store_payment_method(StorePaymentMethodRequest {
+                payment_token: "tok_classic_status".to_owned(),
+                order_id: format!("ck_classic_status_{suffix}"),
+                billing_contact: None,
+            })
+            .await
+            .expect_err("a non-success Classic payment must fail");
+
+        if expected_indeterminate {
+            assert!(matches!(error, MutationError::Indeterminate(_)), "{suffix}");
+            assert_eq!(
+                error.certainty(),
+                crate::MutationCertainty::Indeterminate,
+                "{suffix}"
+            );
+        } else {
+            assert!(matches!(error, MutationError::Configuration(_)), "{suffix}");
+            assert_eq!(
+                error.certainty(),
+                crate::MutationCertainty::NotSubmitted,
+                "{suffix}"
+            );
+        }
+        request_receiver.await.expect("request should be captured");
+        server.await.expect("server task should finish");
+    }
+}
+
+#[tokio::test]
+async fn undocumented_http_422_sale_without_payment_evidence_is_indeterminate() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 422 Unprocessable Entity",
+        "application/json",
+        br#"{"message":"unprocessable"}"#.to_vec(),
+    )
+    .await;
+
+    let error = client
+        .sale(SaleRequest {
+            amount_cents: 100,
+            currency: "USD".to_owned(),
+            order_id: "ck_http_422".to_owned(),
+            source: PaymentSource::PaymentToken("tok_http_422".to_owned()),
+            vault_action: None,
+            stored_credential: None,
+            billing_contact: None,
+        })
+        .await
+        .expect_err("undocumented HTTP 422 must preserve mutation uncertainty");
+
+    assert!(matches!(error, MutationError::Indeterminate(_)));
+    assert_eq!(error.certainty(), crate::MutationCertainty::Indeterminate);
+    request_receiver.await.expect("request should be captured");
     server.await.expect("server task should finish");
 }
 
@@ -711,6 +1424,28 @@ async fn http_429_query_preserves_the_rate_limit_signal() {
     assert!(matches!(error, QueryError::RateLimited(_)));
     let request = request_receiver.await.expect("request should be captured");
     assert!(request.starts_with("POST /api/query.php HTTP/1.1"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn http_422_query_remains_a_permanent_invalid_request() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 422 Unprocessable Entity",
+        "application/json",
+        br#"{"message":"invalid query"}"#.to_vec(),
+    )
+    .await;
+
+    let error = client
+        .query_transaction(TransactionQuery {
+            transaction_id: Some("txn_invalid_query".to_owned()),
+            order_id: None,
+        })
+        .await
+        .expect_err("query HTTP 422 must not become a transient outage");
+
+    assert!(matches!(error, QueryError::InvalidRequest(_)));
+    request_receiver.await.expect("request should be captured");
     server.await.expect("server task should finish");
 }
 

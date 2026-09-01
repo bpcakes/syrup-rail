@@ -183,6 +183,7 @@ async fn insert_subscription_charge_attempt(
     sqlx::query(
         r#"
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -190,6 +191,7 @@ async fn insert_subscription_charge_attempt(
             recurring_period_count, dunning_retry_delays_seconds,
             dunning_exhaustion, past_due_access, next_payment_attempt_at
         ) VALUES (
+            'live',
             $1, $2, $3, 'test_plan', 'active', $4, $5, 100, 'USD',
             $6 - interval '1 month', $6, $6, $7, 'recurring',
             'calendar_months', 1, ARRAY[]::bigint[], 'remain_past_due',
@@ -209,6 +211,7 @@ async fn insert_subscription_charge_attempt(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency,
@@ -218,6 +221,7 @@ async fn insert_subscription_charge_attempt(
             subscription_expected_initial_transaction_id,
             subscription_expected_status, created_at, updated_at
         ) VALUES (
+            'live',
             $1, $2, $3, 'test_plan', $4, $5, $6, $7, $8, $9, 100, 'USD',
             $10, $10 + interval '1 month', $11, $12, $13,
             $5, $14, 'active', $15, $15

@@ -1,21 +1,22 @@
+use std::{error::Error, io};
+
 use super::*;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{Column, Executor};
+use crate::schema_contract::tests::fixtures::create_v2_subscription_fixture;
 
 #[tokio::test]
 async fn runtime_schema_v4_accepts_fresh_install_and_v3_upgrade() -> Result<(), Box<dyn Error>> {
     if V4_INSTALL_SQL.trim().is_empty()
+        || V3_TO_V4_PREPARE_SQL.trim().is_empty()
+        || V3_TO_V4_VALIDATE_SQL.trim().is_empty()
+        || V3_TO_V4_INDEX_SQL.trim().is_empty()
         || V3_TO_V4_UPGRADE_SQL.trim().is_empty()
-        || V3_TO_V4_INCOMPATIBLE_ATTESTATION_AUDIT_SQL
-            .trim()
-            .is_empty()
     {
         return Err(io::Error::other("schema-v4 artifacts must not be empty").into());
     }
     let fresh = TestDatabase::start("sr_fresh_v4").await?;
     let upgraded = TestDatabase::start_v3("sr_upgrade_v4").await?;
+    upgraded.upgrade_v3_to_v4().await?;
     let result = async {
-        upgraded.upgrade_v3_to_v4().await?;
         assert_v4_conforms(&fresh.pool).await?;
         assert_v4_conforms(&upgraded.pool).await?;
 
@@ -23,6 +24,24 @@ async fn runtime_schema_v4_accepts_fresh_install_and_v3_upgrade() -> Result<(), 
         let upgraded_fingerprint = canonical_catalog_fingerprint(&upgraded.pool).await?;
         assert_eq!(fresh_fingerprint, upgraded_fingerprint);
         assert_eq!(fresh_fingerprint, V4_CATALOG_FINGERPRINT);
+        for pool in [&fresh.pool, &upgraded.pool] {
+            let definition: String = sqlx::query_scalar(
+                r#"
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conname = 'billing_payment_attempts_resolution_code_check'
+                "#,
+            )
+            .fetch_one(pool)
+            .await?;
+            for code in syrup_rail::PaymentResolutionCode::ALL {
+                assert!(
+                    definition.contains(code.as_str()),
+                    "schema-v4 resolution constraint is missing {}",
+                    code.as_str()
+                );
+            }
+        }
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
@@ -34,8 +53,263 @@ async fn runtime_schema_v4_accepts_fresh_install_and_v3_upgrade() -> Result<(), 
 }
 
 #[tokio::test]
+async fn v3_upgrade_stages_validation_and_removes_the_compatibility_defaults()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start_v3("sr_v4_stages").await?;
+    let result = async {
+        database.prepare_v3_to_v4().await?;
+        let prepared: (bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                column_default = '''live''::text',
+                NOT constraints.convalidated,
+                (
+                    SELECT NOT convalidated
+                    FROM pg_constraint
+                    WHERE conname =
+                        'billing_payment_attempts_resolution_code_check'
+                )
+            FROM information_schema.columns AS columns
+            JOIN pg_constraint AS constraints
+                ON constraints.conname =
+                    'billing_payment_attempts_required_gateway_account_mode_check'
+            WHERE columns.table_schema = 'public'
+                AND columns.table_name = 'billing_payment_attempts'
+                AND columns.column_name = 'required_gateway_account_mode'
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(prepared, (true, true, true));
+        let prepared_subscription: (bool, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                column_default = '''live''::text',
+                NOT constraints.convalidated
+            FROM information_schema.columns AS columns
+            JOIN pg_constraint AS constraints
+                ON constraints.conname =
+                    'billing_subscriptions_required_gateway_account_mode_check'
+            WHERE columns.table_schema = 'public'
+                AND columns.table_name = 'billing_subscriptions'
+                AND columns.column_name = 'required_gateway_account_mode'
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(prepared_subscription, (true, true));
+
+        database.validate_v3_to_v4().await?;
+        let validated: bool = sqlx::query_scalar(
+            r#"
+            SELECT bool_and(convalidated)
+            FROM pg_constraint
+            WHERE conname IN (
+                'billing_payment_attempts_required_gateway_account_mode_check',
+                'billing_subscriptions_required_gateway_account_mode_check',
+                'billing_payment_attempts_resolution_code_check'
+            )
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert!(validated);
+        let indexes_before_build: (bool, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                to_regclass('public.billing_subscriptions_due_mode_idx') IS NOT NULL,
+                to_regclass('public.billing_subscriptions_due_v4_idx') IS NOT NULL
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(indexes_before_build, (false, false));
+
+        database.index_v3_to_v4().await?;
+        let indexes_before_finalization: (bool, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                (
+                    SELECT indisvalid
+                    FROM pg_index
+                    WHERE indexrelid =
+                        'public.billing_subscriptions_due_mode_idx'::regclass
+                ),
+                (
+                    SELECT indisvalid
+                    FROM pg_index
+                    WHERE indexrelid =
+                        'public.billing_subscriptions_due_v4_idx'::regclass
+                )
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(indexes_before_finalization, (true, true));
+
+        sqlx::query("DROP INDEX public.billing_subscriptions_due_v4_idx")
+            .execute(&database.pool)
+            .await?;
+        let missing_index = database
+            .finalize_v3_to_v4()
+            .await
+            .expect_err("finalization must reject a missing concurrent index");
+        assert!(
+            missing_index
+                .to_string()
+                .contains("all-mode renewal index was not built successfully")
+        );
+        let old_index_preserved: bool = sqlx::query_scalar(
+            "SELECT to_regclass('public.billing_subscriptions_due_idx') IS NOT NULL",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert!(old_index_preserved);
+        database.index_v3_to_v4().await?;
+
+        database.finalize_v3_to_v4().await?;
+        let already_finalized = database
+            .finalize_v3_to_v4()
+            .await
+            .expect_err("finalization must diagnose an already-applied artifact");
+        assert!(
+            already_finalized
+                .to_string()
+                .contains("schema-v4 finalization is already applied")
+        );
+        let indexes_after_finalization: (bool, bool, bool) = sqlx::query_as(
+            r#"
+            SELECT
+                to_regclass('public.billing_subscriptions_due_mode_idx') IS NOT NULL,
+                to_regclass('public.billing_subscriptions_due_idx') IS NOT NULL,
+                to_regclass('public.billing_subscriptions_due_v4_idx') IS NULL
+            "#,
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(indexes_after_finalization, (true, true, true));
+        let default: Option<String> = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'billing_payment_attempts' AND column_name = 'required_gateway_account_mode'",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(default, None);
+        let subscription_default: Option<String> = sqlx::query_scalar(
+            "SELECT column_default FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'billing_subscriptions' AND column_name = 'required_gateway_account_mode'",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(subscription_default, None);
+
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let omitted_mode = sqlx::query(
+            r#"
+            INSERT INTO billing_payment_attempts (
+                id, billing_scope_id, subscriber_id, host_charge_target_id,
+                attempt_kind, status, idempotency_key, request_fingerprint,
+                amount_cents, currency, gateway_account_id,
+                gateway_configuration_id, gateway_order_id
+            ) VALUES (
+                $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
+                100, 'USD', $7, $8, $9
+            )
+            "#,
+        )
+        .bind(Uuid::now_v7())
+        .bind(account.billing_scope_id)
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(format!("omitted-mode-{}", Uuid::now_v7()))
+        .bind(format!("host-charge:omitted-mode:{}", Uuid::now_v7()))
+        .bind(account.gateway_account_id)
+        .bind(account.gateway_configuration_id)
+        .bind(format!("omitted-mode-order-{}", Uuid::now_v7()))
+        .execute(&database.pool)
+        .await;
+        assert!(matches!(
+            omitted_mode,
+            Err(sqlx::Error::Database(error))
+                if error.code().as_deref() == Some("23502")
+                    && error.message().contains("required_gateway_account_mode")
+        ));
+        let omitted_subscription =
+            create_v2_subscription_fixture(&database.pool, account, Uuid::now_v7()).await;
+        assert!(matches!(
+            omitted_subscription,
+            Err(sqlx::Error::Database(error))
+                if error.code().as_deref() == Some("23502")
+                    && error.message().contains("required_gateway_account_mode")
+        ));
+        assert_v4_conforms(&database.pool).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn v3_upgrade_backfills_historical_attempts_and_subscriptions_as_live()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start_v3("sr_v4_backfill").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let subscriber_id = Uuid::now_v7();
+        let (_, subscription_id, _) =
+            create_v2_subscription_fixture(&database.pool, account, subscriber_id).await?;
+        let attempt_id = Uuid::now_v7();
+        sqlx::query(
+            r#"
+            INSERT INTO billing_payment_attempts (
+                id, billing_scope_id, subscriber_id, host_charge_target_id,
+                attempt_kind, status, idempotency_key, request_fingerprint,
+                amount_cents, currency, gateway_account_id,
+                gateway_configuration_id, gateway_order_id
+            ) VALUES (
+                $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
+                100, 'USD', $7, $8, $9
+            )
+            "#,
+        )
+        .bind(attempt_id)
+        .bind(account.billing_scope_id)
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .bind(format!("historical-{attempt_id}"))
+        .bind(format!("initial:historical:{attempt_id}"))
+        .bind(account.gateway_account_id)
+        .bind(account.gateway_configuration_id)
+        .bind(format!("historical-order-{attempt_id}"))
+        .execute(&database.pool)
+        .await?;
+
+        database.upgrade_v3_to_v4().await?;
+        let required_mode: String = sqlx::query_scalar(
+            "SELECT required_gateway_account_mode FROM billing_payment_attempts WHERE id = $1",
+        )
+        .bind(attempt_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(required_mode, "live");
+        let subscription_mode: String = sqlx::query_scalar(
+            "SELECT required_gateway_account_mode FROM billing_subscriptions WHERE id = $1",
+        )
+        .bind(subscription_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(subscription_mode, "live");
+        assert_v4_conforms(&database.pool).await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn runtime_schema_v4_rejects_v3_and_canonical_column_drift() -> Result<(), Box<dyn Error>> {
-    assert_ne!(V3_CATALOG_FINGERPRINT, V4_CATALOG_FINGERPRINT);
     let v3 = TestDatabase::start_v3("sr_v4_reject_v3").await?;
     let drifted = TestDatabase::start("sr_v4_drift").await?;
     let result = async {
@@ -43,7 +317,6 @@ async fn runtime_schema_v4_rejects_v3_and_canonical_column_drift() -> Result<(),
             crate::assert_runtime_schema_v4_compatible(&v3.pool).await,
             Err(crate::SchemaConformanceError::Contract { version: 4, .. })
         ));
-
         sqlx::query("ALTER TABLE billing_payment_attempts ADD COLUMN host_extra text")
             .execute(&drifted.pool)
             .await?;
@@ -59,493 +332,4 @@ async fn runtime_schema_v4_rejects_v3_and_canonical_column_drift() -> Result<(),
     result?;
     v3_cleanup?;
     drifted_cleanup
-}
-
-#[tokio::test]
-async fn v4_preflight_and_constraint_cover_complete_v3_tuple_matrix() -> Result<(), Box<dyn Error>>
-{
-    let v3 = TestDatabase::start_v3("sr_v4_matrix_v3").await?;
-    let v4 = TestDatabase::start("sr_v4_matrix_v4").await?;
-    let result = async {
-        let v3_account = create_gateway_account(&v3.pool, "nmi").await?;
-        let v4_account = create_gateway_account(&v4.pool, "nmi").await?;
-        let mut incompatible_v3_attempts = Vec::new();
-
-        for (position, tuple) in EXTERNAL_REVERSAL_TUPLE_CASES.iter().enumerate() {
-            let v3_attempt = insert_external_reversal_attestation(
-                &v3.pool,
-                v3_account,
-                &format!("matrix-v3-{position}"),
-                tuple.reversal_kind,
-                tuple.prior_resolution_code,
-                tuple.final_resolution_code,
-            )
-            .await?;
-            if !tuple.allowed_in_v4 {
-                incompatible_v3_attempts.push(v3_attempt);
-            }
-
-            let v4_insert = insert_external_reversal_attestation(
-                &v4.pool,
-                v4_account,
-                &format!("matrix-v4-{position}"),
-                tuple.reversal_kind,
-                tuple.prior_resolution_code,
-                tuple.final_resolution_code,
-            )
-            .await;
-            if tuple.allowed_in_v4 {
-                v4_insert?;
-            } else {
-                assert_resolution_constraint_error(v4_insert);
-            }
-        }
-
-        let preflight = run_v3_to_v4_preflight_read_only(&v3.pool).await?;
-        assert_eq!(preflight, (8, 2));
-        let audit = run_v3_to_v4_incompatible_attestation_audit_read_only(&v3.pool).await?;
-        let mut audited_attempts = audit.iter().map(|row| row.attempt_id).collect::<Vec<_>>();
-        audited_attempts.sort_unstable();
-        incompatible_v3_attempts.sort_unstable();
-        assert_eq!(audited_attempts, incompatible_v3_attempts);
-        assert!(
-            audit
-                .iter()
-                .all(IncompatibleAttestationAuditRow::is_forbidden_v4_tuple)
-        );
-
-        for attempt_id in incompatible_v3_attempts {
-            sqlx::query("DELETE FROM billing_external_reversal_attestations WHERE attempt_id = $1")
-                .bind(attempt_id)
-                .execute(&v3.pool)
-                .await?;
-        }
-        v3.upgrade_v3_to_v4().await?;
-        assert_v4_conforms(&v3.pool).await?;
-        assert_v4_conforms(&v4.pool).await?;
-        let retained = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM billing_external_reversal_attestations",
-        )
-        .fetch_one(&v3.pool)
-        .await?;
-        assert_eq!(retained, 6);
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let v3_cleanup = v3.cleanup().await;
-    let v4_cleanup = v4.cleanup().await;
-    result?;
-    v3_cleanup?;
-    v4_cleanup
-}
-
-#[tokio::test]
-async fn v3_upgrade_rejects_incompatible_tuple_then_succeeds_after_remediation()
--> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start_v3("sr_v4_tuple").await?;
-    let result = async {
-        let account = create_gateway_account(&database.pool, "nmi").await?;
-        let compatible_attempt = insert_external_reversal_attestation(
-            &database.pool,
-            account,
-            "compatible",
-            "refund",
-            "subscription_initial_current_grant_conflict",
-            "subscription_initial_externally_refunded",
-        )
-        .await?;
-        let incompatible_refund_attempt = insert_external_reversal_attestation(
-            &database.pool,
-            account,
-            "incompatible-refund",
-            "refund",
-            "subscription_initial_current_grant_conflict",
-            "processor_charge_externally_refunded",
-        )
-        .await?;
-        let incompatible_void_attempt = insert_external_reversal_attestation(
-            &database.pool,
-            account,
-            "incompatible-void",
-            "void",
-            "subscription_initial_current_grant_conflict",
-            "processor_charge_externally_voided",
-        )
-        .await?;
-
-        let preflight = run_v3_to_v4_preflight_read_only(&database.pool).await?;
-        assert_eq!(preflight, (3, 2));
-        let audit = run_v3_to_v4_incompatible_attestation_audit_read_only(&database.pool).await?;
-        assert_eq!(audit.len(), 2);
-        assert!(audit.iter().any(|row| {
-            row.attempt_id == incompatible_refund_attempt
-                && row.reversal_kind == "refund"
-                && row.final_resolution_code == "processor_charge_externally_refunded"
-        }));
-        assert!(audit.iter().any(|row| {
-            row.attempt_id == incompatible_void_attempt
-                && row.reversal_kind == "void"
-                && row.final_resolution_code == "processor_charge_externally_voided"
-        }));
-
-        let mut transaction = database.pool.begin().await?;
-        let error = sqlx::raw_sql(V3_TO_V4_UPGRADE_SQL)
-            .execute(&mut *transaction)
-            .await
-            .expect_err("incompatible retained evidence must abort the v4 cutover");
-        assert!(error.as_database_error().is_some_and(|error| {
-            error.constraint()
-                == Some("billing_external_reversal_attestations_resolution_check")
-        }));
-        transaction.rollback().await?;
-
-        let constraint_definition = sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT pg_get_constraintdef(c.oid, true)
-            FROM pg_constraint AS c
-            WHERE c.conname =
-                'billing_external_reversal_attestations_resolution_check'
-            "#,
-        )
-        .fetch_one(&database.pool)
-        .await?;
-        assert!(constraint_definition.contains("prior_resolution_code = ANY"));
-
-        // This is a disposable migration fixture standing in for the audited
-        // host-owned remediation required for real financial evidence.
-        sqlx::query(
-            "DELETE FROM billing_external_reversal_attestations WHERE attempt_id = $1",
-        )
-        .bind(incompatible_refund_attempt)
-        .execute(&database.pool)
-        .await?;
-
-        let preflight = run_v3_to_v4_preflight_read_only(&database.pool).await?;
-        assert_eq!(preflight, (2, 1));
-        let audit = run_v3_to_v4_incompatible_attestation_audit_read_only(&database.pool).await?;
-        assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].attempt_id, incompatible_void_attempt);
-
-        let mut transaction = database.pool.begin().await?;
-        let error = sqlx::raw_sql(V3_TO_V4_UPGRADE_SQL)
-            .execute(&mut *transaction)
-            .await
-            .expect_err("the independently forbidden void tuple must still abort the cutover");
-        assert!(error.as_database_error().is_some_and(|error| {
-            error.constraint()
-                == Some("billing_external_reversal_attestations_resolution_check")
-        }));
-        transaction.rollback().await?;
-
-        sqlx::query(
-            "DELETE FROM billing_external_reversal_attestations WHERE attempt_id = $1",
-        )
-        .bind(incompatible_void_attempt)
-        .execute(&database.pool)
-        .await?;
-
-        let preflight = run_v3_to_v4_preflight_read_only(&database.pool).await?;
-        assert_eq!(preflight, (1, 0));
-        assert!(
-            run_v3_to_v4_incompatible_attestation_audit_read_only(&database.pool)
-                .await?
-                .is_empty()
-        );
-
-        database.upgrade_v3_to_v4().await?;
-        assert_v4_conforms(&database.pool).await?;
-        let compatible_row_survived = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS (SELECT 1 FROM billing_external_reversal_attestations WHERE attempt_id = $1)",
-        )
-        .bind(compatible_attempt)
-        .fetch_one(&database.pool)
-        .await?;
-        assert!(compatible_row_survived);
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result?;
-    cleanup
-}
-
-async fn run_v3_to_v4_preflight_read_only(pool: &PgPool) -> Result<(i64, i64), sqlx::Error> {
-    let mut transaction = pool
-        .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .await?;
-    let counts = sqlx::query_as::<_, (i64, i64)>(V3_TO_V4_PREFLIGHT_SQL)
-        .fetch_one(&mut *transaction)
-        .await?;
-    transaction.rollback().await?;
-    Ok(counts)
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct IncompatibleAttestationAuditRow {
-    attempt_id: Uuid,
-    processor_charge_id: Uuid,
-    reversal_kind: String,
-    prior_resolution_code: String,
-    final_resolution_code: String,
-}
-
-impl IncompatibleAttestationAuditRow {
-    fn is_forbidden_v4_tuple(&self) -> bool {
-        self.processor_charge_id != Uuid::nil()
-            && self.prior_resolution_code == "subscription_initial_current_grant_conflict"
-            && matches!(
-                (
-                    self.reversal_kind.as_str(),
-                    self.final_resolution_code.as_str()
-                ),
-                ("refund", "processor_charge_externally_refunded")
-                    | ("void", "processor_charge_externally_voided")
-            )
-    }
-}
-
-async fn run_v3_to_v4_incompatible_attestation_audit_read_only(
-    pool: &PgPool,
-) -> Result<Vec<IncompatibleAttestationAuditRow>, sqlx::Error> {
-    let mut transaction = pool
-        .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .await?;
-    let description = (&mut *transaction)
-        .describe(V3_TO_V4_INCOMPATIBLE_ATTESTATION_AUDIT_SQL)
-        .await?;
-    let column_names = description
-        .columns()
-        .iter()
-        .map(Column::name)
-        .collect::<Vec<_>>();
-    assert_eq!(
-        column_names,
-        [
-            "attempt_id",
-            "processor_charge_id",
-            "reversal_kind",
-            "prior_resolution_code",
-            "final_resolution_code",
-        ]
-    );
-    let rows = sqlx::query_as::<_, IncompatibleAttestationAuditRow>(
-        V3_TO_V4_INCOMPATIBLE_ATTESTATION_AUDIT_SQL,
-    )
-    .fetch_all(&mut *transaction)
-    .await?;
-    transaction.rollback().await?;
-    Ok(rows)
-}
-
-#[tokio::test]
-async fn runtime_schema_v4_does_not_read_retained_attestations() -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v4_no_scan").await?;
-    let role = format!("schema_v4_validator_{}", Uuid::now_v7().simple());
-    let result = async {
-        sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
-            .execute(&database.pool)
-            .await?;
-        sqlx::query(&format!(
-            "GRANT SELECT ON ALL TABLES IN SCHEMA public TO {role}"
-        ))
-        .execute(&database.pool)
-        .await?;
-        sqlx::query(&format!(
-            "REVOKE SELECT ON billing_external_reversal_attestations FROM {role}"
-        ))
-        .execute(&database.pool)
-        .await?;
-        sqlx::query(&format!(
-            "GRANT REFERENCES ON billing_external_reversal_attestations TO {role}"
-        ))
-        .execute(&database.pool)
-        .await?;
-        let can_read_attestations = sqlx::query_scalar::<_, bool>(
-            "SELECT has_table_privilege($1, 'billing_external_reversal_attestations', 'SELECT')",
-        )
-        .bind(&role)
-        .fetch_one(&database.pool)
-        .await?;
-        assert!(!can_read_attestations);
-        let set_role = format!("SET ROLE {role}");
-        let validator_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .after_connect(move |connection, _| {
-                let set_role = set_role.clone();
-                Box::pin(async move {
-                    sqlx::query(&set_role).execute(connection).await?;
-                    Ok(())
-                })
-            })
-            .connect_with(database.database_url().parse::<PgConnectOptions>()?)
-            .await?;
-
-        let conformance = crate::assert_runtime_schema_v4_compatible(&validator_pool).await;
-        validator_pool.close().await;
-        conformance?;
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let role_cleanup = drop_schema_validator_role(&database.pool, &role).await;
-    let cleanup = database.cleanup().await;
-    result?;
-    role_cleanup?;
-    cleanup
-}
-
-#[derive(Clone, Copy)]
-struct ExternalReversalTupleCase {
-    reversal_kind: &'static str,
-    prior_resolution_code: &'static str,
-    final_resolution_code: &'static str,
-    allowed_in_v4: bool,
-}
-
-const EXTERNAL_REVERSAL_TUPLE_CASES: [ExternalReversalTupleCase; 8] = [
-    ExternalReversalTupleCase {
-        reversal_kind: "refund",
-        prior_resolution_code: "subscription_initial_current_grant_conflict",
-        final_resolution_code: "subscription_initial_externally_refunded",
-        allowed_in_v4: true,
-    },
-    ExternalReversalTupleCase {
-        reversal_kind: "refund",
-        prior_resolution_code: "subscription_initial_current_grant_conflict",
-        final_resolution_code: "processor_charge_externally_refunded",
-        allowed_in_v4: false,
-    },
-    ExternalReversalTupleCase {
-        reversal_kind: "void",
-        prior_resolution_code: "subscription_initial_current_grant_conflict",
-        final_resolution_code: "subscription_initial_externally_voided",
-        allowed_in_v4: true,
-    },
-    ExternalReversalTupleCase {
-        reversal_kind: "void",
-        prior_resolution_code: "subscription_initial_current_grant_conflict",
-        final_resolution_code: "processor_charge_externally_voided",
-        allowed_in_v4: false,
-    },
-    ExternalReversalTupleCase {
-        reversal_kind: "refund",
-        prior_resolution_code: "processor_charge_external_reversal_required",
-        final_resolution_code: "subscription_initial_externally_refunded",
-        allowed_in_v4: true,
-    },
-    ExternalReversalTupleCase {
-        reversal_kind: "refund",
-        prior_resolution_code: "processor_charge_external_reversal_required",
-        final_resolution_code: "processor_charge_externally_refunded",
-        allowed_in_v4: true,
-    },
-    ExternalReversalTupleCase {
-        reversal_kind: "void",
-        prior_resolution_code: "processor_charge_external_reversal_required",
-        final_resolution_code: "subscription_initial_externally_voided",
-        allowed_in_v4: true,
-    },
-    ExternalReversalTupleCase {
-        reversal_kind: "void",
-        prior_resolution_code: "processor_charge_external_reversal_required",
-        final_resolution_code: "processor_charge_externally_voided",
-        allowed_in_v4: true,
-    },
-];
-
-fn assert_resolution_constraint_error(result: Result<Uuid, sqlx::Error>) {
-    let error = result.expect_err("incompatible tuple must violate the v4 constraint");
-    assert!(error.as_database_error().is_some_and(|error| {
-        error.constraint() == Some("billing_external_reversal_attestations_resolution_check")
-    }));
-}
-
-async fn drop_schema_validator_role(pool: &PgPool, role: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(&format!("DROP OWNED BY {role}"))
-        .execute(pool)
-        .await?;
-    sqlx::query(&format!("DROP ROLE {role}"))
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-async fn insert_external_reversal_attestation(
-    pool: &PgPool,
-    account: GatewayAccountFixture,
-    label: &str,
-    reversal_kind: &str,
-    prior_resolution_code: &str,
-    final_resolution_code: &str,
-) -> Result<Uuid, sqlx::Error> {
-    let attempt_id = Uuid::now_v7();
-    let processor_charge_id = Uuid::now_v7();
-    let gateway_order_id = format!("v4-{label}-{}", attempt_id.simple());
-    let gateway_transaction_id = format!("v4-{label}-txn-{}", attempt_id.simple());
-    sqlx::query(
-        r#"
-        INSERT INTO billing_payment_attempts (
-            id, billing_scope_id, subscriber_id, host_charge_target_id,
-            attempt_kind, status, idempotency_key, request_fingerprint,
-            amount_cents, currency, gateway_account_id,
-            gateway_configuration_id, gateway_order_id, review_required_at
-        ) VALUES (
-            $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
-            500, 'USD', $7, $8, $9, clock_timestamp()
-        )
-        "#,
-    )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(Uuid::now_v7())
-    .bind(Uuid::now_v7())
-    .bind(format!("v4-{label}-idem-{attempt_id}"))
-    .bind(format!("v4-{label}-fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(&gateway_order_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO billing_processor_charges (
-            id, attempt_id, billing_scope_id, gateway_account_id,
-            gateway_order_id, gateway_transaction_id, attempt_kind,
-            amount_cents, currency
-        ) VALUES ($1, $2, $3, $4, $5, $6, 'host_charge', 500, 'USD')
-        "#,
-    )
-    .bind(processor_charge_id)
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(&gateway_order_id)
-    .bind(&gateway_transaction_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-        INSERT INTO billing_external_reversal_attestations (
-            attempt_id, processor_charge_id, actor_id, reversal_kind, reason,
-            prior_resolution_code, final_resolution_code,
-            gateway_account_id, gateway_configuration_id, gateway_order_id,
-            amount_cents, currency, gateway_transaction_id, attested_at
-        ) VALUES (
-            $1, $2, $3, $4, 'migration fixture', $5, $6,
-            $7, $8, $9, 500, 'USD', $10, clock_timestamp()
-        )
-        "#,
-    )
-    .bind(attempt_id)
-    .bind(processor_charge_id)
-    .bind(Uuid::now_v7())
-    .bind(reversal_kind)
-    .bind(prior_resolution_code)
-    .bind(final_resolution_code)
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(gateway_order_id)
-    .bind(gateway_transaction_id)
-    .execute(pool)
-    .await?;
-    Ok(attempt_id)
 }

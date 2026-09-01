@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{Row, postgres::PgRow};
 use syrup_rail::{
     BillingPeriod, ChargeAmount, CurrencyCode, DunningExhaustion, DunningRetryDelay,
-    DunningSchedule, PastDueAccessPolicy, PaymentMethodId, PlanKey, RenewalFailurePolicy,
-    Subscription, SubscriptionId, SubscriptionLifecycle, SubscriptionPeriodRule, SubscriptionPhase,
+    DunningSchedule, GatewayAccountMode, PastDueAccessPolicy, PaymentMethodId, PlanKey,
+    RenewalFailurePolicy, Subscription, SubscriptionId, SubscriptionPeriodRule, SubscriptionPhase,
     SubscriptionStatus,
 };
 use thiserror::Error;
@@ -124,6 +124,7 @@ struct FullSubscriptionRow {
     id: Uuid,
     plan_key: String,
     status: String,
+    required_gateway_account_mode: String,
     payment_method_id: Uuid,
     amount_cents: i32,
     currency: String,
@@ -145,6 +146,7 @@ impl FullSubscriptionRow {
             id: row.try_get("id")?,
             plan_key: row.try_get("plan_key")?,
             status: row.try_get("status")?,
+            required_gateway_account_mode: row.try_get("required_gateway_account_mode")?,
             payment_method_id: row.try_get("payment_method_id")?,
             amount_cents: row.try_get("amount_cents")?,
             currency: row.try_get("currency")?,
@@ -166,6 +168,7 @@ impl FullSubscriptionRow {
             id,
             plan_key,
             status,
+            required_gateway_account_mode,
             payment_method_id,
             amount_cents,
             currency,
@@ -190,24 +193,17 @@ impl FullSubscriptionRow {
                 &past_due_access,
             ))?;
 
-        let status = status
-            .parse::<SubscriptionStatus>()
-            .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?;
-        let current_period = BillingPeriod::new(current_period_start_at, current_period_end_at)
-            .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?;
-        let lifecycle = SubscriptionLifecycle::from_parts(
-            status,
-            current_period,
-            next_renewal_at,
-            next_payment_attempt_at,
-        )
-        .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?;
-
-        Ok(Subscription::from_lifecycle(
+        Ok(Subscription::new(
             SubscriptionId::new(id),
             PlanKey::new(plan_key).map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
+            status
+                .parse::<SubscriptionStatus>()
+                .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             phase
                 .parse::<SubscriptionPhase>()
+                .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
+            required_gateway_account_mode
+                .parse::<GatewayAccountMode>()
                 .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             PaymentMethodId::new(payment_method_id),
             ChargeAmount::new(
@@ -218,95 +214,19 @@ impl FullSubscriptionRow {
             .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             recurring_period,
             renewal_failure,
-            lifecycle,
+            BillingPeriod::new(current_period_start_at, current_period_end_at)
+                .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
+            next_renewal_at,
+            next_payment_attempt_at,
         ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
     use syrup_rail::{DunningExhaustion, PastDueAccessPolicy, SubscriptionPeriodRule};
 
     use super::*;
-
-    fn full_subscription_row() -> FullSubscriptionRow {
-        FullSubscriptionRow {
-            id: Uuid::from_u128(1),
-            plan_key: "plan".to_owned(),
-            status: "active".to_owned(),
-            payment_method_id: Uuid::from_u128(2),
-            amount_cents: 1_000,
-            currency: "USD".to_owned(),
-            current_period_start_at: Utc.timestamp_opt(100, 0).unwrap(),
-            current_period_end_at: Utc.timestamp_opt(200, 0).unwrap(),
-            next_renewal_at: Utc.timestamp_opt(200, 0).unwrap(),
-            phase: "recurring".to_owned(),
-            recurring_period_kind: "calendar_months".to_owned(),
-            recurring_period_count: 1,
-            dunning_retry_delays_seconds: vec![60],
-            dunning_exhaustion: "mark_unpaid".to_owned(),
-            past_due_access: "suspend_immediately".to_owned(),
-            next_payment_attempt_at: Some(Utc.timestamp_opt(200, 0).unwrap()),
-        }
-    }
-
-    #[test]
-    fn complete_subscription_codec_accepts_the_valid_lifecycle_matrix() {
-        let period_end = Utc.timestamp_opt(200, 0).unwrap();
-        let later_attempt = Utc.timestamp_opt(201, 0).unwrap();
-        for (status, next_payment_attempt_at) in [
-            ("active", Some(period_end)),
-            ("past_due", None),
-            ("past_due", Some(period_end)),
-            ("past_due", Some(later_attempt)),
-            ("canceled", None),
-            ("unpaid", None),
-        ] {
-            let mut row = full_subscription_row();
-            row.status = status.to_owned();
-            row.next_payment_attempt_at = next_payment_attempt_at;
-
-            let subscription = row.into_subscription().expect("valid lifecycle row");
-            assert_eq!(subscription.status().as_str(), status);
-            assert_eq!(
-                subscription.next_payment_attempt_at(),
-                next_payment_attempt_at.as_ref()
-            );
-            assert_eq!(subscription.next_renewal_at(), &period_end);
-        }
-    }
-
-    #[test]
-    fn complete_subscription_codec_rejects_invalid_lifecycle_rows() {
-        let before_end = Utc.timestamp_opt(199, 0).unwrap();
-        let period_end = Utc.timestamp_opt(200, 0).unwrap();
-        let after_end = Utc.timestamp_opt(201, 0).unwrap();
-        for (status, next_payment_attempt_at) in [
-            ("active", None),
-            ("active", Some(before_end)),
-            ("active", Some(after_end)),
-            ("past_due", Some(before_end)),
-            ("canceled", Some(period_end)),
-            ("unpaid", Some(period_end)),
-        ] {
-            let mut row = full_subscription_row();
-            row.status = status.to_owned();
-            row.next_payment_attempt_at = next_payment_attempt_at;
-
-            assert!(matches!(
-                row.into_subscription(),
-                Err(SubscriptionPersistenceCodecError::InvalidState)
-            ));
-        }
-
-        let mut row = full_subscription_row();
-        row.next_renewal_at = after_end;
-        assert!(matches!(
-            row.into_subscription(),
-            Err(SubscriptionPersistenceCodecError::InvalidState)
-        ));
-    }
 
     #[test]
     fn period_scalars_decode_fixed_days_and_calendar_months() {

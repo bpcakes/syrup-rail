@@ -13,8 +13,8 @@ use url::form_urlencoded;
 use zeroize::Zeroizing;
 
 use crate::{
-    BillingContact, PaymentOutcomeDiagnostic, PaymentSource, SaleIntent, SensitiveText,
-    StoredCredential, TransactionReportDiagnostic, VaultAction, lossless_json::LosslessJsonValue,
+    BillingContact, PaymentOutcomeDiagnostic, SensitiveText, StoredCredential,
+    TransactionReportDiagnostic, lossless_json::LosslessJsonValue,
 };
 
 use super::form::{
@@ -35,8 +35,8 @@ use super::text::{last4, parse_expiry};
 use super::transport::{gateway_error_for_http_status, gateway_error_from_http_response};
 use super::v5::{amount_value, order_details_json, sale_body_json};
 use super::validation::{
-    validate_report_query, validate_sale_request, validate_store_payment_method_request,
-    validate_transaction_query,
+    ensure_supported_sale_currency, validate_report_query, validate_sale_request,
+    validate_store_payment_method_request, validate_transaction_query,
 };
 use super::*;
 
@@ -124,10 +124,72 @@ fn decimal_pan(zero: u32) -> String {
         .collect()
 }
 
+#[derive(Clone, Copy)]
+enum TestClientConstruction {
+    Explicit(DuplicateCheck),
+    Legacy,
+}
+
 async fn spawn_capturing_server(
     status_line: &'static str,
     content_type: &'static str,
     response_body: Vec<u8>,
+) -> (
+    Client,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_capturing_server_with_duplicate_check(
+        status_line,
+        content_type,
+        response_body,
+        DuplicateCheck::ProcessorConfigured,
+    )
+    .await
+}
+
+async fn spawn_capturing_server_with_duplicate_check(
+    status_line: &'static str,
+    content_type: &'static str,
+    response_body: Vec<u8>,
+    duplicate_check: DuplicateCheck,
+) -> (
+    Client,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_capturing_server_with_client_construction(
+        status_line,
+        content_type,
+        response_body,
+        TestClientConstruction::Explicit(duplicate_check),
+    )
+    .await
+}
+
+async fn spawn_capturing_server_with_legacy_client(
+    status_line: &'static str,
+    content_type: &'static str,
+    response_body: Vec<u8>,
+) -> (
+    Client,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_capturing_server_with_client_construction(
+        status_line,
+        content_type,
+        response_body,
+        TestClientConstruction::Legacy,
+    )
+    .await
+}
+
+async fn spawn_capturing_server_with_client_construction(
+    status_line: &'static str,
+    content_type: &'static str,
+    response_body: Vec<u8>,
+    construction: TestClientConstruction,
 ) -> (
     Client,
     tokio::sync::oneshot::Receiver<String>,
@@ -183,17 +245,74 @@ async fn spawn_capturing_server(
             .expect("response headers should write");
         let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, &response_body).await;
     });
-    let client =
-        Client::new(base_url, "private_key", "query_key").expect("test client should build");
+    let endpoint = Endpoint::parse_loopback_http(base_url).expect("test endpoint should validate");
+    let credentials = Credentials::new("private_key".to_owned(), "query_key".to_owned())
+        .expect("test credentials should validate");
+    let factory = ClientFactory::new_with_loopback_http().expect("test factory should build");
+    #[allow(deprecated)]
+    let client = match construction {
+        TestClientConstruction::Explicit(duplicate_check) => {
+            factory.client_with_duplicate_check(endpoint, credentials, duplicate_check)
+        }
+        TestClientConstruction::Legacy => factory.client(endpoint, credentials),
+    }
+    .expect("test client should build");
     (client, request_receiver, server)
+}
+
+#[test]
+#[allow(deprecated)]
+fn legacy_factory_client_no_longer_selects_the_invalid_zero_override() {
+    let endpoint =
+        Endpoint::parse_loopback_http("http://127.0.0.1").expect("test endpoint should validate");
+    let credentials = Credentials::new("private_key".to_owned(), "query_key".to_owned())
+        .expect("test credentials should validate");
+    let client = ClientFactory::new_with_loopback_http()
+        .expect("test factory should build")
+        .client(endpoint, credentials)
+        .expect("legacy test client should build");
+
+    assert_eq!(client.duplicate_check, DuplicateCheck::ProcessorConfigured);
+}
+
+#[test]
+fn duplicate_check_policy_is_owned_by_each_factory_client() {
+    let factory =
+        ClientFactory::new_with_loopback_http().expect("test factory should construct once");
+    let client = |policy| {
+        factory
+            .client_with_duplicate_check(
+                Endpoint::parse_loopback_http("http://127.0.0.1")
+                    .expect("test endpoint should validate"),
+                Credentials::new("private_key".to_owned(), "query_key".to_owned())
+                    .expect("test credentials should validate"),
+                policy,
+            )
+            .expect("test client should build")
+    };
+    let processor_configured = client(DuplicateCheck::ProcessorConfigured);
+    let explicit_window = client(DuplicateCheck::Window(
+        crate::DuplicateCheckWindow::new(120).expect("window should validate"),
+    ));
+
+    assert_eq!(
+        processor_configured.duplicate_check,
+        DuplicateCheck::ProcessorConfigured
+    );
+    assert_eq!(
+        explicit_window.duplicate_check,
+        DuplicateCheck::Window(crate::DuplicateCheckWindow::new(120).unwrap())
+    );
 }
 
 fn test_sale_request(source: PaymentSource) -> SaleRequest {
     SaleRequest {
         amount_cents: 100,
+        currency: "USD".to_owned(),
         order_id: "ck_order".to_owned(),
-        intent: SaleIntent::from_legacy_parts(source, None, None)
-            .expect("a direct source is a valid sale intent"),
+        source,
+        vault_action: None,
+        stored_credential: None,
         billing_contact: None,
     }
 }

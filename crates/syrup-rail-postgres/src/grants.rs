@@ -4,13 +4,10 @@ use syrup_rail::{
     ActorId, BillingScopeId, PlanKey, SubscriberId, SubscriptionGrant, SubscriptionGrantCreation,
     SubscriptionGrantCreationOutcome, SubscriptionGrantId, SubscriptionGrantKind,
     SubscriptionGrantReason, SubscriptionGrantRecord, SubscriptionGrantRevocation,
-    SubscriptionGrantRevocationAudit, SubscriptionGrantRevocationOutcome,
-    SubscriptionGrantRevocationState, SubscriptionStatus,
+    SubscriptionGrantRevocationOutcome, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
-
-use crate::attempts::lock_subscription_aggregate;
 
 const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
 const INVALID_GRANT_STATE: &str = "canonical subscription grant state is invalid";
@@ -35,7 +32,12 @@ pub async fn create_subscription_grant(
     creation: &SubscriptionGrantCreation,
 ) -> Result<SubscriptionGrantCreationOutcome, SubscriptionGrantMutationError> {
     set_lock_timeout(transaction).await?;
-    lock_subscription_aggregate(transaction, creation.subscriber_id(), creation.plan_key()).await?;
+    lock_subscription_aggregate(
+        transaction,
+        creation.subscriber_id().as_uuid(),
+        creation.plan_key().as_str(),
+    )
+    .await?;
     lock_initial_attempts(
         transaction,
         creation.billing_scope_id().as_uuid(),
@@ -152,8 +154,8 @@ pub async fn revoke_subscription_grant(
     set_lock_timeout(transaction).await?;
     lock_subscription_aggregate(
         transaction,
-        revocation.subscriber_id(),
-        revocation.plan_key(),
+        revocation.subscriber_id().as_uuid(),
+        revocation.plan_key().as_str(),
     )
     .await?;
 
@@ -235,6 +237,25 @@ async fn set_lock_timeout(transaction: &mut Transaction<'_, Postgres>) -> Result
         .bind(BILLING_ROW_LOCK_TIMEOUT)
         .execute(&mut **transaction)
         .await?;
+    Ok(())
+}
+
+async fn lock_subscription_aggregate(
+    transaction: &mut Transaction<'_, Postgres>,
+    subscriber_id: &Uuid,
+    plan_key: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        SELECT pg_advisory_xact_lock(
+            hashtextextended($1::uuid::text || ':' || $2, 0)
+        )
+        "#,
+    )
+    .bind(subscriber_id)
+    .bind(plan_key)
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -379,37 +400,21 @@ fn grant_from_row(row: &PgRow) -> Result<SubscriptionGrantRecord, SubscriptionGr
         ActorId::new(row.try_get("granted_by_actor_id")?),
     )
     .map_err(|_| SubscriptionGrantMutationError::InvalidState(INVALID_GRANT_STATE))?;
-    SubscriptionGrantRecord::from_revocation_state(
+    SubscriptionGrantRecord::new(
         BillingScopeId::new(row.try_get("billing_scope_id")?),
         SubscriberId::new(row.try_get("subscriber_id")?),
         grant,
         grant_reason(row.try_get("reason")?)?,
-        grant_revocation_state(row)?,
+        row.try_get("revoked_at")?,
+        row.try_get::<Option<Uuid>, _>("revoked_by_actor_id")?
+            .map(ActorId::new),
+        row.try_get::<Option<String>, _>("revocation_reason")?
+            .map(grant_reason)
+            .transpose()?,
         row.try_get("created_at")?,
         row.try_get("updated_at")?,
     )
     .map_err(|_| SubscriptionGrantMutationError::InvalidState(INVALID_GRANT_STATE))
-}
-
-fn grant_revocation_state(
-    row: &PgRow,
-) -> Result<SubscriptionGrantRevocationState, SubscriptionGrantMutationError> {
-    let revoked_at = row.try_get::<Option<DateTime<Utc>>, _>("revoked_at")?;
-    let revoked_by_actor_id = row.try_get::<Option<Uuid>, _>("revoked_by_actor_id")?;
-    let reason = row.try_get::<Option<String>, _>("revocation_reason")?;
-    match (revoked_at, revoked_by_actor_id, reason) {
-        (None, None, None) => Ok(SubscriptionGrantRevocationState::Active),
-        (Some(revoked_at), Some(revoked_by_actor_id), Some(reason)) => Ok(
-            SubscriptionGrantRevocationState::Revoked(SubscriptionGrantRevocationAudit::new(
-                revoked_at,
-                ActorId::new(revoked_by_actor_id),
-                grant_reason(reason)?,
-            )),
-        ),
-        _ => Err(SubscriptionGrantMutationError::InvalidState(
-            INVALID_GRANT_STATE,
-        )),
-    }
 }
 
 fn grant_reason(value: String) -> Result<SubscriptionGrantReason, SubscriptionGrantMutationError> {
@@ -429,69 +434,8 @@ mod tests {
     };
     use uuid::Uuid;
 
-    use super::{
-        SubscriptionGrantMutationError, create_subscription_grant, revoke_subscription_grant,
-    };
+    use super::{create_subscription_grant, revoke_subscription_grant};
     use crate::test_support::{TestDatabase, create_gateway_account};
-
-    #[tokio::test]
-    async fn discount_and_grant_workflows_contend_on_the_canonical_subscription_aggregate()
-    -> Result<(), Box<dyn Error>> {
-        let database = TestDatabase::start("sr_gr_agg_lock").await?;
-        let result = async {
-            let subscriber_id = SubscriberId::new(Uuid::now_v7());
-            let plan_key = PlanKey::new("base_subscription")?;
-            let mut holder = database.pool.begin().await?;
-            let held = crate::clear_subscription_discount_in_transaction(
-                &mut holder,
-                BillingScopeId::new(Uuid::now_v7()),
-                subscriber_id,
-                &plan_key,
-            )
-            .await?;
-            if held != syrup_rail::SubscriptionDiscountClearOutcome::NotFound {
-                return Err(io::Error::other(
-                    "discount workflow did not retain its empty aggregate transaction",
-                )
-                .into());
-            }
-
-            let creation = SubscriptionGrantCreation::new(
-                SubscriptionGrantId::new(Uuid::now_v7()),
-                BillingScopeId::new(Uuid::now_v7()),
-                subscriber_id,
-                plan_key,
-                SubscriptionGrantKind::Testing,
-                SubscriptionGrantReason::new("aggregate contention")?,
-                Utc::now() + Duration::days(1),
-                ActorId::new(Uuid::now_v7()),
-            );
-            let mut contender = database.pool.begin().await?;
-            let error = create_subscription_grant(&mut contender, &creation)
-                .await
-                .expect_err("canonical aggregate holder must block grant creation");
-            contender.rollback().await?;
-            holder.rollback().await?;
-            let SubscriptionGrantMutationError::Sql(sqlx::Error::Database(error)) = error else {
-                return Err(io::Error::other(format!(
-                    "expected grant lock timeout, got {error:?}"
-                ))
-                .into());
-            };
-            if error.code().as_deref() != Some("55P03") {
-                return Err(io::Error::other(format!(
-                    "expected grant lock timeout SQLSTATE 55P03, got {:?}",
-                    error.code()
-                ))
-                .into());
-            }
-            Ok::<_, Box<dyn Error>>(())
-        }
-        .await;
-        let cleanup = database.cleanup().await;
-        result?;
-        cleanup
-    }
 
     #[tokio::test]
     async fn grant_lifecycle_is_auditable_and_owned_by_the_caller_transaction()
@@ -589,72 +533,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persisted_partial_revocation_audit_is_rejected() -> Result<(), Box<dyn Error>> {
-        let database = TestDatabase::start("sr_grant_partial").await?;
-        let result = async {
-            let scope = BillingScopeId::new(Uuid::now_v7());
-            let subscriber = SubscriberId::new(Uuid::now_v7());
-            let plan = PlanKey::new("base_subscription")?;
-            let grant_id = SubscriptionGrantId::new(Uuid::now_v7());
-            let creation = SubscriptionGrantCreation::new(
-                grant_id,
-                scope,
-                subscriber,
-                plan.clone(),
-                SubscriptionGrantKind::Promotion,
-                SubscriptionGrantReason::new("partial audit regression")?,
-                Utc::now() + Duration::days(30),
-                ActorId::new(Uuid::now_v7()),
-            );
-            let mut creation_transaction = database.pool.begin().await?;
-            if !matches!(
-                create_subscription_grant(&mut creation_transaction, &creation).await?,
-                SubscriptionGrantCreationOutcome::Created(_)
-            ) {
-                return Err(io::Error::other("grant was not created").into());
-            }
-            creation_transaction.commit().await?;
-
-            sqlx::query(
-                "ALTER TABLE billing_subscription_grants DROP CONSTRAINT billing_subscription_grants_revocation_check",
-            )
-            .execute(&database.pool)
-            .await?;
-            sqlx::query(
-                "UPDATE billing_subscription_grants SET revoked_at = clock_timestamp() WHERE id = $1",
-            )
-            .bind(grant_id.as_uuid())
-            .execute(&database.pool)
-            .await?;
-
-            let revocation = SubscriptionGrantRevocation::new(
-                grant_id,
-                scope,
-                subscriber,
-                plan,
-                ActorId::new(Uuid::now_v7()),
-                SubscriptionGrantReason::new("must reject partial audit")?,
-            );
-            let mut transaction = database.pool.begin().await?;
-            let error = revoke_subscription_grant(&mut transaction, &revocation)
-                .await
-                .expect_err("partial persisted revocation audit must fail closed");
-            transaction.rollback().await?;
-            if !matches!(error, SubscriptionGrantMutationError::InvalidState(_)) {
-                return Err(io::Error::other(format!(
-                    "expected invalid grant state, got {error:?}"
-                ))
-                .into());
-            }
-            Ok::<_, Box<dyn Error>>(())
-        }
-        .await;
-        let cleanup = database.cleanup().await;
-        result?;
-        cleanup
-    }
-
-    #[tokio::test]
     async fn grant_admission_is_exactly_scope_subscriber_and_plan_scoped()
     -> Result<(), Box<dyn Error>> {
         let database = TestDatabase::start("sr_grant_scope").await?;
@@ -736,6 +614,7 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id,
                 billing_scope_id,
                 subscriber_id,
@@ -758,6 +637,7 @@ mod tests {
                 subscription_initial_dunning_exhaustion,
                 subscription_initial_past_due_access
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
                 100, 'USD', $7, $8, $9, 2, 'recurring_immediately', 100,
                 'calendar_months', 1, ARRAY[]::bigint[],

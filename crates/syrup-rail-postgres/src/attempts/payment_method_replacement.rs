@@ -49,6 +49,7 @@ async fn payment_method_replacement_attempt_matches_replay_context(
             SELECT 1 FROM billing_subscriptions
             WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
                 AND gateway_account_id = $4 AND plan_key = $5
+                AND required_gateway_account_mode = $11
                 AND (
                     (
                         status IN ('active', 'past_due')
@@ -74,6 +75,7 @@ async fn payment_method_replacement_attempt_matches_replay_context(
     .bind(attempt.status().as_str())
     .bind(payment_method_id.as_uuid())
     .bind(approved_transaction)
+    .bind(identity.required_gateway_account_mode().as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -95,6 +97,31 @@ async fn payment_method_replacement_attempt_for_replay(
     } else {
         Ok(None)
     }
+}
+
+async fn payment_method_replacement_reservation_replay_outcome(
+    transaction: &mut Transaction<'_, Postgres>,
+    attempt: PaymentAttempt,
+    required_gateway_account_mode: GatewayAccountMode,
+) -> Result<SubscriptionPaymentMethodReplacementReservationOutcome, PaymentAttemptStoreError> {
+    Ok(
+        match payment_method_replacement_attempt_for_replay(transaction, attempt).await? {
+            Some(existing)
+                if prepared_replay_required_mode_changed(
+                    &existing,
+                    required_gateway_account_mode,
+                ) =>
+            {
+                SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
+                    SubscriptionPaymentMethodReplacementRejection::GatewayAccountModeChanged,
+                )
+            }
+            Some(existing) => {
+                SubscriptionPaymentMethodReplacementReservationOutcome::Replay(Box::new(existing))
+            }
+            None => SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict,
+        },
+    )
 }
 
 fn payment_method_replacement_attempt_belongs_to_reservation(
@@ -208,6 +235,7 @@ async fn payment_method_replacement_subscription_state_matches(
                 AND gateway_account_id = $4 AND plan_key = $5
                 AND status IN ('active', 'past_due')
                 AND payment_method_id = $6 AND initial_transaction_id = $7
+                AND required_gateway_account_mode = $8
         )
         "#,
     )
@@ -218,6 +246,7 @@ async fn payment_method_replacement_subscription_state_matches(
     .bind(reservation.plan_key().as_str())
     .bind(expected.payment_method_id().as_uuid())
     .bind(expected.expected_initial_transaction_id().expose())
+    .bind(identity.required_gateway_account_mode().as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -238,11 +267,12 @@ async fn insert_payment_method_replacement_attempt(
             gateway_account_id, gateway_configuration_id, gateway_order_id,
             billing_first_name, billing_last_name, billing_email,
             payment_method_update_expected_payment_method_id,
-            payment_method_update_expected_initial_transaction_id
+            payment_method_update_expected_initial_transaction_id,
+            required_gateway_account_mode
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             'subscription_payment_method_update', 'pending', $7, $8, 0, $9,
-            $10, $11, $12, $13, $14, $15, $16, $17
+            $10, $11, $12, $13, $14, $15, $16, $17, $18
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -264,6 +294,7 @@ async fn insert_payment_method_replacement_attempt(
     .bind(request.billing_contact().email())
     .bind(expected.payment_method_id().as_uuid())
     .bind(expected.expected_initial_transaction_id().expose())
+    .bind(identity.required_gateway_account_mode().as_str())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -314,11 +345,12 @@ pub async fn preflight_subscription_payment_method_replacement_in_transaction(
         ExistingAttemptPreflight::RequiresLockedContext => {}
     }
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
-    let Some(existing) = lock_payment_attempt_by_idempotency(
+    let Some(existing) = payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
+        true,
     )
     .await?
     else {
@@ -343,34 +375,34 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: &syrup_rail::ReplaceSubscriptionPaymentMethod,
     gateway: &syrup_rail::ResolvedGateway,
+    required_gateway_account_mode: GatewayAccountMode,
 ) -> Result<SubscriptionPaymentMethodReplacementReservationOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
-    if let Some(existing) = lock_payment_attempt_by_idempotency(
+    if let Some(existing) = payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
+        true,
     )
     .await?
     {
         if !payment_method_replacement_attempt_matches_command(&existing, command) {
             return Ok(SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict);
         }
-        return Ok(
-            match payment_method_replacement_attempt_for_replay(transaction, existing).await? {
-                Some(existing) => SubscriptionPaymentMethodReplacementReservationOutcome::Replay(
-                    Box::new(existing),
-                ),
-                None => SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict,
-            },
-        );
+        return payment_method_replacement_reservation_replay_outcome(
+            transaction,
+            existing,
+            required_gateway_account_mode,
+        )
+        .await;
     }
 
     let row = sqlx::query(
         r#"
         SELECT id, gateway_account_id, payment_method_id, initial_transaction_id,
-            status, currency
+            status, currency, required_gateway_account_mode
         FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
         ORDER BY updated_at DESC, id DESC
@@ -395,6 +427,17 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
         return Ok(
             SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
                 SubscriptionPaymentMethodReplacementRejection::SubscriptionIneligible,
+            ),
+        );
+    }
+    let subscription_mode = row
+        .try_get::<String, _>("required_gateway_account_mode")?
+        .parse::<GatewayAccountMode>()
+        .map_err(|_| invalid_state())?;
+    if subscription_mode != required_gateway_account_mode {
+        return Ok(
+            SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
+                SubscriptionPaymentMethodReplacementRejection::GatewayAccountModeChanged,
             ),
         );
     }
@@ -441,16 +484,20 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
         gateway_account_id,
     )?;
     let reservation = SubscriptionPaymentMethodReplacement::from_locked_subscription_terms(
-        command, gateway, terms,
+        command,
+        gateway,
+        terms,
+        subscription_mode,
     )
     .map_err(|_| invalid_state())?;
     let inserted = insert_payment_method_replacement_attempt(transaction, &reservation).await?;
     if inserted {
-        let attempt = lock_payment_attempt_by_idempotency(
+        let attempt = payment_attempt_by_idempotency(
             transaction,
             command.billing_scope_id(),
             command.subscriber_id(),
             command.idempotency_key(),
+            true,
         )
         .await?
         .ok_or_else(invalid_state)?;
@@ -461,25 +508,24 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
             ),
         );
     }
-    if let Some(existing) = lock_payment_attempt_by_idempotency(
+    if let Some(existing) = payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
+        true,
     )
     .await?
     {
         if !payment_method_replacement_attempt_matches_command(&existing, command) {
             return Ok(SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict);
         }
-        return Ok(
-            match payment_method_replacement_attempt_for_replay(transaction, existing).await? {
-                Some(existing) => SubscriptionPaymentMethodReplacementReservationOutcome::Replay(
-                    Box::new(existing),
-                ),
-                None => SubscriptionPaymentMethodReplacementReservationOutcome::IdempotencyConflict,
-            },
-        );
+        return payment_method_replacement_reservation_replay_outcome(
+            transaction,
+            existing,
+            required_gateway_account_mode,
+        )
+        .await;
     }
     Ok(
         SubscriptionPaymentMethodReplacementReservationOutcome::Rejected(
@@ -505,11 +551,12 @@ pub async fn admit_subscription_payment_method_replacement_in_transaction(
     fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
         .await?;
     fail_stale_unsubmitted_subscription_charges(transaction, reservation.subscription_id()).await?;
-    let attempt = lock_payment_attempt_by_idempotency(
+    let attempt = payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.request().idempotency_key(),
+        true,
     )
     .await?
     .ok_or_else(invalid_state)?;

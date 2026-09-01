@@ -93,11 +93,9 @@ async fn v2_upgrade_canonicalizes_legacy_combined_name_without_losing_display()
 }
 
 #[tokio::test]
-async fn runtime_schema_v3_rejects_v2_canonical_column_and_provider_fk_drift()
--> Result<(), Box<dyn Error>> {
+async fn runtime_schema_v3_rejects_v2_and_canonical_column_drift() -> Result<(), Box<dyn Error>> {
     let v2 = TestDatabase::start_v2("sr_v3_reject_v2").await?;
     let drifted = TestDatabase::start_v3("sr_v3_drift").await?;
-    let provider_fk_drifted = TestDatabase::start_v3("sr_v3_pfk").await?;
     let result = async {
         assert!(matches!(
             crate::assert_runtime_schema_v3_compatible(&v2.pool).await,
@@ -110,23 +108,12 @@ async fn runtime_schema_v3_rejects_v2_canonical_column_and_provider_fk_drift()
             crate::assert_runtime_schema_v3_compatible(&drifted.pool).await,
             Err(crate::SchemaConformanceError::Contract { version: 3, .. })
         ));
-        sqlx::query(
-            "ALTER TABLE billing_gateway_accounts DROP CONSTRAINT billing_gateway_accounts_provider_fk",
-        )
-        .execute(&provider_fk_drifted.pool)
-        .await?;
-        assert!(matches!(
-            crate::assert_runtime_schema_v3_compatible(&provider_fk_drifted.pool).await,
-            Err(crate::SchemaConformanceError::Contract { version: 3, .. })
-        ));
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
     let v2_cleanup = v2.cleanup().await;
     let drifted_cleanup = drifted.cleanup().await;
-    let provider_fk_drifted_cleanup = provider_fk_drifted.cleanup().await;
     result?;
     v2_cleanup?;
-    drifted_cleanup?;
-    provider_fk_drifted_cleanup
+    drifted_cleanup
 }

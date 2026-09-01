@@ -1,7 +1,7 @@
 use super::*;
 use syrup_rail::{
-    BillingScopeId, DunningExhaustion, DunningSchedule, GatewayAccountId, GatewayConfigurationId,
-    SubscriberId,
+    BillingScopeId, DunningExhaustion, DunningSchedule, GatewayAccountId, GatewayAccountMode,
+    GatewayConfigurationId, SubscriberId,
 };
 
 fn timestamp(seconds: i64) -> DateTime<Utc> {
@@ -44,6 +44,7 @@ fn validated_attempt(
             SubscriberId::new(Uuid::from_u128(11)),
             GatewayAccountId::new(Uuid::from_u128(12)),
             GatewayConfigurationId::new(Uuid::from_u128(13)),
+            GatewayAccountMode::Live,
         ),
         subscription_id: SubscriptionId::new(Uuid::from_u128(14)),
         plan_key: PlanKey::new("decision-test").expect("valid plan key"),
@@ -151,10 +152,8 @@ fn first_failure_decision_projects_retry_and_event_without_persistence() {
     assert!(matches!(
         transition.events[0],
         BillingEvent::SubscriptionPaymentFailed {
-            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
-                retry_at,
-                access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
-            },
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
             ..
         } if retry_at == timestamp(260) && access_ended_at == timestamp(200)
     ));
@@ -184,8 +183,7 @@ fn failure_event_projection_carries_the_complete_access_consequence() {
             },
         )
         .expect("immediate suspension has a causal boundary")
-        .outcome
-        .access(),
+        .access,
         SubscriptionPaymentFailureAccess::Ended {
             access_ended_at: timestamp(200),
         }
@@ -205,8 +203,7 @@ fn failure_event_projection_carries_the_complete_access_consequence() {
             },
         )
         .expect("scheduled dunning retains access")
-        .outcome
-        .access(),
+        .access,
         SubscriptionPaymentFailureAccess::ContinuesDuringDunning
     );
     assert_eq!(
@@ -218,8 +215,7 @@ fn failure_event_projection_carries_the_complete_access_consequence() {
             },
         )
         .expect("exhausted dunning has a causal boundary")
-        .outcome
-        .access(),
+        .access,
         SubscriptionPaymentFailureAccess::Ended {
             access_ended_at: timestamp(300),
         }
@@ -265,9 +261,8 @@ fn first_automatic_failure_after_legacy_recovery_preserves_suspension_boundary()
         transition.events.as_slice(),
         [
             BillingEvent::SubscriptionPaymentFailed {
-                outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded {
+                access: SubscriptionPaymentFailureAccess::Ended {
                     access_ended_at: failure_access_ended_at,
-                    ..
                 },
                 ..
             },
@@ -401,9 +396,8 @@ fn terminal_event_access_boundary_follows_the_snapshotted_policy() {
             transition.events.as_slice(),
             [
                 BillingEvent::SubscriptionPaymentFailed {
-                    outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded {
+                    access: SubscriptionPaymentFailureAccess::Ended {
                         access_ended_at: failure_access_ended_at,
-                        ..
                     },
                     ..
                 },

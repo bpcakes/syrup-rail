@@ -92,7 +92,11 @@ async fn enrollment_offer_hook_excludes_one_in_flight_identity_across_both_stage
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(offer),
     );
-    let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let context_debug = format!(
         "{:?}",
         crate::SubscriptionEnrollmentOfferContext::from_reservation(
@@ -150,8 +154,11 @@ async fn enrollment_offer_hook_excludes_one_in_flight_identity_across_both_stage
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(paid_trial_offer()?),
     );
-    let later_reservation =
-        SubscriptionEnrollmentReservation::from_command(&later_command, &gateway)?;
+    let later_reservation = SubscriptionEnrollmentReservation::from_command(
+        &later_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert_eq!(
         reserve_subscription_enrollment_in_transaction(
@@ -232,65 +239,36 @@ async fn fixed_day_recurring_cadence_persists_and_drives_the_next_renewal()
     );
     let subscription_id = subscription.id();
 
-    assert!(matches!(
-        force_due_renewal(
-            &database.pool,
-            BillingScopeId::new(Uuid::now_v7()),
-            subscription_id,
-        )
-        .await,
-        Err(sqlx::Error::RowNotFound)
-    ));
-    assert!(matches!(
-        force_due_renewal(
-            &database.pool,
-            BillingScopeId::new(account.billing_scope_id),
-            syrup_rail::SubscriptionId::new(Uuid::now_v7()),
-        )
-        .await,
-        Err(sqlx::Error::RowNotFound)
-    ));
-    let renewal_command = force_due_renewal(
-        &database.pool,
-        BillingScopeId::new(account.billing_scope_id),
-        subscription_id,
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+            .fetch_one(&database.pool)
+            .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2 - interval '14 days',
+            current_period_end_at = $2,
+            next_renewal_at = $2,
+            next_payment_attempt_at = $2
+        WHERE id = $1
+        "#,
     )
+    .bind(subscription_id.as_uuid())
+    .bind(due_at)
+    .execute(&database.pool)
     .await?;
-    assert_eq!(
-        renewal_command,
+
+    let renewal = reserve_and_admit_renewal(
+        &database.pool,
+        &gateway,
         ChargeRenewal::new(
             BillingScopeId::new(account.billing_scope_id),
             subscription_id,
-            *renewal_command.period_start_at(),
-        )
-    );
-    let (forced_start_at, forced_end_at, next_renewal_at, next_payment_attempt_at): (
-        DateTime<Utc>,
-        DateTime<Utc>,
-        DateTime<Utc>,
-        Option<DateTime<Utc>>,
-    ) = sqlx::query_as(
-        r#"
-        SELECT
-            current_period_start_at,
-            current_period_end_at,
-            next_renewal_at,
-            next_payment_attempt_at
-        FROM billing_subscriptions
-        WHERE billing_scope_id = $1 AND id = $2
-        "#,
+            due_at,
+        ),
     )
-    .bind(renewal_command.billing_scope_id().as_uuid())
-    .bind(renewal_command.subscription_id().as_uuid())
-    .fetch_one(&database.pool)
     .await?;
-    assert_eq!(forced_end_at - forced_start_at, ChronoDuration::days(14));
-    assert_eq!(next_renewal_at, *renewal_command.period_start_at());
-    assert_eq!(next_payment_attempt_at, Some(next_renewal_at));
-
-    let renewal = reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
-    let due_at = renewal_command.period_start_at();
-    assert_eq!(renewal.period().start_at(), due_at);
+    assert_eq!(renewal.period().start_at(), &due_at);
     assert_eq!(
         *renewal.period().end_at() - renewal.period().start_at(),
         ChronoDuration::days(14)
@@ -366,7 +344,7 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         )?
     );
     assert!(matches!(
-        &events.lock().await[0].event,
+        &events.lock().await[0],
         BillingEvent::SubscriptionStarted {
             charge,
             phase: SubscriptionPhase::Recurring,
@@ -391,8 +369,11 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer.clone()),
     );
-    let declined_reservation =
-        SubscriptionEnrollmentReservation::from_command(&declined_command, &gateway)?;
+    let declined_reservation = SubscriptionEnrollmentReservation::from_command(
+        &declined_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(
@@ -447,8 +428,11 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer.clone()),
     );
-    let reconciled_reservation =
-        SubscriptionEnrollmentReservation::from_command(&reconciled_command, &gateway)?;
+    let reconciled_reservation = SubscriptionEnrollmentReservation::from_command(
+        &reconciled_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(
@@ -487,7 +471,8 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         SubscriptionEnrollmentAdmissionOutcome::Admitted(_)
     ));
     let reconciled_outcome =
-        approved_outcome_with_reference("trial_reconciled_approved", "vault_trial_reconciled");
+        approved_outcome_with_reference("trial_reconciled_approved", "vault_trial_reconciled")
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let reconciled = apply_reconciled_subscription_enrollment_gateway_outcome(
         &database.pool,
         &coordinator,
@@ -496,6 +481,10 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         &reconciled_outcome,
     )
     .await?;
+    assert_eq!(
+        reconciled.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     assert_eq!(
         reconciled
             .subscription()
@@ -536,8 +525,11 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(trial_offer),
     );
-    let mismatch_reservation =
-        SubscriptionEnrollmentReservation::from_command(&mismatch_command, &gateway)?;
+    let mismatch_reservation = SubscriptionEnrollmentReservation::from_command(
+        &mismatch_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     let mismatch = reserve_subscription_enrollment_in_transaction(
         &mut transaction,
@@ -647,7 +639,7 @@ async fn indefinite_discounted_paid_trial_starts_with_zero_recurring_periods_app
     .await?;
     assert_eq!(discount_state, (0, None, "active".to_owned()));
     assert!(matches!(
-        &events.lock().await[0].event,
+        &events.lock().await[0],
         BillingEvent::SubscriptionStarted { charge, .. } if charge.cents() == 100
     ));
 

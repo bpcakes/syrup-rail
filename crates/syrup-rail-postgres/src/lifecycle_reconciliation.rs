@@ -13,6 +13,7 @@ use uuid::Uuid;
 const ROW_LOCK_TIMEOUT: &str = "250ms";
 const OPERATION_TIMEOUT: &str = "5s";
 const PENDING_RETENTION_SECONDS: i64 = 7 * 24 * 60 * 60;
+const PENDING_MAX_CHECKS: i32 = 24;
 const PENDING_CLEANUP_BATCH_SIZE: i64 = 500;
 const STAGED_APPLICATION_BATCH_SIZE: i64 = 100;
 const INVALID_STORED_STATE: &str = "canonical gateway lifecycle state is invalid";
@@ -37,19 +38,31 @@ pub enum GatewayLifecycleApplyOutcome {
     AlreadySuperseded,
     InvalidRefundEconomics,
     ConflictingLifecycleEvidence,
+    HostTargetTransitionSkipped,
     StagedAmbiguous,
     StagedNoMatch,
 }
 
 impl GatewayLifecycleApplyOutcome {
-    /// Returns one when this outcome applied evidence to a canonical attempt.
     pub const fn applied_count(self) -> u64 {
         if matches!(self, Self::Applied) { 1 } else { 0 }
     }
 
-    /// Returns one when this outcome left evidence staged for a later match.
+    /// Counts outcomes whose classification indicates staged evidence.
+    ///
+    /// This does not distinguish a first insertion from a retry of evidence
+    /// that was already staged. [`GatewayLifecycleReconciliationSummary::staged`]
+    /// reports only newly staged evidence.
     pub const fn staged_count(self) -> u64 {
         if matches!(self, Self::StagedAmbiguous | Self::StagedNoMatch) {
+            1
+        } else {
+            0
+        }
+    }
+
+    pub const fn skipped_count(self) -> u64 {
+        if matches!(self, Self::HostTargetTransitionSkipped) {
             1
         } else {
             0
@@ -58,74 +71,45 @@ impl GatewayLifecycleApplyOutcome {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GatewayLifecycleSummaryOutcome {
-    Evidence(GatewayLifecycleApplyOutcome),
-    ExplicitQuarantine,
+struct EvidenceApplication {
+    outcome: GatewayLifecycleApplyOutcome,
+    newly_staged: bool,
 }
 
-impl From<GatewayLifecycleApplyOutcome> for GatewayLifecycleSummaryOutcome {
-    fn from(outcome: GatewayLifecycleApplyOutcome) -> Self {
-        Self::Evidence(outcome)
-    }
-}
-
-/// Per-call accounting for lifecycle report reconciliation.
-///
-/// Evidence increments exactly one of `applied`, `staged`, or `quarantined`,
-/// except superseded evidence, which increments none. Explicit quarantine
-/// reports increment `quarantined`. During staged draining, `cleaned` counts
-/// expired pending rows removed independently of evidence outcomes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GatewayLifecycleReconciliationSummary {
     applied: u64,
     staged: u64,
     quarantined: u64,
     cleaned: u64,
+    skipped: u64,
 }
 
 impl GatewayLifecycleReconciliationSummary {
-    /// Evidence outcomes applied to canonical payment attempts.
     pub const fn applied(self) -> u64 {
         self.applied
     }
 
-    /// Evidence outcomes left pending because no unique candidate remained.
     pub const fn staged(self) -> u64 {
         self.staged
     }
 
-    /// Explicit reports and evidence outcomes that wrote or reopened quarantine.
     pub const fn quarantined(self) -> u64 {
         self.quarantined
     }
 
-    /// Expired pending evidence rows removed during a staged-drain call.
     pub const fn cleaned(self) -> u64 {
         self.cleaned
     }
 
-    fn record_outcome(&mut self, outcome: GatewayLifecycleSummaryOutcome) {
-        match outcome {
-            GatewayLifecycleSummaryOutcome::Evidence(GatewayLifecycleApplyOutcome::Applied) => {
-                self.applied += 1;
-            }
-            GatewayLifecycleSummaryOutcome::Evidence(
-                GatewayLifecycleApplyOutcome::StagedAmbiguous
-                | GatewayLifecycleApplyOutcome::StagedNoMatch,
-            ) => {
-                self.staged += 1;
-            }
-            GatewayLifecycleSummaryOutcome::Evidence(
-                GatewayLifecycleApplyOutcome::InvalidRefundEconomics
-                | GatewayLifecycleApplyOutcome::ConflictingLifecycleEvidence,
-            )
-            | GatewayLifecycleSummaryOutcome::ExplicitQuarantine => {
-                self.quarantined += 1;
-            }
-            GatewayLifecycleSummaryOutcome::Evidence(
-                GatewayLifecycleApplyOutcome::AlreadySuperseded,
-            ) => {}
-        }
+    pub const fn skipped(self) -> u64 {
+        self.skipped
+    }
+
+    fn record_application(&mut self, application: EvidenceApplication) {
+        self.applied += application.outcome.applied_count();
+        self.staged += u64::from(application.newly_staged);
+        self.skipped += application.outcome.skipped_count();
     }
 }
 
@@ -299,10 +283,10 @@ pub async fn reconcile_gateway_transaction_reports(
             GatewayTransactionReport::Ignore => {}
             GatewayTransactionReport::Quarantine(quarantine) => {
                 record_quarantine(pool, account, &quarantine).await?;
-                summary.record_outcome(GatewayLifecycleSummaryOutcome::ExplicitQuarantine);
+                summary.quarantined += 1;
             }
             GatewayTransactionReport::Evidence(evidence) => {
-                let outcome = apply_or_stage_evidence(
+                let application = apply_or_stage_evidence(
                     pool,
                     host_charge_targets,
                     account,
@@ -310,27 +294,33 @@ pub async fn reconcile_gateway_transaction_reports(
                     None,
                 )
                 .await?;
-                summary.record_outcome(outcome.into());
+                summary.record_application(application);
             }
         }
     }
     Ok(summary)
 }
 
+/// Applies one lifecycle observation.
+///
+/// If the matched host target refuses a full reversal, the canonical attempt
+/// update is rolled back and this first-seen evidence is durably staged before
+/// `HostTargetTransitionSkipped` is returned.
 pub async fn apply_gateway_lifecycle_evidence(
     pool: &PgPool,
     host_charge_targets: &dyn HostChargeTargetStore,
     account: &GatewayLifecycleAccount,
     evidence: &GatewayLifecycleEvidence,
 ) -> Result<GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError> {
-    apply_or_stage_evidence(
+    Ok(apply_or_stage_evidence(
         pool,
         host_charge_targets,
         account,
         StoredEvidence::from(evidence),
         None,
     )
-    .await
+    .await?
+    .outcome)
 }
 
 pub async fn stage_gateway_lifecycle_evidence(
@@ -364,24 +354,11 @@ pub async fn apply_staged_gateway_lifecycle_evidence(
 ) -> Result<GatewayLifecycleReconciliationSummary, GatewayLifecycleReconciliationError> {
     let mut summary = GatewayLifecycleReconciliationSummary::default();
     summary.cleaned += cleanup_pending(pool, account).await?;
-    // Preserve the established two bounded cleanup passes and their public
-    // cleaned count while expiry becomes the only pending-evidence clock.
+    record_unactionable_checks(pool, account).await?;
     summary.cleaned += cleanup_pending(pool, account).await?;
 
-    let pending = actionable_pending(pool, account).await?;
-    apply_actionable_pending(pool, host_charge_targets, account, pending, &mut summary).await?;
-    Ok(summary)
-}
-
-async fn apply_actionable_pending(
-    pool: &PgPool,
-    host_charge_targets: &dyn HostChargeTargetStore,
-    account: &GatewayLifecycleAccount,
-    pending: Vec<(Uuid, StoredEvidence)>,
-    summary: &mut GatewayLifecycleReconciliationSummary,
-) -> Result<(), GatewayLifecycleReconciliationError> {
-    for (pending_id, evidence) in pending {
-        let outcome = apply_or_stage_evidence(
+    for (pending_id, evidence) in actionable_pending(pool, account).await? {
+        let application = apply_or_stage_evidence(
             pool,
             host_charge_targets,
             account,
@@ -389,9 +366,9 @@ async fn apply_actionable_pending(
             Some(pending_id),
         )
         .await?;
-        summary.record_outcome(outcome.into());
+        summary.record_application(application);
     }
-    Ok(())
+    Ok(summary)
 }
 
 async fn apply_or_stage_evidence(
@@ -400,7 +377,7 @@ async fn apply_or_stage_evidence(
     account: &GatewayLifecycleAccount,
     evidence: StoredEvidence,
     pending_id: Option<Uuid>,
-) -> Result<GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError> {
+) -> Result<EvidenceApplication, GatewayLifecycleReconciliationError> {
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
@@ -411,14 +388,19 @@ async fn apply_or_stage_evidence(
         .position(|candidate| candidate.matched_transaction_id)
         .or_else(|| (candidate_count == 1 && candidates[0].matched_order_id).then_some(0));
     let Some(selected_index) = selected_index else {
-        if pending_id.is_none() {
-            stage_evidence(&mut transaction, account, &evidence).await?;
-        }
-        transaction.commit().await?;
-        return Ok(if candidate_count == 0 {
-            GatewayLifecycleApplyOutcome::StagedNoMatch
+        let newly_staged = if pending_id.is_none() {
+            stage_evidence(&mut transaction, account, &evidence).await?
         } else {
-            GatewayLifecycleApplyOutcome::StagedAmbiguous
+            false
+        };
+        transaction.commit().await?;
+        return Ok(EvidenceApplication {
+            outcome: if candidate_count == 0 {
+                GatewayLifecycleApplyOutcome::StagedNoMatch
+            } else {
+                GatewayLifecycleApplyOutcome::StagedAmbiguous
+            },
+            newly_staged,
         });
     };
     let candidate = candidates.swap_remove(selected_index);
@@ -468,7 +450,7 @@ async fn apply_or_stage_evidence(
                     INVALID_STORED_STATE,
                 ));
             }
-            if let Some(kind) = evidence.state.full_reversal_kind()
+            let target_transition_applied = if let Some(kind) = evidence.state.full_reversal_kind()
                 && candidate.kind == PaymentAttemptKind::HostCharge
             {
                 let target_id = candidate.host_charge_target_id.ok_or(
@@ -477,7 +459,7 @@ async fn apply_or_stage_evidence(
                 let reversed_at =
                     latest_time(candidate.current_lifecycle_at, evidence.effective_at)
                         .unwrap_or(reconciled_at);
-                host_charge_targets
+                let target_outcome = host_charge_targets
                     .apply_transition(
                         &mut transaction,
                         HostChargeTargetTransition::new(
@@ -490,8 +472,26 @@ async fn apply_or_stage_evidence(
                         ),
                     )
                     .await?;
+                if !target_outcome.is_applied() {
+                    tracing::warn!(
+                        target: "syrup_rail::gateway_lifecycle_reconciliation",
+                        billing_scope_id = %candidate.billing_scope_id.as_uuid(),
+                        subscriber_id = %candidate.subscriber_id.as_uuid(),
+                        attempt_id = %candidate.id,
+                        target_id = %target_id.as_uuid(),
+                        ?target_outcome,
+                        "host target refused a full-reversal transition; leaving lifecycle evidence unapplied"
+                    );
+                }
+                target_outcome.is_applied()
+            } else {
+                true
+            };
+            if target_transition_applied {
+                GatewayLifecycleApplyOutcome::Applied
+            } else {
+                GatewayLifecycleApplyOutcome::HostTargetTransitionSkipped
             }
-            GatewayLifecycleApplyOutcome::Applied
         }
         LifecycleTransition::AlreadySuperseded => GatewayLifecycleApplyOutcome::AlreadySuperseded,
         LifecycleTransition::InvalidRefundEconomics => {
@@ -517,6 +517,26 @@ async fn apply_or_stage_evidence(
             )
             .await?;
         }
+        GatewayLifecycleApplyOutcome::HostTargetTransitionSkipped => {
+            transaction.rollback().await?;
+            // A provider page may advance its cursor after this batch succeeds.
+            // Preserve first-seen evidence before allowing later reports to
+            // continue; an already-pending row was restored by the rollback.
+            let newly_staged = if pending_id.is_none() {
+                let mut staging = pool.begin().await?;
+                set_timeouts(&mut staging).await?;
+                ensure_account(&mut staging, account).await?;
+                let newly_staged = stage_evidence(&mut staging, account, &evidence).await?;
+                staging.commit().await?;
+                newly_staged
+            } else {
+                false
+            };
+            return Ok(EvidenceApplication {
+                outcome,
+                newly_staged,
+            });
+        }
         GatewayLifecycleApplyOutcome::StagedAmbiguous
         | GatewayLifecycleApplyOutcome::StagedNoMatch => unreachable!("handled before selection"),
     }
@@ -531,7 +551,10 @@ async fn apply_or_stage_evidence(
         delete_pending(&mut transaction, account, pending_id).await?;
     }
     transaction.commit().await?;
-    Ok(outcome)
+    Ok(EvidenceApplication {
+        outcome,
+        newly_staged: false,
+    })
 }
 
 async fn attempt_candidates(
@@ -803,8 +826,12 @@ async fn stage_evidence(
     transaction: &mut Transaction<'_, Postgres>,
     account: &GatewayLifecycleAccount,
     evidence: &StoredEvidence,
-) -> Result<(), GatewayLifecycleReconciliationError> {
-    sqlx::query(
+) -> Result<bool, GatewayLifecycleReconciliationError> {
+    // A successful insert retains this candidate identity; the conflict update
+    // retains the existing row's identity. This keeps classification exact in
+    // one concurrency-safe statement without inspecting MVCC system columns.
+    let candidate_id = Uuid::now_v7();
+    let inserted = sqlx::query_scalar::<_, bool>(
         r#"
         INSERT INTO billing_gateway_lifecycle_pending_updates (
             billing_scope_id,
@@ -816,10 +843,11 @@ async fn stage_evidence(
             gateway_lifecycle_action,
             gateway_lifecycle_at,
             refunded_amount_cents,
-            expires_at
+            expires_at,
+            id
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-            now() + ($10::bigint * interval '1 second'))
+            now() + ($10::bigint * interval '1 second'), $11)
         ON CONFLICT (
             gateway_account_id,
             COALESCE(gateway_transaction_id, ''),
@@ -830,6 +858,7 @@ async fn stage_evidence(
             COALESCE(gateway_lifecycle_at, '-infinity'),
             COALESCE(refunded_amount_cents, -1)
         ) DO UPDATE SET updated_at = now()
+        RETURNING id = $11
         "#,
     )
     .bind(account.billing_scope_id().as_uuid())
@@ -842,9 +871,10 @@ async fn stage_evidence(
     .bind(evidence.effective_at)
     .bind(lifecycle_refunded_amount(&evidence.state))
     .bind(PENDING_RETENTION_SECONDS)
-    .execute(&mut **transaction)
+    .bind(candidate_id)
+    .fetch_one(&mut **transaction)
     .await?;
-    Ok(())
+    Ok(inserted)
 }
 
 async fn record_quarantine(
@@ -977,32 +1007,101 @@ async fn cleanup_pending(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    let result = sqlx::query(cleanup_pending_sql())
-        .bind(account.billing_scope_id().as_uuid())
-        .bind(account.gateway_account_id().as_uuid())
-        .bind(PENDING_CLEANUP_BATCH_SIZE)
-        .execute(&mut *transaction)
-        .await?;
+    let result = sqlx::query(
+        r#"
+        WITH stale AS MATERIALIZED (
+            SELECT pending.id
+            FROM billing_gateway_lifecycle_pending_updates pending
+            WHERE pending.billing_scope_id = $1
+                AND pending.gateway_account_id = $2
+                AND pending.expires_at <= now()
+            ORDER BY pending.expires_at, pending.first_seen_at, pending.id
+            LIMIT $3
+            FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM billing_gateway_lifecycle_pending_updates pending
+        USING stale
+        WHERE pending.id = stale.id
+        "#,
+    )
+    .bind(account.billing_scope_id().as_uuid())
+    .bind(account.gateway_account_id().as_uuid())
+    .bind(PENDING_CLEANUP_BATCH_SIZE)
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(result.rows_affected())
 }
 
-fn cleanup_pending_sql() -> &'static str {
-    r#"
-    WITH stale AS MATERIALIZED (
-        SELECT pending.id
-        FROM billing_gateway_lifecycle_pending_updates pending
-        WHERE pending.billing_scope_id = $1
-            AND pending.gateway_account_id = $2
-            AND pending.expires_at <= now()
-        ORDER BY pending.expires_at, pending.first_seen_at, pending.id
-        LIMIT $3
-        FOR UPDATE SKIP LOCKED
+async fn record_unactionable_checks(
+    pool: &PgPool,
+    account: &GatewayLifecycleAccount,
+) -> Result<(), GatewayLifecycleReconciliationError> {
+    let mut transaction = pool.begin().await?;
+    set_timeouts(&mut transaction).await?;
+    ensure_account(&mut transaction, account).await?;
+    sqlx::query(
+        r#"
+        WITH unactionable AS MATERIALIZED (
+            SELECT pending.id
+            FROM billing_gateway_lifecycle_pending_updates pending
+            CROSS JOIN LATERAL (
+                SELECT COUNT(*)::bigint AS candidate_count,
+                    COALESCE(BOOL_OR(
+                        pending.gateway_transaction_id IS NOT NULL
+                        AND public.billing_canonical_gateway_transaction_id(
+                            attempts.gateway_transaction_id
+                        ) = pending.gateway_transaction_id
+                    ), false) AS has_transaction_match
+                FROM billing_payment_attempts attempts
+                WHERE attempts.billing_scope_id = $1
+                    AND attempts.gateway_account_id = $2
+                    AND attempts.status = 'approved'
+                    AND (
+                        (
+                            pending.gateway_transaction_id IS NOT NULL
+                            AND public.billing_canonical_gateway_transaction_id(
+                                attempts.gateway_transaction_id
+                            ) = pending.gateway_transaction_id
+                        )
+                        OR (
+                            pending.gateway_order_id IS NOT NULL
+                            AND (
+                                pending.gateway_transaction_id IS NULL
+                                OR public.billing_canonical_gateway_transaction_id(
+                                    attempts.gateway_transaction_id
+                                ) IS NULL
+                            )
+                            AND attempts.gateway_order_id = pending.gateway_order_id
+                        )
+                    )
+            ) matches
+            WHERE pending.billing_scope_id = $1
+                AND pending.gateway_account_id = $2
+                AND pending.expires_at > now()
+                AND pending.check_count < $3
+                AND NOT (matches.has_transaction_match OR matches.candidate_count = 1)
+            ORDER BY pending.last_checked_at NULLS FIRST,
+                pending.first_seen_at,
+                pending.id
+            LIMIT $4
+            FOR UPDATE OF pending SKIP LOCKED
+        )
+        UPDATE billing_gateway_lifecycle_pending_updates pending
+        SET last_checked_at = now(),
+            check_count = pending.check_count + 1
+        FROM unactionable
+        WHERE pending.id = unactionable.id
+        "#,
     )
-    DELETE FROM billing_gateway_lifecycle_pending_updates pending
-    USING stale
-    WHERE pending.id = stale.id
-    "#
+    .bind(account.billing_scope_id().as_uuid())
+    .bind(account.gateway_account_id().as_uuid())
+    .bind(PENDING_MAX_CHECKS)
+    .bind(PENDING_CLEANUP_BATCH_SIZE)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(())
 }
 
 async fn actionable_pending(
@@ -1012,12 +1111,62 @@ async fn actionable_pending(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    let rows = sqlx::query(actionable_pending_sql())
-        .bind(account.billing_scope_id().as_uuid())
-        .bind(account.gateway_account_id().as_uuid())
-        .bind(STAGED_APPLICATION_BATCH_SIZE)
-        .fetch_all(&mut *transaction)
-        .await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT pending.id,
+            pending.gateway_transaction_id,
+            pending.gateway_order_id,
+            pending.gateway_condition,
+            pending.gateway_lifecycle_status,
+            pending.gateway_lifecycle_action,
+            pending.gateway_lifecycle_at,
+            pending.refunded_amount_cents
+        FROM billing_gateway_lifecycle_pending_updates pending
+        CROSS JOIN LATERAL (
+            SELECT COUNT(*)::bigint AS candidate_count,
+                COALESCE(BOOL_OR(
+                    pending.gateway_transaction_id IS NOT NULL
+                    AND public.billing_canonical_gateway_transaction_id(
+                        attempts.gateway_transaction_id
+                    ) = pending.gateway_transaction_id
+                ), false) AS has_transaction_match
+            FROM billing_payment_attempts attempts
+            WHERE attempts.billing_scope_id = $1
+                AND attempts.gateway_account_id = $2
+                AND attempts.status = 'approved'
+                AND (
+                    (
+                        pending.gateway_transaction_id IS NOT NULL
+                        AND public.billing_canonical_gateway_transaction_id(
+                            attempts.gateway_transaction_id
+                        ) = pending.gateway_transaction_id
+                    )
+                    OR (
+                        pending.gateway_order_id IS NOT NULL
+                        AND (
+                            pending.gateway_transaction_id IS NULL
+                            OR public.billing_canonical_gateway_transaction_id(
+                                attempts.gateway_transaction_id
+                            ) IS NULL
+                        )
+                        AND attempts.gateway_order_id = pending.gateway_order_id
+                    )
+                )
+        ) matches
+        WHERE pending.billing_scope_id = $1
+            AND pending.gateway_account_id = $2
+            AND pending.expires_at > now()
+            AND (matches.has_transaction_match OR matches.candidate_count = 1)
+        ORDER BY pending.first_seen_at, pending.id
+        LIMIT $3
+        FOR UPDATE OF pending SKIP LOCKED
+        "#,
+    )
+    .bind(account.billing_scope_id().as_uuid())
+    .bind(account.gateway_account_id().as_uuid())
+    .bind(STAGED_APPLICATION_BATCH_SIZE)
+    .fetch_all(&mut *transaction)
+    .await?;
     let pending = rows
         .into_iter()
         .map(|row| {
@@ -1038,58 +1187,6 @@ async fn actionable_pending(
         .collect::<Result<Vec<_>, GatewayLifecycleReconciliationError>>()?;
     transaction.commit().await?;
     Ok(pending)
-}
-
-fn actionable_pending_sql() -> &'static str {
-    r#"
-    SELECT pending.id,
-        pending.gateway_transaction_id,
-        pending.gateway_order_id,
-        pending.gateway_condition,
-        pending.gateway_lifecycle_status,
-        pending.gateway_lifecycle_action,
-        pending.gateway_lifecycle_at,
-        pending.refunded_amount_cents
-    FROM billing_gateway_lifecycle_pending_updates pending
-    CROSS JOIN LATERAL (
-        SELECT COUNT(*)::bigint AS candidate_count,
-            COALESCE(BOOL_OR(
-                pending.gateway_transaction_id IS NOT NULL
-                AND public.billing_canonical_gateway_transaction_id(
-                    attempts.gateway_transaction_id
-                ) = pending.gateway_transaction_id
-            ), false) AS has_transaction_match
-        FROM billing_payment_attempts attempts
-        WHERE attempts.billing_scope_id = $1
-            AND attempts.gateway_account_id = $2
-            AND attempts.status = 'approved'
-            AND (
-                (
-                    pending.gateway_transaction_id IS NOT NULL
-                    AND public.billing_canonical_gateway_transaction_id(
-                        attempts.gateway_transaction_id
-                    ) = pending.gateway_transaction_id
-                )
-                OR (
-                    pending.gateway_order_id IS NOT NULL
-                    AND (
-                        pending.gateway_transaction_id IS NULL
-                        OR public.billing_canonical_gateway_transaction_id(
-                            attempts.gateway_transaction_id
-                        ) IS NULL
-                    )
-                    AND attempts.gateway_order_id = pending.gateway_order_id
-                )
-            )
-    ) matches
-    WHERE pending.billing_scope_id = $1
-        AND pending.gateway_account_id = $2
-        AND pending.expires_at > now()
-        AND (matches.has_transaction_match OR matches.candidate_count = 1)
-    ORDER BY pending.first_seen_at, pending.id
-    LIMIT $3
-    FOR UPDATE OF pending SKIP LOCKED
-    "#
 }
 
 pub(crate) async fn ensure_account(
@@ -1145,14 +1242,11 @@ fn latest_time(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Opt
 mod tests {
     use std::{
         error::Error,
-        io,
         sync::atomic::{AtomicU64, Ordering},
     };
 
     use super::*;
-    use crate::test_support::{
-        TestDatabase, create_gateway_account, explain_plan_root, plan_has_node_type,
-    };
+    use crate::test_support::{TestDatabase, create_gateway_account};
     use async_trait::async_trait;
     use sqlx::PgConnection;
     use syrup_rail::{
@@ -1187,7 +1281,7 @@ mod tests {
             })
         }
 
-        async fn admit_submission(
+        async fn ensure_submission_admitted(
             &self,
             _connection: &mut PgConnection,
             _admission: &crate::HostChargeSubmissionAdmission,
@@ -1287,6 +1381,7 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id,
                 billing_scope_id,
                 subscriber_id,
@@ -1303,6 +1398,7 @@ mod tests {
                 submitted_at,
                 resolved_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'approved', $5, $6, $7,
                 $8, $9, $10, $11, $12, $12
             )
@@ -1323,378 +1419,6 @@ mod tests {
         .execute(pool)
         .await?;
         Ok(attempt_id)
-    }
-
-    #[test]
-    fn summary_reducer_counts_every_outcome_once() {
-        for (outcome, expected) in [
-            (
-                GatewayLifecycleSummaryOutcome::Evidence(GatewayLifecycleApplyOutcome::Applied),
-                (1, 0, 0),
-            ),
-            (
-                GatewayLifecycleSummaryOutcome::Evidence(
-                    GatewayLifecycleApplyOutcome::AlreadySuperseded,
-                ),
-                (0, 0, 0),
-            ),
-            (
-                GatewayLifecycleSummaryOutcome::Evidence(
-                    GatewayLifecycleApplyOutcome::InvalidRefundEconomics,
-                ),
-                (0, 0, 1),
-            ),
-            (
-                GatewayLifecycleSummaryOutcome::Evidence(
-                    GatewayLifecycleApplyOutcome::ConflictingLifecycleEvidence,
-                ),
-                (0, 0, 1),
-            ),
-            (
-                GatewayLifecycleSummaryOutcome::Evidence(
-                    GatewayLifecycleApplyOutcome::StagedAmbiguous,
-                ),
-                (0, 1, 0),
-            ),
-            (
-                GatewayLifecycleSummaryOutcome::Evidence(
-                    GatewayLifecycleApplyOutcome::StagedNoMatch,
-                ),
-                (0, 1, 0),
-            ),
-            (
-                GatewayLifecycleSummaryOutcome::ExplicitQuarantine,
-                (0, 0, 1),
-            ),
-        ] {
-            let mut summary = GatewayLifecycleReconciliationSummary::default();
-            summary.record_outcome(outcome);
-            assert_eq!(
-                (summary.applied(), summary.staged(), summary.quarantined()),
-                expected,
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn summary_accounts_for_incoming_and_staged_quarantine_and_superseded_evidence()
-    -> Result<(), Box<dyn Error>> {
-        let database = TestDatabase::start("life_summary").await?;
-        let fixture = create_gateway_account(&database.pool, "nmi").await?;
-        let account = lifecycle_account(fixture, "nmi");
-        let host_targets = ExactHostTargets::default();
-        let observed_at = Utc::now() - chrono::Duration::minutes(1);
-
-        insert_host_attempt(
-            &database.pool,
-            fixture,
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            "txn-invalid-economics",
-            1_000,
-            observed_at,
-        )
-        .await?;
-        let conflicting_attempt_id = insert_host_attempt(
-            &database.pool,
-            fixture,
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            "txn-conflicting-evidence",
-            1_000,
-            observed_at,
-        )
-        .await?;
-        sqlx::query(
-            r#"
-            UPDATE billing_payment_attempts
-            SET gateway_lifecycle_status = 'settled',
-                gateway_lifecycle_at = $2,
-                refunded_amount_cents = 100
-            WHERE id = $1
-            "#,
-        )
-        .bind(conflicting_attempt_id)
-        .bind(observed_at)
-        .execute(&database.pool)
-        .await?;
-
-        let incoming = reconcile_gateway_transaction_reports(
-            &database.pool,
-            &host_targets,
-            &account,
-            vec![
-                evidence(
-                    "txn-invalid-economics",
-                    GatewayLifecycleState::Refunded {
-                        cumulative_refunded_cents: CumulativeRefundCents::new(500)?,
-                    },
-                    observed_at,
-                )?,
-                evidence(
-                    "txn-conflicting-evidence",
-                    GatewayLifecycleState::Voided,
-                    observed_at + chrono::Duration::seconds(1),
-                )?,
-                GatewayTransactionReport::Quarantine(GatewayLifecycleQuarantine::new(
-                    Some(GatewayTransactionId::new("txn-explicit-quarantine")?),
-                    None,
-                    GatewayLifecycleQuarantineReason::MalformedReportStructure,
-                )?),
-                GatewayTransactionReport::Ignore,
-            ],
-        )
-        .await?;
-        assert_eq!(incoming.applied(), 0);
-        assert_eq!(incoming.staged(), 0);
-        assert_eq!(incoming.quarantined(), 3);
-        assert_eq!(incoming.cleaned(), 0);
-
-        insert_host_attempt(
-            &database.pool,
-            fixture,
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            "txn-superseded",
-            1_000,
-            observed_at,
-        )
-        .await?;
-        let superseded_report = evidence(
-            "txn-superseded",
-            GatewayLifecycleState::PendingSettlement,
-            observed_at,
-        )?;
-        let applied = reconcile_gateway_transaction_reports(
-            &database.pool,
-            &host_targets,
-            &account,
-            vec![superseded_report.clone()],
-        )
-        .await?;
-        assert_eq!(applied.applied(), 1);
-        let superseded = reconcile_gateway_transaction_reports(
-            &database.pool,
-            &host_targets,
-            &account,
-            vec![superseded_report],
-        )
-        .await?;
-        assert_eq!(superseded, GatewayLifecycleReconciliationSummary::default());
-
-        let staged = reconcile_gateway_transaction_reports(
-            &database.pool,
-            &host_targets,
-            &account,
-            vec![evidence(
-                "txn-staged-invalid",
-                GatewayLifecycleState::Refunded {
-                    cumulative_refunded_cents: CumulativeRefundCents::new(500)?,
-                },
-                observed_at,
-            )?],
-        )
-        .await?;
-        assert_eq!(staged.staged(), 1);
-        insert_host_attempt(
-            &database.pool,
-            fixture,
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            "txn-staged-invalid",
-            1_000,
-            observed_at,
-        )
-        .await?;
-        let drained =
-            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
-                .await?;
-        assert_eq!(drained.applied(), 0);
-        assert_eq!(drained.staged(), 0);
-        assert_eq!(drained.quarantined(), 1);
-        assert_eq!(drained.cleaned(), 0);
-        let pending_invalid: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*)
-            FROM billing_gateway_lifecycle_pending_updates
-            WHERE gateway_account_id = $1
-                AND gateway_transaction_id = 'txn-staged-invalid'
-            "#,
-        )
-        .bind(fixture.gateway_account_id)
-        .fetch_one(&database.pool)
-        .await?;
-        assert_eq!(pending_invalid, 0);
-
-        database.cleanup().await
-    }
-
-    #[tokio::test]
-    async fn staged_candidate_changed_after_selection_remains_staged_and_is_counted()
-    -> Result<(), Box<dyn Error>> {
-        let database = TestDatabase::start("life_staged_race").await?;
-        let fixture = create_gateway_account(&database.pool, "nmi").await?;
-        let account = lifecycle_account(fixture, "nmi");
-        let host_targets = ExactHostTargets::default();
-        let observed_at = Utc::now() - chrono::Duration::minutes(1);
-        let staged = reconcile_gateway_transaction_reports(
-            &database.pool,
-            &host_targets,
-            &account,
-            vec![evidence(
-                "txn-candidate-changed",
-                GatewayLifecycleState::PendingSettlement,
-                observed_at,
-            )?],
-        )
-        .await?;
-        assert_eq!(staged.staged(), 1);
-        let attempt_id = insert_host_attempt(
-            &database.pool,
-            fixture,
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            "txn-candidate-changed",
-            1_000,
-            observed_at,
-        )
-        .await?;
-
-        let selected = actionable_pending(&database.pool, &account).await?;
-        assert_eq!(selected.len(), 1);
-        sqlx::query("UPDATE billing_payment_attempts SET status = 'failed' WHERE id = $1")
-            .bind(attempt_id)
-            .execute(&database.pool)
-            .await?;
-        let mut summary = GatewayLifecycleReconciliationSummary::default();
-        apply_actionable_pending(
-            &database.pool,
-            &host_targets,
-            &account,
-            selected,
-            &mut summary,
-        )
-        .await?;
-        assert_eq!(summary.applied(), 0);
-        assert_eq!(summary.staged(), 1);
-        assert_eq!(summary.quarantined(), 0);
-        let pending_count: i64 = sqlx::query_scalar(
-            r#"
-            SELECT COUNT(*)
-            FROM billing_gateway_lifecycle_pending_updates
-            WHERE gateway_account_id = $1
-                AND gateway_transaction_id = 'txn-candidate-changed'
-            "#,
-        )
-        .bind(fixture.gateway_account_id)
-        .fetch_one(&database.pool)
-        .await?;
-        assert_eq!(pending_count, 1);
-
-        database.cleanup().await
-    }
-
-    #[tokio::test]
-    async fn expiry_cleanup_preserves_bounded_pass_counts_and_backlog_query_limits()
-    -> Result<(), Box<dyn Error>> {
-        let database = TestDatabase::start("life_pending").await?;
-        let fixture = create_gateway_account(&database.pool, "nmi").await?;
-        let account = lifecycle_account(fixture, "nmi");
-        let host_targets = ExactHostTargets::default();
-        sqlx::query(
-            r#"
-            INSERT INTO billing_gateway_lifecycle_pending_updates (
-                billing_scope_id,
-                gateway_account_id,
-                gateway_transaction_id,
-                gateway_lifecycle_status,
-                first_seen_at,
-                updated_at,
-                expires_at
-            )
-            SELECT $1,
-                $2,
-                'expired-' || value::text,
-                'unknown',
-                now() - interval '8 days',
-                now() - interval '8 days',
-                now() - interval '1 day'
-            FROM generate_series(1, 1001) value
-            "#,
-        )
-        .bind(fixture.billing_scope_id)
-        .bind(fixture.gateway_account_id)
-        .execute(&database.pool)
-        .await?;
-        sqlx::query(
-            r#"
-            INSERT INTO billing_gateway_lifecycle_pending_updates (
-                billing_scope_id,
-                gateway_account_id,
-                gateway_transaction_id,
-                gateway_lifecycle_status
-            )
-            SELECT $1, $2, 'live-' || value::text, 'unknown'
-            FROM generate_series(1, 4096) value
-            "#,
-        )
-        .bind(fixture.billing_scope_id)
-        .bind(fixture.gateway_account_id)
-        .execute(&database.pool)
-        .await?;
-        sqlx::raw_sql(
-            "ANALYZE billing_gateway_lifecycle_pending_updates; ANALYZE billing_payment_attempts;",
-        )
-        .execute(&database.pool)
-        .await?;
-
-        for (name, sql, limit) in [
-            ("cleanup", cleanup_pending_sql(), PENDING_CLEANUP_BATCH_SIZE),
-            (
-                "actionable",
-                actionable_pending_sql(),
-                STAGED_APPLICATION_BATCH_SIZE,
-            ),
-        ] {
-            let explain_sql = format!("EXPLAIN (FORMAT JSON, COSTS OFF) {sql}");
-            let plan: serde_json::Value = sqlx::query_scalar(&explain_sql)
-                .bind(fixture.billing_scope_id)
-                .bind(fixture.gateway_account_id)
-                .bind(limit)
-                .fetch_one(&database.pool)
-                .await?;
-            let root = explain_plan_root(&plan)?;
-            if !plan_has_node_type(root, "Limit") {
-                return Err(io::Error::other(format!(
-                    "representative lifecycle {name} plan lost its bounded candidate limit:\n{}",
-                    serde_json::to_string_pretty(root)?
-                ))
-                .into());
-            }
-        }
-
-        let first =
-            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
-                .await?;
-        assert_eq!(first.cleaned(), 1_000);
-        assert_eq!(first.applied(), 0);
-        let second =
-            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
-                .await?;
-        assert_eq!(second.cleaned(), 1);
-        let third =
-            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
-                .await?;
-        assert_eq!(third.cleaned(), 0);
-        let remaining: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM billing_gateway_lifecycle_pending_updates WHERE gateway_account_id = $1",
-        )
-        .bind(fixture.gateway_account_id)
-        .fetch_one(&database.pool)
-        .await?;
-        assert_eq!(remaining, 4_096);
-
-        database.cleanup().await
     }
 
     #[tokio::test]
@@ -1754,24 +1478,6 @@ mod tests {
                 "diagnostic action".to_owned()
             )
         );
-
-        for _ in 0..25 {
-            let no_match =
-                apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
-                    .await?;
-            assert_eq!(no_match, GatewayLifecycleReconciliationSummary::default());
-        }
-        let inert_check_state: (i32, Option<DateTime<Utc>>) = sqlx::query_as(
-            r#"
-            SELECT check_count, last_checked_at
-            FROM billing_gateway_lifecycle_pending_updates
-            WHERE gateway_account_id = $1
-            "#,
-        )
-        .bind(fixture.gateway_account_id)
-        .fetch_one(&database.pool)
-        .await?;
-        assert_eq!(inert_check_state, (0, None));
 
         let late_subscriber = Uuid::now_v7();
         let late_target = Uuid::now_v7();
@@ -1859,6 +1565,112 @@ mod tests {
         assert_eq!(target.0, "reversed");
         assert_eq!(target.1, "refunded");
         assert_eq!(target.2, postgres_timestamp_precision(refunded_at));
+
+        let refused_subscriber_id = Uuid::now_v7();
+        let refused_target_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO host_charge_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'pending')",
+        )
+        .bind(refused_target_id)
+        .bind(fixture.billing_scope_id)
+        .bind(refused_subscriber_id)
+        .execute(&database.pool)
+        .await?;
+        insert_host_attempt(
+            &database.pool,
+            fixture,
+            refused_subscriber_id,
+            refused_target_id,
+            "txn-refund-refused",
+            800,
+            staged_at,
+        )
+        .await?;
+        let refused_attempt_before: (Option<String>, Option<i32>) = sqlx::query_as(
+            "SELECT gateway_lifecycle_status, refunded_amount_cents FROM billing_payment_attempts WHERE gateway_transaction_id = 'txn-refund-refused'",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        let following_subscriber_id = Uuid::now_v7();
+        let following_target_id = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO host_charge_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'paid')",
+        )
+        .bind(following_target_id)
+        .bind(fixture.billing_scope_id)
+        .bind(following_subscriber_id)
+        .execute(&database.pool)
+        .await?;
+        insert_host_attempt(
+            &database.pool,
+            fixture,
+            following_subscriber_id,
+            following_target_id,
+            "txn-refund-following",
+            900,
+            staged_at,
+        )
+        .await?;
+        let refused_evidence = evidence(
+            "txn-refund-refused",
+            GatewayLifecycleState::Refunded {
+                cumulative_refunded_cents: CumulativeRefundCents::new(800)?,
+            },
+            Utc::now(),
+        )?;
+        let summary = reconcile_gateway_transaction_reports(
+            &database.pool,
+            &host_targets,
+            &account,
+            vec![
+                refused_evidence.clone(),
+                evidence(
+                    "txn-refund-following",
+                    GatewayLifecycleState::Refunded {
+                        cumulative_refunded_cents: CumulativeRefundCents::new(900)?,
+                    },
+                    Utc::now(),
+                )?,
+            ],
+        )
+        .await?;
+        assert_eq!(summary.skipped(), 1);
+        assert_eq!(summary.staged(), 1);
+        assert_eq!(summary.applied(), 1);
+        let redelivery = reconcile_gateway_transaction_reports(
+            &database.pool,
+            &host_targets,
+            &account,
+            vec![refused_evidence],
+        )
+        .await?;
+        assert_eq!(redelivery.skipped(), 1);
+        assert_eq!(redelivery.staged(), 0);
+        assert_eq!(redelivery.applied(), 0);
+        let refused_attempt_state: (Option<String>, Option<i32>) = sqlx::query_as(
+            "SELECT gateway_lifecycle_status, refunded_amount_cents FROM billing_payment_attempts WHERE gateway_transaction_id = 'txn-refund-refused'",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(refused_attempt_state, refused_attempt_before);
+        let refused_pending_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM billing_gateway_lifecycle_pending_updates WHERE gateway_account_id = $1 AND gateway_transaction_id = 'txn-refund-refused'",
+        )
+        .bind(fixture.gateway_account_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(refused_pending_count, 1);
+        let staged_retry =
+            apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
+                .await?;
+        assert_eq!(staged_retry.skipped(), 1);
+        assert_eq!(staged_retry.staged(), 0);
+        let following_target_state: String =
+            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
+                .bind(following_target_id)
+                .fetch_one(&database.pool)
+                .await?;
+        assert_eq!(following_target_state, "reversed");
 
         let cursor_key = GatewayLifecycleCursorKey::new("approved_lifecycle")?;
         let initial =

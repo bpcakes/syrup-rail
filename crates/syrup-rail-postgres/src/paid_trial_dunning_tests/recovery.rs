@@ -67,7 +67,11 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         ),
         SubscriptionEnrollmentExpectedTerms::discounted(offer, discount)?,
     );
-    let enrollment = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let enrollment = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(&mut transaction, &offers, &enrollment)
@@ -114,6 +118,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         r#"
         WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -121,7 +126,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
             recurring_period_count, dunning_retry_delays_seconds,
             dunning_exhaustion, past_due_access, next_payment_attempt_at, unpaid_at
         ) SELECT
-            $1, $2, $3, 'identity_pro', 'unpaid', $4, $5, 2900, 'USD',
+            'live', $1, $2, $3, 'identity_pro', 'unpaid', $4, $5, 2900, 'USD',
             observed_at - interval '2 months', observed_at - interval '1 month',
             observed_at - interval '1 month', $6, 'recurring',
             'calendar_months', 1, ARRAY[]::bigint[], 'mark_unpaid',
@@ -138,13 +143,29 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     .execute(&database.pool)
     .await?;
 
-    let queued_renewal = force_due_renewal(
-        &database.pool,
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+            .fetch_one(&database.pool)
+            .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2 - interval '7 days',
+            current_period_end_at = $2,
+            next_renewal_at = $2,
+            next_payment_attempt_at = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(due_at)
+    .execute(&database.pool)
+    .await?;
+    let queued_renewal = ChargeRenewal::new(
         BillingScopeId::new(account.billing_scope_id),
         subscription_id,
-    )
-    .await?;
-    let due_at = *queued_renewal.period_start_at();
+        due_at,
+    );
     let renewal = reserve_and_admit_renewal(&database.pool, &gateway, queued_renewal).await?;
     assert_eq!(renewal.request().amount().cents(), 2_320);
     apply_subscription_renewal_gateway_outcome(
@@ -209,14 +230,20 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     let recovery = reserve_and_admit_recovery(&database.pool, &gateway, &recovery_command).await?;
     assert_eq!(recovery.request().amount().cents(), 2_320);
     assert_eq!(recovery.period().start_at(), &due_at);
+    let duplicate_outcome = unknown_outcome()
+        .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let unknown = apply_subscription_recovery_gateway_outcome(
         &database.pool,
         &coordinator,
         &recovery,
-        &unknown_outcome(),
+        &duplicate_outcome,
     )
     .await?;
     assert_eq!(unknown.status(), syrup_rail::PaymentAttemptStatus::Unknown);
+    assert_eq!(
+        unknown.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let retry_after_unknown: Option<DateTime<Utc>> = sqlx::query_scalar(
         "SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
     )
@@ -238,9 +265,13 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         PlanKey::new("identity_pro")?,
     );
     let mut transaction = database.pool.begin().await?;
-    let blocked =
-        reserve_subscription_recovery_in_transaction(&mut transaction, &blocked_recovery, &gateway)
-            .await?;
+    let blocked = reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        &blocked_recovery,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         blocked,
@@ -249,14 +280,21 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         )
     );
 
+    let recovered_outcome =
+        approved_outcome_with_reference("discounted_trial_recovery", "vault_recovery")
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let recovered = apply_reconciled_subscription_recovery_gateway_outcome(
         &database.pool,
         &coordinator,
         BillingScopeId::new(account.billing_scope_id),
         recovery.identity().attempt_id(),
-        &approved_outcome_with_reference("discounted_trial_recovery", "vault_recovery"),
+        &recovered_outcome,
     )
     .await?;
+    assert_eq!(
+        recovered.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let subscription = recovered
         .subscription()
         .expect("approved recovery restores subscription");
@@ -291,9 +329,13 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     assert_eq!(original_method_status, "disabled");
 
     let mut transaction = database.pool.begin().await?;
-    let stale =
-        reserve_subscription_renewal_in_transaction(&mut transaction, queued_renewal, &gateway)
-            .await?;
+    let stale = reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        queued_renewal,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         stale,
@@ -304,15 +346,15 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     let emitted = events.lock().await.clone();
     assert_eq!(emitted.len(), 3);
     assert!(matches!(
-        &emitted[0].event,
+        emitted[0],
         BillingEvent::SubscriptionStarted { .. }
     ));
     assert!(matches!(
-        &emitted[1].event,
+        emitted[1],
         BillingEvent::SubscriptionPaymentFailed { .. }
     ));
     assert!(matches!(
-        &emitted[2].event,
+        emitted[2],
         BillingEvent::SubscriptionRenewed { .. }
     ));
 

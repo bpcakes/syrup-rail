@@ -73,6 +73,7 @@ async fn newer_unpaid_history_allows_grants_and_deletion_scrub_without_becoming_
             SELECT clock_timestamp() + interval '1 second' AS observed_at
         )
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -81,7 +82,7 @@ async fn newer_unpaid_history_allows_grants_and_deletion_scrub_without_becoming_
             dunning_retry_delays_seconds, dunning_exhaustion,
             past_due_access, next_payment_attempt_at, unpaid_at
         ) SELECT
-            $1, $2, $3, 'identity_pro', 'unpaid', $4, $5, 2900, 'USD',
+            'live', $1, $2, $3, 'identity_pro', 'unpaid', $4, $5, 2900, 'USD',
             observed_at - interval '2 months', observed_at - interval '1 month',
             observed_at - interval '1 month', $6, observed_at, observed_at,
             'recurring', 'calendar_months', 1, ARRAY[]::bigint[],

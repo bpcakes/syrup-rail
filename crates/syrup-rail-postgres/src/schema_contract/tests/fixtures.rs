@@ -299,7 +299,25 @@ pub(super) async fn insert_v1_terminal_subscription_attempt(
     resolution_code: Option<&str>,
 ) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    let has_required_gateway_account_mode = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+                AND table_name = 'billing_payment_attempts'
+                AND column_name = 'required_gateway_account_mode'
+        )
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+    let (required_mode_column, required_mode_value) = if has_required_gateway_account_mode {
+        (", required_gateway_account_mode", ", 'live'")
+    } else {
+        ("", "")
+    };
+    let query = format!(
         r#"
         INSERT INTO billing_payment_attempts (
             id, billing_scope_id, subscriber_id, plan_key,
@@ -310,34 +328,35 @@ pub(super) async fn insert_v1_terminal_subscription_attempt(
             submitted_at, resolved_at, resolution_code,
             subscription_expected_payment_method_id,
             subscription_expected_initial_transaction_id,
-            subscription_expected_status
+            subscription_expected_status{required_mode_column}
         ) VALUES (
             $1, $2, $3, 'base_subscription', $4, $5, $6, $7,
             $8, $9, 100, 'USD',
             '2026-02-01 00:00:00+00', '2026-03-01 00:00:00+00',
             $10, $11, $12, $13::timestamptz, $14::timestamptz, $15,
-            $5, $16, 'past_due'
+            $5, $16, 'past_due'{required_mode_value}
         )
-        "#,
-    )
-    .bind(attempt_id)
-    .bind(gateway.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(subscription_id)
-    .bind(payment_method_id)
-    .bind(attempt_kind)
-    .bind(status)
-    .bind(format!("schema-upgrade-{identity}"))
-    .bind(format!("schema-upgrade:{attempt_kind}:{identity}"))
-    .bind(gateway.gateway_account_id)
-    .bind(gateway.gateway_configuration_id)
-    .bind(format!("schema-upgrade-order-{identity}"))
-    .bind(submitted_at)
-    .bind(resolved_at)
-    .bind(resolution_code)
-    .bind(initial_transaction_id)
-    .execute(pool)
-    .await?;
+        "#
+    );
+    sqlx::query(&query)
+        .bind(attempt_id)
+        .bind(gateway.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(subscription_id)
+        .bind(payment_method_id)
+        .bind(attempt_kind)
+        .bind(status)
+        .bind(format!("schema-upgrade-{identity}"))
+        .bind(format!("schema-upgrade:{attempt_kind}:{identity}"))
+        .bind(gateway.gateway_account_id)
+        .bind(gateway.gateway_configuration_id)
+        .bind(format!("schema-upgrade-order-{identity}"))
+        .bind(submitted_at)
+        .bind(resolved_at)
+        .bind(resolution_code)
+        .bind(initial_transaction_id)
+        .execute(pool)
+        .await?;
     Ok(attempt_id)
 }
 

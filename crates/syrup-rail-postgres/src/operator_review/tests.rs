@@ -166,6 +166,7 @@ async fn insert_review_renewal(
         r#"
             WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
             INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
@@ -173,7 +174,7 @@ async fn insert_review_renewal(
                 recurring_period_count, dunning_retry_delays_seconds,
                 dunning_exhaustion, past_due_access, next_payment_attempt_at
             ) SELECT
-                $1, $2, $3, 'test_plan', 'active', $4, $5, 500, 'USD',
+                'live', $1, $2, $3, 'test_plan', 'active', $4, $5, 500, 'USD',
                 observed_at - interval '1 month', observed_at, observed_at,
                 $6, 'recurring', 'calendar_months', 1, ARRAY[]::bigint[],
                 'remain_past_due', 'suspend_immediately', observed_at
@@ -200,12 +201,13 @@ async fn insert_review_renewal(
                 submitted_at, review_required_at,
                 subscription_expected_payment_method_id,
                 subscription_expected_initial_transaction_id,
-                subscription_expected_status
+                subscription_expected_status,
+                required_gateway_account_mode
             ) SELECT
                 $1, $2, $3, 'test_plan', $4, $5, 'subscription_renewal',
                 'review_required', $6, $7, 500, 'USD', subscriptions.next_renewal_at,
                 subscriptions.next_renewal_at + interval '1 month', $8, $9, $10,
-                observed_at, observed_at, $5, $11, 'active'
+                observed_at, observed_at, $5, $11, 'active', 'live'
             FROM clock
             CROSS JOIN billing_subscriptions AS subscriptions
             WHERE subscriptions.id = $4

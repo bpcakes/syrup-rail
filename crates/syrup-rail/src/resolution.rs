@@ -11,11 +11,13 @@ pub enum PaymentResolutionCode {
     SubscriptionInitialPreparedAttemptExpired,
     SubscriptionRenewalRetryStateChangedBeforeCharge,
     GatewayLiveReadinessFailedBeforeSubmission,
+    GatewayTestReadinessFailedBeforeSubmission,
     GatewayMalformedBeforeSubmission,
     GatewayRequestRejectedBeforeSubmission,
     GatewayConfigurationBeforeSubmission,
     GatewayUnavailableBeforeSubmission,
     GatewayProviderRateLimitedBeforeSubmission,
+    GatewayAccountRateLimitedBeforeSubmission,
     GatewayAccountMutationCooldownBeforeSubmission,
     HostChargeApprovedStaleState,
     SubscriptionApprovedRenewalStaleState,
@@ -37,11 +39,13 @@ impl PaymentResolutionCode {
         Self::SubscriptionInitialPreparedAttemptExpired,
         Self::SubscriptionRenewalRetryStateChangedBeforeCharge,
         Self::GatewayLiveReadinessFailedBeforeSubmission,
+        Self::GatewayTestReadinessFailedBeforeSubmission,
         Self::GatewayMalformedBeforeSubmission,
         Self::GatewayRequestRejectedBeforeSubmission,
         Self::GatewayConfigurationBeforeSubmission,
         Self::GatewayUnavailableBeforeSubmission,
         Self::GatewayProviderRateLimitedBeforeSubmission,
+        Self::GatewayAccountRateLimitedBeforeSubmission,
         Self::GatewayAccountMutationCooldownBeforeSubmission,
         Self::HostChargeApprovedStaleState,
         Self::SubscriptionApprovedRenewalStaleState,
@@ -54,20 +58,31 @@ impl PaymentResolutionCode {
 
     pub const RENEWAL_INFRASTRUCTURE_RETRY_CODES: &'static [Self] = &[
         Self::GatewayLiveReadinessFailedBeforeSubmission,
+        Self::GatewayTestReadinessFailedBeforeSubmission,
         Self::GatewayMalformedBeforeSubmission,
         Self::GatewayRequestRejectedBeforeSubmission,
         Self::GatewayConfigurationBeforeSubmission,
         Self::GatewayUnavailableBeforeSubmission,
         Self::GatewayProviderRateLimitedBeforeSubmission,
+        Self::GatewayAccountRateLimitedBeforeSubmission,
         Self::GatewayAccountMutationCooldownBeforeSubmission,
     ];
 
     pub const RENEWAL_INFRASTRUCTURE_PACING_CODES: &'static [Self] = &[
         Self::GatewayLiveReadinessFailedBeforeSubmission,
+        Self::GatewayTestReadinessFailedBeforeSubmission,
         Self::GatewayMalformedBeforeSubmission,
         Self::GatewayRequestRejectedBeforeSubmission,
         Self::GatewayConfigurationBeforeSubmission,
         Self::GatewayUnavailableBeforeSubmission,
+    ];
+
+    /// Rate-limit outcomes that share the renewal fast-to-slow retry curve.
+    /// Their durable codes remain distinct because their global cooldown
+    /// scopes differ.
+    pub const RENEWAL_RATE_LIMIT_PACING_CODES: &'static [Self] = &[
+        Self::GatewayProviderRateLimitedBeforeSubmission,
+        Self::GatewayAccountRateLimitedBeforeSubmission,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -93,6 +108,9 @@ impl PaymentResolutionCode {
             Self::GatewayLiveReadinessFailedBeforeSubmission => {
                 "gateway_live_readiness_failed_before_submission"
             }
+            Self::GatewayTestReadinessFailedBeforeSubmission => {
+                "gateway_test_readiness_failed_before_submission"
+            }
             Self::GatewayMalformedBeforeSubmission => "gateway_malformed_before_submission",
             Self::GatewayRequestRejectedBeforeSubmission => {
                 "gateway_request_rejected_before_submission"
@@ -101,6 +119,9 @@ impl PaymentResolutionCode {
             Self::GatewayUnavailableBeforeSubmission => "gateway_unavailable_before_submission",
             Self::GatewayProviderRateLimitedBeforeSubmission => {
                 "gateway_provider_rate_limited_before_submission"
+            }
+            Self::GatewayAccountRateLimitedBeforeSubmission => {
+                "gateway_account_rate_limited_before_submission"
             }
             Self::GatewayAccountMutationCooldownBeforeSubmission => {
                 "gateway_account_mutation_cooldown_before_submission"
@@ -160,6 +181,9 @@ impl TryFrom<&str> for PaymentResolutionCode {
             "gateway_live_readiness_failed_before_submission" => {
                 Ok(Self::GatewayLiveReadinessFailedBeforeSubmission)
             }
+            "gateway_test_readiness_failed_before_submission" => {
+                Ok(Self::GatewayTestReadinessFailedBeforeSubmission)
+            }
             "gateway_malformed_before_submission" => Ok(Self::GatewayMalformedBeforeSubmission),
             "gateway_request_rejected_before_submission" => {
                 Ok(Self::GatewayRequestRejectedBeforeSubmission)
@@ -170,6 +194,9 @@ impl TryFrom<&str> for PaymentResolutionCode {
             "gateway_unavailable_before_submission" => Ok(Self::GatewayUnavailableBeforeSubmission),
             "gateway_provider_rate_limited_before_submission" => {
                 Ok(Self::GatewayProviderRateLimitedBeforeSubmission)
+            }
+            "gateway_account_rate_limited_before_submission" => {
+                Ok(Self::GatewayAccountRateLimitedBeforeSubmission)
             }
             "gateway_account_mutation_cooldown_before_submission" => {
                 Ok(Self::GatewayAccountMutationCooldownBeforeSubmission)
@@ -213,13 +240,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_twenty_two_canonical_values_round_trip_exhaustively() {
-        assert_eq!(PaymentResolutionCode::ALL.len(), 22);
+    fn all_twenty_four_canonical_values_round_trip_exhaustively() {
+        assert_eq!(PaymentResolutionCode::ALL.len(), 24);
         let values = PaymentResolutionCode::ALL
             .iter()
             .map(|code| code.as_str())
             .collect::<HashSet<_>>();
-        assert_eq!(values.len(), 22);
+        assert_eq!(values.len(), 24);
         for code in PaymentResolutionCode::ALL {
             assert_eq!(PaymentResolutionCode::try_from(code.as_str()), Ok(*code));
         }
@@ -237,15 +264,25 @@ mod tests {
     fn retry_policy_sets_preserve_the_characterized_membership() {
         assert_eq!(
             PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_RETRY_CODES.len(),
-            7
+            9
         );
         assert_eq!(
             PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES.len(),
-            5
+            6
+        );
+        assert_eq!(
+            PaymentResolutionCode::RENEWAL_RATE_LIMIT_PACING_CODES,
+            &[
+                PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
+                PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission,
+            ]
         );
         let pacing = PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES;
         assert!(
             !pacing.contains(&PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
+        );
+        assert!(
+            !pacing.contains(&PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission)
         );
         assert!(
             !pacing

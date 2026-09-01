@@ -169,13 +169,13 @@ impl HostChargeTargetStore for LockFirstAttemptTargets {
             .await
     }
 
-    async fn admit_submission(
+    async fn ensure_submission_admitted(
         &self,
         connection: &mut PgConnection,
         admission: &HostChargeSubmissionAdmission,
     ) -> Result<HostChargeSubmissionDecision, HostChargeTargetError> {
         ReconciliationTargets
-            .admit_submission(connection, admission)
+            .ensure_submission_admitted(connection, admission)
             .await
     }
 

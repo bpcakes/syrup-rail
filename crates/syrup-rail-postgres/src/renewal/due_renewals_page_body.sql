@@ -1,8 +1,9 @@
 -- Composition contract: this fragment closes eligible_subscriptions and uses
--- $1-$3/$5-$12. Its caller appends $13 (first page) or $15 (continuation) as
--- the LIMIT placeholder.
+-- $1-$3/$5-$12. Its caller appends the LIMIT placeholder after any mode and
+-- continuation binds.
 )
 SELECT subscriptions.billing_scope_id, subscriptions.id,
+    subscriptions.required_gateway_account_mode,
     subscriptions.next_renewal_at,
     subscriptions.next_payment_attempt_at,
     COALESCE(renewal_attempts.attempt_sequence_count, 0)::bigint
@@ -27,13 +28,13 @@ LEFT JOIN LATERAL (
         COUNT(*) FILTER (
             WHERE attempts.attempt_kind = 'subscription_renewal'
                 AND attempts.status = 'failed'
-                AND attempts.resolution_code = $3
-        ) AS provider_rate_limited_attempt_count,
+                AND attempts.resolution_code = ANY($3::text[])
+        ) AS rate_limited_attempt_count,
         MAX(attempts.resolved_at) FILTER (
             WHERE attempts.attempt_kind = 'subscription_renewal'
                 AND attempts.status = 'failed'
-                AND attempts.resolution_code = $3
-        ) AS last_provider_rate_limited_at,
+                AND attempts.resolution_code = ANY($3::text[])
+        ) AS last_rate_limited_at,
         COUNT(*) AS attempt_sequence_count,
         BOOL_OR(
             attempts.status IN ('pending', 'unknown', 'review_required', 'approved')
@@ -58,11 +59,11 @@ WHERE COALESCE(renewal_attempts.has_blocking_attempt, false) = false
             <= $10::timestamptz - ($6::bigint * interval '1 second')
     )
     AND (
-        renewal_attempts.last_provider_rate_limited_at IS NULL
-        OR renewal_attempts.last_provider_rate_limited_at <= $10::timestamptz
+        renewal_attempts.last_rate_limited_at IS NULL
+        OR renewal_attempts.last_rate_limited_at <= $10::timestamptz
             - (
                 CASE WHEN COALESCE(
-                    renewal_attempts.provider_rate_limited_attempt_count,
+                    renewal_attempts.rate_limited_attempt_count,
                     0
                 ) >= $7 THEN $8::bigint ELSE $9::bigint END
                 * interval '1 second'

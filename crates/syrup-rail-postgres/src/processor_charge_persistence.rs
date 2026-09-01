@@ -1,46 +1,30 @@
 use sqlx::{PgConnection, Row, postgres::PgRow};
 use syrup_rail::{
     ActorId, BillingScopeId, ChargeAmount, CurrencyCode, ExternalReversalAttestation,
-    ExternalReversalKind, ExternalReversalOutcome, ExternalReversalPriorClassification,
-    ExternalReversalReason, ExternalReversalResolution, GatewayAccountId, GatewayConfigurationId,
+    ExternalReversalKind, ExternalReversalReason, GatewayAccountId, GatewayConfigurationId,
     GatewayOrderId, GatewayTransactionId, Money, PaymentAttempt, PaymentAttemptId,
     PaymentAttemptKind, PaymentResolutionCode, ProcessorCharge, ProcessorChargeId,
     ProcessorChargeProgression, ProcessorChargeRole, ProcessorChargeStateCode,
 };
 use uuid::Uuid;
 
-use crate::attempts::processor_evidence_from_row;
-
-const INVALID_PROCESSOR_CHARGE_STATE: &str = "canonical operator review state is invalid";
-
-#[derive(Debug)]
-pub(crate) enum ProcessorChargePersistenceError {
-    Sql(sqlx::Error),
-    InvalidState(&'static str),
-}
-
-impl From<sqlx::Error> for ProcessorChargePersistenceError {
-    fn from(error: sqlx::Error) -> Self {
-        Self::Sql(error)
-    }
-}
+use crate::{
+    attempts::processor_evidence_from_row,
+    operator_review::{INVALID_OPERATOR_STATE, OperatorReviewError},
+};
 
 pub(crate) fn processor_charge_from_row(
     row: &PgRow,
-) -> Result<ProcessorCharge, ProcessorChargePersistenceError> {
+) -> Result<ProcessorCharge, OperatorReviewError> {
     let attempt_id = PaymentAttemptId::new(row.try_get("attempt_id")?);
-    let currency = CurrencyCode::new(&row.try_get::<String, _>("currency")?).map_err(|_| {
-        ProcessorChargePersistenceError::InvalidState(INVALID_PROCESSOR_CHARGE_STATE)
-    })?;
-    let amount = Money::new(row.try_get("amount_cents")?, currency).map_err(|_| {
-        ProcessorChargePersistenceError::InvalidState(INVALID_PROCESSOR_CHARGE_STATE)
-    })?;
+    let currency = CurrencyCode::new(&row.try_get::<String, _>("currency")?)
+        .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    let amount = Money::new(row.try_get("amount_cents")?, currency)
+        .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
     let order = row.try_get::<String, _>("gateway_order_id")?;
     let gateway_order_id = GatewayOrderId::from_generated_attempt(&order, attempt_id)
         .or_else(|_| GatewayOrderId::from_correlation(&order))
-        .map_err(|_| {
-            ProcessorChargePersistenceError::InvalidState(INVALID_PROCESSOR_CHARGE_STATE)
-        })?;
+        .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
     Ok(ProcessorCharge::new(
         ProcessorChargeId::new(row.try_get("id")?),
         attempt_id,
@@ -56,7 +40,7 @@ pub(crate) fn processor_charge_from_row(
             .map(parse_charge_state_code)
             .transpose()?,
         processor_evidence_from_row(row).map_err(|_| {
-            ProcessorChargePersistenceError::InvalidState("operator charge evidence is invalid")
+            OperatorReviewError::InvalidState("operator charge evidence is invalid")
         })?,
         row.try_get("observed_at")?,
     ))
@@ -65,7 +49,7 @@ pub(crate) fn processor_charge_from_row(
 pub(crate) async fn attestation_by_charge(
     connection: &mut PgConnection,
     charge_id: Uuid,
-) -> Result<Option<ExternalReversalAttestation>, ProcessorChargePersistenceError> {
+) -> Result<Option<ExternalReversalAttestation>, OperatorReviewError> {
     let row = sqlx::query(
         r#"
         SELECT processor_charge_id, attempt_id, actor_id, reversal_kind, reason,
@@ -85,77 +69,49 @@ pub(crate) async fn attestation_by_charge(
     row.as_ref().map(attestation_from_row).transpose()
 }
 
-fn attestation_from_row(
-    row: &PgRow,
-) -> Result<ExternalReversalAttestation, ProcessorChargePersistenceError> {
+fn attestation_from_row(row: &PgRow) -> Result<ExternalReversalAttestation, OperatorReviewError> {
     let attempt_id = PaymentAttemptId::new(row.try_get("attempt_id")?);
     let order = row.try_get::<String, _>("gateway_order_id")?;
     let order = GatewayOrderId::from_generated_attempt(&order, attempt_id)
         .or_else(|_| GatewayOrderId::from_correlation(&order))
         .map_err(|_| {
-            ProcessorChargePersistenceError::InvalidState(
-                "operator attestation order identity is invalid",
-            )
+            OperatorReviewError::InvalidState("operator attestation order identity is invalid")
         })?;
     let currency = CurrencyCode::new(&row.try_get::<String, _>("currency")?).map_err(|_| {
-        ProcessorChargePersistenceError::InvalidState("operator attestation currency is invalid")
-    })?;
-    let kind = parse_reversal_kind(&row.try_get::<String, _>("reversal_kind")?).map_err(|_| {
-        ProcessorChargePersistenceError::InvalidState(
-            "operator attestation reversal kind is invalid",
-        )
-    })?;
-    let prior = ExternalReversalPriorClassification::from_resolution_code(
-        &row.try_get::<String, _>("prior_resolution_code")?,
-    )
-    .map_err(|_| {
-        ProcessorChargePersistenceError::InvalidState(
-            "operator attestation prior classification is invalid",
-        )
-    })?;
-    let final_resolution_code = PaymentResolutionCode::try_from(
-        row.try_get::<String, _>("final_resolution_code")?.as_str(),
-    )
-    .map_err(|_| {
-        ProcessorChargePersistenceError::InvalidState(
-            "operator attestation final resolution is invalid",
-        )
-    })?;
-    let outcome =
-        ExternalReversalOutcome::from_kind_and_final_resolution_code(kind, final_resolution_code)
-            .map_err(|_| {
-            ProcessorChargePersistenceError::InvalidState("operator attestation outcome is invalid")
-        })?;
-    let resolution = ExternalReversalResolution::new(prior, outcome).map_err(|_| {
-        ProcessorChargePersistenceError::InvalidState(
-            "operator attestation resolution tuple is invalid",
-        )
+        OperatorReviewError::InvalidState("operator attestation currency is invalid")
     })?;
     Ok(ExternalReversalAttestation::new(
         ProcessorChargeId::new(row.try_get("processor_charge_id")?),
         attempt_id,
         ActorId::new(row.try_get("actor_id")?),
-        ExternalReversalReason::new(row.try_get::<String, _>("reason")?).map_err(|_| {
-            ProcessorChargePersistenceError::InvalidState("operator attestation reason is invalid")
+        parse_reversal_kind(&row.try_get::<String, _>("reversal_kind")?).map_err(|_| {
+            OperatorReviewError::InvalidState("operator attestation reversal kind is invalid")
         })?,
-        resolution,
+        ExternalReversalReason::new(row.try_get::<String, _>("reason")?).map_err(|_| {
+            OperatorReviewError::InvalidState("operator attestation reason is invalid")
+        })?,
+        row.try_get("prior_resolution_code")?,
+        PaymentResolutionCode::try_from(
+            row.try_get::<String, _>("final_resolution_code")?.as_str(),
+        )
+        .map_err(|_| {
+            OperatorReviewError::InvalidState("operator attestation final resolution is invalid")
+        })?,
         GatewayAccountId::new(row.try_get("gateway_account_id")?),
         GatewayConfigurationId::new(row.try_get("gateway_configuration_id")?),
         order,
         ChargeAmount::new(row.try_get("amount_cents")?, currency).map_err(|_| {
-            ProcessorChargePersistenceError::InvalidState("operator attestation amount is invalid")
+            OperatorReviewError::InvalidState("operator attestation amount is invalid")
         })?,
         GatewayTransactionId::new(row.try_get::<String, _>("gateway_transaction_id")?).map_err(
             |_| {
-                ProcessorChargePersistenceError::InvalidState(
+                OperatorReviewError::InvalidState(
                     "operator attestation transaction identity is invalid",
                 )
             },
         )?,
         processor_evidence_from_row(row).map_err(|_| {
-            ProcessorChargePersistenceError::InvalidState(
-                "operator attestation evidence is invalid",
-            )
+            OperatorReviewError::InvalidState("operator attestation evidence is invalid")
         })?,
         row.try_get("attested_at")?,
     ))
@@ -178,14 +134,15 @@ pub(crate) fn attestation_matches_source(
                 .transaction_id()
                 .expect("eligible charge has transaction identity")
         && attestation.processor_evidence() == charge.evidence()
-        && attestation.resolution()
-            == expected_reversal_resolution(attempt, charge, attestation.kind())
+        && attestation.prior_resolution_code() == expected_prior_resolution_code(attempt, charge)
+        && attestation.final_resolution_code()
+            == expected_final_resolution_code(attempt.kind(), attestation.kind())
 }
 
-pub(crate) fn expected_prior_classification(
+pub(crate) fn expected_prior_resolution_code(
     attempt: &PaymentAttempt,
     charge: &ProcessorCharge,
-) -> ExternalReversalPriorClassification {
+) -> &'static str {
     if charge.role() == ProcessorChargeRole::Primary
         && charge.attempt_kind() == PaymentAttemptKind::SubscriptionInitial
         && (attempt.state().resolution_code()
@@ -195,90 +152,70 @@ pub(crate) fn expected_prior_classification(
                     PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict,
                 )))
     {
-        ExternalReversalPriorClassification::SubscriptionInitialCurrentGrantConflict
+        PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict.as_str()
     } else {
-        ExternalReversalPriorClassification::ProcessorChargeExternalReversalRequired
+        "processor_charge_external_reversal_required"
     }
 }
 
-pub(crate) fn expected_reversal_outcome(
+pub(crate) fn expected_final_resolution_code(
     attempt_kind: PaymentAttemptKind,
     kind: ExternalReversalKind,
-) -> ExternalReversalOutcome {
+) -> PaymentResolutionCode {
     match (attempt_kind, kind) {
         (PaymentAttemptKind::SubscriptionInitial, ExternalReversalKind::Refund) => {
-            ExternalReversalOutcome::SubscriptionInitialRefunded
+            PaymentResolutionCode::SubscriptionInitialExternallyRefunded
         }
         (PaymentAttemptKind::SubscriptionInitial, ExternalReversalKind::Void) => {
-            ExternalReversalOutcome::SubscriptionInitialVoided
+            PaymentResolutionCode::SubscriptionInitialExternallyVoided
         }
-        (_, ExternalReversalKind::Refund) => ExternalReversalOutcome::ProcessorChargeRefunded,
-        (_, ExternalReversalKind::Void) => ExternalReversalOutcome::ProcessorChargeVoided,
+        (_, ExternalReversalKind::Refund) => {
+            PaymentResolutionCode::ProcessorChargeExternallyRefunded
+        }
+        (_, ExternalReversalKind::Void) => PaymentResolutionCode::ProcessorChargeExternallyVoided,
     }
 }
 
-pub(crate) fn expected_reversal_resolution(
-    attempt: &PaymentAttempt,
-    charge: &ProcessorCharge,
-    kind: ExternalReversalKind,
-) -> ExternalReversalResolution {
-    ExternalReversalResolution::new(
-        expected_prior_classification(attempt, charge),
-        expected_reversal_outcome(attempt.kind(), kind),
-    )
-    .expect("derived external reversal resolution is valid")
-}
-
-pub(crate) fn parse_kind(
-    value: &str,
-) -> Result<PaymentAttemptKind, ProcessorChargePersistenceError> {
+pub(crate) fn parse_kind(value: &str) -> Result<PaymentAttemptKind, OperatorReviewError> {
     value
         .parse()
-        .map_err(|_| ProcessorChargePersistenceError::InvalidState(INVALID_PROCESSOR_CHARGE_STATE))
+        .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))
 }
 
-pub(crate) fn parse_role(
-    value: &str,
-) -> Result<ProcessorChargeRole, ProcessorChargePersistenceError> {
+pub(crate) fn parse_role(value: &str) -> Result<ProcessorChargeRole, OperatorReviewError> {
     match value {
         "primary" => Ok(ProcessorChargeRole::Primary),
         "additional" => Ok(ProcessorChargeRole::Additional),
-        _ => Err(ProcessorChargePersistenceError::InvalidState(
-            INVALID_PROCESSOR_CHARGE_STATE,
-        )),
+        _ => Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE)),
     }
 }
 
 pub(crate) fn parse_progression(
     value: &str,
-) -> Result<ProcessorChargeProgression, ProcessorChargePersistenceError> {
+) -> Result<ProcessorChargeProgression, OperatorReviewError> {
     match value {
         "pending" => Ok(ProcessorChargeProgression::Pending),
         "reconciliation_required" => Ok(ProcessorChargeProgression::ReconciliationRequired),
         "external_reversal_required" => Ok(ProcessorChargeProgression::ExternalReversalRequired),
         "applied" => Ok(ProcessorChargeProgression::Applied),
         "externally_reversed" => Ok(ProcessorChargeProgression::ExternallyReversed),
-        _ => Err(ProcessorChargePersistenceError::InvalidState(
-            INVALID_PROCESSOR_CHARGE_STATE,
-        )),
+        _ => Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE)),
     }
 }
 
 pub(crate) fn parse_reversal_kind(
     value: &str,
-) -> Result<ExternalReversalKind, ProcessorChargePersistenceError> {
+) -> Result<ExternalReversalKind, OperatorReviewError> {
     match value {
         "refund" => Ok(ExternalReversalKind::Refund),
         "void" => Ok(ExternalReversalKind::Void),
-        _ => Err(ProcessorChargePersistenceError::InvalidState(
-            INVALID_PROCESSOR_CHARGE_STATE,
-        )),
+        _ => Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE)),
     }
 }
 
 pub(crate) fn parse_charge_state_code(
     value: &str,
-) -> Result<ProcessorChargeStateCode, ProcessorChargePersistenceError> {
+) -> Result<ProcessorChargeStateCode, OperatorReviewError> {
     match value {
         "processor_charge_external_reversal_required" => {
             return Ok(ProcessorChargeStateCode::ExternalReversalRequired);
@@ -299,5 +236,5 @@ pub(crate) fn parse_charge_state_code(
     }
     PaymentResolutionCode::try_from(value)
         .map(ProcessorChargeStateCode::PaymentResolution)
-        .map_err(|_| ProcessorChargePersistenceError::InvalidState(INVALID_PROCESSOR_CHARGE_STATE))
+        .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))
 }

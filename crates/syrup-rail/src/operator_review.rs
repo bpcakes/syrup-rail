@@ -117,163 +117,6 @@ impl ExternalReversalKind {
     }
 }
 
-/// The durable classification that immediately preceded an external reversal.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExternalReversalPriorClassification {
-    SubscriptionInitialCurrentGrantConflict,
-    ProcessorChargeExternalReversalRequired,
-}
-
-impl ExternalReversalPriorClassification {
-    pub const fn resolution_code(self) -> &'static str {
-        match self {
-            Self::SubscriptionInitialCurrentGrantConflict => {
-                "subscription_initial_current_grant_conflict"
-            }
-            Self::ProcessorChargeExternalReversalRequired => {
-                "processor_charge_external_reversal_required"
-            }
-        }
-    }
-
-    pub fn from_resolution_code(value: &str) -> Result<Self, ExternalReversalResolutionError> {
-        match value {
-            "subscription_initial_current_grant_conflict" => {
-                Ok(Self::SubscriptionInitialCurrentGrantConflict)
-            }
-            "processor_charge_external_reversal_required" => {
-                Ok(Self::ProcessorChargeExternalReversalRequired)
-            }
-            _ => Err(ExternalReversalResolutionError::InvalidPriorClassification),
-        }
-    }
-}
-
-/// The closed final result of an externally reversed processor charge.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ExternalReversalOutcome {
-    SubscriptionInitialRefunded,
-    SubscriptionInitialVoided,
-    ProcessorChargeRefunded,
-    ProcessorChargeVoided,
-}
-
-impl ExternalReversalOutcome {
-    pub const ALL: &'static [Self] = &[
-        Self::SubscriptionInitialRefunded,
-        Self::SubscriptionInitialVoided,
-        Self::ProcessorChargeRefunded,
-        Self::ProcessorChargeVoided,
-    ];
-
-    pub const fn kind(self) -> ExternalReversalKind {
-        match self {
-            Self::SubscriptionInitialRefunded | Self::ProcessorChargeRefunded => {
-                ExternalReversalKind::Refund
-            }
-            Self::SubscriptionInitialVoided | Self::ProcessorChargeVoided => {
-                ExternalReversalKind::Void
-            }
-        }
-    }
-
-    pub const fn final_resolution_code(self) -> PaymentResolutionCode {
-        match self {
-            Self::SubscriptionInitialRefunded => {
-                PaymentResolutionCode::SubscriptionInitialExternallyRefunded
-            }
-            Self::SubscriptionInitialVoided => {
-                PaymentResolutionCode::SubscriptionInitialExternallyVoided
-            }
-            Self::ProcessorChargeRefunded => {
-                PaymentResolutionCode::ProcessorChargeExternallyRefunded
-            }
-            Self::ProcessorChargeVoided => PaymentResolutionCode::ProcessorChargeExternallyVoided,
-        }
-    }
-
-    pub fn from_kind_and_final_resolution_code(
-        kind: ExternalReversalKind,
-        final_resolution_code: PaymentResolutionCode,
-    ) -> Result<Self, ExternalReversalResolutionError> {
-        match (kind, final_resolution_code) {
-            (
-                ExternalReversalKind::Refund,
-                PaymentResolutionCode::SubscriptionInitialExternallyRefunded,
-            ) => Ok(Self::SubscriptionInitialRefunded),
-            (
-                ExternalReversalKind::Void,
-                PaymentResolutionCode::SubscriptionInitialExternallyVoided,
-            ) => Ok(Self::SubscriptionInitialVoided),
-            (
-                ExternalReversalKind::Refund,
-                PaymentResolutionCode::ProcessorChargeExternallyRefunded,
-            ) => Ok(Self::ProcessorChargeRefunded),
-            (
-                ExternalReversalKind::Void,
-                PaymentResolutionCode::ProcessorChargeExternallyVoided,
-            ) => Ok(Self::ProcessorChargeVoided),
-            _ => Err(ExternalReversalResolutionError::InvalidOutcome),
-        }
-    }
-}
-
-/// A valid durable external-reversal resolution tuple.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExternalReversalResolution {
-    prior: ExternalReversalPriorClassification,
-    outcome: ExternalReversalOutcome,
-}
-
-impl ExternalReversalResolution {
-    pub fn new(
-        prior: ExternalReversalPriorClassification,
-        outcome: ExternalReversalOutcome,
-    ) -> Result<Self, ExternalReversalResolutionError> {
-        if prior == ExternalReversalPriorClassification::SubscriptionInitialCurrentGrantConflict
-            && matches!(
-                outcome,
-                ExternalReversalOutcome::ProcessorChargeRefunded
-                    | ExternalReversalOutcome::ProcessorChargeVoided
-            )
-        {
-            return Err(ExternalReversalResolutionError::IncompatiblePriorOutcome);
-        }
-        Ok(Self { prior, outcome })
-    }
-
-    pub const fn prior(self) -> ExternalReversalPriorClassification {
-        self.prior
-    }
-
-    pub const fn outcome(self) -> ExternalReversalOutcome {
-        self.outcome
-    }
-
-    pub const fn kind(self) -> ExternalReversalKind {
-        self.outcome.kind()
-    }
-
-    pub const fn prior_resolution_code(self) -> &'static str {
-        self.prior.resolution_code()
-    }
-
-    pub const fn final_resolution_code(self) -> PaymentResolutionCode {
-        self.outcome.final_resolution_code()
-    }
-}
-
-/// Why a persisted external-reversal tuple cannot be represented safely.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub enum ExternalReversalResolutionError {
-    #[error("external reversal prior classification is invalid")]
-    InvalidPriorClassification,
-    #[error("external reversal outcome is invalid")]
-    InvalidOutcome,
-    #[error("external reversal prior classification is incompatible with its outcome")]
-    IncompatiblePriorOutcome,
-}
-
 #[derive(Clone, Eq, PartialEq)]
 pub struct ExternalReversalReason(String);
 
@@ -660,8 +503,10 @@ pub struct ExternalReversalAttestation {
     processor_charge_id: ProcessorChargeId,
     attempt_id: PaymentAttemptId,
     actor_id: ActorId,
+    kind: ExternalReversalKind,
     reason: ExternalReversalReason,
-    resolution: ExternalReversalResolution,
+    prior_resolution_code: String,
+    final_resolution_code: PaymentResolutionCode,
     gateway_account_id: GatewayAccountId,
     gateway_configuration_id: GatewayConfigurationId,
     gateway_order_id: GatewayOrderId,
@@ -677,8 +522,10 @@ impl ExternalReversalAttestation {
         processor_charge_id: ProcessorChargeId,
         attempt_id: PaymentAttemptId,
         actor_id: ActorId,
+        kind: ExternalReversalKind,
         reason: ExternalReversalReason,
-        resolution: ExternalReversalResolution,
+        prior_resolution_code: String,
+        final_resolution_code: PaymentResolutionCode,
         gateway_account_id: GatewayAccountId,
         gateway_configuration_id: GatewayConfigurationId,
         gateway_order_id: GatewayOrderId,
@@ -691,8 +538,10 @@ impl ExternalReversalAttestation {
             processor_charge_id,
             attempt_id,
             actor_id,
+            kind,
             reason,
-            resolution,
+            prior_resolution_code,
+            final_resolution_code,
             gateway_account_id,
             gateway_configuration_id,
             gateway_order_id,
@@ -701,48 +550,6 @@ impl ExternalReversalAttestation {
             processor_evidence,
             attested_at,
         }
-    }
-
-    /// Validates the historical raw resolution fields before constructing the typed form.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_legacy_parts(
-        processor_charge_id: ProcessorChargeId,
-        attempt_id: PaymentAttemptId,
-        actor_id: ActorId,
-        kind: ExternalReversalKind,
-        reason: ExternalReversalReason,
-        prior_resolution_code: impl AsRef<str>,
-        final_resolution_code: PaymentResolutionCode,
-        gateway_account_id: GatewayAccountId,
-        gateway_configuration_id: GatewayConfigurationId,
-        gateway_order_id: GatewayOrderId,
-        amount: ChargeAmount,
-        gateway_transaction_id: GatewayTransactionId,
-        processor_evidence: ProcessorEvidence,
-        attested_at: DateTime<Utc>,
-    ) -> Result<Self, ExternalReversalResolutionError> {
-        let prior = ExternalReversalPriorClassification::from_resolution_code(
-            prior_resolution_code.as_ref(),
-        )?;
-        let outcome = ExternalReversalOutcome::from_kind_and_final_resolution_code(
-            kind,
-            final_resolution_code,
-        )?;
-        let resolution = ExternalReversalResolution::new(prior, outcome)?;
-        Ok(Self::new(
-            processor_charge_id,
-            attempt_id,
-            actor_id,
-            reason,
-            resolution,
-            gateway_account_id,
-            gateway_configuration_id,
-            gateway_order_id,
-            amount,
-            gateway_transaction_id,
-            processor_evidence,
-            attested_at,
-        ))
     }
 
     pub const fn processor_charge_id(&self) -> ProcessorChargeId {
@@ -755,25 +562,16 @@ impl ExternalReversalAttestation {
         self.actor_id
     }
     pub const fn kind(&self) -> ExternalReversalKind {
-        self.resolution.kind()
+        self.kind
     }
     pub const fn reason(&self) -> &ExternalReversalReason {
         &self.reason
     }
-    pub const fn resolution(&self) -> ExternalReversalResolution {
-        self.resolution
-    }
-    pub const fn prior_classification(&self) -> ExternalReversalPriorClassification {
-        self.resolution.prior()
-    }
-    pub const fn outcome(&self) -> ExternalReversalOutcome {
-        self.resolution.outcome()
-    }
-    pub const fn prior_resolution_code(&self) -> &'static str {
-        self.resolution.prior_resolution_code()
+    pub fn prior_resolution_code(&self) -> &str {
+        &self.prior_resolution_code
     }
     pub const fn final_resolution_code(&self) -> PaymentResolutionCode {
-        self.resolution.final_resolution_code()
+        self.final_resolution_code
     }
     pub const fn gateway_account_id(&self) -> GatewayAccountId {
         self.gateway_account_id
@@ -849,6 +647,7 @@ mod tests {
                 SubscriberId::new(Uuid::from_u128(3)),
                 GatewayAccountId::new(Uuid::from_u128(4)),
                 GatewayConfigurationId::new(Uuid::from_u128(5)),
+                crate::GatewayAccountMode::Live,
             ),
             crate::PaymentAttemptRequest::new(
                 target,
@@ -891,119 +690,6 @@ mod tests {
         assert_eq!(
             ExternalReversalReason::new("card 4111111111111111"),
             Err(ExternalReversalReasonError::ContainsRawCardData)
-        );
-    }
-
-    #[test]
-    fn external_reversal_resolution_exhaustively_closes_prior_and_outcome_labels() {
-        let priors = [
-            ExternalReversalPriorClassification::SubscriptionInitialCurrentGrantConflict,
-            ExternalReversalPriorClassification::ProcessorChargeExternalReversalRequired,
-        ];
-        assert_eq!(ExternalReversalOutcome::ALL.len(), 4);
-
-        for prior in priors {
-            for outcome in ExternalReversalOutcome::ALL {
-                let resolution = ExternalReversalResolution::new(prior, *outcome);
-                let is_invalid = prior
-                    == ExternalReversalPriorClassification::SubscriptionInitialCurrentGrantConflict
-                    && matches!(
-                        *outcome,
-                        ExternalReversalOutcome::ProcessorChargeRefunded
-                            | ExternalReversalOutcome::ProcessorChargeVoided
-                    );
-                if is_invalid {
-                    assert_eq!(
-                        resolution,
-                        Err(ExternalReversalResolutionError::IncompatiblePriorOutcome)
-                    );
-                    continue;
-                }
-
-                let resolution = resolution.expect("the remaining tuple labels are valid");
-                assert_eq!(resolution.prior(), prior);
-                assert_eq!(resolution.outcome(), *outcome);
-                assert_eq!(resolution.prior_resolution_code(), prior.resolution_code());
-                assert_eq!(resolution.kind(), outcome.kind());
-                assert_eq!(
-                    resolution.final_resolution_code(),
-                    outcome.final_resolution_code()
-                );
-                assert_eq!(
-                    ExternalReversalOutcome::from_kind_and_final_resolution_code(
-                        resolution.kind(),
-                        resolution.final_resolution_code(),
-                    ),
-                    Ok(*outcome)
-                );
-            }
-        }
-
-        assert_eq!(
-            ExternalReversalPriorClassification::from_resolution_code("unexpected"),
-            Err(ExternalReversalResolutionError::InvalidPriorClassification)
-        );
-        assert_eq!(
-            ExternalReversalOutcome::from_kind_and_final_resolution_code(
-                ExternalReversalKind::Refund,
-                PaymentResolutionCode::SubscriptionInitialExternallyVoided,
-            ),
-            Err(ExternalReversalResolutionError::InvalidOutcome)
-        );
-    }
-
-    #[test]
-    fn external_reversal_legacy_parts_are_fallible() {
-        let attestation = ExternalReversalAttestation::from_legacy_parts(
-            ProcessorChargeId::new(Uuid::from_u128(10)),
-            PaymentAttemptId::new(Uuid::from_u128(11)),
-            ActorId::new(Uuid::from_u128(12)),
-            ExternalReversalKind::Refund,
-            ExternalReversalReason::new("processor refund verified").unwrap(),
-            "processor_charge_external_reversal_required",
-            PaymentResolutionCode::ProcessorChargeExternallyRefunded,
-            GatewayAccountId::new(Uuid::from_u128(13)),
-            GatewayConfigurationId::new(Uuid::from_u128(14)),
-            GatewayOrderId::from_correlation("legacy-reversal-order").unwrap(),
-            ChargeAmount::new(500, crate::CurrencyCode::new("USD").unwrap()).unwrap(),
-            GatewayTransactionId::new("txn-legacy-reversal").unwrap(),
-            ProcessorEvidence::default(),
-            Utc.with_ymd_and_hms(2026, 8, 23, 0, 0, 0).unwrap(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            attestation.resolution(),
-            ExternalReversalResolution::new(
-                ExternalReversalPriorClassification::ProcessorChargeExternalReversalRequired,
-                ExternalReversalOutcome::ProcessorChargeRefunded,
-            )
-            .unwrap()
-        );
-        assert_eq!(attestation.kind(), ExternalReversalKind::Refund);
-        assert_eq!(
-            attestation.final_resolution_code(),
-            PaymentResolutionCode::ProcessorChargeExternallyRefunded
-        );
-
-        assert_eq!(
-            ExternalReversalAttestation::from_legacy_parts(
-                ProcessorChargeId::new(Uuid::from_u128(10)),
-                PaymentAttemptId::new(Uuid::from_u128(11)),
-                ActorId::new(Uuid::from_u128(12)),
-                ExternalReversalKind::Refund,
-                ExternalReversalReason::new("processor refund verified").unwrap(),
-                "subscription_initial_current_grant_conflict",
-                PaymentResolutionCode::ProcessorChargeExternallyRefunded,
-                GatewayAccountId::new(Uuid::from_u128(13)),
-                GatewayConfigurationId::new(Uuid::from_u128(14)),
-                GatewayOrderId::from_correlation("legacy-reversal-order").unwrap(),
-                ChargeAmount::new(500, crate::CurrencyCode::new("USD").unwrap()).unwrap(),
-                GatewayTransactionId::new("txn-legacy-reversal").unwrap(),
-                ProcessorEvidence::default(),
-                Utc.with_ymd_and_hms(2026, 8, 23, 0, 0, 0).unwrap(),
-            ),
-            Err(ExternalReversalResolutionError::IncompatiblePriorOutcome)
         );
     }
 

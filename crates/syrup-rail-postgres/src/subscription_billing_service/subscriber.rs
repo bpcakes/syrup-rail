@@ -35,11 +35,21 @@ impl SubscriptionBillingService {
         if let Some(scope) = self.active_cooldown(&account).await? {
             return Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope });
         }
+        let expected = ExpectedGatewayIdentity::for_account(
+            billing_scope_id,
+            gateway_configuration_id,
+            &account,
+        );
         let gateway = self
             .resolver
-            .resolve_identity(account.identity().clone())
+            .resolve(
+                expected.billing_scope_id,
+                expected.gateway_account_id,
+                expected.gateway_configuration_id,
+                expected.provider_key.clone(),
+            )
             .await?;
-        if account.identity() != gateway.identity() {
+        if !expected.matches(&gateway) {
             return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
         Ok((account, gateway))
@@ -65,12 +75,8 @@ impl SubscriptionBillingService {
         let provider_key = GatewayProviderKey::new(&row.1)
             .map_err(|_| SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE))?;
         Ok(GatewayAccountSnapshot {
-            identity: GatewayAccountIdentity::new(
-                billing_scope_id,
-                GatewayAccountId::new(row.0),
-                provider_key,
-                gateway_configuration_id,
-            ),
+            account_id: GatewayAccountId::new(row.0),
+            provider_key,
         })
     }
 
@@ -89,8 +95,8 @@ impl SubscriptionBillingService {
             WHERE accounts.id = $1 AND accounts.provider_key = $2
             "#,
         )
-        .bind(account.account_id().as_uuid())
-        .bind(account.provider_key().as_str())
+        .bind(account.account_id.as_uuid())
+        .bind(account.provider_key.as_str())
         .fetch_optional(&self.pool)
         .await?
         .ok_or(SubscriptionBillingServiceError::GatewayConfigurationChanged)?;
@@ -106,22 +112,23 @@ impl SubscriptionBillingService {
     pub(super) async fn resolve_subscriber_readiness_failure(
         &self,
         reservation: SubscriberInitiatedReservation<'_>,
-        failure: GatewayReadinessFailure,
+        failure: SubscriberReadinessFailure,
         boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let gateway_error = failure.gateway_error();
         if boundary == OutcomeResolutionBoundary::Prepared
-            && failure.preserves_prepared_attempt_for_retry()
             && let Some(error) = gateway_error.as_ref()
+            && GatewayNotSubmittedPolicy::for_readiness_error(error)
+                .restores_prepared_attempt_when_supported()
         {
             return Err(SubscriptionBillingServiceError::GatewayReadiness(
                 clone_gateway_error(error),
             ));
         }
-        let code = failure.resolution_code();
-        let cooldown = failure.cooldown();
-        let cooldown_error_scope = failure.cooldown_error_scope();
-        let condition = failure.condition();
+        let policy = failure.policy();
+        let code = policy.resolution_code();
+        let cooldown = policy.cooldown();
+        let cooldown_error_scope = policy.cooldown_error_scope();
         let detail = failure.into_detail();
         let evidence = ProcessorEvidence::new(
             None,
@@ -129,7 +136,7 @@ impl SubscriptionBillingService {
             None,
             None,
             Some(detail),
-            condition,
+            Some(GatewayDiagnostic::new("failed")),
             GatewayPaymentDescriptor::default(),
         );
         let payment = reservation

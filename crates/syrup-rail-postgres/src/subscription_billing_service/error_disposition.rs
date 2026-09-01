@@ -85,8 +85,10 @@ impl SubscriptionBillingServiceError {
     ///
     /// A `true` result means only that Syrup Rail can safely accept another
     /// submission of that unchanged command and idempotency key. It does not
-    /// promise that the next attempt will succeed. Do not create a new command
-    /// or idempotency key merely because this returns `true`.
+    /// promise that the next call will perform another payment; it may return a
+    /// canonical terminal result. Do not create a new command or idempotency
+    /// key merely because this returns `true`. Inspect the canonical result
+    /// before deciding whether a later payment needs a newly issued key.
     pub const fn is_retryable(&self) -> bool {
         matches!(
             self.disposition(),
@@ -225,7 +227,13 @@ const fn gateway_not_submitted_disposition(
         GatewayNotSubmittedError::Configuration(_) => {
             SubscriptionBillingServiceErrorDisposition::Misconfigured
         }
-        GatewayNotSubmittedError::Unavailable(_) | GatewayNotSubmittedError::RateLimited(_) => {
+        GatewayNotSubmittedError::AccountModeMismatch { .. } => {
+            SubscriptionBillingServiceErrorDisposition::Misconfigured
+        }
+        GatewayNotSubmittedError::AccountModeVerification(error) => {
+            gateway_readiness_disposition(error)
+        }
+        GatewayNotSubmittedError::NotTransmitted(_) | GatewayNotSubmittedError::RateLimited(_) => {
             SubscriptionBillingServiceErrorDisposition::TemporarilyUnavailable
         }
     }
@@ -242,7 +250,8 @@ const fn enrollment_reservation_rejection_disposition(
             SubscriptionBillingServiceErrorDisposition::Rejected
         }
         SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged
-        | SubscriptionEnrollmentReservationRejection::GatewayConfigurationChanged => {
+        | SubscriptionEnrollmentReservationRejection::GatewayConfigurationChanged
+        | SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged => {
             SubscriptionBillingServiceErrorDisposition::Conflict
         }
     }
@@ -254,7 +263,8 @@ const fn enrollment_submission_rejection_disposition(
     match rejection {
         SubscriptionEnrollmentSubmissionRejection::BillingStateChanged
         | SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged
-        | SubscriptionEnrollmentSubmissionRejection::GatewayConfigurationChanged => {
+        | SubscriptionEnrollmentSubmissionRejection::GatewayConfigurationChanged
+        | SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged => {
             SubscriptionBillingServiceErrorDisposition::Conflict
         }
     }
@@ -283,7 +293,8 @@ const fn recovery_reservation_rejection_disposition(
         | SubscriptionRecoveryReservationRejection::PaymentMethodUpdateInProgress => {
             SubscriptionBillingServiceErrorDisposition::Rejected
         }
-        SubscriptionRecoveryReservationRejection::GatewayConfigurationChanged => {
+        SubscriptionRecoveryReservationRejection::GatewayConfigurationChanged
+        | SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged => {
             SubscriptionBillingServiceErrorDisposition::Conflict
         }
     }
@@ -311,7 +322,8 @@ const fn renewal_reservation_rejection_disposition(
         | SubscriptionRenewalReservationRejection::RetryBlocked => {
             SubscriptionBillingServiceErrorDisposition::Rejected
         }
-        SubscriptionRenewalReservationRejection::GatewayConfigurationChanged => {
+        SubscriptionRenewalReservationRejection::GatewayAccountModeChanged
+        | SubscriptionRenewalReservationRejection::GatewayConfigurationChanged => {
             SubscriptionBillingServiceErrorDisposition::Conflict
         }
     }
@@ -327,7 +339,8 @@ const fn payment_method_replacement_reservation_rejection_disposition(
         | SubscriptionPaymentMethodReplacementRejection::PaymentMethodUpdateInProgress => {
             SubscriptionBillingServiceErrorDisposition::Rejected
         }
-        SubscriptionPaymentMethodReplacementRejection::GatewayConfigurationChanged => {
+        SubscriptionPaymentMethodReplacementRejection::GatewayConfigurationChanged
+        | SubscriptionPaymentMethodReplacementRejection::GatewayAccountModeChanged => {
             SubscriptionBillingServiceErrorDisposition::Conflict
         }
     }

@@ -35,7 +35,6 @@ build/
 .vite/
 .turbo/
 .astro/
-.contract-stage-*/
 
 # Jig local runtime cache. Keep durable agent state tracked.
 .agent/.cache/*
@@ -47,9 +46,3 @@ build/
 tmp/
 temp/
 # END JIG MANAGED BLOCK
-
-# bv (beads viewer) local config and caches
-.bv/
-
-# Local agent-instruction backups
-/AGENTS.md.bak

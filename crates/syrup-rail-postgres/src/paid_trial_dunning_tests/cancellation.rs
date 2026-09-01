@@ -75,9 +75,13 @@ async fn paid_trial_and_scheduled_dunning_cancellation_preserve_exact_access_and
         trial_end,
     );
     let mut transaction = database.pool.begin().await?;
-    let stale =
-        reserve_subscription_renewal_in_transaction(&mut transaction, stale_trial_job, &gateway)
-            .await?;
+    let stale = reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        stale_trial_job,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         stale,
@@ -104,12 +108,29 @@ async fn paid_trial_and_scheduled_dunning_cancellation_preserve_exact_access_and
         .subscription()
         .expect("approved trial creates subscription")
         .id();
-    let queued_dunning_job = force_due_renewal(
-        &database.pool,
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+            .fetch_one(&database.pool)
+            .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2 - interval '7 days',
+            current_period_end_at = $2,
+            next_renewal_at = $2,
+            next_payment_attempt_at = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(due_at)
+    .execute(&database.pool)
+    .await?;
+    let queued_dunning_job = ChargeRenewal::new(
         BillingScopeId::new(account.billing_scope_id),
         subscription_id,
-    )
-    .await?;
+        due_at,
+    );
     let renewal = reserve_and_admit_renewal(&database.pool, &gateway, queued_dunning_job).await?;
     apply_subscription_renewal_gateway_outcome(
         &database.pool,
@@ -155,9 +176,13 @@ async fn paid_trial_and_scheduled_dunning_cancellation_preserve_exact_access_and
         CancelSubscriptionOutcome::AlreadyCanceled(_)
     ));
     let mut transaction = database.pool.begin().await?;
-    let stale =
-        reserve_subscription_renewal_in_transaction(&mut transaction, queued_dunning_job, &gateway)
-            .await?;
+    let stale = reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        queued_dunning_job,
+        &gateway,
+        GatewayAccountMode::Live,
+    )
+    .await?;
     transaction.rollback().await?;
     assert_eq!(
         stale,

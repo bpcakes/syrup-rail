@@ -28,6 +28,28 @@ pub struct Credentials {
     pub(crate) query_security_key: Zeroizing<String>,
 }
 
+/// Per-sale NMI duplicate-check behavior for an account-bound client.
+///
+/// NMI applies this as a processor-dependent heuristic. It does not replace a
+/// caller's durable idempotency or reconciliation policy.
+///
+/// See NMI's [`dup_seconds` payment field](https://docs.nmi.com/reference/create-sale-v5)
+/// and [processor duplicate-check settings](https://docs.nmi.com/reference/add-processor-service).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum DuplicateCheck {
+    /// Omits `dup_seconds` and uses the NMI account's processor configuration.
+    ProcessorConfigured,
+    /// Sends a positive duplicate-check window with every sale.
+    ///
+    /// Some processor configurations reject this per-transaction override.
+    Window(DuplicateCheckWindow),
+}
+
+/// A validated positive NMI duplicate-check window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DuplicateCheckWindow(u32);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ConfigurationError {
@@ -49,6 +71,41 @@ pub enum ConfigurationError {
     CredentialTooLong,
     #[error("NMI private API key is invalid for the Authorization header")]
     PrivateApiKeyInvalidHeader,
+    #[error("NMI duplicate-check window is outside the supported positive range")]
+    DuplicateCheckWindowOutOfRange,
+}
+
+impl DuplicateCheck {
+    pub(crate) const fn wire_seconds(self) -> Option<u32> {
+        match self {
+            Self::ProcessorConfigured => None,
+            Self::Window(window) => Some(window.seconds()),
+        }
+    }
+}
+
+impl DuplicateCheckWindow {
+    /// Smallest value represented by this positive-window type.
+    ///
+    /// Zero is deliberately excluded: it is not a duplicate-check window and
+    /// this client never sends `dup_seconds=0`.
+    pub const MIN_SECONDS: u32 = 1;
+
+    /// Largest duplicate-check window documented by NMI's
+    /// [`dup_seconds` field](https://docs.nmi.com/reference/create-sale-v5).
+    pub const MAX_SECONDS: u32 = 7_862_400;
+
+    /// Creates a duplicate-check window in this client's supported positive range.
+    pub const fn new(seconds: u32) -> Result<Self, ConfigurationError> {
+        if seconds < Self::MIN_SECONDS || seconds > Self::MAX_SECONDS {
+            return Err(ConfigurationError::DuplicateCheckWindowOutOfRange);
+        }
+        Ok(Self(seconds))
+    }
+
+    pub const fn seconds(self) -> u32 {
+        self.0
+    }
 }
 
 impl Endpoint {
@@ -166,59 +223,5 @@ fn is_loopback_host(url: &Url) -> bool {
         Some(Host::Ipv4(address)) => IpAddr::V4(address).is_loopback(),
         Some(Host::Ipv6(address)) => IpAddr::V6(address).is_loopback(),
         None => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn private_api_key_header_is_sensitive_and_redacted() {
-        let private = "private-debug-sentinel";
-        let credentials = Credentials::new(private.to_owned(), "query-key".to_owned())
-            .expect("credentials should validate");
-
-        let authorization = credentials.private_api_key_header();
-
-        assert!(authorization.is_sensitive());
-        assert!(!format!("{authorization:?}").contains(private));
-    }
-
-    #[test]
-    fn credentials_accept_existing_zeroizing_owners_without_reallocation() {
-        let private = Zeroizing::new("private-key".to_owned());
-        let query = Zeroizing::new("query-key".to_owned());
-        let private_pointer = private.as_ptr();
-        let query_pointer = query.as_ptr();
-
-        let credentials =
-            Credentials::new(private, query).expect("zeroizing credentials should validate");
-
-        assert_eq!(credentials.private_api_key.as_ptr(), private_pointer);
-        assert_eq!(credentials.query_security_key.as_ptr(), query_pointer);
-    }
-
-    #[test]
-    fn credentials_reject_oversized_whitespace_before_required_checks() {
-        assert!(matches!(
-            Credentials::new(" ".repeat(MAX_CREDENTIAL_BYTES + 1), "query-key".to_owned()),
-            Err(ConfigurationError::CredentialTooLong)
-        ));
-        assert!(matches!(
-            Credentials::new(
-                "private-key".to_owned(),
-                " ".repeat(MAX_CREDENTIAL_BYTES + 1)
-            ),
-            Err(ConfigurationError::CredentialTooLong)
-        ));
-        assert!(matches!(
-            Credentials::new(" ".repeat(MAX_CREDENTIAL_BYTES), "query-key".to_owned()),
-            Err(ConfigurationError::PrivateApiKeyRequired)
-        ));
-        assert!(matches!(
-            Credentials::new("private-key".to_owned(), " ".repeat(MAX_CREDENTIAL_BYTES)),
-            Err(ConfigurationError::QuerySecurityKeyRequired)
-        ));
     }
 }

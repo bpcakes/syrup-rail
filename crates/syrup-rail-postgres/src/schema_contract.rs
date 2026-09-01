@@ -38,14 +38,16 @@ pub const V1_TO_V2_UPGRADE_SQL: &str = include_str!("../schema/v2/upgrade_from_v
 /// The immutable forward-only version-2-to-version-3 upgrade artifact.
 pub const V2_TO_V3_UPGRADE_SQL: &str = include_str!("../schema/v3/upgrade_from_v2.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// The read-only version-3-to-version-4 upgrade preflight.
-pub const V3_TO_V4_PREFLIGHT_SQL: &str = include_str!("../schema/v4/preflight_from_v3.sql");
+/// The first, fast-lock version-3-to-version-4 preparation artifact.
+pub const V3_TO_V4_PREPARE_SQL: &str = include_str!("../schema/v4/prepare_from_v3.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// The read-only audit of incompatible v3 external-reversal attestations.
-pub const V3_TO_V4_INCOMPATIBLE_ATTESTATION_AUDIT_SQL: &str =
-    include_str!("../schema/v4/audit_incompatible_attestations_from_v3.sql");
+/// The separately committed, lower-lock version-3-to-version-4 validation artifact.
+pub const V3_TO_V4_VALIDATE_SQL: &str = include_str!("../schema/v4/validate_from_v3.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// The immutable forward-only version-3-to-version-4 upgrade artifact.
+/// The non-transactional concurrent index stage for the version-3-to-version-4 cutover.
+pub const V3_TO_V4_INDEX_SQL: &str = include_str!("../schema/v4/index_from_v3.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The final version-3-to-version-4 cutover artifact.
 pub const V3_TO_V4_UPGRADE_SQL: &str = include_str!("../schema/v4/upgrade_from_v3.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
@@ -54,12 +56,11 @@ pub const V3_TO_V4_UPGRADE_SQL: &str = include_str!("../schema/v4/upgrade_from_v
 const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
-const V4_CATALOG_FINGERPRINT: u64 = 0x023d_0171_91be_dc34;
+const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
-pub(crate) const INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL: &str =
-    "external reversal attestations contain an incompatible resolution tuple";
 const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -179,6 +180,44 @@ const RENEWAL_DISPATCH_INDEX_CONTRACT: IndexContract = IndexContract {
     ),
 };
 
+const V4_RENEWAL_DISPATCH_INDEX_CONTRACT: IndexContract = IndexContract {
+    included_expressions: &[
+        "billing_scope_id",
+        "gateway_account_id",
+        "next_renewal_at",
+        "required_gateway_account_mode",
+    ],
+    ..RENEWAL_DISPATCH_INDEX_CONTRACT
+};
+
+const MODE_RENEWAL_DISPATCH_INDEX_CONTRACT: IndexContract = IndexContract {
+    purpose: "mode-specific renewal-dispatch keyset",
+    name: "billing_subscriptions_due_mode_idx",
+    table: "billing_subscriptions",
+    unique: false,
+    keys: &[
+        IndexKeyContract {
+            expression: "required_gateway_account_mode",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.text_ops",
+        },
+        IndexKeyContract {
+            expression: "next_payment_attempt_at",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.timestamptz_ops",
+        },
+        IndexKeyContract {
+            expression: "id",
+            ordering: IndexKeyOrdering::AscNullsLast,
+            opclass: "pg_catalog.uuid_ops",
+        },
+    ],
+    included_expressions: &["billing_scope_id", "gateway_account_id", "next_renewal_at"],
+    predicate: Some(
+        "(status = ANY (ARRAY['active'::text, 'past_due'::text])) AND next_payment_attempt_at IS NOT NULL",
+    ),
+};
+
 const SUBSCRIPTION_HISTORY_INDEX_CONTRACT: IndexContract = IndexContract {
     purpose: "subscription-history keyset",
     name: "billing_payment_attempts_subscription_history_idx",
@@ -252,6 +291,7 @@ const V1_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "current_subscription_rank",
 ];
 
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "id",
     "billing_scope_id",
@@ -283,12 +323,43 @@ const V2_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "unpaid_at",
 ];
 
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V3_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V2_CURRENT_SUBSCRIPTION_COLUMNS;
-const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V3_CURRENT_SUBSCRIPTION_COLUMNS;
+const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
+    "id",
+    "billing_scope_id",
+    "gateway_account_id",
+    "subscriber_id",
+    "plan_key",
+    "status",
+    "payment_method_id",
+    "amount_cents",
+    "currency",
+    "current_period_start_at",
+    "current_period_end_at",
+    "next_renewal_at",
+    "initial_transaction_id",
+    "canceled_at",
+    "created_at",
+    "updated_at",
+    "current_subscription_rank",
+    "phase",
+    "recurring_period_kind",
+    "recurring_period_count",
+    "trial_amount_cents",
+    "trial_period_kind",
+    "trial_period_count",
+    "dunning_retry_delays_seconds",
+    "dunning_exhaustion",
+    "past_due_access",
+    "next_payment_attempt_at",
+    "unpaid_at",
+    "required_gateway_account_mode",
+];
 
 /// Why a host database does not satisfy a canonical schema contract.
 ///
-/// Runtime compatibility assertions report their schema version in the
+/// [`crate::assert_runtime_schema_v4_compatible`] reports version `4` in its
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
 /// or commit the read-only catalog snapshot.
 #[non_exhaustive]
@@ -325,21 +396,16 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
     }
 }
 
-/// Asserts that a host database still on schema v3 is compatible while the host
-/// stages the required schema-v4 cutover.
+/// Asserts that a historical host database matches the canonical schema-v3
+/// contract in tests or migration tooling built with the
+/// `schema-contract-test-support` feature.
 ///
-/// Syrup Rail 0.4 hosts must apply schema v4 and call
-/// [`assert_runtime_schema_v4_compatible`] before accepting billing work. This
-/// retained v3 assertion supports only the pre-cutover validation window.
-/// Call it after the host has applied its immutable schema-v3 install or
-/// forward-only upgrade migration through its normal migration deployment.
-/// This function does not install, upgrade, audit, or otherwise mutate the
-/// database. It runs the same full canonical v3 catalog conformance and
-/// fingerprint check used by the schema-contract tests, then verifies that
-/// every live external-reversal attestation can be represented by the typed
-/// runtime model. Both checks share one `REPEATABLE READ READ ONLY` PostgreSQL
-/// transaction. PostgreSQL major version 18 is required; other majors are
-/// rejected before catalog comparison.
+/// This function is not part of the ordinary production facade because the
+/// 0.4 runtime requires schema v4. It does not install, upgrade, preflight,
+/// audit, or otherwise mutate the schema. It runs the full canonical v3 catalog conformance
+/// and fingerprint check used by the schema-contract tests in one
+/// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
+/// 18 is required; other majors are rejected before catalog comparison.
 /// A concurrent-reindex transition mismatch is retried once in a fresh
 /// transaction so a reindex that commits between catalog and live-operation
 /// observations cannot cause a stale result. Other contract failures are not
@@ -350,6 +416,7 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 /// `pg_stat_progress_create_index` and the backend retains the expected table
 /// and index locks. PostgreSQL hides those details from unrelated roles without
 /// statistics privileges, for which this check deliberately fails closed.
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 pub async fn assert_runtime_schema_v3_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -367,16 +434,7 @@ pub async fn assert_runtime_schema_v3_compatible(
 ///
 /// Call this after the host has applied its immutable Syrup Rail install or
 /// forward-only upgrade migration through its normal migration deployment.
-/// This function does not install, upgrade, audit, or otherwise mutate the
-/// database. It runs the complete canonical v4 catalog conformance and
-/// fingerprint check in one `REPEATABLE READ READ ONLY` PostgreSQL transaction.
-/// The validated v4 external-reversal constraint encodes the typed resolution
-/// tuple invariant, so this assertion does not scan retained attestations.
-/// PostgreSQL major version 18 is required; other majors are rejected before
-/// catalog comparison.
-///
-/// Concurrent-reindex transition handling and visibility requirements are the
-/// same as for [`assert_runtime_schema_v3_compatible`].
+/// This function is read-only and requires PostgreSQL major version 18.
 pub async fn assert_runtime_schema_v4_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -554,78 +612,20 @@ async fn assert_schema_conforms(
     require_ready_canonical_indexes(version, &billing_indexes)?;
     require_index_contract(connection, version, GATEWAY_ORDER_INDEX_CONTRACT).await?;
     if version >= 2 {
-        require_index_contract(connection, version, RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
+        let renewal_dispatch_contract = if version >= 4 {
+            V4_RENEWAL_DISPATCH_INDEX_CONTRACT
+        } else {
+            RENEWAL_DISPATCH_INDEX_CONTRACT
+        };
+        require_index_contract(connection, version, renewal_dispatch_contract).await?;
         require_index_contract(connection, version, SUBSCRIPTION_HISTORY_INDEX_CONTRACT).await?;
+    }
+    if version >= 4 {
+        require_index_contract(connection, version, MODE_RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
     }
     require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
         .await?;
-    // Shipped v3 cannot express the typed tuple matrix in its constraint, so
-    // its compatibility API retains the live-row preflight. V4 validates the
-    // invariant during cutover and fingerprints the replacement constraint.
-    if version == 3 {
-        require_compatible_external_reversal_attestations(connection, version).await?;
-    }
     require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await
-}
-
-async fn require_compatible_external_reversal_attestations(
-    connection: &mut PgConnection,
-    version: u16,
-) -> Result<(), SchemaConformanceError> {
-    let incompatible_tuple_exists = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM billing_external_reversal_attestations
-            WHERE NOT (
-                (
-                    prior_resolution_code = 'subscription_initial_current_grant_conflict'
-                    AND (
-                        (
-                            reversal_kind = 'refund'
-                            AND final_resolution_code =
-                                'subscription_initial_externally_refunded'
-                        )
-                        OR (
-                            reversal_kind = 'void'
-                            AND final_resolution_code =
-                                'subscription_initial_externally_voided'
-                        )
-                    )
-                )
-                OR (
-                    prior_resolution_code = 'processor_charge_external_reversal_required'
-                    AND (
-                        (
-                            reversal_kind = 'refund'
-                            AND final_resolution_code IN (
-                                'subscription_initial_externally_refunded',
-                                'processor_charge_externally_refunded'
-                            )
-                        )
-                        OR (
-                            reversal_kind = 'void'
-                            AND final_resolution_code IN (
-                                'subscription_initial_externally_voided',
-                                'processor_charge_externally_voided'
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        "#,
-    )
-    .fetch_one(&mut *connection)
-    .await?;
-    if incompatible_tuple_exists {
-        Err(contract_error(
-            version,
-            INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL,
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 async fn require_unchanged_active_reindex_shadows(

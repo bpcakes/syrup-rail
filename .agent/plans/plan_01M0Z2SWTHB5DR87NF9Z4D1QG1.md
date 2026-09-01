@@ -1,0 +1,1 @@
+Release syrup-rail 0.3.1 with an opt-in exact gateway account-mode policy. Preserve live mode as the default, cover subscriber, renewal, replacement, recovery, and host-charge submission paths, and verify release metadata and compatibility.

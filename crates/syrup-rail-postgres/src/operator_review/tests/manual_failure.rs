@@ -70,10 +70,10 @@ async fn manual_failure_uses_the_paid_trial_subscription_dunning_policy()
             &recorded[0],
             BillingEvent::SubscriptionPaymentFailed {
                 attempt_id: event_attempt_id,
-                outcome: syrup_rail::SubscriptionPaymentFailureOutcome::RetryScheduled {
-                    retry_at,
-                    ..
-                },
+                disposition:
+                    syrup_rail::SubscriptionPaymentFailureDisposition::RetryScheduled {
+                        retry_at,
+                    },
                 ..
             } if *event_attempt_id == PaymentAttemptId::new(attempt_id)
                 && *retry_at == next_attempt_at
@@ -301,11 +301,13 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
                 gateway_configuration_id, gateway_order_id, review_required_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
                 500, 'USD', $7, $8, $9, clock_timestamp()
             )

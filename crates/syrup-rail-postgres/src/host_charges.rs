@@ -3,14 +3,20 @@ use std::{error::Error, fmt};
 use async_trait::async_trait;
 use sqlx::{PgConnection, Postgres, Transaction};
 use syrup_rail::{
-    BillingContactSnapshot, BillingScopeId, ChargeAmount, ChargeHostTarget, HostChargeReservation,
-    HostChargeTargetId, HostChargeTargetRejection, HostChargeTargetSnapshot,
+    BillingContactSnapshot, BillingScopeId, ChargeAmount, ChargeHostTarget, GatewayAccountMode,
+    HostChargeReservation, HostChargeTargetId, HostChargeTargetRejection, HostChargeTargetSnapshot,
     HostChargeTargetTransition, HostChargeTargetTransitionOutcome, IdempotencyKey, PaymentAttempt,
     PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptKind, SubscriberId,
 };
 use thiserror::Error;
 
-use crate::host_error::{BoxError, RedactedHostErrorSource};
+use crate::{
+    attempts::{
+        AttemptReplayDisposition, attempt_replay_disposition,
+        find_payment_attempt_by_idempotency_in_transaction, prepared_replay_required_mode_changed,
+    },
+    host_error::{BoxError, RedactedHostErrorSource},
+};
 
 /// Value-redacted failure returned by the host charge-target store.
 #[derive(Debug)]
@@ -84,7 +90,11 @@ impl HostChargeTargetReservation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostChargeReservationDecision {
     Reserved(HostChargeTargetSnapshot),
-    IdempotentContender,
+    /// The target is already claimed by this idempotency key.
+    ///
+    /// The current snapshot is mandatory so the ledger can still reject a
+    /// same-key replay after host-owned economics changed.
+    IdempotentContender(HostChargeTargetSnapshot),
     Rejected {
         reason: syrup_rail::HostChargeTargetRejection,
     },
@@ -153,6 +163,13 @@ pub enum HostChargeSubmissionDecision {
 pub trait HostChargeTargetStore: Send + Sync {
     /// Locks and snapshots the target for replay/conflict preflight without
     /// changing host business state.
+    ///
+    /// A same-mode prepared replay invokes this callback again so its current
+    /// economics can be compared with the durable attempt. Terminal replay and
+    /// a prepared replay owned by another deployment mode skip it. When the
+    /// target is already claimed by the same idempotency key, return
+    /// [`HostChargeReservationDecision::IdempotentContender`] with its current
+    /// snapshot; the ledger still validates that snapshot.
     async fn preflight_target(
         &self,
         connection: &mut PgConnection,
@@ -165,12 +182,41 @@ pub trait HostChargeTargetStore: Send + Sync {
         reservation: &HostChargeTargetReservation,
     ) -> Result<HostChargeReservationDecision, HostChargeTargetError>;
 
-    async fn admit_submission(
+    /// Revalidates the target immediately before provider submission.
+    ///
+    /// This callback must be repeat-safe for the same attempt. A transient
+    /// control-plane failure can prove that the provider mutation was not
+    /// contacted, restore the canonical attempt to prepared state, and invoke
+    /// admission again on a same-key retry. Implementations should return the
+    /// same admitted snapshot while the target and expected charge are
+    /// unchanged and produce no additional observable side effect: do not
+    /// increment counters or append duplicate audit rows. One-shot paid/failed
+    /// business transitions belong in [`Self::apply_transition`].
+    async fn ensure_submission_admitted(
         &self,
         connection: &mut PgConnection,
         admission: &HostChargeSubmissionAdmission,
     ) -> Result<HostChargeSubmissionDecision, HostChargeTargetError>;
 
+    /// Applies one repeat-safe business transition keyed by its attempt.
+    ///
+    /// Return [`HostChargeTargetTransitionOutcome::ExactReplay`] when the same
+    /// transition was already applied. In particular,
+    /// [`syrup_rail::HostChargeTargetTransitionKind::ReleasedBeforeSubmission`]
+    /// releases a
+    /// claimed target after a determinate pre-submission failure and must not
+    /// be interpreted as a card decline.
+    ///
+    /// Application and reconciliation transactions ordinarily commit only when
+    /// this callback returns `Applied` or `ExactReplay`. One canonical replay
+    /// exception preserves the target-before-attempt lock order: if a `Paid`
+    /// callback returns `StaleTarget` or `Unchanged` and the subsequently locked
+    /// attempt is already approved, Syrup Rail returns that approved attempt.
+    /// This permits a later reversal to remain monotonic; implementations must
+    /// never move a reversed target back to paid. Other persistent refusals
+    /// intentionally leave the canonical attempt unresolved and require the
+    /// host to repair or explicitly reconcile its target state before retrying
+    /// cleanup.
     async fn apply_transition(
         &self,
         connection: &mut PgConnection,
@@ -202,6 +248,7 @@ pub enum HostChargePreflightOutcome {
 pub enum HostChargeReservationOutcome {
     Reserved(PaymentAttempt),
     Replay(PaymentAttempt),
+    GatewayAccountModeChanged,
     IdempotencyConflict,
     Rejected { reason: HostChargeTargetRejection },
 }
@@ -220,8 +267,48 @@ pub async fn preflight_host_charge_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     targets: &dyn HostChargeTargetStore,
     command: &ChargeHostTarget,
+    required_gateway_account_mode: GatewayAccountMode,
 ) -> Result<HostChargePreflightOutcome, HostChargeStoreError> {
     crate::attempts::set_enrollment_timeouts(transaction).await?;
+    // This first observation is intentionally lock-free. Canonical replay
+    // skips the host callback; unlike 0.3, an in-flight submitted attempt can
+    // be returned as a pending snapshot instead of waiting for its concurrent
+    // application transaction. Repairable review and wrong-mode prepared replay
+    // lock the attempt and return without taking a target lock; same-mode
+    // prepared work continues in the target -> attempt lock order for economics
+    // revalidation.
+    let observed = find_payment_attempt_by_idempotency_in_transaction(
+        transaction,
+        command.billing_scope_id(),
+        command.subscriber_id(),
+        command.idempotency_key(),
+    )
+    .await?;
+    if let Some(observed) = observed {
+        if !host_charge_attempt_matches_command(&observed, command, None) {
+            return Ok(HostChargePreflightOutcome::IdempotencyConflict);
+        }
+        let disposition = attempt_replay_disposition(&observed);
+        if disposition == AttemptReplayDisposition::ReturnCanonical {
+            return Ok(HostChargePreflightOutcome::Replay(Box::new(observed)));
+        }
+        if disposition == AttemptReplayDisposition::RepairUnsubmittedReview
+            || prepared_replay_required_mode_changed(&observed, required_gateway_account_mode)
+        {
+            let locked = crate::lock_payment_attempt_by_idempotency_in_transaction(
+                transaction,
+                command.billing_scope_id(),
+                command.subscriber_id(),
+                command.idempotency_key(),
+            )
+            .await?
+            .ok_or(HostChargeStoreError::InvalidState)?;
+            if !host_charge_attempt_matches_command(&locked, command, None) {
+                return Ok(HostChargePreflightOutcome::IdempotencyConflict);
+            }
+            return Ok(HostChargePreflightOutcome::Replay(Box::new(locked)));
+        }
+    }
     let target_reservation = HostChargeTargetReservation::new(
         command.billing_scope_id(),
         command.subscriber_id(),
@@ -238,40 +325,33 @@ pub async fn preflight_host_charge_in_transaction(
         command.idempotency_key(),
     )
     .await?;
-    let snapshot = match decision {
-        HostChargeReservationDecision::Reserved(snapshot) => snapshot,
-        HostChargeReservationDecision::IdempotentContender => {
-            let Some(existing) = existing else {
-                return Err(HostChargeStoreError::InvalidState);
-            };
-            return Ok(
-                if host_charge_attempt_matches_command(&existing, command, None) {
-                    HostChargePreflightOutcome::Replay(Box::new(existing))
-                } else {
-                    HostChargePreflightOutcome::IdempotencyConflict
-                },
-            );
+    Ok(match (decision, existing) {
+        (HostChargeReservationDecision::Reserved(snapshot), None) => {
+            HostChargePreflightOutcome::Continue(snapshot)
         }
-        HostChargeReservationDecision::Rejected { reason } => {
-            return Ok(match existing {
-                Some(existing) if host_charge_attempt_matches_command(&existing, command, None) => {
-                    HostChargePreflightOutcome::Replay(Box::new(existing))
-                }
-                Some(_) => HostChargePreflightOutcome::IdempotencyConflict,
-                None => HostChargePreflightOutcome::Rejected { reason },
-            });
+        (HostChargeReservationDecision::Reserved(snapshot), Some(existing))
+        | (HostChargeReservationDecision::IdempotentContender(snapshot), Some(existing)) => {
+            if host_charge_attempt_matches_command(&existing, command, Some(snapshot)) {
+                HostChargePreflightOutcome::Replay(Box::new(existing))
+            } else {
+                HostChargePreflightOutcome::IdempotencyConflict
+            }
         }
-    };
-    let Some(existing) = existing else {
-        return Ok(HostChargePreflightOutcome::Continue(snapshot));
-    };
-    Ok(
-        if host_charge_attempt_matches_command(&existing, command, Some(snapshot)) {
+        (HostChargeReservationDecision::IdempotentContender(_), None) => {
+            return Err(HostChargeStoreError::InvalidState);
+        }
+        (HostChargeReservationDecision::Rejected { .. }, Some(existing))
+            if host_charge_attempt_matches_command(&existing, command, None) =>
+        {
             HostChargePreflightOutcome::Replay(Box::new(existing))
-        } else {
+        }
+        (HostChargeReservationDecision::Rejected { .. }, Some(_)) => {
             HostChargePreflightOutcome::IdempotencyConflict
-        },
-    )
+        }
+        (HostChargeReservationDecision::Rejected { reason }, None) => {
+            HostChargePreflightOutcome::Rejected { reason }
+        }
+    })
 }
 
 pub async fn reserve_host_charge_in_transaction(
@@ -297,7 +377,7 @@ pub async fn reserve_host_charge_in_transaction(
         .await?;
     let snapshot = match decision {
         HostChargeReservationDecision::Reserved(snapshot) => snapshot,
-        HostChargeReservationDecision::IdempotentContender => {
+        HostChargeReservationDecision::IdempotentContender(snapshot) => {
             let existing = crate::lock_payment_attempt_by_idempotency_in_transaction(
                 transaction,
                 identity.billing_scope_id(),
@@ -307,10 +387,20 @@ pub async fn reserve_host_charge_in_transaction(
             .await?
             .ok_or(HostChargeStoreError::InvalidState)?;
             return Ok(
-                if host_charge_attempt_matches_reservation(&existing, reservation) {
-                    HostChargeReservationOutcome::Replay(existing)
-                } else {
+                if snapshot != reservation.snapshot()
+                    || !host_charge_attempt_matches_reservation_without_required_mode(
+                        &existing,
+                        reservation,
+                    )
+                {
                     HostChargeReservationOutcome::IdempotencyConflict
+                } else if prepared_replay_required_mode_changed(
+                    &existing,
+                    identity.required_gateway_account_mode(),
+                ) {
+                    HostChargeReservationOutcome::GatewayAccountModeChanged
+                } else {
+                    HostChargeReservationOutcome::Replay(existing)
                 },
             );
         }
@@ -331,10 +421,11 @@ pub async fn reserve_host_charge_in_transaction(
             attempt_kind, status, idempotency_key, request_fingerprint,
             amount_cents, currency, gateway_account_id,
             gateway_configuration_id, gateway_order_id,
-            billing_first_name, billing_last_name, billing_email
+            billing_first_name, billing_last_name, billing_email,
+            required_gateway_account_mode
         ) VALUES (
             $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
-            $7, $8, $9, $10, $11, $12, $13, $14
+            $7, $8, $9, $10, $11, $12, $13, $14, $15
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
@@ -353,6 +444,7 @@ pub async fn reserve_host_charge_in_transaction(
     .bind(request.billing_contact().first_name())
     .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
+    .bind(identity.required_gateway_account_mode().as_str())
     .execute(&mut **transaction)
     .await?;
     let attempt_id = if inserted.rows_affected() == 1 {
@@ -376,8 +468,11 @@ pub async fn reserve_host_charge_in_transaction(
     )
     .await?
     .ok_or(HostChargeStoreError::InvalidState)?;
-    if !host_charge_attempt_matches_reservation(&attempt, reservation) {
+    if !host_charge_attempt_matches_reservation_without_required_mode(&attempt, reservation) {
         return Ok(HostChargeReservationOutcome::IdempotencyConflict);
+    }
+    if prepared_replay_required_mode_changed(&attempt, identity.required_gateway_account_mode()) {
+        return Ok(HostChargeReservationOutcome::GatewayAccountModeChanged);
     }
     Ok(if inserted.rows_affected() == 1 {
         HostChargeReservationOutcome::Reserved(attempt)
@@ -394,6 +489,27 @@ pub async fn admit_host_charge_submission_in_transaction(
     crate::attempts::set_enrollment_timeouts(transaction).await?;
     let identity = reservation.identity();
     let target_id = reservation.snapshot().target_id();
+    // Observe without locking before entering the host callback. The callback
+    // owns the target -> attempt lock order, but it must never receive an
+    // admission assembled from a different durable attempt.
+    let observed = crate::find_payment_attempt_by_id_in_transaction(
+        transaction,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(HostChargeStoreError::InvalidState)?;
+    if !host_charge_attempt_matches_reservation_without_required_mode(&observed, reservation) {
+        return Err(HostChargeStoreError::InvalidState);
+    }
+    if observed.status() != syrup_rail::PaymentAttemptStatus::Pending
+        || observed.state().timestamps().submitted_at().is_some()
+    {
+        return Ok(HostChargeSubmissionOutcome::AlreadyAdmitted(observed));
+    }
+    if !host_charge_attempt_matches_reservation(&observed, reservation) {
+        return Err(HostChargeStoreError::InvalidState);
+    }
     let admission = HostChargeSubmissionAdmission::new(
         identity.billing_scope_id(),
         identity.subscriber_id(),
@@ -401,7 +517,30 @@ pub async fn admit_host_charge_submission_in_transaction(
         identity.attempt_id(),
         reservation.snapshot().charge(),
     );
-    let decision = targets.admit_submission(transaction, &admission).await?;
+    let decision = targets
+        .ensure_submission_admitted(transaction, &admission)
+        .await?;
+    // Lock and revalidate after the target callback. This preserves the
+    // documented lock order and makes the durable row, rather than the
+    // caller-built reservation, the authority for the transition.
+    let attempt = crate::attempts::lock_payment_attempt_by_id_on_connection(
+        transaction,
+        identity.billing_scope_id(),
+        identity.attempt_id(),
+    )
+    .await?
+    .ok_or(HostChargeStoreError::InvalidState)?;
+    if !host_charge_attempt_matches_reservation_without_required_mode(&attempt, reservation) {
+        return Err(HostChargeStoreError::InvalidState);
+    }
+    if attempt.status() != syrup_rail::PaymentAttemptStatus::Pending
+        || attempt.state().timestamps().submitted_at().is_some()
+    {
+        return Ok(HostChargeSubmissionOutcome::AlreadyAdmitted(attempt));
+    }
+    if !host_charge_attempt_matches_reservation(&attempt, reservation) {
+        return Err(HostChargeStoreError::InvalidState);
+    }
     let rejection = match decision {
         HostChargeSubmissionDecision::Admitted(snapshot) if snapshot == reservation.snapshot() => {
             None
@@ -428,6 +567,9 @@ pub async fn admit_host_charge_submission_in_transaction(
         .bind(target_id.as_uuid())
         .execute(&mut **transaction)
         .await?;
+        if updated.rows_affected() != 1 {
+            return Err(HostChargeStoreError::InvalidState);
+        }
         let attempt = crate::find_payment_attempt_by_id_in_transaction(
             transaction,
             identity.billing_scope_id(),
@@ -435,39 +577,10 @@ pub async fn admit_host_charge_submission_in_transaction(
         )
         .await?
         .ok_or(HostChargeStoreError::InvalidState)?;
-        return Ok(if updated.rows_affected() == 1 {
-            HostChargeSubmissionOutcome::Rejected { attempt, reason }
-        } else {
-            HostChargeSubmissionOutcome::AlreadyAdmitted(attempt)
-        });
+        return Ok(HostChargeSubmissionOutcome::Rejected { attempt, reason });
     }
-    let updated = sqlx::query(
-        r#"
-        UPDATE billing_payment_attempts
-        SET submitted_at = clock_timestamp(), updated_at = clock_timestamp()
-        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
-            AND host_charge_target_id = $4 AND attempt_kind = 'host_charge'
-            AND status = 'pending' AND submitted_at IS NULL
-        "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(target_id.as_uuid())
-    .execute(&mut **transaction)
-    .await?;
-    let attempt = crate::find_payment_attempt_by_id_in_transaction(
-        transaction,
-        identity.billing_scope_id(),
-        identity.attempt_id(),
-    )
-    .await?
-    .ok_or(HostChargeStoreError::InvalidState)?;
-    Ok(if updated.rows_affected() == 1 {
-        HostChargeSubmissionOutcome::Admitted(attempt)
-    } else {
-        HostChargeSubmissionOutcome::AlreadyAdmitted(attempt)
-    })
+    let attempt = crate::attempts::admit_prepared_attempt(transaction, &attempt).await?;
+    Ok(HostChargeSubmissionOutcome::Admitted(attempt))
 }
 
 fn host_charge_attempt_matches_command(
@@ -500,7 +613,7 @@ fn host_charge_attempt_matches_command(
         })
 }
 
-fn host_charge_attempt_matches_reservation(
+fn host_charge_attempt_matches_reservation_without_required_mode(
     attempt: &PaymentAttempt,
     reservation: &HostChargeReservation,
 ) -> bool {
@@ -518,6 +631,15 @@ fn host_charge_attempt_matches_reservation(
         && request.fingerprint() == requested.fingerprint()
         && request.amount() == requested.amount()
         && request.billing_contact() == requested.billing_contact()
+}
+
+pub(crate) fn host_charge_attempt_matches_reservation(
+    attempt: &PaymentAttempt,
+    reservation: &HostChargeReservation,
+) -> bool {
+    attempt.kind() == PaymentAttemptKind::HostCharge
+        && attempt.identity() == reservation.identity()
+        && attempt.request() == reservation.request()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -657,10 +779,11 @@ mod tests {
                     id, billing_scope_id, subscriber_id, host_charge_target_id,
                     attempt_kind, status, idempotency_key, request_fingerprint,
                     amount_cents, currency, gateway_account_id,
-                    gateway_configuration_id, gateway_order_id
+                    gateway_configuration_id, gateway_order_id,
+                    required_gateway_account_mode
                 ) VALUES (
                     $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
-                    100, 'USD', $7, $8, 'host-charge-test-order'
+                    100, 'USD', $7, $8, 'host-charge-test-order', 'live'
                 )
                 "#,
             )

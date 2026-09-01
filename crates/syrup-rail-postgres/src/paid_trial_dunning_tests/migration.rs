@@ -5,7 +5,9 @@ use syrup_rail::{
     SubscriptionRecoveryReservationRejection,
 };
 
-use crate::schema_contract::{V1_TO_V2_UPGRADE_SQL, assert_v2_conforms, assert_v3_conforms};
+use crate::schema_contract::{
+    V1_TO_V2_UPGRADE_SQL, assert_v2_conforms, assert_v3_conforms, assert_v4_conforms,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegacyRecoveryState {
@@ -47,7 +49,8 @@ struct LegacyRecoveryFixture {
 }
 
 #[tokio::test]
-async fn v1_active_recovery_authority_survives_v2_and_v3_cutovers() -> Result<(), Box<dyn Error>> {
+async fn v1_active_recovery_authority_survives_v2_v3_and_v4_cutovers() -> Result<(), Box<dyn Error>>
+{
     let database = TestDatabase::start_v1("pt_v1_recovery").await?;
     let result = async {
         let account = create_gateway_account(&database.pool, "nmi").await?;
@@ -71,6 +74,8 @@ async fn v1_active_recovery_authority_survives_v2_and_v3_cutovers() -> Result<()
         assert_v2_conforms(&database.pool).await?;
         database.upgrade_v2_to_v3().await?;
         assert_v3_conforms(&database.pool).await?;
+        database.upgrade_v3_to_v4().await?;
+        assert_v4_conforms(&database.pool).await?;
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let coordinator = TestCoordinator {
@@ -158,6 +163,7 @@ async fn v1_active_recovery_authority_survives_v2_and_v3_cutovers() -> Result<()
             &mut transaction,
             &fresh_command,
             &gateway,
+            GatewayAccountMode::Live,
         )
         .await?;
         transaction.rollback().await?;

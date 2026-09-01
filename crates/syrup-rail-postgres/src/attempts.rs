@@ -4,21 +4,22 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, CumulativeRefundCents,
-    CurrencyCode, DiscountClaimId, DiscountCodeId, GatewayAccountId, GatewayConfigurationId,
-    GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId, GatewayPaymentDescriptor,
-    GatewayPaymentMethodReference, GatewayProviderKey, GatewayTransactionId, HostChargeTargetId,
-    IdempotencyKey, LimitedDiscountMonths, Money, PaidTrialTerms, PaymentAttempt,
-    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptStatus,
-    PaymentAttemptTarget, PaymentAttemptTimestamps, PaymentMethodId, PaymentMethodUpdateSnapshot,
-    PaymentResolutionCode, PercentOffBasisPoints, PlanKey, PositiveDiscountCents,
-    ProcessorEvidence, RecurringSubscriptionTerms, SubscriberId, SubscriptionDiscountCode,
-    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
-    SubscriptionEnrollmentDiscountSnapshot, SubscriptionEnrollmentPreflightOutcome,
-    SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationOutcome,
-    SubscriptionEnrollmentReservationRejection, SubscriptionEnrollmentSubmissionOutcome,
-    SubscriptionEnrollmentSubmissionRejection, SubscriptionEnrollmentTermsVersion, SubscriptionId,
-    SubscriptionInitialApplication, SubscriptionOffer, SubscriptionPaymentMethodReplacement,
+    CurrencyCode, DiscountClaimId, DiscountCodeId, GatewayAccountId, GatewayAccountMode,
+    GatewayConfigurationId, GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId,
+    GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayProviderKey,
+    GatewayTransactionId, HostChargeTargetId, IdempotencyKey, LimitedDiscountMonths, Money,
+    PaidTrialTerms, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptLifecycle, PaymentAttemptRequest,
+    PaymentAttemptState, PaymentAttemptStatus, PaymentAttemptTarget, PaymentAttemptTimestamps,
+    PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentResolutionCode, PercentOffBasisPoints,
+    PlanKey, PositiveDiscountCents, ProcessorEvidence, RecurringSubscriptionTerms, SubscriberId,
+    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
+    SubscriptionDiscountSnapshot, SubscriptionEnrollmentDiscountSnapshot,
+    SubscriptionEnrollmentPreflightOutcome, SubscriptionEnrollmentReservation,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
+    SubscriptionEnrollmentSubmissionOutcome, SubscriptionEnrollmentSubmissionRejection,
+    SubscriptionEnrollmentTermsVersion, SubscriptionId, SubscriptionInitialApplication,
+    SubscriptionOffer, SubscriptionPaymentMethodReplacement,
     SubscriptionPaymentMethodReplacementLockedTerms,
     SubscriptionPaymentMethodReplacementPreflightOutcome,
     SubscriptionPaymentMethodReplacementRejection,
@@ -59,6 +60,8 @@ pub use payment_method_replacement::{
     preflight_subscription_payment_method_replacement_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
 };
+pub(crate) use persistence::find_payment_attempt_by_idempotency_in_transaction;
+use persistence::map_subscription_persistence_error;
 pub(crate) use persistence::{
     PAYMENT_ATTEMPT_SELECT, find_payment_attempt_by_id_on_connection,
     lock_payment_attempt_by_id_on_connection, payment_attempt_from_row,
@@ -66,10 +69,6 @@ pub(crate) use persistence::{
 };
 pub use persistence::{
     find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,
-};
-use persistence::{
-    find_payment_attempt_by_idempotency, insert_subscription_charge_attempt,
-    lock_payment_attempt_by_idempotency, map_subscription_persistence_error,
 };
 pub use recovery::{
     admit_subscription_recovery_submission_in_transaction,
@@ -86,12 +85,14 @@ pub(crate) use shared::{
     blocking_payment_method_update_exists, expire_stale_initial_attempts,
     fail_stale_unsubmitted_payment_method_updates, fail_stale_unsubmitted_subscription_charges,
     lock_initial_attempt_rows, lock_initial_charge_rows, lock_subscription_aggregate,
-    set_enrollment_timeouts, try_lock_subscription_aggregate,
+    prepared_replay_required_mode_changed, set_enrollment_timeouts,
+    try_lock_subscription_aggregate,
 };
+use transitions::reject_prepared_attempt;
 pub(crate) use transitions::{
-    AttemptApproval, AttemptResolutionStatus, AttemptTransition, persist_attempt_transition,
+    AttemptApproval, AttemptResolutionStatus, AttemptTransition, admit_prepared_attempt,
+    persist_attempt_transition,
 };
-use transitions::{admit_prepared_attempt, reject_prepared_attempt};
 
 const INVALID_ATTEMPT_STATE: &str = "canonical payment attempt state is invalid";
 #[derive(Error)]
