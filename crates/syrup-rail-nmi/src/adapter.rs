@@ -212,7 +212,7 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
     let diagnostics = parts
         .diagnostics
         .iter()
-        .filter_map(map_payment_diagnostic)
+        .map(map_payment_diagnostic)
         .collect();
     let mut status = map_payment_status(parts.status);
     let transaction_id = validated_transaction_id(parts.transaction_id);
@@ -253,14 +253,36 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
     GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics)
 }
 
-fn map_payment_diagnostic(
-    diagnostic: &PaymentOutcomeDiagnostic,
-) -> Option<GatewayPaymentDiagnostic> {
+fn map_payment_diagnostic(diagnostic: &PaymentOutcomeDiagnostic) -> GatewayPaymentDiagnostic {
     match diagnostic {
-        PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
-            Some(GatewayPaymentDiagnostic::ProcessorReportedDuplicate)
+        PaymentOutcomeDiagnostic::MissingTransactionIdentifier => {
+            GatewayPaymentDiagnostic::MissingTransactionIdentifier
         }
-        _ => None,
+        PaymentOutcomeDiagnostic::MissingCustomerVaultIdentifier => {
+            GatewayPaymentDiagnostic::MissingPaymentMethodReference
+        }
+        PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier => {
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier
+        }
+        PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier => {
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference
+        }
+        PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField => {
+            GatewayPaymentDiagnostic::InvalidOrConflictingDecisionField
+        }
+        PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate
+        }
+        PaymentOutcomeDiagnostic::ConflictingDecisionEvidence => {
+            GatewayPaymentDiagnostic::ConflictingDecisionEvidence
+        }
+        PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence => {
+            GatewayPaymentDiagnostic::UnrecognizedDecisionEvidence
+        }
+        PaymentOutcomeDiagnostic::MissingDecisionEvidence => {
+            GatewayPaymentDiagnostic::MissingDecisionEvidence
+        }
+        _ => GatewayPaymentDiagnostic::UnmappedProviderDiagnostic,
     }
 }
 
@@ -591,6 +613,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn every_payment_anomaly_crosses_the_provider_neutral_boundary() {
+        let mappings = [
+            (
+                PaymentOutcomeDiagnostic::MissingTransactionIdentifier,
+                GatewayPaymentDiagnostic::MissingTransactionIdentifier,
+            ),
+            (
+                PaymentOutcomeDiagnostic::MissingCustomerVaultIdentifier,
+                GatewayPaymentDiagnostic::MissingPaymentMethodReference,
+            ),
+            (
+                PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+                GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            ),
+            (
+                PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier,
+                GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
+            ),
+            (
+                PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+                GatewayPaymentDiagnostic::InvalidOrConflictingDecisionField,
+            ),
+            (
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+                GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+            ),
+            (
+                PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+                GatewayPaymentDiagnostic::ConflictingDecisionEvidence,
+            ),
+            (
+                PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence,
+                GatewayPaymentDiagnostic::UnrecognizedDecisionEvidence,
+            ),
+            (
+                PaymentOutcomeDiagnostic::MissingDecisionEvidence,
+                GatewayPaymentDiagnostic::MissingDecisionEvidence,
+            ),
+        ];
+
+        for (source, expected) in mappings {
+            assert_eq!(map_payment_diagnostic(&source), expected);
+        }
+    }
+
     #[tokio::test]
     async fn parsed_processor_duplicate_reaches_the_gateway_boundary() {
         let (gateway, server) = gateway_with_response(
@@ -620,7 +688,10 @@ mod tests {
         assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
         assert_eq!(
             outcome.diagnostics(),
-            &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+            &[
+                GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+                GatewayPaymentDiagnostic::ConflictingDecisionEvidence,
+            ]
         );
         assert_eq!(
             outcome.response_code().map(GatewayDiagnostic::expose),
@@ -630,6 +701,70 @@ mod tests {
             .await
             .expect("test server should not hang")
             .expect("test server assertions should pass");
+    }
+
+    #[tokio::test]
+    async fn parsed_terminal_failure_with_empty_identity_stays_terminal() {
+        let (gateway, server) = gateway_with_response(
+            r#"{"response":"3","response_code":"300","response_text":"Transaction was rejected by gateway.","id":""}"#,
+        )
+        .await;
+        let attempt_id: PaymentAttemptId = "00000000-0000-0000-0000-000000000300".parse().unwrap();
+        let request = GatewaySaleRequest::new(
+            ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap(),
+            GatewayOrderId::from_generated_attempt(
+                "ck_order_00000000000000000000000000000300",
+                attempt_id,
+            )
+            .unwrap(),
+            GatewaySaleIntent::OneTime {
+                payment_token: PaymentToken::new("tok_terminal_failure").unwrap(),
+            },
+            None,
+        );
+
+        let outcome = gateway
+            .sale(request)
+            .await
+            .expect("300 should be an outcome");
+
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Failed);
+        assert!(outcome.transaction_id().is_none());
+        assert!(outcome.diagnostics().is_empty());
+        server.await.expect("test server assertions should pass");
+    }
+
+    #[tokio::test]
+    async fn parsed_conflicting_terminal_evidence_remains_reconcilable() {
+        let (gateway, server) = gateway_with_response(
+            r#"{"response":"3","response_code":"300","status":"approved","id":""}"#,
+        )
+        .await;
+        let attempt_id: PaymentAttemptId = "00000000-0000-0000-0000-000000000301".parse().unwrap();
+        let request = GatewaySaleRequest::new(
+            ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap(),
+            GatewayOrderId::from_generated_attempt(
+                "ck_order_00000000000000000000000000000301",
+                attempt_id,
+            )
+            .unwrap(),
+            GatewaySaleIntent::OneTime {
+                payment_token: PaymentToken::new("tok_conflicting_failure").unwrap(),
+            },
+            None,
+        );
+
+        let outcome = gateway
+            .sale(request)
+            .await
+            .expect("conflicting evidence should be an outcome");
+
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+        assert_eq!(
+            outcome.diagnostics(),
+            &[GatewayPaymentDiagnostic::ConflictingDecisionEvidence]
+        );
+        server.await.expect("test server assertions should pass");
     }
 
     #[test]

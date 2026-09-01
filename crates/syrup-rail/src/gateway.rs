@@ -294,11 +294,31 @@ pub enum GatewayPaymentStatus {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum GatewayPaymentDiagnostic {
+    /// An approved processor decision did not include a transaction identity.
+    MissingTransactionIdentifier,
+    /// An approved processor decision did not include the requested stored
+    /// payment-method identity.
+    MissingPaymentMethodReference,
+    /// Transaction-identity evidence was malformed or contradictory.
+    InvalidOrConflictingTransactionIdentifier,
+    /// Stored-payment-method identity evidence was malformed or contradictory.
+    InvalidOrConflictingPaymentMethodReference,
+    /// One processor decision field was malformed or internally contradictory.
+    InvalidOrConflictingDecisionField,
     /// The processor reported the payment as a duplicate.
     ///
     /// This does not prove that the current attempt was submitted or identify
     /// an earlier transaction. Reconcile the durable attempt before retrying.
     ProcessorReportedDuplicate,
+    /// Individually recognized processor decision fields disagreed.
+    ConflictingDecisionEvidence,
+    /// A processor decision field contained unrecognized vocabulary.
+    UnrecognizedDecisionEvidence,
+    /// The processor response contained no recognizable payment decision.
+    MissingDecisionEvidence,
+    /// The provider adapter received a newer payload-free diagnostic category
+    /// that the current provider-neutral contract does not yet name.
+    UnmappedProviderDiagnostic,
 }
 
 #[derive(Clone, Eq, PartialEq)]
