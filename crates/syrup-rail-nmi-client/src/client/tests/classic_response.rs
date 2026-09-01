@@ -223,6 +223,36 @@ fn classic_payment_outcome_preserves_vault_disabled_failure() {
 }
 
 #[test]
+fn classic_terminal_response_codes_accept_an_empty_transaction_identifier() {
+    for response_code in ["300", "400", "410", "411", "440", "441", "460", "461"] {
+        let response = format!(
+            "response=3&responsetext=Terminal+gateway+failure&response_code={response_code}&transactionid="
+        );
+        let outcome = classic_payment_outcome_from_form(&response)
+            .expect("an empty identifier cannot overturn a terminal gateway decision");
+
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{response_code}");
+        assert_eq!(outcome.transaction_id, None, "{response_code}");
+        assert!(outcome.diagnostics.is_empty(), "{response_code}");
+    }
+}
+
+#[test]
+fn classic_terminal_response_rejects_absent_and_present_transaction_aliases() {
+    let outcome = classic_payment_outcome_from_form(
+        "response=3&response_code=300&transactionid=&transaction_id=txn_conflicting_failure",
+    )
+    .expect("conflicting terminal response identity should remain reconcilable");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(outcome.transaction_id, None);
+    assert_eq!(
+        outcome.diagnostics,
+        vec![PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier]
+    );
+}
+
+#[test]
 fn classic_noncanonical_301_evidence_is_order_independent_and_reconcilable() {
     for response in [
         "response=3&response_code=301&responsecode=%2B0301",
@@ -265,7 +295,7 @@ fn classic_duplicate_response_code_requires_reconciliation() {
 }
 
 #[test]
-fn classic_duplicate_response_keeps_malformed_identity_diagnostic() {
+fn classic_duplicate_response_treats_an_empty_identity_as_absent() {
     let outcome = classic_payment_outcome_from_form(
         "response=3&responsetext=Duplicate+transaction&response_code=430&transactionid=",
     )
@@ -277,7 +307,6 @@ fn classic_duplicate_response_keeps_malformed_identity_diagnostic() {
         vec![
             PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
             PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
-            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
         ]
     );
 }

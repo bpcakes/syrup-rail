@@ -235,7 +235,7 @@ fn collect_classic_transaction_identifier(
             );
             outcome.record_identifier(
                 ScalarOccurrence::Scalar(Cow::Borrowed(value)),
-                IdentifierPresence::Required,
+                IdentifierPresence::ForegroundRequired,
             );
         }
     }

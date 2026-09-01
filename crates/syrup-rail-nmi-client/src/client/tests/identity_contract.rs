@@ -28,6 +28,33 @@ async fn public_sale_downgrades_approval_without_transaction_identity() {
 }
 
 #[tokio::test]
+async fn public_sale_treats_an_empty_approved_transaction_identity_as_missing() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 200 OK",
+        "application/json",
+        br#"{"status":"approved","id":""}"#.to_vec(),
+    )
+    .await;
+
+    let outcome = client
+        .sale(test_sale_request(PaymentSource::PaymentToken(
+            "tok_empty_transaction".to_owned(),
+        )))
+        .await
+        .expect("an empty approved identity is an anomalous outcome");
+
+    assert_eq!(outcome.status(), PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.diagnostics(),
+        &[PaymentOutcomeDiagnostic::MissingTransactionIdentifier]
+    );
+    assert!(outcome.into_parts().transaction_id.is_none());
+    let request = request_receiver.await.expect("request should be captured");
+    assert!(request.starts_with("POST /api/v5/payments/sale HTTP/1.1"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
 async fn public_vault_creation_sale_requires_transaction_and_vault_identities() {
     let (client, request_receiver, server) = spawn_capturing_server(
         "HTTP/1.1 200 OK",

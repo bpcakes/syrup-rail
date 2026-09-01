@@ -136,7 +136,7 @@ pub(in crate::client) fn payment_outcome_from_json(
         collect_json_identifier(
             value,
             JSON_TRANSACTION_ID_PATHS,
-            IdentifierPresence::Required,
+            IdentifierPresence::ForegroundRequired,
         ),
         customer_vault_id,
         &mut diagnostics,

@@ -29,6 +29,10 @@ pub(in crate::client) enum ScalarOccurrence<'a> {
 #[derive(Clone, Copy)]
 pub(super) enum IdentifierPresence {
     Required,
+    /// Foreground mutation responses may explicitly report that no
+    /// transaction identity was created. Public operation policy separately
+    /// requires an identity for approved outcomes.
+    ForegroundRequired,
     Optional,
 }
 
@@ -38,6 +42,7 @@ pub(in crate::client) struct ScalarOccurrenceCollector {
     comparison_values: Vec<String>,
     exact_wire_spellings: Vec<Option<String>>,
     saw_occurrence: bool,
+    saw_absent_required_identifier: bool,
     saw_bounded_occurrence: bool,
     invalid: bool,
 }
@@ -81,6 +86,19 @@ impl ScalarOccurrenceCollector {
             ScalarOccurrence::Null if matches!(presence, IdentifierPresence::Optional) => {}
             ScalarOccurrence::Scalar(raw) | ScalarOccurrence::CoercedScalar(raw)
                 if matches!(presence, IdentifierPresence::Optional) && raw.trim().is_empty() => {}
+            ScalarOccurrence::Null
+                if matches!(presence, IdentifierPresence::ForegroundRequired) =>
+            {
+                self.saw_occurrence = true;
+                self.saw_absent_required_identifier = true;
+            }
+            ScalarOccurrence::Scalar(raw) | ScalarOccurrence::CoercedScalar(raw)
+                if matches!(presence, IdentifierPresence::ForegroundRequired)
+                    && raw.trim().is_empty() =>
+            {
+                self.saw_occurrence = true;
+                self.saw_absent_required_identifier = true;
+            }
             ScalarOccurrence::Null => self.record(ScalarOccurrence::InvalidShape),
             occurrence => self.record(occurrence),
         }
@@ -112,10 +130,9 @@ impl ScalarOccurrenceCollector {
     }
 
     pub(super) fn finish_normalized(self, normalize: fn(&str) -> String) -> ResolvedScalar {
-        if self.invalid {
+        if self.invalid || (self.saw_absent_required_identifier && !self.values.is_empty()) {
             ResolvedScalar::InvalidOrConflicting
         } else if self.values.is_empty() {
-            debug_assert!(!self.saw_occurrence);
             ResolvedScalar::Missing
         } else {
             let selected = &self.values[0];
