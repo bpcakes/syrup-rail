@@ -5,8 +5,8 @@ gateway and lifecycle-evidence contracts.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.0"
-syrup-rail-nmi = "0.5.0"
+syrup-rail = "0.5.1"
+syrup-rail-nmi = "0.5.1"
 ```
 
 The adapter re-exports the matching raw client as
@@ -29,14 +29,16 @@ An NMI duplicate response code `430` remains an unknown outcome requiring exact
 reconciliation; the raw client exposes
 `DuplicateTransactionAtProcessor`, and the adapter maps it to the
 provider-neutral `GatewayPaymentDiagnostic::ProcessorReportedDuplicate` on
-`GatewayPaymentOutcome`. Foreground `syrup-rail-postgres` subscription and
-host-charge results copy it to `gateway_diagnostics()`, so hosts can route on
-the typed fact without parsing provider text. Those result diagnostics describe
-the observation applied by the current call; they are not separately persisted
-and a later attempt replay may not contain them. The exact response code remains
-durable processor evidence. A current diagnostic never overrides the returned
-durable attempt status or evidence; hosts must use those authoritative fields
-when deciding whether submission is complete or reconciliation is required.
+`GatewayPaymentOutcome`. Every other raw payment-evidence anomaly also crosses
+that boundary as a payload-free provider-neutral diagnostic, so hosts never
+need to reconstruct decision safety from provider response text. Foreground
+`syrup-rail-postgres` subscription and host-charge results copy diagnostics to
+`gateway_diagnostics()`. Those result diagnostics describe the observation
+applied by the current call; they are not separately persisted and a later
+attempt replay may not contain them. Exact response fields remain durable
+processor evidence. A current diagnostic never overrides the returned durable
+attempt status or evidence; hosts must use those authoritative fields when
+deciding whether submission is complete or reconciliation is required.
 The duplicate is not mapped to a card decline or known non-submission. Keep the
 processor duplicate window shorter than the shortest normal billing or renewal
 interval and the minimum replacement-charge interval, then wait out that window

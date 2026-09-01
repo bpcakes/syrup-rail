@@ -4,6 +4,29 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-01
+
+### Fixed
+
+- Preserve NMI's authoritative terminal payment decisions when a foreground
+  response explicitly supplies an empty transaction identifier. NMI response
+  codes `300`, `400`, `410`, `411`, `440`, `441`, `460`, and `461` now remain
+  `Failed` instead of becoming indefinitely reconcilable. Approved responses
+  with an empty identifier still fail closed through the public operation's
+  required-identity check, conflicting empty and non-empty aliases remain
+  `Unknown`, and exact-query XML retains its stricter identifier contract.
+- Preserve every payload-free NMI payment anomaly across the provider-neutral
+  gateway boundary. Missing, malformed, conflicting, and unrecognized decision
+  or identifier evidence no longer disappears before host policy can inspect
+  `GatewayPaymentOutcome::diagnostics()`.
+
+### Action required for hosts
+
+- Remove host-side parsing or reclassification of NMI response strings when
+  upgrading. Use `GatewayPaymentOutcome::status()` as the authoritative
+  decision and typed `GatewayPaymentDiagnostic` values for anomaly routing.
+  The diagnostic enum remains non-exhaustive; retain a wildcard match arm.
+
 ## [0.5.0] - 2026-08-28
 
 ### Fixed
