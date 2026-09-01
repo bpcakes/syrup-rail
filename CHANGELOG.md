@@ -4,6 +4,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-01
+
 ### Fixed
 
 - Make the retained schema-v4 runtime assertion reject incompatible live
@@ -76,7 +78,7 @@ All notable changes to the Syrup Rail crates are documented in this file.
   run `schema/v5/audit_incompatible_attestations_from_v4.sql` through an
   authorized operator process to identify the affected internal rows without
   exposing unnecessary provider or presentation evidence. Rehearse the exact
-  upgrade artifact on representative data, drain schema-v3 billing traffic,
+  upgrade artifact on representative data, drain schema-v4 billing traffic,
   stop every v4 writer, and apply `schema/v5/upgrade_from_v4.sql` in one
   host-owned transaction. Its validated CHECK replacement scans the retained
   table under `ACCESS EXCLUSIVE`; size the maintenance window and configure
