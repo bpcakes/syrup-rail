@@ -143,10 +143,12 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::UnresolvedProcessorCharge) => Rejected,
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged) => Conflict,
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::ReservationRejected(SubscriptionEnrollmentReservationRejection::AttemptInProgress) => Rejected,
         SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::BillingStateChanged) => Conflict,
         SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::EnrollmentTermsChanged) => Conflict,
         SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::SubmissionRejected(SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::TargetUnavailable) => Rejected,
         SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::ChargeChanged) => Conflict,
         SubscriptionBillingServiceError::HostChargeReservationRejected(HostChargeTargetRejection::LedgerUnsafe) => Rejected,
@@ -158,6 +160,7 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
         SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::AttemptInProgress) => Rejected,
         SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::PaymentMethodUpdateInProgress) => Rejected,
         SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::RecoveryReservationRejected(SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection::BillingStateChanged) => Conflict,
         SubscriptionBillingServiceError::RecoverySubmissionRejected(SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged) => Conflict,
         SubscriptionBillingServiceError::RenewalReservationRejected(SubscriptionRenewalReservationRejection::SubscriptionNotFound) => Rejected,
@@ -171,13 +174,22 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
         SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::ChargeAttemptInProgress) => Rejected,
         SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::PaymentMethodUpdateInProgress) => Rejected,
         SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::GatewayConfigurationChanged) => Conflict,
+        SubscriptionBillingServiceError::PaymentMethodReplacementReservationRejected(SubscriptionPaymentMethodReplacementRejection::GatewayAccountModeChanged) => Conflict,
         SubscriptionBillingServiceError::PaymentMethodReplacementSubmissionRejected(SubscriptionPaymentMethodReplacementSubmissionRejection::BillingStateChanged) => Conflict,
         SubscriptionBillingServiceError::PaymentMethodReplacementSubmissionRejected(SubscriptionPaymentMethodReplacementSubmissionRejection::GatewayConfigurationChanged) => Conflict,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::RequestRejected(GatewayDiagnostic::new("test"))) => Rejected,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Malformed(GatewayDiagnostic::new("test"))) => Internal,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Configuration(GatewayDiagnostic::new("test"))) => Misconfigured,
-        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::Unavailable(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::NotTransmitted(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
         SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::RateLimited(GatewayDiagnostic::new("test"))) => TemporarilyUnavailable,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::AccountModeMismatch {
+            required: GatewayAccountMode::Live,
+            observed: GatewayAccountMode::Test,
+            detail: GatewayDiagnostic::new("test"),
+        }) => Misconfigured,
+        SubscriptionBillingServiceError::GatewayNotSubmitted(GatewayNotSubmittedError::AccountModeVerification(
+            GatewayError::Unavailable(GatewayDiagnostic::new("test")),
+        )) => TemporarilyUnavailable,
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::RequestRejected(GatewayDiagnostic::new("test"))) => Rejected,
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Malformed(GatewayDiagnostic::new("test"))) => Internal,
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Configuration(GatewayDiagnostic::new("test"))) => Misconfigured,
@@ -255,7 +267,7 @@ fn service_error_retry_helpers_preserve_exact_admission_delay_only() {
     }
 
     let unavailable = SubscriptionBillingServiceError::GatewayNotSubmitted(
-        GatewayNotSubmittedError::Unavailable(GatewayDiagnostic::new("test")),
+        GatewayNotSubmittedError::NotTransmitted(GatewayDiagnostic::new("test")),
     );
     assert!(unavailable.is_retryable());
     assert_eq!(unavailable.retry_after(), None);
@@ -290,7 +302,7 @@ fn subscriber_admission_mapping_preserves_each_error_variant() {
 }
 
 #[test]
-fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
+fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
     for (scope, code, detail) in [
         (
             GatewayMutationCooldownScope::Account,
@@ -303,33 +315,30 @@ fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
             "gateway provider cooldown is active",
         ),
     ] {
-        let failure = GatewayReadinessFailure::for_cooldown(scope);
-        assert_eq!(failure.resolution_code(), code);
-        assert!(failure.cooldown().is_none());
-        assert_eq!(failure.cooldown_error_scope(), Some(scope));
-        assert_eq!(
-            failure.condition().is_none(),
-            scope == GatewayMutationCooldownScope::Provider
-        );
+        let failure = SubscriberReadinessFailure::Cooldown(scope);
+        let policy = failure.policy();
+        assert_eq!(policy.resolution_code(), code);
+        assert!(policy.cooldown().is_none());
+        assert_eq!(policy.cooldown_error_scope(), Some(scope));
         assert_eq!(failure.into_detail().expose(), detail);
     }
 
-    let provider = GatewayReadinessFailure::ProviderRateLimited(GatewayDiagnostic::new(
-        "provider asked to retry later",
+    let provider = SubscriberReadinessFailure::Gateway(GatewayError::RateLimited(
+        GatewayDiagnostic::new("provider asked to retry later"),
     ));
+    let policy = provider.policy();
     assert_eq!(
-        provider.resolution_code(),
+        policy.resolution_code(),
         PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission
     );
     assert!(matches!(
-        provider.cooldown(),
+        policy.cooldown(),
         Some(RateLimitCooldown::Provider)
     ));
     assert_eq!(
-        provider.cooldown_error_scope(),
+        policy.cooldown_error_scope(),
         Some(GatewayMutationCooldownScope::Provider)
     );
-    assert!(provider.condition().is_none());
     assert_eq!(
         provider.into_detail().expose(),
         "provider asked to retry later"
@@ -354,158 +363,89 @@ fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         ),
     ] {
         let detail = error.detail().clone();
-        let failure = GatewayReadinessFailure::Gateway(error);
-        assert_eq!(failure.resolution_code(), code);
-        assert!(failure.gateway_error().is_some());
-        assert!(failure.cooldown().is_none());
-        assert!(failure.cooldown_error_scope().is_none());
-        assert!(failure.condition().is_some());
+        let failure = SubscriberReadinessFailure::Gateway(error);
+        let policy = failure.policy();
+        assert_eq!(policy.resolution_code(), code);
         assert_eq!(
-            failure.preserves_prepared_attempt_for_retry(),
+            GatewayNotSubmittedPolicy::for_readiness_error(
+                &failure.gateway_error().expect("gateway error is retained")
+            )
+            .resolution_code(),
+            code
+        );
+        assert!(policy.cooldown().is_none());
+        assert!(policy.cooldown_error_scope().is_none());
+        let gateway_error = failure.gateway_error().expect("gateway error is retained");
+        assert_eq!(
+            GatewayNotSubmittedPolicy::for_readiness_error(&gateway_error)
+                .restores_prepared_attempt_when_supported(),
             code == PaymentResolutionCode::GatewayUnavailableBeforeSubmission
         );
         assert_eq!(failure.into_detail().expose(), detail.expose());
     }
 
-    let readiness = GatewayReadinessFailure::LiveModeUnavailable;
-    assert_eq!(
-        readiness.resolution_code(),
-        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
-    );
-    assert!(readiness.cooldown().is_none());
-    assert!(readiness.cooldown_error_scope().is_none());
-    assert!(readiness.condition().is_some());
-    assert_eq!(readiness.into_detail().expose(), LIVE_READINESS_FAILED_TEXT);
-}
-
-#[test]
-fn gateway_readiness_classifier_covers_account_modes_and_every_gateway_error() {
-    assert!(GatewayReadinessFailure::from_account_mode(Ok(GatewayAccountMode::Live)).is_none());
-
-    let test_mode = GatewayReadinessFailure::from_account_mode(Ok(GatewayAccountMode::Test))
-        .expect("test mode is not ready for a live mutation");
-    assert_eq!(
-        test_mode.resolution_code(),
-        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
-    );
-    assert!(test_mode.gateway_error().is_none());
-    assert!(matches!(
-        test_mode.unreserved_gateway_error(),
-        Some(GatewayError::Configuration(_))
-    ));
-
-    for (result, code, retryable, cooldown_scope) in [
+    for (required, code, detail) in [
         (
-            Err(GatewayError::RequestRejected(GatewayDiagnostic::new(
-                "request rejected",
-            ))),
-            PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission,
-            false,
-            None,
+            GatewayAccountMode::Live,
+            PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission,
+            "Payment was not submitted because the payment processor account mode did not match this deployment.",
         ),
         (
-            Err(GatewayError::Malformed(GatewayDiagnostic::new(
-                "malformed response",
-            ))),
-            PaymentResolutionCode::GatewayMalformedBeforeSubmission,
-            false,
-            None,
-        ),
-        (
-            Err(GatewayError::Configuration(GatewayDiagnostic::new(
-                "bad configuration",
-            ))),
-            PaymentResolutionCode::GatewayConfigurationBeforeSubmission,
-            false,
-            None,
-        ),
-        (
-            Err(GatewayError::Unavailable(GatewayDiagnostic::new(
-                "transport unavailable",
-            ))),
-            PaymentResolutionCode::GatewayUnavailableBeforeSubmission,
-            true,
-            None,
-        ),
-        (
-            Err(GatewayError::RateLimited(GatewayDiagnostic::new(
-                "provider asked to retry later",
-            ))),
-            PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
-            false,
-            Some(GatewayMutationCooldownScope::Provider),
+            GatewayAccountMode::Test,
+            PaymentResolutionCode::GatewayTestReadinessFailedBeforeSubmission,
+            "Payment was not submitted because the payment processor account mode did not match this deployment.",
         ),
     ] {
-        let failure = GatewayReadinessFailure::from_account_mode(result)
-            .expect("every gateway error is a readiness failure");
-        assert_eq!(failure.resolution_code(), code);
-        assert_eq!(failure.preserves_prepared_attempt_for_retry(), retryable);
-        assert_eq!(failure.cooldown_error_scope(), cooldown_scope);
-        assert_eq!(
-            failure.cooldown().is_some(),
-            cooldown_scope == Some(GatewayMutationCooldownScope::Provider)
-        );
-        assert_eq!(failure.gateway_error().is_some(), cooldown_scope.is_none());
+        let readiness = SubscriberReadinessFailure::AccountMode(required);
+        let policy = readiness.policy();
+        assert_eq!(policy.resolution_code(), code);
+        assert!(policy.cooldown().is_none());
+        assert!(policy.cooldown_error_scope().is_none());
+        assert_eq!(readiness.into_detail().expose(), detail);
     }
 }
 
 #[test]
-fn gateway_account_identity_requires_every_resolved_component() {
+fn expected_gateway_identity_requires_every_resolved_component() {
     let provider_key = GatewayProviderKey::new("nmi").expect("valid provider key");
-    let gateway_account_id = GatewayAccountId::new(uuid::Uuid::from_u128(1));
+    let account = GatewayAccountSnapshot {
+        account_id: GatewayAccountId::new(uuid::Uuid::from_u128(1)),
+        provider_key: provider_key.clone(),
+    };
     let billing_scope_id = BillingScopeId::new(uuid::Uuid::from_u128(2));
     let gateway_configuration_id =
         syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(3));
-    let expected = GatewayAccountIdentity::new(
-        billing_scope_id,
-        gateway_account_id,
-        provider_key.clone(),
-        gateway_configuration_id,
-    );
+    let expected =
+        ExpectedGatewayIdentity::for_account(billing_scope_id, gateway_configuration_id, &account);
 
-    assert_eq!(
-        expected,
-        GatewayAccountIdentity::new(
-            billing_scope_id,
-            gateway_account_id,
-            provider_key.clone(),
-            gateway_configuration_id,
-        )
-    );
-    assert_ne!(
-        expected,
-        GatewayAccountIdentity::new(
-            BillingScopeId::new(uuid::Uuid::from_u128(4)),
-            gateway_account_id,
-            provider_key.clone(),
-            gateway_configuration_id,
-        )
-    );
-    assert_ne!(
-        expected,
-        GatewayAccountIdentity::new(
-            billing_scope_id,
-            GatewayAccountId::new(uuid::Uuid::from_u128(5)),
-            provider_key.clone(),
-            gateway_configuration_id,
-        )
-    );
-    assert_ne!(
-        expected,
-        GatewayAccountIdentity::new(
-            billing_scope_id,
-            gateway_account_id,
-            provider_key.clone(),
-            syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(6)),
-        )
-    );
-    assert_ne!(
-        expected,
-        GatewayAccountIdentity::new(
-            billing_scope_id,
-            gateway_account_id,
-            GatewayProviderKey::new("other_gateway").expect("valid provider key"),
-            gateway_configuration_id,
-        )
-    );
+    assert!(expected.matches_components(
+        billing_scope_id,
+        account.account_id,
+        gateway_configuration_id,
+        &provider_key,
+    ));
+    assert!(!expected.matches_components(
+        BillingScopeId::new(uuid::Uuid::from_u128(4)),
+        account.account_id,
+        gateway_configuration_id,
+        &provider_key,
+    ));
+    assert!(!expected.matches_components(
+        billing_scope_id,
+        GatewayAccountId::new(uuid::Uuid::from_u128(5)),
+        gateway_configuration_id,
+        &provider_key,
+    ));
+    assert!(!expected.matches_components(
+        billing_scope_id,
+        account.account_id,
+        syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(6)),
+        &provider_key,
+    ));
+    assert!(!expected.matches_components(
+        billing_scope_id,
+        account.account_id,
+        gateway_configuration_id,
+        &GatewayProviderKey::new("other_gateway").expect("valid provider key"),
+    ));
 }

@@ -198,19 +198,15 @@ slug_id!(PlanKey);
 slug_id!(GatewayProviderKey);
 slug_id!(GatewayLifecycleCursorKey);
 
-/// Exact host and provider identity of one configured gateway account.
-///
-/// The value travels intact across persistence and resolver boundaries so a
-/// caller cannot accidentally combine components from different accounts.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GatewayAccountIdentity {
+pub struct GatewayAccountRegistration {
     billing_scope_id: BillingScopeId,
     gateway_account_id: GatewayAccountId,
     provider_key: GatewayProviderKey,
     gateway_configuration_id: GatewayConfigurationId,
 }
 
-impl GatewayAccountIdentity {
+impl GatewayAccountRegistration {
     pub fn new(
         billing_scope_id: BillingScopeId,
         gateway_account_id: GatewayAccountId,
@@ -233,7 +229,7 @@ impl GatewayAccountIdentity {
         self.gateway_account_id
     }
 
-    pub const fn provider_key(&self) -> &GatewayProviderKey {
+    pub fn provider_key(&self) -> &GatewayProviderKey {
         &self.provider_key
     }
 
@@ -241,9 +237,6 @@ impl GatewayAccountIdentity {
         self.gateway_configuration_id
     }
 }
-
-/// Backwards-compatible name for a gateway identity supplied at registration.
-pub type GatewayAccountRegistration = GatewayAccountIdentity;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayConfigurationActivation {

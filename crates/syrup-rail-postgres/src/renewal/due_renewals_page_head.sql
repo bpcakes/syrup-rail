@@ -1,6 +1,6 @@
 -- Composition contract: this fragment uses $4/$10/$12 and opens
--- eligible_subscriptions. The first-page statement appends the body directly;
--- the continuation inserts its $13/$14 keyset predicate first.
+-- eligible_subscriptions. The caller may insert a $13 mode predicate, then a
+-- continuation keyset whose placeholders depend on that mode predicate.
 -- NOT MATERIALIZED removes the old mandatory full-candidate evaluation and
 -- lets PostgreSQL stop an ordered index plan at the outer LIMIT. Plan choice
 -- remains cost-based and must be rehearsed against representative host data.
@@ -8,6 +8,7 @@ WITH eligible_subscriptions AS NOT MATERIALIZED (
     SELECT
         subscriptions.billing_scope_id,
         subscriptions.id,
+        subscriptions.required_gateway_account_mode,
         subscriptions.next_renewal_at,
         subscriptions.next_payment_attempt_at,
         accounts.gateway_configuration_id

@@ -3,21 +3,20 @@ use chrono::Duration;
 use syrup_rail::{
     BillingContact, GatewayAccountMode, GatewayDiagnostic, GatewayError, GatewayLifecycleCursorKey,
     GatewayLifecycleQueryPolicy, GatewayMutationError, GatewayNotSubmittedError, GatewayOrderId,
-    GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
-    GatewayTransactionId, GatewayTransactionReport, GatewayTransactionReportRequest,
-    PaymentGateway, ProcessorEvidence,
+    GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentOutcome,
+    GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest, GatewaySaleIntent,
+    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId,
+    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway,
+    ProcessorEvidence,
 };
 use syrup_rail_nmi_client::{
-    AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeParts, PaymentStatus,
-    QueryError, ReportQuery, SaleIntent, SaleRequest, SensitiveText, StorePaymentMethodRequest,
-    TransactionActionParts, TransactionQuery, TransactionReportDiagnostic, TransactionReportParts,
+    AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeDiagnostic,
+    PaymentOutcomeParts, PaymentSource, PaymentStatus, QueryError, ReportQuery, SaleRequest,
+    SensitiveText, StorePaymentMethodRequest, StoredCredential, TransactionActionParts,
+    TransactionQuery, TransactionReportDiagnostic, TransactionReportParts, VaultAction,
 };
 
-use crate::{
-    lifecycle::{NmiAction, NmiReport, admit_report},
-    reference::nmi_mutation_reference_attempt_id,
-};
+use crate::lifecycle::{NmiAction, NmiReport, admit_report};
 
 pub struct NmiPaymentGateway {
     client: Client,
@@ -145,27 +144,35 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
             )),
         ));
     }
-    let intent = match intent {
-        GatewaySaleIntent::OneTime { payment_token } => {
-            SaleIntent::PaymentToken(payment_token.into_inner())
-        }
-        GatewaySaleIntent::InitialStoredCredential { payment_token } => {
-            SaleIntent::InitialStoredCredential {
-                payment_token: payment_token.into_inner(),
-            }
-        }
+    let (source, vault_action, stored_credential) = match intent {
+        GatewaySaleIntent::OneTime { payment_token } => (
+            PaymentSource::PaymentToken(payment_token.into_inner()),
+            None,
+            None,
+        ),
+        GatewaySaleIntent::InitialStoredCredential { payment_token } => (
+            PaymentSource::PaymentToken(payment_token.into_inner()),
+            Some(VaultAction::AddCustomer),
+            Some(StoredCredential::InitialCustomer),
+        ),
         GatewaySaleIntent::RecurringStoredCredential {
             payment_method_reference,
             initial_transaction_id,
-        } => SaleIntent::RecurringStoredCredential {
-            customer_vault_id: payment_method_reference.into_inner(),
-            initial_transaction_id: initial_transaction_id.into_inner(),
-        },
+        } => (
+            PaymentSource::CustomerVault(payment_method_reference.into_inner()),
+            None,
+            Some(StoredCredential::RecurringMerchant {
+                initial_transaction_id: initial_transaction_id.into_inner(),
+            }),
+        ),
     };
     Ok(SaleRequest {
         amount_cents: charge.cents(),
+        currency: charge.currency().as_str().to_owned(),
         order_id: order_id.into_inner(),
-        intent,
+        source,
+        vault_action,
+        stored_credential,
         billing_contact: billing_contact.map(map_billing_contact),
     })
 }
@@ -185,12 +192,28 @@ fn map_payment_outcome(outcome: syrup_rail_nmi_client::PaymentOutcome) -> Gatewa
 
 fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcome {
     for diagnostic in &parts.diagnostics {
-        tracing::warn!(
-            provider = "nmi",
-            diagnostic = ?diagnostic,
-            "NMI returned anomalous payment outcome evidence"
-        );
+        match diagnostic {
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
+                tracing::warn!(
+                    provider = "nmi",
+                    diagnostic = ?diagnostic,
+                    "NMI reported a duplicate transaction at the processor; reconciliation is required"
+                );
+            }
+            _ => {
+                tracing::warn!(
+                    provider = "nmi",
+                    diagnostic = ?diagnostic,
+                    "NMI returned anomalous payment outcome evidence"
+                );
+            }
+        }
     }
+    let diagnostics = parts
+        .diagnostics
+        .iter()
+        .filter_map(map_payment_diagnostic)
+        .collect();
     let mut status = map_payment_status(parts.status);
     let transaction_id = validated_transaction_id(parts.transaction_id);
     let payment_method_reference = validated_payment_method_reference(parts.customer_vault_id);
@@ -227,7 +250,18 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
         sanitized_text(parts.condition),
         map_payment_descriptor_parts(parts.descriptor.into_parts()),
     );
-    GatewayPaymentOutcome::new(status, evidence)
+    GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics)
+}
+
+fn map_payment_diagnostic(
+    diagnostic: &PaymentOutcomeDiagnostic,
+) -> Option<GatewayPaymentDiagnostic> {
+    match diagnostic {
+        PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
+            Some(GatewayPaymentDiagnostic::ProcessorReportedDuplicate)
+        }
+        _ => None,
+    }
 }
 
 fn map_payment_status(status: PaymentStatus) -> GatewayPaymentStatus {
@@ -340,6 +374,27 @@ fn validated_report_order_id(value: Option<SensitiveText>) -> Option<GatewayOrde
     }
 }
 
+fn nmi_mutation_reference_attempt_id(value: &str) -> Option<PaymentAttemptId> {
+    let mut parts = value.split('_');
+    let namespace = parts.next()?;
+    let kind = parts.next()?;
+    let attempt_id = parts.next()?;
+    let has_canonical_shape = parts.next().is_none()
+        && namespace.len() == 2
+        && namespace.bytes().all(|byte| byte.is_ascii_lowercase())
+        && matches!(
+            kind,
+            "order" | "base-sub" | "renewal" | "recovery" | "payment-method"
+        )
+        && attempt_id.len() == 32
+        && attempt_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    has_canonical_shape
+        .then(|| attempt_id.parse::<PaymentAttemptId>().ok())
+        .flatten()
+}
+
 fn map_transaction_action_parts(parts: TransactionActionParts) -> NmiAction {
     NmiAction {
         action_type: sanitized_text(parts.action_type),
@@ -366,7 +421,7 @@ fn map_mutation_error(error: MutationError) -> GatewayMutationError {
             GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::Configuration(detail))
         }
         MutationError::Unavailable(_) => {
-            GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::Unavailable(detail))
+            GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::NotTransmitted(detail))
         }
         MutationError::RateLimited(_) => {
             GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::RateLimited(detail))
@@ -392,10 +447,14 @@ fn map_query_error(error: QueryError) -> GatewayError {
 #[cfg(test)]
 mod tests {
     use syrup_rail::{
-        ChargeAmount, CurrencyCode, GatewayLifecycleQuarantineReason, PaymentAttemptId,
-        PaymentCardBrand, PaymentToken,
+        ChargeAmount, CurrencyCode, GatewayLifecycleQuarantineReason, PaymentCardBrand,
+        PaymentToken,
     };
-    use syrup_rail_nmi_client::{PaymentDescriptor, PaymentOutcomeParts, TransactionReportParts};
+    use syrup_rail_nmi_client::{
+        ClientFactory, Credentials, DuplicateCheck, Endpoint, PaymentDescriptor,
+        PaymentOutcomeParts, TransactionReportParts,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
 
@@ -415,6 +474,68 @@ mod tests {
             descriptor: PaymentDescriptor::default(),
             diagnostics: Vec::new(),
         }
+    }
+
+    async fn gateway_with_response(
+        response_body: &'static str,
+    ) -> (NmiPaymentGateway, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let endpoint = Endpoint::parse_loopback_http(format!(
+            "http://{}",
+            listener.local_addr().expect("test listener address")
+        ))
+        .expect("loopback endpoint should validate");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("sale should connect");
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).await.expect("request should read");
+                assert!(read > 0, "request closed before headers");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let content_length = String::from_utf8_lossy(&request[..header_end])
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or_default();
+            while request.len() < header_end + content_length {
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("request body should read");
+                assert!(read > 0, "request closed before body");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream
+                .write_all(headers.as_bytes())
+                .await
+                .expect("response headers should write");
+            stream
+                .write_all(response_body.as_bytes())
+                .await
+                .expect("response body should write");
+        });
+        let credentials = Credentials::new("private_key".to_owned(), "query_key".to_owned())
+            .expect("test credentials should validate");
+        let client = ClientFactory::new_with_loopback_http()
+            .expect("test factory should construct")
+            .client_with_duplicate_check(endpoint, credentials, DuplicateCheck::ProcessorConfigured)
+            .expect("test client should construct");
+        (NmiPaymentGateway::new(client), server)
     }
 
     #[test]
@@ -449,6 +570,66 @@ mod tests {
         assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
         assert!(outcome.transaction_id().is_none());
         assert!(outcome.payment_method_reference().is_none());
+    }
+
+    #[test]
+    fn processor_duplicate_diagnostic_crosses_the_provider_neutral_boundary() {
+        let mut parts = empty_outcome(PaymentStatus::Unknown);
+        parts.response_code = Some(text("430"));
+        parts.diagnostics = vec![PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor];
+
+        let outcome = map_payment_outcome_parts(parts);
+
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+        assert_eq!(
+            outcome.diagnostics(),
+            &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        );
+        assert_eq!(
+            outcome.response_code().map(GatewayDiagnostic::expose),
+            Some("430")
+        );
+    }
+
+    #[tokio::test]
+    async fn parsed_processor_duplicate_reaches_the_gateway_boundary() {
+        let (gateway, server) = gateway_with_response(
+            r#"{"response":"3","response_code":"430","response_text":"Duplicate transaction"}"#,
+        )
+        .await;
+        let attempt_id: PaymentAttemptId = "00000000-0000-0000-0000-000000000430".parse().unwrap();
+        let request = GatewaySaleRequest::new(
+            ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap(),
+            GatewayOrderId::from_generated_attempt(
+                "ck_order_00000000000000000000000000000430",
+                attempt_id,
+            )
+            .unwrap(),
+            GatewaySaleIntent::OneTime {
+                payment_token: PaymentToken::new("tok_duplicate").unwrap(),
+            },
+            None,
+        );
+
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(5), gateway.sale(request))
+                .await
+                .expect("test sale should not hang")
+                .expect("430 should be an outcome");
+
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+        assert_eq!(
+            outcome.diagnostics(),
+            &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        );
+        assert_eq!(
+            outcome.response_code().map(GatewayDiagnostic::expose),
+            Some("430")
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("test server should not hang")
+            .expect("test server assertions should pass");
     }
 
     #[test]
@@ -515,7 +696,6 @@ mod tests {
 
     #[test]
     fn invalid_optional_locator_does_not_discard_safe_sibling() {
-        assert_eq!(nmi_mutation_reference_attempt_id("ck_order_safe"), None);
         let report = map_transaction_report_parts(TransactionReportParts {
             transaction_id: Some(text("bad transaction")),
             order_id: Some(text("ck_order_safe")),
@@ -554,7 +734,7 @@ mod tests {
         assert!(syrup_rail::string_contains_raw_card_data(value));
         let report = map_transaction_report_parts(TransactionReportParts {
             transaction_id: None,
-            order_id: Some(text("  ck_renewal_00000000000000000000000000000000  ")),
+            order_id: Some(text(value)),
             condition: Some(text("complete")),
             actions: Vec::new(),
             diagnostics: Vec::new(),

@@ -2,8 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use syrup_rail::{
     BillingScopeId, GatewayAccountId, HostChargeTargetId, HostChargeTargetTransition,
-    HostChargeTargetTransitionKind, HostChargeTargetTransitionOutcome, PaymentAttemptId,
-    PaymentAttemptKind, SubscriberId,
+    HostChargeTargetTransitionKind, PaymentAttemptId, PaymentAttemptKind, SubscriberId,
 };
 use uuid::Uuid;
 
@@ -56,9 +55,10 @@ struct StaleHostChargeCandidate {
 /// Candidate selection first makes a durable scheduling claim with
 /// `FOR UPDATE SKIP LOCKED`. Previously claimed rows sort behind untouched work,
 /// so a bounded page cannot be monopolized by target-local skips. Each claimed
-/// candidate then transitions its host-owned target to `PaymentFailed` before
-/// locking and revalidating the canonical attempt. Both financial changes
-/// commit in one transaction. A concurrent submission, terminal outcome,
+/// candidate then transitions its host-owned target to
+/// `ReleasedBeforeSubmission` before locking and revalidating the canonical
+/// attempt. Both financial changes commit in one transaction. A concurrent
+/// submission, terminal outcome,
 /// target-level `StaleTarget` or `Unchanged`, or contended attempt row rolls the
 /// target transition back and counts as skipped. No gateway I/O is performed.
 pub async fn fail_stale_unsubmitted_host_charges(
@@ -84,16 +84,21 @@ pub async fn fail_stale_unsubmitted_host_charges(
                     SubscriberId::new(candidate.subscriber_id),
                     PaymentAttemptId::new(candidate.attempt_id),
                     HostChargeTargetId::new(candidate.target_id),
-                    HostChargeTargetTransitionKind::PaymentFailed,
+                    HostChargeTargetTransitionKind::ReleasedBeforeSubmission,
                     effective_at,
                 ),
             )
             .await?;
-        if !matches!(
-            target_outcome,
-            HostChargeTargetTransitionOutcome::Applied
-                | HostChargeTargetTransitionOutcome::ExactReplay
-        ) {
+        if !target_outcome.is_applied() {
+            tracing::warn!(
+                target: "syrup_rail::host_charge_reconciliation",
+                billing_scope_id = %candidate.billing_scope_id,
+                subscriber_id = %candidate.subscriber_id,
+                attempt_id = %candidate.attempt_id,
+                target_id = %candidate.target_id,
+                ?target_outcome,
+                "host target refused stale unsubmitted charge release; leaving attempt unresolved"
+            );
             transaction.rollback().await?;
             summary.skipped += 1;
             continue;

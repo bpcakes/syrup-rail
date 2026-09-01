@@ -4,6 +4,17 @@ use super::*;
 use crate::{CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError};
 
 #[test]
+fn gateway_account_mode_storage_values_round_trip_exhaustively() {
+    for mode in [GatewayAccountMode::Live, GatewayAccountMode::Test] {
+        assert_eq!(mode.as_str().parse::<GatewayAccountMode>(), Ok(mode));
+        assert_eq!(mode.to_string(), mode.as_str());
+    }
+    assert!("LIVE".parse::<GatewayAccountMode>().is_err());
+    assert!("unknown".parse::<GatewayAccountMode>().is_err());
+    assert!("".parse::<GatewayAccountMode>().is_err());
+}
+
+#[test]
 fn query_and_report_requests_reject_invalid_shapes() {
     assert!(matches!(
         GatewayQueryRequest::new(None, None),
@@ -226,6 +237,29 @@ fn approved_payment_evidence_requires_identity_and_an_authoritative_decision() {
 }
 
 #[test]
+fn gateway_outcome_carries_only_provider_neutral_payment_diagnostics() {
+    let outcome =
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, ProcessorEvidence::default())
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+    assert_eq!(
+        outcome.diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
+    let (status, evidence, diagnostics) = outcome.into_parts_with_diagnostics();
+    assert_eq!(status, GatewayPaymentStatus::Unknown);
+    assert_eq!(evidence, ProcessorEvidence::default());
+    assert_eq!(
+        diagnostics,
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
+    assert!(
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, ProcessorEvidence::default())
+            .diagnostics()
+            .is_empty()
+    );
+}
+
+#[test]
 fn quarantine_resolution_reason_is_normalized_bounded_and_card_safe() {
     let reason = GatewayLifecycleQuarantineResolutionReason::new("  reviewed evidence  ").unwrap();
     assert_eq!(reason.expose(), "reviewed evidence");
@@ -286,6 +320,23 @@ fn gateway_errors_preserve_value_free_debug_and_stable_messages() {
     let debug = format!("{not_submitted:?}");
     assert!(debug.starts_with("Malformed"));
     assert!(debug.contains("has_detail: true"));
+    assert!(!debug.contains(SENTINEL));
+
+    let mode_mismatch = GatewayNotSubmittedError::AccountModeMismatch {
+        required: GatewayAccountMode::Live,
+        observed: GatewayAccountMode::Test,
+        detail: GatewayDiagnostic::new(SENTINEL),
+    };
+    let debug = format!("{mode_mismatch:?}");
+    assert!(debug.starts_with("AccountModeMismatch"));
+    assert!(debug.contains("has_detail: true"));
+    assert!(!debug.contains(SENTINEL));
+
+    let mode_verification = GatewayNotSubmittedError::AccountModeVerification(
+        GatewayError::Unavailable(GatewayDiagnostic::new(SENTINEL)),
+    );
+    let debug = format!("{mode_verification:?}");
+    assert!(debug.starts_with("AccountModeVerification"));
     assert!(!debug.contains(SENTINEL));
 
     let mutation = GatewayMutationError::Indeterminate(GatewayDiagnostic::new(SENTINEL));

@@ -145,7 +145,8 @@ pub async fn attest_external_reversal(
         return Ok(ExternalReversalAttestationOutcome::Ineligible);
     }
 
-    let resolution = expected_reversal_resolution(&attempt, &charge, kind);
+    let prior = expected_prior_resolution_code(&attempt, &charge).to_owned();
+    let final_code = expected_final_resolution_code(attempt.kind(), kind);
     let attested_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *transaction)
         .await?;
@@ -154,8 +155,10 @@ pub async fn attest_external_reversal(
         &attempt,
         &charge,
         actor_id,
+        kind,
         reason,
-        resolution,
+        &prior,
+        final_code,
         attested_at,
     )
     .await?;
@@ -170,7 +173,7 @@ pub async fn attest_external_reversal(
         "#,
     )
     .bind(processor_charge_id.as_uuid())
-    .bind(resolution.prior_resolution_code())
+    .bind(&prior)
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() != 1 {
@@ -188,7 +191,7 @@ pub async fn attest_external_reversal(
             "#,
         )
         .bind(attempt.identity().attempt_id().as_uuid())
-        .bind(resolution.final_resolution_code().as_str())
+        .bind(final_code.as_str())
         .bind(attested_at)
         .bind(attempt.status().as_str())
         .execute(&mut *transaction)
@@ -283,7 +286,7 @@ pub(super) async fn lock_processor_charge(
     .bind(charge_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
-    Ok(row.as_ref().map(processor_charge_from_row).transpose()?)
+    row.as_ref().map(processor_charge_from_row).transpose()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -292,8 +295,10 @@ async fn insert_attestation(
     attempt: &PaymentAttempt,
     charge: &ProcessorCharge,
     actor_id: ActorId,
+    kind: ExternalReversalKind,
     reason: &ExternalReversalReason,
-    resolution: ExternalReversalResolution,
+    prior: &str,
+    final_code: PaymentResolutionCode,
     attested_at: DateTime<Utc>,
 ) -> Result<(), OperatorReviewError> {
     let identity = attempt.identity();
@@ -323,10 +328,10 @@ async fn insert_attestation(
     .bind(charge.id().as_uuid())
     .bind(identity.attempt_id().as_uuid())
     .bind(actor_id.as_uuid())
-    .bind(resolution.kind().as_str())
+    .bind(kind.as_str())
     .bind(reason.expose())
-    .bind(resolution.prior_resolution_code())
-    .bind(resolution.final_resolution_code().as_str())
+    .bind(prior)
+    .bind(final_code.as_str())
     .bind(identity.gateway_account_id().as_uuid())
     .bind(identity.gateway_configuration_id().as_uuid())
     .bind(charge.gateway_order_id().expose())

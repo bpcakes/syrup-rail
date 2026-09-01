@@ -24,6 +24,11 @@ impl SubscriptionBillingService {
                 return Err(SubscriptionBillingServiceError::IdempotencyConflict);
             }
         };
+        if prepared_attempt.as_ref().is_some_and(|attempt| {
+            attempt.identity().required_gateway_account_mode() != self.required_gateway_account_mode
+        }) {
+            return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+        }
 
         self.admit_subscriber_mutation(
             command.billing_scope_id(),
@@ -57,6 +62,11 @@ impl SubscriptionBillingService {
                 SubscriptionRecoveryReservationOutcome::IdempotencyConflict => {
                     return Err(SubscriptionBillingServiceError::IdempotencyConflict);
                 }
+                SubscriptionRecoveryReservationOutcome::Rejected(
+                    SubscriptionRecoveryReservationRejection::GatewayAccountModeChanged,
+                ) => {
+                    return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+                }
                 SubscriptionRecoveryReservationOutcome::Rejected(reason) => {
                     return Err(
                         SubscriptionBillingServiceError::RecoveryReservationRejected(reason),
@@ -72,25 +82,38 @@ impl SubscriptionBillingService {
                 INVALID_SERVICE_STATE,
             ));
         }
+        if reservation.identity().required_gateway_account_mode()
+            != self.required_gateway_account_mode
+        {
+            return Err(SubscriptionBillingServiceError::GatewayConfigurationChanged);
+        }
 
         if let Some(scope) = self.active_cooldown(&account).await? {
             return self
                 .resolve_subscriber_readiness_failure(
                     SubscriberInitiatedReservation::Recovery(&reservation),
-                    GatewayReadinessFailure::for_cooldown(scope),
+                    SubscriberReadinessFailure::Cooldown(scope),
                     OutcomeResolutionBoundary::Prepared,
                 )
                 .await;
         }
-        if let Some(failure) = gateway_readiness_failure(&gateway).await {
-            return self
-                .resolve_subscriber_readiness_failure(
-                    SubscriberInitiatedReservation::Recovery(&reservation),
-                    failure,
-                    OutcomeResolutionBoundary::Prepared,
-                )
-                .await;
-        }
+        let verified_gateway = match subscriber_gateway_readiness(
+            &gateway,
+            self.required_gateway_account_mode,
+        )
+        .await
+        {
+            Ok(verified_gateway) => verified_gateway,
+            Err(failure) => {
+                return self
+                    .resolve_subscriber_readiness_failure(
+                        SubscriberInitiatedReservation::Recovery(&reservation),
+                        failure,
+                        OutcomeResolutionBoundary::Prepared,
+                    )
+                    .await;
+            }
+        };
 
         let admission =
             match admit_subscription_recovery_submission(&self.pool, &reservation).await? {
@@ -102,29 +125,13 @@ impl SubscriptionBillingService {
                     return self.payment_result(attempt).await;
                 }
             };
+        // Admission can race with a cooldown observed by another request;
+        // recheck before the capability performs provider I/O.
         if let Some(scope) = self.active_cooldown(&account).await? {
             return self
                 .resolve_subscriber_readiness_failure(
                     SubscriberInitiatedReservation::Recovery(&reservation),
-                    GatewayReadinessFailure::for_cooldown(scope),
-                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
-                )
-                .await;
-        }
-        if let Some(failure) = gateway_readiness_failure(&gateway).await {
-            return self
-                .resolve_subscriber_readiness_failure(
-                    SubscriberInitiatedReservation::Recovery(&reservation),
-                    failure,
-                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
-                )
-                .await;
-        }
-        if let Some(scope) = self.active_cooldown(&account).await? {
-            return self
-                .resolve_subscriber_readiness_failure(
-                    SubscriberInitiatedReservation::Recovery(&reservation),
-                    GatewayReadinessFailure::for_cooldown(scope),
+                    SubscriberReadinessFailure::Cooldown(scope),
                     OutcomeResolutionBoundary::AdmittedNotSubmitted,
                 )
                 .await;
@@ -134,13 +141,13 @@ impl SubscriptionBillingService {
             self.coordinator.as_ref(),
             admission,
             &command,
-            &gateway,
+            verified_gateway,
         )
         .await?
         {
             SubscriptionRecoveryProviderResult::Payment(payment) => Ok(payment),
-            SubscriptionRecoveryProviderResult::NotSubmitted { payment, error } => {
-                preserve_concurrent_terminal_payment(payment, error)
+            SubscriptionRecoveryProviderResult::NotSubmitted { error, .. } => {
+                Err(SubscriptionBillingServiceError::GatewayNotSubmitted(error))
             }
         }
     }
@@ -162,9 +169,13 @@ impl SubscriptionBillingService {
         gateway: &syrup_rail::ResolvedGateway,
     ) -> Result<SubscriptionRecoveryReservationOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
-        let outcome =
-            reserve_subscription_recovery_in_transaction(&mut transaction, command, gateway)
-                .await?;
+        let outcome = reserve_subscription_recovery_in_transaction(
+            &mut transaction,
+            command,
+            gateway,
+            self.required_gateway_account_mode,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(outcome)
     }

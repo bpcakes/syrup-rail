@@ -52,11 +52,10 @@ pub use billing_portal::{
 pub use card_data::{raw_card_data_ranges, string_contains_raw_card_data};
 pub use discount::{
     ClearSubscriptionDiscount, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
-    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimState,
-    SubscriptionDiscountClaimStatus, SubscriptionDiscountClearOutcome,
-    SubscriptionDiscountCodeCreation, SubscriptionDiscountCodeQuote,
-    SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus, SubscriptionDiscountCodeUpdate,
-    discounted_charge,
+    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimStatus,
+    SubscriptionDiscountClearOutcome, SubscriptionDiscountCodeCreation,
+    SubscriptionDiscountCodeQuote, SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus,
+    SubscriptionDiscountCodeUpdate, discounted_charge,
 };
 pub use enrollment::{
     EnrollSubscription, SubscriptionActivationProjection, SubscriptionEnrollmentDiscountSnapshot,
@@ -70,16 +69,16 @@ pub use enrollment::{
 pub use event::{
     BillingEvent, BillingEventKey, BillingEventSubject, PaymentCardDisplay, SubscriptionEndReason,
     SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureDisposition,
-    SubscriptionPaymentFailureOutcome,
 };
 pub use gateway::{
-    ApprovedProcessorEvidence, CardLastFour, GatewayAccountMode, GatewayError,
-    GatewayLifecycleEvidence, GatewayLifecycleEvidenceError, GatewayLifecycleQuarantine,
-    GatewayLifecycleQuarantineError, GatewayLifecycleQuarantineReason,
-    GatewayLifecycleQuarantineResolutionReason, GatewayLifecycleQuarantineResolutionReasonError,
-    GatewayLifecycleQueryPolicy, GatewayLifecycleQueryPolicyError, GatewayLifecycleState,
-    GatewayMutationError, GatewayMutationReferenceFactory, GatewayNotSubmittedError,
-    GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayQueryRequest,
+    ApprovedProcessorEvidence, CardLastFour, GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS,
+    GatewayAccountMode, GatewayAccountModeParseError, GatewayError, GatewayLifecycleEvidence,
+    GatewayLifecycleEvidenceError, GatewayLifecycleQuarantine, GatewayLifecycleQuarantineError,
+    GatewayLifecycleQuarantineReason, GatewayLifecycleQuarantineResolutionReason,
+    GatewayLifecycleQuarantineResolutionReasonError, GatewayLifecycleQueryPolicy,
+    GatewayLifecycleQueryPolicyError, GatewayLifecycleState, GatewayMutationError,
+    GatewayMutationReferenceFactory, GatewayNotSubmittedError, GatewayPaymentDescriptor,
+    GatewayPaymentDiagnostic, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayQueryRequest,
     GatewayRequestError, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
     GatewayTransactionReport, GatewayTransactionReportRequest, MutationCertainty, PaymentCardBrand,
     PaymentGateway, PaymentReversalKind, ProcessorEvidence, SharedGatewayMutationReferenceFactory,
@@ -100,7 +99,7 @@ pub use host_charge::{
 };
 pub use identity::{
     ActorId, BillingScopeId, DiscountClaimId, DiscountCodeId, GatewayAccountId,
-    GatewayAccountIdentity, GatewayAccountRegistration, GatewayConfigurationActivation,
+    GatewayAccountRegistration, GatewayConfigurationActivation,
     GatewayConfigurationActivationOutcome, GatewayConfigurationId, GatewayLifecycleCursorKey,
     GatewayProviderKey, HostChargeTargetId, IdempotencyKey, IdempotencyKeyError, PaymentAttemptId,
     PaymentAttemptKind, PaymentAttemptKindParseError, PaymentAttemptStatus,
@@ -115,15 +114,13 @@ pub use money::{
 };
 pub use operator_review::{
     AttemptReviewCursor, AttemptReviewPage, ExternalReversalAttestation,
-    ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalOutcome,
-    ExternalReversalPriorClassification, ExternalReversalReason, ExternalReversalReasonError,
-    ExternalReversalResolution, ExternalReversalResolutionError, MANUAL_ATTEMPT_FAILURE_NOTE,
-    ManualAttemptFailureOutcome, ManualFailureHostCharge, OPERATOR_REVIEW_PAGE_LIMIT,
-    OperatorReviewPageLimit, OperatorReviewPageLimitError,
-    PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE, ProcessorCharge, ProcessorChargeProgression,
-    ProcessorChargeReviewCursor, ProcessorChargeReviewItem, ProcessorChargeReviewPage,
-    ProcessorChargeRole, ProcessorChargeStateCode, review_required_attempt_can_be_manually_failed,
-    review_required_manual_failure_evidence,
+    ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalReason,
+    ExternalReversalReasonError, MANUAL_ATTEMPT_FAILURE_NOTE, ManualAttemptFailureOutcome,
+    ManualFailureHostCharge, OPERATOR_REVIEW_PAGE_LIMIT, OperatorReviewPageLimit,
+    OperatorReviewPageLimitError, PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE, ProcessorCharge,
+    ProcessorChargeProgression, ProcessorChargeReviewCursor, ProcessorChargeReviewItem,
+    ProcessorChargeReviewPage, ProcessorChargeRole, ProcessorChargeStateCode,
+    review_required_attempt_can_be_manually_failed, review_required_manual_failure_evidence,
 };
 pub use payment_method_update::{
     ReplaceSubscriptionPaymentMethod, SubscriptionPaymentMethodReplacement,
@@ -150,16 +147,14 @@ pub use recovery::{
 pub use renewal::{
     ChargeRenewal, MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION,
     RENEWAL_DISPATCH_LIMIT, RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS,
-    RENEWAL_PROVIDER_RATE_LIMIT_FAST_RETRY_ATTEMPTS,
-    RENEWAL_PROVIDER_RATE_LIMIT_RETRY_AFTER_SECONDS,
-    RENEWAL_PROVIDER_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS, RenewalAttemptState, RenewalDispatch,
-    RenewalDispatchPage, RenewalDispatchPageCursor, RenewalFailureDisposition,
-    RenewalFailurePolicyError, SubscriptionRenewalLockedTerms, SubscriptionRenewalOutcome,
-    SubscriptionRenewalReservation, SubscriptionRenewalReservationBuildError,
-    SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
-    SubscriptionRenewalSubmissionOutcome, SubscriptionRenewalSubmissionRejection,
-    provider_rate_limit_retry_after_seconds, renewal_attempt_idempotency_key,
-    renewal_failure_disposition,
+    RENEWAL_RATE_LIMIT_FAST_RETRY_ATTEMPTS, RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS,
+    RenewalAttemptState, RenewalDispatch, RenewalDispatchPage, RenewalDispatchPageCursor,
+    RenewalFailureDisposition, RenewalFailurePolicyError, SubscriptionRenewalLockedTerms,
+    SubscriptionRenewalOutcome, SubscriptionRenewalReservation,
+    SubscriptionRenewalReservationBuildError, SubscriptionRenewalReservationOutcome,
+    SubscriptionRenewalReservationRejection, SubscriptionRenewalSubmissionOutcome,
+    SubscriptionRenewalSubmissionRejection, rate_limit_retry_after_seconds,
+    renewal_attempt_idempotency_key, renewal_failure_disposition,
 };
 pub use resolution::{PaymentResolutionCode, PaymentResolutionCodeParseError};
 pub use resolver::{GatewayResolutionError, GatewayResolver, ResolvedGateway};
@@ -174,9 +169,7 @@ pub use subscription::{
     SubscriptionGrantCreationOutcome, SubscriptionGrantError, SubscriptionGrantKind,
     SubscriptionGrantKindParseError, SubscriptionGrantReason, SubscriptionGrantReasonError,
     SubscriptionGrantRecord, SubscriptionGrantRecordError, SubscriptionGrantRevocation,
-    SubscriptionGrantRevocationAudit, SubscriptionGrantRevocationOutcome,
-    SubscriptionGrantRevocationState, SubscriptionLifecycle, SubscriptionLifecycleError,
-    classify_past_due_access,
+    SubscriptionGrantRevocationOutcome, classify_past_due_access,
 };
 pub use subscription_payment_context::SubscriptionPaymentContext;
 pub use terms::{

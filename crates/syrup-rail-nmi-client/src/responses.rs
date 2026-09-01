@@ -76,6 +76,11 @@ pub enum PaymentOutcomeDiagnostic {
     InvalidOrConflictingTransactionIdentifier,
     InvalidOrConflictingCustomerVaultIdentifier,
     InvalidOrConflictingDecisionField,
+    /// NMI reported response code `430`, "Duplicate transaction at processor".
+    ///
+    /// This remains an unknown payment outcome that requires reconciliation;
+    /// the diagnostic only makes the provider's duplicate decision observable.
+    DuplicateTransactionAtProcessor,
     ConflictingDecisionEvidence,
     UnrecognizedDecisionEvidence,
     MissingDecisionEvidence,

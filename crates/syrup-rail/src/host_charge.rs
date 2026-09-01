@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
-    ChargeAmount, GatewayConfigurationId, HostChargeTargetId, IdempotencyKey, PaymentAttempt,
+    ChargeAmount, GatewayAccountMode, GatewayConfigurationId, GatewayPaymentDiagnostic,
+    HostChargeTargetId, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
     PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
     PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind, PaymentToken,
     ProcessorEvidence, ResolvedGateway, SubscriberId,
@@ -121,6 +122,7 @@ impl HostChargeReservation {
         snapshot: HostChargeTargetSnapshot,
         gateway: &ResolvedGateway,
         attempt_id: PaymentAttemptId,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, HostChargeReservationBuildError> {
         if snapshot.target_id() != command.target_id() {
             return Err(HostChargeReservationBuildError::TargetIdentityMismatch);
@@ -136,13 +138,15 @@ impl HostChargeReservation {
             command.subscriber_id(),
             gateway.gateway_account_id(),
             command.gateway_configuration_id(),
+            required_gateway_account_mode,
         );
         let amount = snapshot.charge().money();
-        let request = PaymentAttemptRequest::canonical(
+        let request = PaymentAttemptRequest::new(
             PaymentAttemptTarget::HostCharge {
                 target_id: command.target_id(),
             },
             command.idempotency_key().clone(),
+            PaymentAttemptFingerprint::for_host_charge(command.target_id(), amount),
             amount,
             gateway
                 .mutation_reference_factory()
@@ -197,9 +201,16 @@ pub enum HostChargeTargetRejection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostChargeTargetTransitionKind {
     Paid,
+    /// Releases a claimed target after the provider mutation was provably not
+    /// submitted. This can occur before or after submission admission.
+    ReleasedBeforeSubmission,
     PaymentFailed,
-    ReleasedAfterExternalReversal { kind: PaymentReversalKind },
-    Reversed { kind: PaymentReversalKind },
+    ReleasedAfterExternalReversal {
+        kind: PaymentReversalKind,
+    },
+    Reversed {
+        kind: PaymentReversalKind,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -271,12 +282,33 @@ pub enum HostChargeTargetTransitionOutcome {
     Unchanged { reason: HostChargeTargetNoChange },
 }
 
+impl HostChargeTargetTransitionOutcome {
+    /// Returns whether the requested transition is durably reflected in host state.
+    pub const fn is_applied(self) -> bool {
+        matches!(self, Self::Applied | Self::ExactReplay)
+    }
+}
+
 /// Durable result of applying one host-target payment outcome.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Equality compares the durable attempt and pending-confirmation evidence.
+/// Call-scoped gateway diagnostics are intentionally excluded because an exact
+/// replay may not reproduce them.
+#[derive(Clone, Debug)]
 pub struct HostChargePaymentResult {
     attempt: PaymentAttempt,
     pending_confirmation_evidence: Option<ApprovedProcessorEvidence>,
+    gateway_diagnostics: Vec<GatewayPaymentDiagnostic>,
 }
+
+impl PartialEq for HostChargePaymentResult {
+    fn eq(&self, other: &Self) -> bool {
+        self.attempt == other.attempt
+            && self.pending_confirmation_evidence == other.pending_confirmation_evidence
+    }
+}
+
+impl Eq for HostChargePaymentResult {}
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum HostChargePaymentResultBuildError {
@@ -292,6 +324,7 @@ impl HostChargePaymentResult {
         Ok(Self {
             attempt,
             pending_confirmation_evidence: None,
+            gateway_diagnostics: Vec::new(),
         })
     }
 
@@ -306,7 +339,25 @@ impl HostChargePaymentResult {
         Ok(Self {
             attempt,
             pending_confirmation_evidence: Some(evidence),
+            gateway_diagnostics: Vec::new(),
         })
+    }
+
+    /// Attaches payload-free diagnostics from the gateway observation applied
+    /// by the current call.
+    ///
+    /// These diagnostics are foreground routing facts, not durable attempt
+    /// state. A later replay reconstructs the canonical payment result from
+    /// persisted processor evidence and may not contain them.
+    pub fn with_gateway_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
+        self.gateway_diagnostics = diagnostics;
+        self
+    }
+
+    /// Returns payload-free diagnostics from the gateway observation applied
+    /// by the current call.
+    pub fn gateway_diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
+        &self.gateway_diagnostics
     }
 
     pub const fn attempt(&self) -> &PaymentAttempt {
@@ -361,5 +412,18 @@ mod tests {
             "host_charge:00000000-0000-0000-0000-000000000001:1250:USD"
         );
         assert_eq!(fingerprint.to_string(), "[redacted]");
+    }
+
+    #[test]
+    fn target_transition_outcome_identifies_durable_application() {
+        assert!(HostChargeTargetTransitionOutcome::Applied.is_applied());
+        assert!(HostChargeTargetTransitionOutcome::ExactReplay.is_applied());
+        assert!(!HostChargeTargetTransitionOutcome::StaleTarget.is_applied());
+        assert!(
+            !HostChargeTargetTransitionOutcome::Unchanged {
+                reason: HostChargeTargetNoChange::ReleaseUnsafe,
+            }
+            .is_applied()
+        );
     }
 }

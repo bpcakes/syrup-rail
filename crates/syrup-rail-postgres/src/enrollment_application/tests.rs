@@ -16,30 +16,32 @@ use syrup_rail::{
     EndUserMutationCommand, EnrollSubscription, GatewayAccountId, GatewayAccountMode,
     GatewayConfigurationId, GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy,
     GatewayMutationError, GatewayMutationReferenceFactory, GatewayOrderId,
-    GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayPaymentOutcome,
-    GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest, GatewayResolutionError,
-    GatewayResolver, GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId,
-    GatewayTransactionReport, GatewayTransactionReportRequest, IdempotencyKey, Money,
-    PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptTarget,
-    PaymentAttemptTimestamps, PaymentCardBrand, PaymentGateway, PaymentToken,
+    GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentMethodReference,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest,
+    GatewayResolutionError, GatewayResolver, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
+    GatewayTransactionId, GatewayTransactionReport, GatewayTransactionReportRequest,
+    IdempotencyKey, Money, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState,
+    PaymentAttemptTarget, PaymentAttemptTimestamps, PaymentCardBrand, PaymentGateway, PaymentToken,
     PercentOffBasisPoints, RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod,
-    ResolvedGateway, SubscriberId, SubscriptionDiscountCode, SubscriptionDiscountDuration,
+    ResolvedGateway, SubscriptionDiscountCode, SubscriptionDiscountDuration,
     SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
-    SubscriptionEnrollmentReservationOutcome,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentMethodReplacementRejection,
     SubscriptionPaymentMethodReplacementReservationOutcome, SubscriptionRecoveryReservationOutcome,
-    SubscriptionRenewalOutcome, SubscriptionStatus,
+    SubscriptionRecoveryReservationRejection, SubscriptionRenewalOutcome,
+    SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
+    SubscriptionStatus,
 };
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 
 use super::*;
 use crate::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
     BillingTransactionSubjectState, GatewayMutationCooldownScope, SubscriptionBillingService,
-    SubscriptionBillingServiceError, SubscriptionOfferStore,
+    SubscriptionBillingServiceError, SubscriptionOfferStore, due_renewals,
     reserve_subscription_enrollment_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
-    reserve_subscription_recovery_in_transaction,
+    reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
     test_support::{TestDatabase, create_gateway_account, immediate_offer},
 };
 
@@ -266,6 +268,22 @@ impl ScriptedGateway {
         }
     }
 
+    fn for_stored_method_with_readiness(
+        readiness: impl IntoIterator<Item = Result<GatewayAccountMode, GatewayError>>,
+        result: Result<GatewayPaymentOutcome, GatewayMutationError>,
+    ) -> Self {
+        Self {
+            account_mode_calls: AtomicUsize::new(0),
+            account_mode_results: Mutex::new(readiness.into_iter().collect()),
+            sale_calls: AtomicUsize::new(0),
+            sale_order_ids: Mutex::new(Vec::new()),
+            sale_result: Mutex::new(None),
+            store_calls: AtomicUsize::new(0),
+            store_order_ids: Mutex::new(Vec::new()),
+            store_result: Mutex::new(Some(result)),
+        }
+    }
+
     fn for_sale_with_readiness(
         readiness: impl IntoIterator<Item = Result<GatewayAccountMode, GatewayError>>,
         result: Result<GatewayPaymentOutcome, GatewayMutationError>,
@@ -404,21 +422,6 @@ struct TestCoordinator {
     pool: PgPool,
     events: Arc<Mutex<Vec<BillingEvent>>>,
     fail_event: bool,
-    append_pause: Option<Arc<AppendPause>>,
-}
-
-struct AppendPause {
-    reached: Semaphore,
-    release: Semaphore,
-}
-
-impl AppendPause {
-    fn new() -> Self {
-        Self {
-            reached: Semaphore::new(0),
-            release: Semaphore::new(0),
-        }
-    }
 }
 
 #[async_trait]
@@ -437,7 +440,6 @@ impl BillingTransactionCoordinator for TestCoordinator {
             ),
             events: Arc::clone(&self.events),
             fail_event: self.fail_event,
-            append_pause: self.append_pause.clone(),
         }))
     }
 }
@@ -446,7 +448,6 @@ struct TestTransaction {
     transaction: Option<Transaction<'static, Postgres>>,
     events: Arc<Mutex<Vec<BillingEvent>>>,
     fail_event: bool,
-    append_pause: Option<Arc<AppendPause>>,
 }
 
 #[async_trait]
@@ -464,15 +465,6 @@ impl BillingTransaction for TestTransaction {
             return Err(BillingEventWriteError::new(InjectedHostError));
         }
         self.events.lock().await.push(event.clone());
-        if let Some(pause) = &self.append_pause {
-            pause.reached.add_permits(1);
-            pause
-                .release
-                .acquire()
-                .await
-                .expect("test append pause remains open")
-                .forget();
-        }
         Ok(())
     }
 
@@ -639,7 +631,11 @@ async fn enrollment_fixture(
         Arc::new(TestReferenceFactory),
         Arc::new(NeverCalledGateway),
     );
-    let reservation = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let admission = if prepare_submission {
         let mut transaction = database.pool.begin().await?;
         assert!(matches!(
@@ -671,7 +667,6 @@ async fn enrollment_fixture(
         pool: database.pool.clone(),
         events: Arc::new(Mutex::new(Vec::new())),
         fail_event,
-        append_pause: None,
     };
     Ok(ApplicationFixture {
         database,
@@ -689,18 +684,32 @@ async fn hold_subscription_aggregate_lock(
     plan_key: &str,
 ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    let plan_key = PlanKey::new(plan_key).expect("test subscription plan key must be valid");
-    crate::attempts::lock_subscription_aggregate(
-        &mut transaction,
-        SubscriberId::new(subscriber_id),
-        &plan_key,
-    )
-    .await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(subscriber_id)
+        .bind(plan_key)
+        .execute(&mut *transaction)
+        .await?;
     Ok(transaction)
 }
 
 fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
     approved_outcome_with_reference(Some(transaction_id), "vault_application")
+}
+
+fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
+    GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Unknown,
+        ProcessorEvidence::new(
+            None,
+            None,
+            Some(GatewayDiagnostic::new("3")),
+            Some(GatewayDiagnostic::new("430")),
+            Some(GatewayDiagnostic::new("Duplicate transaction")),
+            None,
+            GatewayPaymentDescriptor::default(),
+        ),
+    )
+    .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
 }
 
 fn approved_outcome_with_transaction(transaction_id: Option<&str>) -> GatewayPaymentOutcome {

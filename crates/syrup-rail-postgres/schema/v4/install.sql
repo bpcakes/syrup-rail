@@ -1,4 +1,4 @@
--- Syrup Rail canonical PostgreSQL schema, version 3.
+-- Syrup Rail canonical PostgreSQL schema, version 4.
 --
 -- Hosts materialize this file byte-for-byte in an immutable migration, then
 -- add host identity, actor, credential, and target bindings separately.
@@ -128,6 +128,7 @@ CREATE TABLE public.billing_subscriptions (
     past_due_access text NOT NULL,
     next_payment_attempt_at timestamptz,
     unpaid_at timestamptz,
+    required_gateway_account_mode text NOT NULL,
     CONSTRAINT billing_subscriptions_id_owner_account_plan_key
         UNIQUE (
             id,
@@ -146,6 +147,8 @@ CREATE TABLE public.billing_subscriptions (
         CHECK (amount_cents > 0),
     CONSTRAINT billing_subscriptions_currency_check
         CHECK (currency = upper(currency) AND length(currency) = 3),
+    CONSTRAINT billing_subscriptions_required_gateway_account_mode_check
+        CHECK (required_gateway_account_mode IN ('live', 'test')),
     CONSTRAINT billing_subscriptions_period_check
         CHECK (
             current_period_end_at > current_period_start_at
@@ -275,6 +278,21 @@ ON public.billing_subscriptions (gateway_account_id, initial_transaction_id);
 
 CREATE INDEX billing_subscriptions_due_idx
 ON public.billing_subscriptions (next_payment_attempt_at, id)
+INCLUDE (
+    billing_scope_id,
+    gateway_account_id,
+    next_renewal_at,
+    required_gateway_account_mode
+)
+WHERE status IN ('active', 'past_due')
+    AND next_payment_attempt_at IS NOT NULL;
+
+CREATE INDEX billing_subscriptions_due_mode_idx
+ON public.billing_subscriptions (
+    required_gateway_account_mode,
+    next_payment_attempt_at,
+    id
+)
 INCLUDE (billing_scope_id, gateway_account_id, next_renewal_at)
 WHERE status IN ('active', 'past_due')
     AND next_payment_attempt_at IS NOT NULL;
@@ -351,6 +369,7 @@ CREATE TABLE public.billing_payment_attempts (
     subscription_initial_dunning_exhaustion text,
     subscription_initial_past_due_access text,
     billing_last_name text,
+    required_gateway_account_mode text NOT NULL,
     CONSTRAINT billing_payment_attempts_id_scope_account_key
         UNIQUE (id, billing_scope_id, gateway_account_id),
     CONSTRAINT billing_payment_attempts_id_owner_plan_key
@@ -409,6 +428,8 @@ CREATE TABLE public.billing_payment_attempts (
         CHECK (length(btrim(request_fingerprint)) > 0),
     CONSTRAINT billing_payment_attempts_gateway_order_check
         CHECK (length(btrim(gateway_order_id)) > 0),
+    CONSTRAINT billing_payment_attempts_required_gateway_account_mode_check
+        CHECK (required_gateway_account_mode IN ('live', 'test')),
     CONSTRAINT billing_payment_attempts_gateway_transaction_check
         CHECK (
             NOT gateway_transaction_id IS DISTINCT FROM
@@ -575,11 +596,13 @@ CREATE TABLE public.billing_payment_attempts (
                 'subscription_initial_prepared_attempt_expired',
                 'subscription_renewal_retry_state_changed_before_charge',
                 'gateway_live_readiness_failed_before_submission',
+                'gateway_test_readiness_failed_before_submission',
                 'gateway_malformed_before_submission',
                 'gateway_request_rejected_before_submission',
                 'gateway_configuration_before_submission',
                 'gateway_unavailable_before_submission',
                 'gateway_provider_rate_limited_before_submission',
+                'gateway_account_rate_limited_before_submission',
                 'gateway_account_mutation_cooldown_before_submission',
                 'host_charge_approved_stale_state',
                 'subscription_approved_renewal_stale_state',
@@ -1399,39 +1422,23 @@ CREATE TABLE public.billing_external_reversal_attestations (
         ),
     CONSTRAINT billing_external_reversal_attestations_resolution_check
         CHECK (
-            (
-                prior_resolution_code =
-                    'subscription_initial_current_grant_conflict'
-                AND (
-                    (
-                        reversal_kind = 'refund'
-                        AND final_resolution_code =
-                            'subscription_initial_externally_refunded'
-                    )
-                    OR (
-                        reversal_kind = 'void'
-                        AND final_resolution_code =
-                            'subscription_initial_externally_voided'
+            prior_resolution_code IN (
+                'subscription_initial_current_grant_conflict',
+                'processor_charge_external_reversal_required'
+            )
+            AND (
+                (
+                    reversal_kind = 'refund'
+                    AND final_resolution_code IN (
+                        'subscription_initial_externally_refunded',
+                        'processor_charge_externally_refunded'
                     )
                 )
-            )
-            OR (
-                prior_resolution_code =
-                    'processor_charge_external_reversal_required'
-                AND (
-                    (
-                        reversal_kind = 'refund'
-                        AND final_resolution_code IN (
-                            'subscription_initial_externally_refunded',
-                            'processor_charge_externally_refunded'
-                        )
-                    )
-                    OR (
-                        reversal_kind = 'void'
-                        AND final_resolution_code IN (
-                            'subscription_initial_externally_voided',
-                            'processor_charge_externally_voided'
-                        )
+                OR (
+                    reversal_kind = 'void'
+                    AND final_resolution_code IN (
+                        'subscription_initial_externally_voided',
+                        'processor_charge_externally_voided'
                     )
                 )
             )
@@ -2223,7 +2230,8 @@ SELECT
     dunning_exhaustion,
     past_due_access,
     next_payment_attempt_at,
-    unpaid_at
+    unpaid_at,
+    required_gateway_account_mode
 FROM public.billing_subscriptions
 WHERE status IN ('active', 'past_due')
     OR (

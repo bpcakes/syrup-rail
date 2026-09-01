@@ -44,6 +44,17 @@ pub(crate) enum AttemptReplayDisposition {
     ReturnCanonical,
 }
 
+impl AttemptReplayDisposition {
+    /// Whether replay can still continue to a first provider submission.
+    ///
+    /// Unsubmitted review-required attempts are locally repairable, but the
+    /// repair path can only expire or return their canonical result. They no
+    /// longer need the deployment mode that was captured at reservation.
+    pub(crate) const fn may_reach_provider(self) -> bool {
+        matches!(self, Self::ResumePrepared)
+    }
+}
+
 /// The database policy for attempts that are still wholly local.
 ///
 /// The status classification is global because provider submission and replay
@@ -119,6 +130,20 @@ pub(crate) fn attempt_replay_disposition(attempt: &PaymentAttempt) -> AttemptRep
     )
 }
 
+/// Whether a replay can still reach the provider but its requested deployment
+/// mode differs from the mode captured by the durable attempt.
+///
+/// Terminal and locally repairable attempts remain canonical across a service
+/// mode change. Only a prepared attempt can be submitted for the first time,
+/// so only that state rejects a changed required mode.
+pub(crate) fn prepared_replay_required_mode_changed(
+    attempt: &PaymentAttempt,
+    requested_mode: GatewayAccountMode,
+) -> bool {
+    attempt_replay_disposition(attempt).may_reach_provider()
+        && attempt.identity().required_gateway_account_mode() != requested_mode
+}
+
 const fn attempt_replay_disposition_for(
     status: PaymentAttemptStatus,
     was_submitted: bool,
@@ -139,11 +164,12 @@ pub(super) async fn preflight_existing_attempt(
     idempotency_key: &IdempotencyKey,
     matches_command: impl FnOnce(&PaymentAttempt) -> bool,
 ) -> Result<ExistingAttemptPreflight, PaymentAttemptStoreError> {
-    let Some(existing) = find_payment_attempt_by_idempotency(
+    let Some(existing) = payment_attempt_by_idempotency(
         transaction,
         billing_scope_id,
         subscriber_id,
         idempotency_key,
+        false,
     )
     .await?
     else {
@@ -169,47 +195,46 @@ pub(super) async fn preflight_existing_attempt(
 /// Database provider keys remain raw values at this boundary: an unexpected
 /// persisted value fails closed as a mismatch rather than becoming a new parse
 /// error contract.
-#[derive(Clone)]
-pub(super) struct ExpectedGatewayIdentity {
-    pub(super) identity: syrup_rail::GatewayAccountIdentity,
+#[derive(Clone, Copy)]
+pub(super) struct ExpectedGatewayIdentity<'a> {
+    pub(super) billing_scope_id: BillingScopeId,
+    pub(super) gateway_account_id: GatewayAccountId,
+    pub(super) gateway_configuration_id: GatewayConfigurationId,
+    pub(super) provider_key: &'a GatewayProviderKey,
 }
 
-impl ExpectedGatewayIdentity {
+impl<'a> ExpectedGatewayIdentity<'a> {
     pub(super) fn for_gateway(
         billing_scope_id: BillingScopeId,
         expected_gateway_configuration_id: GatewayConfigurationId,
-        gateway: &syrup_rail::ResolvedGateway,
+        gateway: &'a syrup_rail::ResolvedGateway,
     ) -> Self {
         Self {
-            identity: syrup_rail::GatewayAccountIdentity::new(
-                billing_scope_id,
-                gateway.gateway_account_id(),
-                gateway.provider_key().clone(),
-                expected_gateway_configuration_id,
-            ),
+            billing_scope_id,
+            gateway_account_id: gateway.gateway_account_id(),
+            gateway_configuration_id: expected_gateway_configuration_id,
+            provider_key: gateway.provider_key(),
         }
     }
 
     pub(super) fn from_reservation(
         identity: PaymentAttemptIdentity,
-        provider_key: &GatewayProviderKey,
+        provider_key: &'a GatewayProviderKey,
     ) -> Self {
         Self {
-            identity: syrup_rail::GatewayAccountIdentity::new(
-                identity.billing_scope_id(),
-                identity.gateway_account_id(),
-                provider_key.clone(),
-                identity.gateway_configuration_id(),
-            ),
+            billing_scope_id: identity.billing_scope_id(),
+            gateway_account_id: identity.gateway_account_id(),
+            gateway_configuration_id: identity.gateway_configuration_id(),
+            provider_key,
         }
     }
 
     pub(super) const fn billing_scope_id(&self) -> BillingScopeId {
-        self.identity.billing_scope_id()
+        self.billing_scope_id
     }
 
     pub(super) const fn gateway_account_id(&self) -> GatewayAccountId {
-        self.identity.gateway_account_id()
+        self.gateway_account_id
     }
 
     pub(super) fn matches_row(
@@ -218,9 +243,9 @@ impl ExpectedGatewayIdentity {
         configuration_id: Uuid,
         provider_key: &str,
     ) -> bool {
-        account_id == self.identity.gateway_account_id().into_uuid()
-            && configuration_id == self.identity.gateway_configuration_id().into_uuid()
-            && provider_key == self.identity.provider_key().as_str()
+        account_id == self.gateway_account_id.into_uuid()
+            && configuration_id == self.gateway_configuration_id.into_uuid()
+            && provider_key == self.provider_key.as_str()
     }
 }
 
@@ -262,6 +287,28 @@ pub(crate) async fn try_lock_subscription_aggregate(
     .bind(plan_key.as_str())
     .fetch_one(&mut **transaction)
     .await
+}
+
+pub(super) async fn payment_attempt_by_idempotency(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    idempotency_key: &IdempotencyKey,
+    for_update: bool,
+) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
+    let lock = if for_update { "FOR UPDATE" } else { "" };
+    let query = format!(
+        "{PAYMENT_ATTEMPT_SELECT} \
+         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3 \
+         {lock}"
+    );
+    let row = sqlx::query(&query)
+        .bind(billing_scope_id.as_uuid())
+        .bind(subscriber_id.as_uuid())
+        .bind(idempotency_key.expose())
+        .fetch_optional(&mut **transaction)
+        .await?;
+    row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
 pub(crate) async fn lock_initial_attempt_rows(
@@ -352,7 +399,7 @@ pub(crate) async fn expire_stale_initial_attempts(
 
 pub(super) async fn gateway_identity_matches_account(
     transaction: &mut Transaction<'_, Postgres>,
-    expected: &ExpectedGatewayIdentity,
+    expected: &ExpectedGatewayIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
@@ -538,6 +585,14 @@ mod replay_disposition_tests {
         assert_eq!(
             attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, false),
             AttemptReplayDisposition::RepairUnsubmittedReview,
+        );
+        assert!(
+            attempt_replay_disposition_for(PaymentAttemptStatus::Pending, false)
+                .may_reach_provider()
+        );
+        assert!(
+            !attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, false)
+                .may_reach_provider()
         );
 
         for status in PaymentAttemptStatus::ALL {

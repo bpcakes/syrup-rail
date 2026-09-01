@@ -59,13 +59,30 @@ async fn late_approval_and_reversal_preserve_terminal_failure_history_and_cancel
         .subscription()
         .expect("approved trial creates a subscription")
         .id();
-    let renewal_command = force_due_renewal(
-        &database.pool,
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+            .fetch_one(&database.pool)
+            .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2 - interval '7 days',
+            current_period_end_at = $2,
+            next_renewal_at = $2,
+            next_payment_attempt_at = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(due_at)
+    .execute(&database.pool)
+    .await?;
+
+    let renewal_command = ChargeRenewal::new(
         BillingScopeId::new(account.billing_scope_id),
         subscription_id,
-    )
-    .await?;
-    let due_at = *renewal_command.period_start_at();
+        due_at,
+    );
     let first_reservation =
         reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
     let first = apply_subscription_renewal_gateway_outcome(
@@ -125,7 +142,16 @@ async fn late_approval_and_reversal_preserve_terminal_failure_history_and_cancel
     assert_eq!(attempt_status, "declined");
     assert_eq!(resolution_code, None);
 
-    make_retry_due(&database.pool, renewal_command).await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET next_payment_attempt_at = clock_timestamp() - interval '1 second'
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&database.pool)
+    .await?;
     let second_reservation =
         reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
     let second = apply_subscription_renewal_gateway_outcome(

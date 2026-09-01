@@ -7,7 +7,7 @@ async fn policy_subscription(
     coordinator: &TestCoordinator,
     policy: RenewalFailurePolicy,
     key: &str,
-) -> Result<(SubscriberId, ChargeRenewal), Box<dyn Error>> {
+) -> Result<(SubscriberId, syrup_rail::SubscriptionId, DateTime<Utc>), Box<dyn Error>> {
     let offer = paid_trial_offer_with_policy(policy)?;
     let subscriber_id = SubscriberId::new(Uuid::now_v7());
     let initial = approve_enrollment(
@@ -29,13 +29,8 @@ async fn policy_subscription(
         .subscription()
         .expect("approved trial creates subscription")
         .id();
-    let renewal = force_due_renewal(
-        &database.pool,
-        BillingScopeId::new(account.billing_scope_id),
-        subscription_id,
-    )
-    .await?;
-    Ok((subscriber_id, renewal))
+    let due_at = make_trial_due(&database.pool, subscription_id).await?;
+    Ok((subscriber_id, subscription_id, due_at))
 }
 
 fn query(account: GatewayAccountFixture, subscriber_id: SubscriberId) -> EntitlementQuery {
@@ -64,7 +59,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         DunningExhaustion::MarkUnpaid,
         PastDueAccessPolicy::SuspendImmediately,
     );
-    let (suspended_subscriber, suspended_renewal) = policy_subscription(
+    let (suspended_subscriber, suspended_id, suspended_due) = policy_subscription(
         &database,
         account,
         &gateway,
@@ -73,23 +68,22 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         "suspend_terminal",
     )
     .await?;
-    let suspended_id = suspended_renewal.subscription_id();
     let (_, first_suspended_at) = decline_due_renewal(
         &database.pool,
         &gateway,
         &coordinator,
-        suspended_renewal,
+        scope,
+        suspended_id,
+        suspended_due,
         "suspend_terminal_failure_1",
     )
     .await?;
     assert!(events.lock().await.iter().any(|event| matches!(
-        &event.event,
+        event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
-                access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
-                ..
-            },
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
             ..
         } if *subscription_id == suspended_id && *access_ended_at == first_suspended_at
     )));
@@ -108,12 +102,14 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         .await,
         Err(crate::EntitlementGuardError::PastDue)
     ));
-    make_retry_due(&database.pool, suspended_renewal).await?;
+    make_retry_due(&database.pool, suspended_id).await?;
     let (_, final_suspended_at) = decline_due_renewal(
         &database.pool,
         &gateway,
         &coordinator,
-        suspended_renewal,
+        scope,
+        suspended_id,
+        suspended_due,
         "suspend_terminal_failure_2",
     )
     .await?;
@@ -125,20 +121,18 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
     assert_eq!(status, "unpaid");
     let emitted = events.lock().await.clone();
     assert!(emitted.iter().any(|event| matches!(
-        &event.event,
+        event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded {
-                ended_at,
-                access_ended_at,
-            },
+            disposition: SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
             ..
         } if *subscription_id == suspended_id
             && *ended_at == final_suspended_at
             && *access_ended_at == first_suspended_at
     )));
     assert!(emitted.iter().any(|event| matches!(
-        &event.event,
+        event,
         BillingEvent::SubscriptionEnded {
             subscription_id,
             reason: SubscriptionEndReason::NonPayment,
@@ -155,7 +149,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         DunningExhaustion::RemainPastDue,
         PastDueAccessPolicy::ContinueUntilDunningExhausted,
     );
-    let (remain_subscriber, remain_renewal) = policy_subscription(
+    let (remain_subscriber, remain_id, remain_due) = policy_subscription(
         &database,
         account,
         &gateway,
@@ -164,23 +158,22 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         "remain_exhausted",
     )
     .await?;
-    let remain_id = remain_renewal.subscription_id();
     decline_due_renewal(
         &database.pool,
         &gateway,
         &coordinator,
-        remain_renewal,
+        scope,
+        remain_id,
+        remain_due,
         "remain_failure_1",
     )
     .await?;
     assert!(events.lock().await.iter().any(|event| matches!(
-        &event.event,
+        event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
-                access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
-                ..
-            },
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { .. },
+            access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
             ..
         } if *subscription_id == remain_id
     )));
@@ -191,12 +184,14 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
             ..
         }
     ));
-    make_retry_due(&database.pool, remain_renewal).await?;
+    make_retry_due(&database.pool, remain_id).await?;
     let (_, remain_exhausted_at) = decline_due_renewal(
         &database.pool,
         &gateway,
         &coordinator,
-        remain_renewal,
+        scope,
+        remain_id,
+        remain_due,
         "remain_failure_2",
     )
     .await?;
@@ -215,13 +210,13 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         }
     ));
     assert!(events.lock().await.iter().any(|event| matches!(
-        &event.event,
+        event,
         BillingEvent::SubscriptionPaymentFailed {
             subscription_id,
-            outcome: SubscriptionPaymentFailureOutcome::DunningExhausted {
+            disposition: SubscriptionPaymentFailureDisposition::DunningExhausted {
                 exhausted_at,
-                access_ended_at,
             },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
             ..
         } if *subscription_id == remain_id
             && *exhausted_at == remain_exhausted_at
@@ -240,7 +235,7 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         } if access_ends_at == remain_exhausted_at
     ));
 
-    let (cancel_subscriber, cancel_renewal) = policy_subscription(
+    let (cancel_subscriber, cancel_id, cancel_due) = policy_subscription(
         &database,
         account,
         &gateway,
@@ -253,7 +248,9 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         &database.pool,
         &gateway,
         &coordinator,
-        cancel_renewal,
+        scope,
+        cancel_id,
+        cancel_due,
         "suspend_cancel_failure",
     )
     .await?;

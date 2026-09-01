@@ -16,14 +16,21 @@ mod requests;
 mod responses;
 
 pub use client::{Client, ClientFactory};
-pub use configuration::{ConfigurationError, Credentials, Endpoint};
+#[cfg(test)]
+pub(crate) use configuration::MAX_CREDENTIAL_BYTES;
+pub use configuration::{
+    ConfigurationError, Credentials, DuplicateCheck, DuplicateCheckWindow, Endpoint,
+};
 pub use errors::{MutationCertainty, MutationError, QueryError};
 pub use requests::{
-    BillingContact, PaymentSource, ReportQuery, SaleIntent, SaleIntentBuildError, SaleRequest,
-    StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
+    BillingContact, PaymentSource, ReportQuery, SaleRequest, StorePaymentMethodRequest,
+    StoredCredential, TransactionQuery, VaultAction,
 };
 pub use responses::{
     AccountMode, PaymentDescriptor, PaymentDescriptorParts, PaymentOutcome,
     PaymentOutcomeDiagnostic, PaymentOutcomeParts, PaymentStatus, SensitiveText, TransactionAction,
     TransactionActionParts, TransactionReport, TransactionReportDiagnostic, TransactionReportParts,
 };
+
+#[cfg(test)]
+mod public_api_tests;

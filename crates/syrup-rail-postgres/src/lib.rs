@@ -6,7 +6,6 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
-mod advisory_locks;
 mod attempts;
 mod billing_portal;
 mod cancellation;
@@ -22,6 +21,7 @@ mod host_charges;
 mod host_error;
 mod lifecycle_quarantine;
 mod lifecycle_reconciliation;
+mod mode_verified_gateway;
 mod operator_review;
 #[cfg(test)]
 mod paid_trial_dunning_tests;
@@ -134,6 +134,9 @@ pub use lifecycle_reconciliation::{
     reconcile_gateway_transaction_reports, record_gateway_lifecycle_quarantines,
     save_gateway_lifecycle_reconciliation_cursor, stage_gateway_lifecycle_evidence,
 };
+pub use mode_verified_gateway::{
+    GatewayAccountModeVerificationError, ModeVerifiedGateway, verify_gateway_account_mode,
+};
 pub use operator_review::{
     ExternalReversalAttestationOutcome, ExternalReversalHostStore, ExternalReversalHostStoreError,
     ExternalReversalHostTransitionOutcome, ManualAttemptFailureHostStore,
@@ -153,10 +156,14 @@ pub use reconciliation::{
     fail_stale_unsubmitted_subscription_charges, fail_stale_unsubmitted_subscription_enrollments,
     reconciliation_gateway_accounts,
 };
-pub use renewal::{RenewalStoreError, due_renewals, due_renewals_page, renewal_attempt_state};
+pub use renewal::{
+    RenewalStoreError, due_renewals, due_renewals_for_mode, due_renewals_page,
+    due_renewals_page_for_mode, renewal_attempt_state,
+};
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+pub use schema_contract::assert_runtime_schema_v3_compatible;
 pub use schema_contract::{
-    SUPPORTED_POSTGRES_MAJOR_VERSION, SchemaConformanceError, assert_runtime_schema_v3_compatible,
-    assert_runtime_schema_v4_compatible,
+    SUPPORTED_POSTGRES_MAJOR_VERSION, SchemaConformanceError, assert_runtime_schema_v4_compatible,
 };
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,

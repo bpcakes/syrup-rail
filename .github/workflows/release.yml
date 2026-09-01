@@ -29,13 +29,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Require main
+      - name: Require an approved release ref
         env:
           RELEASE_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
-            echo "Run releases from main, not $RELEASE_REF." >&2
+          if [[ "$RELEASE_REF" != "refs/heads/main" &&
+                "$RELEASE_REF" != "refs/heads/release/0.4.0" ]]; then
+            echo "Run releases from main or the approved 0.4.0 release branch, not $RELEASE_REF." >&2
             exit 1
           fi
 

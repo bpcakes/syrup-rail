@@ -315,6 +315,37 @@ fn query_outcome_treats_conflicting_status_and_condition_as_unknown() {
 }
 
 #[test]
+fn query_duplicate_response_code_remains_reconcilable_and_composes_diagnostics() {
+    let outcome = query_outcome_from_xml(
+        r#"
+        <nm_response>
+          <transaction>
+            <transaction_id>txn_query_duplicate</transaction_id>
+            <response>3</response>
+            <response_code>0430</response_code>
+            <status><unexpected>shape</unexpected></status>
+          </transaction>
+        </nm_response>
+        "#,
+    )
+    .expect("duplicate exact-query response should parse")
+    .expect("duplicate transaction should be present");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.transaction_id.as_ref().map(SensitiveText::expose),
+        Some("txn_query_duplicate")
+    );
+    assert_eq!(
+        outcome.diagnostics,
+        vec![
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+        ]
+    );
+}
+
+#[test]
 fn query_outcome_decision_duplicates_are_order_independent() {
     for fields in [
         "<response>1</response><response>2</response>",

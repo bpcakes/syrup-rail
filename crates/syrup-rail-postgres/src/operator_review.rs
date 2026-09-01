@@ -6,13 +6,13 @@ use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     ActorId, AttemptReviewCursor, AttemptReviewPage, BillingEventSubject, BillingScopeId,
     CurrencyCode, ExternalReversalAttestation, ExternalReversalHostChargeRelease,
-    ExternalReversalKind, ExternalReversalReason, ExternalReversalResolution, GatewayAccountId,
-    GatewayDiagnostic, GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentMethodReference,
-    GatewayTransactionId, HostChargeTargetId, ManualAttemptFailureOutcome, ManualFailureHostCharge,
-    Money, OperatorReviewPageLimit, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
-    PaymentAttemptStatus, PlanKey, ProcessorCharge, ProcessorChargeId, ProcessorChargeProgression,
-    ProcessorChargeReviewCursor, ProcessorChargeReviewItem, ProcessorChargeReviewPage,
-    ProcessorChargeRole, ProcessorEvidence, SubscriberId,
+    ExternalReversalKind, ExternalReversalReason, GatewayAccountId, GatewayDiagnostic,
+    GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayTransactionId,
+    HostChargeTargetId, ManualAttemptFailureOutcome, ManualFailureHostCharge, Money,
+    OperatorReviewPageLimit, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
+    PaymentAttemptStatus, PaymentResolutionCode, PlanKey, ProcessorCharge, ProcessorChargeId,
+    ProcessorChargeProgression, ProcessorChargeReviewCursor, ProcessorChargeReviewItem,
+    ProcessorChargeReviewPage, ProcessorChargeRole, ProcessorEvidence, SubscriberId,
     review_required_attempt_can_be_manually_failed, review_required_manual_failure_evidence,
 };
 use thiserror::Error;
@@ -27,8 +27,8 @@ use crate::attempts::{
 };
 use crate::host_error::{BoxError, RedactedHostErrorSource};
 use crate::processor_charge_persistence::{
-    ProcessorChargePersistenceError, attestation_by_charge, attestation_matches_source,
-    expected_reversal_resolution, parse_charge_state_code, parse_kind, parse_progression,
+    attestation_by_charge, attestation_matches_source, expected_final_resolution_code,
+    expected_prior_resolution_code, parse_charge_state_code, parse_kind, parse_progression,
     parse_role, processor_charge_from_row,
 };
 use crate::renewal_failure::{
@@ -71,15 +71,6 @@ pub enum OperatorReviewError {
     BillingTransaction(#[from] BillingTransactionError),
     #[error(transparent)]
     BillingEvent(#[from] BillingEventWriteError),
-}
-
-impl From<ProcessorChargePersistenceError> for OperatorReviewError {
-    fn from(error: ProcessorChargePersistenceError) -> Self {
-        match error {
-            ProcessorChargePersistenceError::Sql(error) => Self::Sql(error),
-            ProcessorChargePersistenceError::InvalidState(message) => Self::InvalidState(message),
-        }
-    }
 }
 
 impl From<crate::PaymentAttemptStoreError> for OperatorReviewError {

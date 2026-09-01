@@ -1,1 +1,0 @@
-Implement Beads R-31 by preserving the deployed advisory-lock key, routing enrollment, grants, cancellation, discounts, and entitlement through one crate-private helper, adding exact-key and cross-workflow contention coverage, and running PostgreSQL/backend gates.

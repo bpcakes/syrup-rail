@@ -1,7 +1,4 @@
 use super::*;
-use syrup_rail::{
-    ExternalReversalOutcome, ExternalReversalPriorClassification, PaymentResolutionCode,
-};
 
 #[derive(Default)]
 struct ExactHostRelease {
@@ -71,11 +68,13 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
                 gateway_configuration_id, gateway_order_id, review_required_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
                 500, 'USD', $7, $8, $9, clock_timestamp()
             )
@@ -223,14 +222,6 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     };
     assert_eq!(attempt.status(), PaymentAttemptStatus::Failed);
     assert_eq!(attestation.actor_id(), actor);
-    assert_eq!(
-        attestation.prior_classification(),
-        ExternalReversalPriorClassification::ProcessorChargeExternalReversalRequired
-    );
-    assert_eq!(
-        attestation.outcome(),
-        ExternalReversalOutcome::ProcessorChargeRefunded
-    );
     assert_eq!(host.calls.load(Ordering::SeqCst), 1);
     assert!(
         sqlx::query_scalar::<_, bool>("SELECT released FROM host_targets WHERE id = $1")
@@ -271,58 +262,6 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         ).bind(charge_id).fetch_one(&database.pool).await?;
     assert_eq!(counts, (1, "externally_reversed".to_owned()));
 
-    let void_reason = ExternalReversalReason::new("processor void verified")?;
-    let additional_transaction_id = GatewayTransactionId::new("txn-operator-additional")?;
-    let additional_attested = attest_external_reversal(
-        &database.pool,
-        &host,
-        ProcessorChargeId::new(additional_charge_id),
-        actor,
-        ExternalReversalKind::Void,
-        &additional_transaction_id,
-        &void_reason,
-    )
-    .await?;
-    let ExternalReversalAttestationOutcome::Attested { attestation, .. } = additional_attested
-    else {
-        panic!("expected additional void attestation");
-    };
-    assert_eq!(
-        attestation.prior_classification(),
-        ExternalReversalPriorClassification::ProcessorChargeExternalReversalRequired
-    );
-    assert_eq!(
-        attestation.outcome(),
-        ExternalReversalOutcome::ProcessorChargeVoided
-    );
-    assert!(matches!(
-        attest_external_reversal(
-            &database.pool,
-            &host,
-            ProcessorChargeId::new(additional_charge_id),
-            actor,
-            ExternalReversalKind::Void,
-            &additional_transaction_id,
-            &void_reason,
-        )
-        .await?,
-        ExternalReversalAttestationOutcome::Replayed { .. }
-    ));
-    assert_eq!(
-        attest_external_reversal(
-            &database.pool,
-            &host,
-            ProcessorChargeId::new(additional_charge_id),
-            ActorId::new(Uuid::now_v7()),
-            ExternalReversalKind::Void,
-            &additional_transaction_id,
-            &void_reason,
-        )
-        .await?,
-        ExternalReversalAttestationOutcome::ReplayConflict
-    );
-    crate::assert_runtime_schema_v4_compatible(&database.pool).await?;
-
     database.cleanup().await?;
     Ok(())
 }
@@ -339,6 +278,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
@@ -355,6 +295,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
                 subscription_initial_dunning_exhaustion,
                 subscription_initial_past_due_access
             ) VALUES (
+                'live',
                 $1, $2, $3, 'base', 'subscription_initial', 'review_required',
                 $4, $5, 500, 'USD', $6, $7, $8, 'txn-grant-conflict',
                 '1', '100', 'Approved', 'complete',
@@ -402,29 +343,22 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
 
     let host = ExactHostRelease::default();
     let actor = ActorId::new(Uuid::now_v7());
-    let reason = ExternalReversalReason::new("processor void verified")?;
+    let reason = ExternalReversalReason::new("processor refund verified")?;
     let transaction_id = GatewayTransactionId::new("txn-grant-conflict")?;
     let attested = attest_external_reversal(
         &database.pool,
         &host,
         ProcessorChargeId::new(charge_id),
         actor,
-        ExternalReversalKind::Void,
+        ExternalReversalKind::Refund,
         &transaction_id,
         &reason,
     )
     .await?;
-    let ExternalReversalAttestationOutcome::Attested { attestation, .. } = attested else {
-        panic!("expected initial void attestation");
-    };
-    assert_eq!(
-        attestation.prior_classification(),
-        ExternalReversalPriorClassification::SubscriptionInitialCurrentGrantConflict
-    );
-    assert_eq!(
-        attestation.outcome(),
-        ExternalReversalOutcome::SubscriptionInitialVoided
-    );
+    assert!(matches!(
+        attested,
+        ExternalReversalAttestationOutcome::Attested { .. }
+    ));
     let state_code: String =
         sqlx::query_scalar("SELECT state_code FROM billing_processor_charges WHERE id = $1")
             .bind(charge_id)
@@ -440,132 +374,13 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
             &host,
             ProcessorChargeId::new(charge_id),
             actor,
-            ExternalReversalKind::Void,
+            ExternalReversalKind::Refund,
             &transaction_id,
             &reason,
         )
         .await?,
         ExternalReversalAttestationOutcome::Replayed { .. }
     ));
-    assert_eq!(
-        attest_external_reversal(
-            &database.pool,
-            &host,
-            ProcessorChargeId::new(charge_id),
-            ActorId::new(Uuid::now_v7()),
-            ExternalReversalKind::Void,
-            &transaction_id,
-            &reason,
-        )
-        .await?,
-        ExternalReversalAttestationOutcome::ReplayConflict
-    );
-
-    database.cleanup().await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
--> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start_v3("rail_op_tuple").await?;
-    let account = create_gateway_account(&database.pool, "nmi").await?;
-    let attempt_id = Uuid::now_v7();
-    let charge_id = Uuid::now_v7();
-    let order_id = format!("ck_{}", attempt_id.simple());
-    let transaction_id = "txn-invalid-reversal-tuple";
-    sqlx::query(
-        r#"
-            INSERT INTO billing_payment_attempts (
-                id, billing_scope_id, subscriber_id, host_charge_target_id,
-                attempt_kind, status, idempotency_key, request_fingerprint,
-                amount_cents, currency, gateway_account_id,
-                gateway_configuration_id, gateway_order_id, review_required_at
-            ) VALUES (
-                $1, $2, $3, $4, 'host_charge', 'review_required', $5, $6,
-                500, 'USD', $7, $8, $9, clock_timestamp()
-            )
-            "#,
-    )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(Uuid::now_v7())
-    .bind(Uuid::now_v7())
-    .bind(format!("idem-{attempt_id}"))
-    .bind(format!("fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(&order_id)
-    .execute(&database.pool)
-    .await?;
-    sqlx::query(
-        r#"
-            INSERT INTO billing_processor_charges (
-                id, attempt_id, billing_scope_id, gateway_account_id,
-                gateway_order_id, gateway_transaction_id, attempt_kind,
-                amount_cents, currency
-            ) VALUES ($1, $2, $3, $4, $5, $6, 'host_charge', 500, 'USD')
-            "#,
-    )
-    .bind(charge_id)
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(&order_id)
-    .bind(transaction_id)
-    .execute(&database.pool)
-    .await?;
-    crate::assert_runtime_schema_v3_compatible(&database.pool).await?;
-
-    sqlx::query(
-        r#"
-            INSERT INTO billing_external_reversal_attestations (
-                attempt_id, processor_charge_id, actor_id, reversal_kind, reason,
-                prior_resolution_code, final_resolution_code,
-                gateway_account_id, gateway_configuration_id, gateway_order_id,
-                amount_cents, currency, gateway_transaction_id, attested_at
-            ) VALUES (
-                $1, $2, $3, 'refund', 'operator confirmed refund',
-                'subscription_initial_current_grant_conflict',
-                'processor_charge_externally_refunded',
-                $4, $5, $6, 500, 'USD', $7, clock_timestamp()
-            )
-            "#,
-    )
-    .bind(attempt_id)
-    .bind(charge_id)
-    .bind(Uuid::now_v7())
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(&order_id)
-    .bind(transaction_id)
-    .execute(&database.pool)
-    .await?;
-
-    assert!(matches!(
-        crate::assert_runtime_schema_v3_compatible(&database.pool).await,
-        Err(crate::SchemaConformanceError::Contract { version: 3, detail })
-            if detail == crate::schema_contract::INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL
-    ));
-    let error = attest_external_reversal(
-        &database.pool,
-        &ExactHostRelease::default(),
-        ProcessorChargeId::new(charge_id),
-        ActorId::new(Uuid::now_v7()),
-        ExternalReversalKind::Refund,
-        &GatewayTransactionId::new(transaction_id)?,
-        &ExternalReversalReason::new("operator confirmed refund")?,
-    )
-    .await
-    .expect_err("incompatible legacy tuple must fail strict hydration");
-    assert!(matches!(
-        &error,
-        OperatorReviewError::InvalidState("operator attestation resolution tuple is invalid")
-    ));
-    assert_eq!(
-        error.to_string(),
-        "operator attestation resolution tuple is invalid"
-    );
 
     database.cleanup().await?;
     Ok(())

@@ -38,7 +38,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
     lock_payment_method_domain(
         connection,
         identity.subscriber_id(),
-        identity.gateway_account_id(),
+        identity.gateway_account_id().as_uuid(),
     )
     .await?;
     lock_subscription_aggregate(connection, identity.subscriber_id(), reservation.plan_key())
@@ -139,7 +139,8 @@ async fn apply_payment_method_replacement_approved_on_connection(
     let expected = reservation.expected_state();
     let row = sqlx::query(
         r#"
-        SELECT status, payment_method_id, initial_transaction_id
+        SELECT status, payment_method_id, initial_transaction_id,
+            required_gateway_account_mode
         FROM billing_subscriptions
         WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
             AND gateway_account_id = $4 AND plan_key = $5
@@ -177,7 +178,9 @@ async fn apply_payment_method_replacement_approved_on_connection(
     let status: String = row.try_get("status")?;
     let current_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
     let current_transaction_id: String = row.try_get("initial_transaction_id")?;
-    let expected_state = status == "active" || status == "past_due";
+    let expected_state = (status == "active" || status == "past_due")
+        && row.try_get::<String, _>("required_gateway_account_mode")?
+            == identity.required_gateway_account_mode().as_str();
     let baseline_matches = current_method_id == expected.payment_method_id()
         && current_transaction_id == expected.expected_initial_transaction_id().expose();
     let exact_replay =
@@ -218,6 +221,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
                 AND gateway_account_id = $6 AND plan_key = $7
                 AND status IN ('active', 'past_due')
                 AND payment_method_id = $8 AND initial_transaction_id = $9
+                AND required_gateway_account_mode = $10
             "#,
         )
         .bind(reservation.subscription_id().as_uuid())
@@ -229,6 +233,7 @@ async fn apply_payment_method_replacement_approved_on_connection(
         .bind(reservation.plan_key().as_str())
         .bind(expected.payment_method_id().as_uuid())
         .bind(expected.expected_initial_transaction_id().expose())
+        .bind(identity.required_gateway_account_mode().as_str())
         .execute(&mut *connection)
         .await?;
         if updated.rows_affected() != 1 {

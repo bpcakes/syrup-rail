@@ -12,10 +12,7 @@ use super::{
     classify_guard_access, entitlement, require_entitlement_for_update,
     require_entitlement_for_update_with_lock_timeout,
 };
-use crate::{
-    attempts::{lock_subscription_aggregate, try_lock_subscription_aggregate},
-    test_support::{TestDatabase, create_gateway_account},
-};
+use crate::test_support::{TestDatabase, create_gateway_account};
 
 mod projection;
 mod stale_attempts;
@@ -155,6 +152,49 @@ async fn protected_write_guard_uses_database_state_and_restores_the_host_timeout
                 insert_paid_subscription(&database.pool, "active").await?;
             let paid_guard = guard(paid_scope, paid_subscriber)?;
             require_guard(&database.pool, &paid_guard).await?;
+            require_guard(
+                &database.pool,
+                &paid_guard
+                    .clone()
+                    .with_required_gateway_account_mode(syrup_rail::GatewayAccountMode::Live),
+            )
+            .await?;
+            if !matches!(
+                guard_result(
+                    &database.pool,
+                    &paid_guard
+                        .clone()
+                        .with_required_gateway_account_mode(syrup_rail::GatewayAccountMode::Test),
+                )
+                .await?,
+                Err(EntitlementGuardError::Required)
+            ) {
+                return Err(io::Error::other(
+                    "a test-only guard admitted a live-mode paid subscription",
+                )
+                .into());
+            }
+            sqlx::query(
+                "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id = $1",
+            )
+            .bind(subscription)
+            .execute(&database.pool)
+            .await?;
+            assert!(matches!(
+                guard_result(&database.pool, &paid_guard).await?,
+                Err(EntitlementGuardError::Required)
+            ));
+            require_guard(
+                &database.pool,
+                &paid_guard.clone().across_gateway_account_modes(),
+            )
+            .await?;
+            sqlx::query(
+                "UPDATE billing_subscriptions SET required_gateway_account_mode = 'live' WHERE id = $1",
+            )
+            .bind(subscription)
+            .execute(&database.pool)
+            .await?;
             sqlx::query("UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1")
                 .bind(subscription)
                 .execute(&database.pool)
@@ -273,6 +313,7 @@ async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Resul
                 subscriber_id uuid NOT NULL,
                 plan_key text NOT NULL,
                 status text NOT NULL,
+                required_gateway_account_mode text NOT NULL,
                 current_period_end_at text NOT NULL,
                 past_due_access text NOT NULL,
                 next_payment_attempt_at timestamptz
@@ -285,8 +326,9 @@ async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Resul
             r#"
             INSERT INTO billing_subscriptions (
                 id, billing_scope_id, subscriber_id, plan_key, status,
-                current_period_end_at, past_due_access, next_payment_attempt_at
-            ) VALUES ($1, $2, $3, 'base_subscription', 'active',
+                required_gateway_account_mode, current_period_end_at,
+                past_due_access, next_payment_attempt_at
+            ) VALUES ($1, $2, $3, 'base_subscription', 'active', 'live',
                 'not-a-timestamp', 'suspend_immediately', NULL)
             "#,
         )
@@ -319,7 +361,7 @@ async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Resul
 }
 
 #[tokio::test]
-async fn discount_and_entitlement_workflows_contend_on_the_canonical_subscription_aggregate()
+async fn protected_write_guard_rolls_back_after_a_database_lock_timeout()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_guard_timeout").await?;
     let result = async {
@@ -330,20 +372,7 @@ async fn discount_and_entitlement_workflows_contend_on_the_canonical_subscriptio
         let probe_id = Uuid::now_v7();
 
         let mut holder = database.pool.begin().await?;
-        let plan_key = PlanKey::new("base_subscription")?;
-        let held = crate::clear_subscription_discount_in_transaction(
-            &mut holder,
-            BillingScopeId::new(scope),
-            SubscriberId::new(subscriber),
-            &plan_key,
-        )
-        .await?;
-        if held != syrup_rail::SubscriptionDiscountClearOutcome::NotFound {
-            return Err(io::Error::other(
-                "discount workflow did not retain its empty aggregate transaction",
-            )
-            .into());
-        }
+        lock_entitlement_aggregate(&mut holder, subscriber).await?;
 
         let mut caller = EntitlementWriteTransaction::begin(&database.pool).await?;
         let caller_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -437,12 +466,12 @@ async fn canceling_a_blocked_protected_write_guard_rolls_back_the_transaction()
         assert_backend_transaction_ended(&mut observer, caller_pid).await?;
 
         let mut contender = database.pool.begin().await?;
-        let plan_key = PlanKey::new("base_subscription")?;
-        let aggregate_unlocked = try_lock_subscription_aggregate(
-            &mut contender,
-            SubscriberId::new(subscriber),
-            &plan_key,
+        let aggregate_unlocked: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
         )
+        .bind(subscriber)
+        .bind("base_subscription")
+        .fetch_one(&mut *contender)
         .await?;
         if !aggregate_unlocked {
             return Err(
@@ -475,12 +504,12 @@ async fn protected_write_guard_holds_the_aggregate_and_entitlement_rows_until_ca
         sqlx::query("SET LOCAL lock_timeout = '100ms'")
             .execute(&mut *aggregate_contender)
             .await?;
-        let plan_key = PlanKey::new("base_subscription")?;
-        let aggregate_error = lock_subscription_aggregate(
-            &mut aggregate_contender,
-            SubscriberId::new(subscriber),
-            &plan_key,
+        let aggregate_error = sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
         )
+        .bind(subscriber)
+        .bind("base_subscription")
+        .execute(&mut *aggregate_contender)
         .await
         .expect_err("guard must hold the shared subscription aggregate domain");
         assert_lock_timeout(&aggregate_error)?;
@@ -583,6 +612,7 @@ async fn insert_paid_subscription(
     sqlx::query(
         r#"
             INSERT INTO billing_subscriptions (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents,
                 currency, current_period_start_at, current_period_end_at,
@@ -591,7 +621,7 @@ async fn insert_paid_subscription(
                 dunning_retry_delays_seconds, dunning_exhaustion,
                 past_due_access, next_payment_attempt_at
             ) SELECT
-                $1, $2, $3, 'base_subscription', $4, $5, $6, 100, 'USD',
+                'live', $1, $2, $3, 'base_subscription', $4, $5, $6, 100, 'USD',
                 observed_at - interval '1 day', observed_at + interval '1 day',
                 observed_at + interval '1 day', $7,
                 CASE WHEN $4 = 'canceled' THEN observed_at ELSE NULL END,
@@ -699,9 +729,12 @@ async fn lock_entitlement_aggregate(
     transaction: &mut Transaction<'_, Postgres>,
     subscriber: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let plan_key =
-        PlanKey::new("base_subscription").expect("test subscription plan key must be valid");
-    lock_subscription_aggregate(transaction, SubscriberId::new(subscriber), &plan_key).await
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(subscriber)
+        .bind("base_subscription")
+        .execute(&mut **transaction)
+        .await?;
+    Ok(())
 }
 
 fn assert_lock_timeout(error: &sqlx::Error) -> Result<(), io::Error> {

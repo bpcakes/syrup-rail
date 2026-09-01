@@ -10,6 +10,10 @@ use crate::{
     PaymentToken,
 };
 
+/// Cooldown applied after a determinate account- or provider-scoped mutation
+/// rate limit.
+pub const GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS: i64 = 60;
+
 pub use self::lifecycle::{
     GatewayLifecycleEvidence, GatewayLifecycleEvidenceError, GatewayLifecycleQuarantine,
     GatewayLifecycleQuarantineError, GatewayLifecycleQuarantineReason,
@@ -23,6 +27,38 @@ mod lifecycle;
 pub enum GatewayAccountMode {
     Live,
     Test,
+}
+
+impl GatewayAccountMode {
+    /// Canonical provider-neutral storage representation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Test => "test",
+        }
+    }
+}
+
+impl fmt::Display for GatewayAccountMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
+#[error("gateway account mode is not recognized")]
+pub struct GatewayAccountModeParseError;
+
+impl std::str::FromStr for GatewayAccountMode {
+    type Err = GatewayAccountModeParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "live" => Ok(Self::Live),
+            "test" => Ok(Self::Test),
+            _ => Err(GatewayAccountModeParseError),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -248,6 +284,21 @@ pub enum GatewayPaymentStatus {
     Declined,
     Unknown,
     Failed,
+}
+
+/// Provider-neutral diagnostics that require host policy beyond the payment
+/// status alone.
+///
+/// These diagnostics intentionally contain no provider payload. Exact gateway
+/// response fields remain available through [`ProcessorEvidence`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum GatewayPaymentDiagnostic {
+    /// The processor reported the payment as a duplicate.
+    ///
+    /// This does not prove that the current attempt was submitted or identify
+    /// an earlier transaction. Reconcile the durable attempt before retrying.
+    ProcessorReportedDuplicate,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -568,11 +619,22 @@ impl fmt::Debug for ProcessorEvidence {
 pub struct GatewayPaymentOutcome {
     status: GatewayPaymentStatus,
     evidence: ProcessorEvidence,
+    diagnostics: Vec<GatewayPaymentDiagnostic>,
 }
 
 impl GatewayPaymentOutcome {
     pub const fn new(status: GatewayPaymentStatus, evidence: ProcessorEvidence) -> Self {
-        Self { status, evidence }
+        Self {
+            status,
+            evidence,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// Attaches provider-neutral diagnostics derived by a gateway adapter.
+    pub fn with_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
+        self.diagnostics = diagnostics;
+        self
     }
 
     pub const fn status(&self) -> GatewayPaymentStatus {
@@ -583,6 +645,11 @@ impl GatewayPaymentOutcome {
         &self.evidence
     }
 
+    /// Returns payload-free diagnostics suitable for host policy and routing.
+    pub fn diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
+        &self.diagnostics
+    }
+
     /// Refines this outcome's evidence only when the provider decision is
     /// authoritatively approved.
     pub fn approved_evidence(&self) -> Option<ApprovedProcessorEvidence> {
@@ -591,8 +658,26 @@ impl GatewayPaymentOutcome {
         })
     }
 
+    /// Consumes the outcome into its original durable decision parts.
+    ///
+    /// This compatibility method does not return provider-neutral diagnostics;
+    /// use [`Self::into_parts_with_diagnostics`] when routing them matters.
+    #[deprecated(
+        note = "this drops gateway diagnostics; use GatewayPaymentOutcome::into_parts_with_diagnostics"
+    )]
     pub fn into_parts(self) -> (GatewayPaymentStatus, ProcessorEvidence) {
         (self.status, self.evidence)
+    }
+
+    /// Consumes the outcome without discarding provider-neutral diagnostics.
+    pub fn into_parts_with_diagnostics(
+        self,
+    ) -> (
+        GatewayPaymentStatus,
+        ProcessorEvidence,
+        Vec<GatewayPaymentDiagnostic>,
+    ) {
+        (self.status, self.evidence, self.diagnostics)
     }
 
     pub const fn transaction_id(&self) -> Option<&GatewayTransactionId> {
@@ -666,6 +751,17 @@ impl GatewayError {
     }
 }
 
+/// Proof from a gateway adapter that the provider never received a mutation.
+///
+/// Returning any variant authorizes ledger-aware callers to restore prepared
+/// work and retry the same provider mutation when policy permits. Adapters must
+/// use [`GatewayMutationError::Indeterminate`] once request transmission may
+/// have begun. Misclassifying an in-flight request as not submitted can cause a
+/// duplicate provider mutation on same-key retry.
+///
+/// This enum is intentionally exhaustive: adding a variant must break every
+/// persistence adapter at compile time so retry safety, durable resolution,
+/// cooldown scope, and host-target consequences are classified together.
 #[derive(Error)]
 pub enum GatewayNotSubmittedError {
     #[error("gateway rejected the mutation request")]
@@ -674,10 +770,30 @@ pub enum GatewayNotSubmittedError {
     Malformed(GatewayDiagnostic),
     #[error("gateway mutation configuration is invalid")]
     Configuration(GatewayDiagnostic),
-    #[error("gateway mutation service is unavailable")]
-    Unavailable(GatewayDiagnostic),
+    /// Transport failed before request transmission began. This is not a
+    /// generic transient transport error: returning it certifies that the
+    /// provider could not have received the mutation.
+    #[error("gateway mutation was not transmitted")]
+    NotTransmitted(GatewayDiagnostic),
     #[error("gateway mutation was rate limited before submission")]
     RateLimited(GatewayDiagnostic),
+    /// Reserved for a caller-owned account-mode check performed immediately
+    /// before invoking the mutation endpoint.
+    ///
+    /// Gateway adapters must not return this variant from `sale` or
+    /// `store_payment_method`; verified submission wrappers normalize any such
+    /// adapter response to an ordinary terminal not-submitted error.
+    #[error("gateway account mode changed before mutation submission")]
+    AccountModeMismatch {
+        required: GatewayAccountMode,
+        observed: GatewayAccountMode,
+        detail: GatewayDiagnostic,
+    },
+    /// Reserved for a caller-owned account-mode query performed immediately
+    /// before invoking the mutation endpoint. Gateway adapters must not return
+    /// this variant from mutation methods.
+    #[error("gateway account mode could not be verified before mutation submission")]
+    AccountModeVerification(#[source] GatewayError),
 }
 
 impl fmt::Debug for GatewayNotSubmittedError {
@@ -686,8 +802,26 @@ impl fmt::Debug for GatewayNotSubmittedError {
             Self::RequestRejected(detail) => ("RequestRejected", detail),
             Self::Malformed(detail) => ("Malformed", detail),
             Self::Configuration(detail) => ("Configuration", detail),
-            Self::Unavailable(detail) => ("Unavailable", detail),
+            Self::NotTransmitted(detail) => ("NotTransmitted", detail),
             Self::RateLimited(detail) => ("RateLimited", detail),
+            Self::AccountModeMismatch {
+                required,
+                observed,
+                detail,
+            } => {
+                return formatter
+                    .debug_struct("AccountModeMismatch")
+                    .field("required", required)
+                    .field("observed", observed)
+                    .field("has_detail", &(!detail.is_empty()))
+                    .finish();
+            }
+            Self::AccountModeVerification(error) => {
+                return formatter
+                    .debug_tuple("AccountModeVerification")
+                    .field(error)
+                    .finish();
+            }
         };
         formatter
             .debug_struct(variant)
@@ -702,12 +836,20 @@ impl GatewayNotSubmittedError {
             Self::RequestRejected(detail)
             | Self::Malformed(detail)
             | Self::Configuration(detail)
-            | Self::Unavailable(detail)
+            | Self::NotTransmitted(detail)
             | Self::RateLimited(detail) => detail,
+            Self::AccountModeMismatch { detail, .. } => detail,
+            Self::AccountModeVerification(error) => error.detail(),
         }
     }
 }
 
+/// Gateway mutation failure classified by whether provider receipt is possible.
+///
+/// Adapter implementations must return `NotSubmitted` only with proof that no
+/// request bytes could have reached the provider. Once transmission may have
+/// begun, return an indeterminate variant even if the transport later reports
+/// an ordinary unavailable or rate-limit error.
 #[derive(Error)]
 pub enum GatewayMutationError {
     #[error("gateway mutation was not submitted")]
@@ -738,6 +880,8 @@ impl fmt::Debug for GatewayMutationError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MutationCertainty {
+    /// The adapter certifies that the provider never received the request.
+    /// Ledger-aware callers may use this proof to permit same-key resubmission.
     NotSubmitted,
     Indeterminate,
 }

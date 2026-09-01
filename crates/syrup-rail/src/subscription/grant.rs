@@ -92,54 +92,15 @@ pub enum SubscriptionGrantRecordError {
     UpdateBeforeCreation,
 }
 
-/// Immutable audit facts recorded when a subscription grant is revoked.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SubscriptionGrantRevocationAudit {
-    revoked_at: DateTime<Utc>,
-    revoked_by_actor_id: ActorId,
-    reason: SubscriptionGrantReason,
-}
-
-impl SubscriptionGrantRevocationAudit {
-    pub const fn new(
-        revoked_at: DateTime<Utc>,
-        revoked_by_actor_id: ActorId,
-        reason: SubscriptionGrantReason,
-    ) -> Self {
-        Self {
-            revoked_at,
-            revoked_by_actor_id,
-            reason,
-        }
-    }
-
-    pub const fn revoked_at(&self) -> &DateTime<Utc> {
-        &self.revoked_at
-    }
-
-    pub const fn revoked_by_actor_id(&self) -> ActorId {
-        self.revoked_by_actor_id
-    }
-
-    pub const fn reason(&self) -> &SubscriptionGrantReason {
-        &self.reason
-    }
-}
-
-/// Whether a subscription grant remains active or has an immutable revocation audit.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SubscriptionGrantRevocationState {
-    Active,
-    Revoked(SubscriptionGrantRevocationAudit),
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionGrantRecord {
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
     grant: SubscriptionGrant,
     reason: SubscriptionGrantReason,
-    revocation: SubscriptionGrantRevocationState,
+    revoked_at: Option<DateTime<Utc>>,
+    revoked_by_actor_id: Option<ActorId>,
+    revocation_reason: Option<SubscriptionGrantReason>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
 }
@@ -157,42 +118,13 @@ impl SubscriptionGrantRecord {
         created_at: DateTime<Utc>,
         updated_at: DateTime<Utc>,
     ) -> Result<Self, SubscriptionGrantRecordError> {
-        let revocation = match (revoked_at, revoked_by_actor_id, revocation_reason) {
-            (None, None, None) => SubscriptionGrantRevocationState::Active,
-            (Some(revoked_at), Some(revoked_by_actor_id), Some(reason)) => {
-                SubscriptionGrantRevocationState::Revoked(SubscriptionGrantRevocationAudit::new(
-                    revoked_at,
-                    revoked_by_actor_id,
-                    reason,
-                ))
-            }
-            _ => return Err(SubscriptionGrantRecordError::InvalidRevocation),
-        };
-        Self::from_revocation_state(
-            billing_scope_id,
-            subscriber_id,
-            grant,
-            reason,
-            revocation,
-            created_at,
-            updated_at,
-        )
-    }
-
-    pub fn from_revocation_state(
-        billing_scope_id: BillingScopeId,
-        subscriber_id: SubscriberId,
-        grant: SubscriptionGrant,
-        reason: SubscriptionGrantReason,
-        revocation: SubscriptionGrantRevocationState,
-        created_at: DateTime<Utc>,
-        updated_at: DateTime<Utc>,
-    ) -> Result<Self, SubscriptionGrantRecordError> {
-        if matches!(
-            &revocation,
-            SubscriptionGrantRevocationState::Revoked(audit)
-                if audit.revoked_at() < grant.starts_at()
+        if !matches!(
+            (&revoked_at, &revoked_by_actor_id, &revocation_reason),
+            (None, None, None) | (Some(_), Some(_), Some(_))
         ) {
+            return Err(SubscriptionGrantRecordError::InvalidRevocation);
+        }
+        if revoked_at.is_some_and(|revoked_at| revoked_at < *grant.starts_at()) {
             return Err(SubscriptionGrantRecordError::RevocationBeforeStart);
         }
         if updated_at < created_at {
@@ -203,7 +135,9 @@ impl SubscriptionGrantRecord {
             subscriber_id,
             grant,
             reason,
-            revocation,
+            revoked_at,
+            revoked_by_actor_id,
+            revocation_reason,
             created_at,
             updated_at,
         })
@@ -225,29 +159,16 @@ impl SubscriptionGrantRecord {
         &self.reason
     }
 
-    pub const fn revocation_state(&self) -> &SubscriptionGrantRevocationState {
-        &self.revocation
-    }
-
     pub const fn revoked_at(&self) -> Option<&DateTime<Utc>> {
-        match &self.revocation {
-            SubscriptionGrantRevocationState::Active => None,
-            SubscriptionGrantRevocationState::Revoked(audit) => Some(audit.revoked_at()),
-        }
+        self.revoked_at.as_ref()
     }
 
     pub const fn revoked_by_actor_id(&self) -> Option<ActorId> {
-        match &self.revocation {
-            SubscriptionGrantRevocationState::Active => None,
-            SubscriptionGrantRevocationState::Revoked(audit) => Some(audit.revoked_by_actor_id()),
-        }
+        self.revoked_by_actor_id
     }
 
     pub const fn revocation_reason(&self) -> Option<&SubscriptionGrantReason> {
-        match &self.revocation {
-            SubscriptionGrantRevocationState::Active => None,
-            SubscriptionGrantRevocationState::Revoked(audit) => Some(audit.reason()),
-        }
+        self.revocation_reason.as_ref()
     }
 
     pub const fn created_at(&self) -> &DateTime<Utc> {

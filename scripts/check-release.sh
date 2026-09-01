@@ -101,15 +101,13 @@ fi
 
 cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
-# Keep the empty clean-mode argument vector safe under `set -u` on Bash 3.2
-# through 4.3.
-set --
+package_dirty_args=()
 if [[ "$allow_dirty" == true ]]; then
-  set -- --allow-dirty
+  package_dirty_args+=(--allow-dirty)
 fi
 
 for crate in "${publishable_crates[@]}"; do
-  package_files="$(cargo package --locked --list "$@" -p "$crate")"
+  package_files="$(cargo package --locked --list "${package_dirty_args[@]}" -p "$crate")"
   for required_file in LICENSE README.md; do
     if ! grep -Fqx "$required_file" <<<"$package_files"; then
       echo "$crate package does not contain $required_file." >&2

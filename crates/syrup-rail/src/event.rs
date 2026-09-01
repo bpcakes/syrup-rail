@@ -161,69 +161,6 @@ impl SubscriptionPaymentFailureAccess {
     }
 }
 
-/// Complete scheduler, lifecycle, and product-access consequence of one
-/// subscription payment failure.
-///
-/// The variants encode only states the billing engine can produce. In
-/// particular, exhausted or terminal collection can never claim that product
-/// access continues.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SubscriptionPaymentFailureOutcome {
-    /// Automatic collection remains scheduled. Product access may either
-    /// continue during dunning or have ended at an earlier causal boundary.
-    RetryScheduled {
-        /// Exact durable time at which automatic collection becomes eligible.
-        retry_at: DateTime<Utc>,
-        /// Canonical product-access fact immediately after the failure.
-        access: SubscriptionPaymentFailureAccess,
-    },
-    /// Automatic collection was exhausted while the subscription remains past
-    /// due, and product access has ended.
-    DunningExhausted {
-        /// Time at which the configured dunning schedule was exhausted.
-        exhausted_at: DateTime<Utc>,
-        /// Durable causal boundary at which product access ended.
-        access_ended_at: DateTime<Utc>,
-    },
-    /// Nonpayment ended the subscription and product access has ended.
-    SubscriptionEnded {
-        /// Time at which nonpayment made the subscription terminal.
-        ended_at: DateTime<Utc>,
-        /// Durable causal boundary at which product access ended.
-        access_ended_at: DateTime<Utc>,
-    },
-}
-
-impl SubscriptionPaymentFailureOutcome {
-    /// Projects the legacy scheduler or lifecycle consequence.
-    pub const fn disposition(self) -> SubscriptionPaymentFailureDisposition {
-        match self {
-            Self::RetryScheduled { retry_at, .. } => {
-                SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at }
-            }
-            Self::DunningExhausted { exhausted_at, .. } => {
-                SubscriptionPaymentFailureDisposition::DunningExhausted { exhausted_at }
-            }
-            Self::SubscriptionEnded { ended_at, .. } => {
-                SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at }
-            }
-        }
-    }
-
-    /// Projects the legacy product-access consequence.
-    pub const fn access(self) -> SubscriptionPaymentFailureAccess {
-        match self {
-            Self::RetryScheduled { access, .. } => access,
-            Self::DunningExhausted {
-                access_ended_at, ..
-            }
-            | Self::SubscriptionEnded {
-                access_ended_at, ..
-            } => SubscriptionPaymentFailureAccess::Ended { access_ended_at },
-        }
-    }
-}
-
 /// Provider-neutral reason that a subscription lifecycle ended.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SubscriptionEndReason {
@@ -274,8 +211,10 @@ pub enum BillingEvent {
         subscription_id: SubscriptionId,
         /// Exact plan owned by the subscription.
         plan_key: PlanKey,
-        /// Complete scheduler, lifecycle, and product-access consequence.
-        outcome: SubscriptionPaymentFailureOutcome,
+        /// Durable scheduler or lifecycle consequence.
+        disposition: SubscriptionPaymentFailureDisposition,
+        /// Canonical product-access fact immediately after the failure.
+        access: SubscriptionPaymentFailureAccess,
     },
     /// Nonpayment made a subscription lifecycle terminal.
     SubscriptionEnded {
@@ -401,10 +340,10 @@ mod tests {
                     attempt_id: attempt(4),
                     subscription_id: subscription(2),
                     plan_key: plan_key.clone(),
-                    outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
+                    disposition: SubscriptionPaymentFailureDisposition::RetryScheduled {
                         retry_at: end,
-                        access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
                     },
+                    access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
                 },
                 BillingEventKey::SubscriptionPaymentFailed(attempt(4)),
             ),
@@ -478,60 +417,5 @@ mod tests {
         };
         assert!(!access.permits_product_access());
         assert_eq!(access.access_ended_at(), Some(ended));
-    }
-
-    #[test]
-    fn payment_failure_outcomes_project_exactly_the_four_valid_matrices() {
-        let failed_at = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
-        let retry_at = Utc.with_ymd_and_hms(2026, 8, 2, 0, 0, 0).unwrap();
-        let exhausted_at = Utc.with_ymd_and_hms(2026, 8, 3, 0, 0, 0).unwrap();
-        let ended_at = Utc.with_ymd_and_hms(2026, 8, 4, 0, 0, 0).unwrap();
-        let cases = [
-            (
-                SubscriptionPaymentFailureOutcome::RetryScheduled {
-                    retry_at,
-                    access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
-                },
-                SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
-                SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
-            ),
-            (
-                SubscriptionPaymentFailureOutcome::RetryScheduled {
-                    retry_at,
-                    access: SubscriptionPaymentFailureAccess::Ended {
-                        access_ended_at: failed_at,
-                    },
-                },
-                SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
-                SubscriptionPaymentFailureAccess::Ended {
-                    access_ended_at: failed_at,
-                },
-            ),
-            (
-                SubscriptionPaymentFailureOutcome::DunningExhausted {
-                    exhausted_at,
-                    access_ended_at: exhausted_at,
-                },
-                SubscriptionPaymentFailureDisposition::DunningExhausted { exhausted_at },
-                SubscriptionPaymentFailureAccess::Ended {
-                    access_ended_at: exhausted_at,
-                },
-            ),
-            (
-                SubscriptionPaymentFailureOutcome::SubscriptionEnded {
-                    ended_at,
-                    access_ended_at: failed_at,
-                },
-                SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
-                SubscriptionPaymentFailureAccess::Ended {
-                    access_ended_at: failed_at,
-                },
-            ),
-        ];
-
-        for (outcome, disposition, access) in cases {
-            assert_eq!(outcome.disposition(), disposition);
-            assert_eq!(outcome.access(), access);
-        }
     }
 }

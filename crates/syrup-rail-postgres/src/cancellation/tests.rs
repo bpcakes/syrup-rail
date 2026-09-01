@@ -33,57 +33,6 @@ impl SubscriptionFixture {
 }
 
 #[tokio::test]
-async fn discount_and_cancellation_workflows_contend_on_the_canonical_subscription_aggregate()
--> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_can_agg_lock").await?;
-    let result = async {
-        let subscriber_id = SubscriberId::new(Uuid::now_v7());
-        let plan_key = PlanKey::new("base_subscription")?;
-        let mut holder = database.pool.begin().await?;
-        let held = crate::clear_subscription_discount_in_transaction(
-            &mut holder,
-            BillingScopeId::new(Uuid::now_v7()),
-            subscriber_id,
-            &plan_key,
-        )
-        .await?;
-        if held != syrup_rail::SubscriptionDiscountClearOutcome::NotFound {
-            return Err(io::Error::other(
-                "discount workflow did not retain its empty aggregate transaction",
-            )
-            .into());
-        }
-
-        let command =
-            CancelSubscription::new(BillingScopeId::new(Uuid::now_v7()), subscriber_id, plan_key);
-        let mut contender = database.pool.begin().await?;
-        let error = cancel_subscription_in_transaction(&mut contender, &command)
-            .await
-            .expect_err("canonical aggregate holder must block cancellation");
-        contender.rollback().await?;
-        holder.rollback().await?;
-        let SubscriptionCancellationError::Sql(sqlx::Error::Database(error)) = error else {
-            return Err(io::Error::other(format!(
-                "expected cancellation lock timeout, got {error:?}"
-            ))
-            .into());
-        };
-        if error.code().as_deref() != Some("55P03") {
-            return Err(io::Error::other(format!(
-                "expected cancellation lock timeout SQLSTATE 55P03, got {:?}",
-                error.code()
-            ))
-            .into());
-        }
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result?;
-    cleanup
-}
-
-#[tokio::test]
 async fn cancellation_is_exact_idempotent_and_preserves_the_payment_method()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("sr_cancel_exact").await?;
@@ -503,6 +452,7 @@ async fn insert_subscription(
     sqlx::query(
         r#"
             INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
@@ -510,6 +460,7 @@ async fn insert_subscription(
                 recurring_period_count, dunning_retry_delays_seconds,
                 dunning_exhaustion, past_due_access, next_payment_attempt_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6, $7, 5900, 'USD', $8, $9, $9, $10,
                 'recurring', 'calendar_months', 1, ARRAY[]::bigint[],
                 'remain_past_due', 'suspend_immediately', $9
@@ -548,6 +499,7 @@ async fn insert_payment_method_update(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, gateway_account_id,
@@ -556,6 +508,7 @@ async fn insert_payment_method_update(
                 payment_method_update_expected_initial_transaction_id,
                 created_at, updated_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6,
                 'subscription_payment_method_update', 'pending', $7, $8, 0, 'USD',
                 $9, $10, $11, $6, $12, $13, $13
@@ -589,6 +542,7 @@ async fn insert_renewal(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, billing_period_start_at,
@@ -597,6 +551,7 @@ async fn insert_renewal(
                 subscription_expected_initial_transaction_id, subscription_expected_status,
                 created_at, updated_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'pending',
                 $7, $8, 5900, 'USD', $9, $10, $11, $12, $13, $6, $14, 'active',
                 $15, $15
@@ -631,6 +586,7 @@ async fn insert_failed_renewal(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, billing_period_start_at,
@@ -639,6 +595,7 @@ async fn insert_failed_renewal(
                 subscription_expected_initial_transaction_id, subscription_expected_status,
                 submitted_at, resolved_at
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'declined',
                 $7, $8, 5900, 'USD', $9, $10, $11, $12, $13, $6, $14, 'active',
                 clock_timestamp() - interval '1 minute',

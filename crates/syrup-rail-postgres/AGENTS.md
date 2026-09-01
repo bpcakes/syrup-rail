@@ -10,10 +10,9 @@ and transaction orchestration.
 - `src/lib.rs` — the public PostgreSQL operation facade and crate-private
   module ownership map.
 - `schema/v4/install.sql` — current authoritative fresh-install DDL;
-  `schema/v4/preflight_from_v3.sql`,
-  `schema/v4/audit_incompatible_attestations_from_v3.sql`, and
-  `schema/v4/upgrade_from_v3.sql` are the read-only sizing, minimized blocker
-  audit, and forward-only v3 cutover artifacts.
+  `schema/v4/prepare_from_v3.sql`, `validate_from_v3.sql`, the
+  non-transactional concurrent `index_from_v3.sql`, and `upgrade_from_v3.sql`
+  are the forward-only v3 cutover stages.
 - `schema/v3/**` — immutable shipped version-3 distribution artifacts.
 - `schema/v2/preflight_from_v1.sql`,
   `schema/v2/audit_retry_reclassification_from_v1.sql`, and
@@ -107,11 +106,10 @@ and transaction orchestration.
 
 - Change canonical tables, constraints, functions, triggers, or views in the
   current versioned schema artifact and supply a forward-only upgrade for any
-  materialized version. Never edit shipped artifacts under `schema/v1/**`
-  through `schema/v3/**`.
+  materialized version. Never edit `schema/v1/**`.
 - Change host conformance or schema behavior tests in the matching
-  `src/schema_contract/tests/{v1,v2,v3,v4,upgrade}` module, keep shared setup in
-  the fixture modules, and update the catalog fingerprint intentionally.
+  `src/schema_contract/tests/{v1,v2,upgrade}` module, keep shared setup in the
+  fixture modules, and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
 - Change canonical attempt row parsing/loaders in `src/attempts/persistence.rs`,
@@ -164,9 +162,10 @@ and transaction orchestration.
   `due_renewals` as the fixed-limit first-page compatibility wrapper. Keep the
   first-page and continuation SQL phases separate, force the candidate CTE to
   fold so it is not unconditionally materialized before the outer page limit,
-  and keep that keyset aligned with `billing_subscriptions_due_idx` in both
-  schema-v4 artifacts and the complete runtime index contract. Folding and an
-  aligned index make early stopping available; PostgreSQL still chooses plans
+  and keep that keyset aligned with `billing_subscriptions_due_idx` for all-mode
+  scans and `billing_subscriptions_due_mode_idx` for mode-specific scans in
+  both schema-v4 artifacts and the complete runtime index contract. Folding and
+  aligned indexes make early stopping available; PostgreSQL still chooses plans
   by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
   remain host-owned. This freezes eligibility time rather than holding a
@@ -247,7 +246,13 @@ and transaction orchestration.
 - Enrollment offer locks receive one stable reservation context at both
   reservation and submission-admission stages. Host attempt-history
   eligibility queries exclude the supplied in-flight attempt ID so a prepared
-  enrollment cannot disqualify itself.
+  enrollment cannot disqualify itself. Submission admission acquires the
+  subscriber/plan advisory lock, then locks and validates the attempt before
+  invoking `lock_enrollment_offer`; reservation uses the same advisory lock but
+  may invoke the offer callback before inserting or locking the attempt. Keep
+  offer callbacks on the supplied connection and do not acquire attempt-ledger
+  locks from them. Already-admitted replay and wrong-mode rejection return
+  before the submission-admission offer callback.
 - Initial enrollment reserves a token-free attempt before provider I/O, then
   revalidates plan, claim, billing blockers, attempt fingerprint, and exact
   gateway configuration under locks immediately before submission admission.
@@ -302,10 +307,10 @@ and transaction orchestration.
   causal-history boundary in `renewal_failure.rs`; it owns admission of the
   first v2 automatic result and access timing for cancellation and terminal
   events.
-- `SubscriptionPaymentFailed.outcome.access()` is the canonical post-failure
-  access projection. Build the outcome only from the locked subscription's
-  snapshotted policy and causal failure history, and reuse its access projection
-  for any matching terminal event boundary.
+- `SubscriptionPaymentFailed.access` is the canonical post-failure access
+  projection. Build it only from the locked subscription's snapshotted policy
+  and causal failure history, and reuse the same projection for any matching
+  terminal event boundary.
 - Discount-code list and disable operations administer durable records without
   consulting the current offer. Only active create/update, validation, and
   claim paths lock the host offer and construct current pricing.

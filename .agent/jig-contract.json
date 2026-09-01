@@ -1,6 +1,7 @@
 {
-  "contract_version": 4,
+  "contract_version": 3,
   "tool_namespace": "jig",
+  "jig_version": "0.2.0",
   "required_commands": [
     "bootstrap_command",
     "rust_fmt_check_command",
@@ -48,6 +49,11 @@
       "kind": "command",
       "description": "Run the configured SQLx check command.",
       "command": "sqlx_check_command"
+    },
+    {
+      "name": "jig.migration_add",
+      "kind": "native",
+      "description": "Add timestamped SQL migration stubs."
     },
 
     {

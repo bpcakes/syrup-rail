@@ -4,18 +4,18 @@ use chrono::{DateTime, Utc};
 use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     ActorId, AppliedSubscriptionDiscount, BillingPeriod, ChargeAmount, CurrencyCode,
-    DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, LimitedDiscountMonths,
-    MissingSubscriptionAction, PastDueAccess, PastDueAccessPolicy, PastDueAction,
-    PaymentAttemptKind, PaymentMethodId, PercentOffBasisPoints, PositiveDiscountCents,
-    SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
+    DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, GatewayAccountMode,
+    LimitedDiscountMonths, MissingSubscriptionAction, PastDueAccess, PastDueAccessPolicy,
+    PastDueAction, PaymentAttemptKind, PaymentMethodId, PercentOffBasisPoints,
+    PositiveDiscountCents, SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
     SubscriptionGrant, SubscriptionGrantId, SubscriptionGrantKind, SubscriptionId,
-    SubscriptionLifecycle, SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
+    SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::attempts::{LocalAttemptPolicy, lock_subscription_aggregate};
+use crate::attempts::LocalAttemptPolicy;
 use crate::subscription_persistence::{
     RenewalFailurePolicyScalars, SubscriptionPeriodRuleScalars, SubscriptionPersistenceCodecError,
     renewal_failure_policy_from_scalars, subscription_period_rule_from_scalars,
@@ -239,7 +239,11 @@ async fn lock_and_classify_entitlement(
     connection: &mut PgConnection,
     guard: &EntitlementGuard,
 ) -> Result<GuardAccess, sqlx::Error> {
-    lock_subscription_aggregate(connection, guard.subscriber_id(), guard.plan_key()).await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
+        .bind(guard.subscriber_id().as_uuid())
+        .bind(guard.plan_key().as_str())
+        .execute(&mut *connection)
+        .await?;
 
     let subscriptions = sqlx::query_as::<_, GuardSubscriptionState>(
         r#"
@@ -248,6 +252,7 @@ async fn lock_and_classify_entitlement(
         WHERE billing_scope_id = $1
             AND subscriber_id = $2
             AND plan_key = $3
+            AND ($4::text IS NULL OR required_gateway_account_mode = $4)
         ORDER BY id
         FOR SHARE
         "#,
@@ -255,6 +260,11 @@ async fn lock_and_classify_entitlement(
     .bind(guard.billing_scope_id().as_uuid())
     .bind(guard.subscriber_id().as_uuid())
     .bind(guard.plan_key().as_str())
+    .bind(
+        guard
+            .required_gateway_account_mode()
+            .map(GatewayAccountMode::as_str),
+    )
     .fetch_all(&mut *connection)
     .await?;
     let grants = sqlx::query_as::<_, GuardGrantTimeState>(
@@ -370,6 +380,7 @@ where
             WHERE subscriptions.billing_scope_id = $1
                 AND subscriptions.subscriber_id = $2
                 AND subscriptions.plan_key = $3
+                AND ($4::text IS NULL OR subscriptions.required_gateway_account_mode = $4)
                 AND (
                     subscriptions.status IN ('active', 'past_due')
                     OR (
@@ -417,6 +428,7 @@ where
             paid.current_period_end_at AS paid_period_end_at,
             paid.next_renewal_at AS paid_next_renewal_at,
             paid.phase AS paid_phase,
+            paid.required_gateway_account_mode AS paid_required_gateway_account_mode,
             paid.recurring_period_kind AS paid_recurring_period_kind,
             paid.recurring_period_count AS paid_recurring_period_count,
             paid.dunning_retry_delays_seconds AS paid_dunning_retry_delays_seconds,
@@ -445,10 +457,10 @@ where
                         )
                     )
                     AND NOT (
-                        attempts.status = ANY($6::text[])
+                        attempts.status = ANY($7::text[])
                         AND attempts.submitted_at IS NULL
                         AND attempts.created_at <= clock.observed_at
-                            - ($4::bigint * interval '1 second')
+                            - ($5::bigint * interval '1 second')
                     )
                     AND NOT EXISTS (
                         SELECT 1
@@ -469,10 +481,10 @@ where
                     )
                     AND attempts.status IN ('pending', 'unknown', 'review_required')
                     AND NOT (
-                        attempts.status = ANY($6::text[])
+                        attempts.status = ANY($7::text[])
                         AND attempts.submitted_at IS NULL
                         AND attempts.created_at <= clock.observed_at
-                            - ($5::bigint * interval '1 second')
+                            - ($6::bigint * interval '1 second')
                     )
             ) AS pending_recovery_confirmation,
             saved.id AS saved_claim_id,
@@ -527,6 +539,11 @@ where
     .bind(query.billing_scope_id().as_uuid())
     .bind(query.subscriber_id().as_uuid())
     .bind(query.plan_key().as_str())
+    .bind(
+        query
+            .required_gateway_account_mode()
+            .map(GatewayAccountMode::as_str),
+    )
     .bind(initial_policy.stale_after_seconds())
     .bind(subscription_charge_policy.stale_after_seconds())
     .bind(LocalAttemptPolicy::expirable_status_values())
@@ -586,24 +603,17 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
         &past_due_access,
     ))
     .map_err(map_subscription_persistence_error)?;
-    let current_period = BillingPeriod::new(
-        row.try_get("paid_period_start_at")?,
-        row.try_get("paid_period_end_at")?,
-    )
-    .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?;
-    let lifecycle = SubscriptionLifecycle::from_parts(
-        status,
-        current_period,
-        row.try_get("paid_next_renewal_at")?,
-        row.try_get("paid_next_payment_attempt_at")?,
-    )
-    .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?;
-    let subscription = Subscription::from_lifecycle(
+    let next_payment_attempt_at = row.try_get("paid_next_payment_attempt_at")?;
+    let subscription = Subscription::new(
         SubscriptionId::new(subscription_id),
         row.try_get::<String, _>("paid_plan_key")?
             .parse()
             .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
+        status,
         phase,
+        row.try_get::<String, _>("paid_required_gateway_account_mode")?
+            .parse::<GatewayAccountMode>()
+            .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
         PaymentMethodId::new(row.try_get("paid_payment_method_id")?),
         ChargeAmount::new(
             row.try_get("paid_amount_cents")?,
@@ -613,7 +623,13 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
         .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
         recurring_period,
         renewal_failure,
-        lifecycle,
+        BillingPeriod::new(
+            row.try_get("paid_period_start_at")?,
+            row.try_get("paid_period_end_at")?,
+        )
+        .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
+        row.try_get("paid_next_renewal_at")?,
+        next_payment_attempt_at,
     );
     let applied_discount = applied_discount_from_row(row)?;
 

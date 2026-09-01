@@ -23,7 +23,11 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
         ),
         SubscriptionEnrollmentExpectedTerms::full_price(offer),
     );
-    let enrollment = SubscriptionEnrollmentReservation::from_command(&command, &gateway)?;
+    let enrollment = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(&mut transaction, &offers, &enrollment)
@@ -69,7 +73,7 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     let started_events = events.lock().await.clone();
     assert_eq!(started_events.len(), 1);
     assert!(matches!(
-        &started_events[0].event,
+        &started_events[0],
         BillingEvent::SubscriptionStarted {
             charge,
             period,
@@ -79,20 +83,30 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
             && period == &BillingPeriod::new(trial_start, trial_end).expect("valid trial period")
     ));
 
-    let renewal_command = force_due_renewal(
-        &database.pool,
-        BillingScopeId::new(account.billing_scope_id),
-        subscription_id,
-    )
-    .await?;
-    let due_at = *renewal_command.period_start_at();
-    let (forced_start_at, forced_end_at): (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
-        "SELECT current_period_start_at, current_period_end_at FROM billing_subscriptions WHERE id = $1",
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+            .fetch_one(&database.pool)
+            .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2 - interval '7 days',
+            current_period_end_at = $2,
+            next_renewal_at = $2,
+            next_payment_attempt_at = $2
+        WHERE id = $1
+        "#,
     )
     .bind(subscription_id.as_uuid())
-    .fetch_one(&database.pool)
+    .bind(due_at)
+    .execute(&database.pool)
     .await?;
-    assert_eq!(forced_end_at - forced_start_at, ChronoDuration::days(7));
+
+    let renewal_command = ChargeRenewal::new(
+        BillingScopeId::new(account.billing_scope_id),
+        subscription_id,
+        due_at,
+    );
     let first_reservation =
         reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
     assert_eq!(first_reservation.request().amount().cents(), 2_900);
@@ -162,17 +176,28 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     ));
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
 
-    make_retry_due(&database.pool, renewal_command).await?;
+    sqlx::query(
+        "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&database.pool)
+    .await?;
     let second_reservation =
         reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
+    let second_outcome = declined_outcome("trial_renewal_decline_2")
+        .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let second = apply_reconciled_subscription_renewal_gateway_outcome(
         &database.pool,
         &coordinator,
         BillingScopeId::new(account.billing_scope_id),
         second_reservation.identity().attempt_id(),
-        &declined_outcome("trial_renewal_decline_2"),
+        &second_outcome,
     )
     .await?;
+    assert_eq!(
+        second.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let failure_two_at =
         resolved_at(&database.pool, second.attempt().identity().attempt_id()).await?;
     let retry_at: Option<DateTime<Utc>> = sqlx::query_scalar(
@@ -183,10 +208,16 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     .await?;
     assert_eq!(retry_at, Some(failure_two_at + ChronoDuration::days(3)));
 
-    make_retry_due(&database.pool, renewal_command).await?;
+    sqlx::query(
+        "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&database.pool)
+    .await?;
     let final_reservation =
         reserve_and_admit_renewal(&database.pool, &gateway, renewal_command).await?;
-    let final_outcome = declined_outcome("trial_renewal_decline_3");
+    let final_outcome = declined_outcome("trial_renewal_decline_3")
+        .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
     let final_result = apply_subscription_renewal_gateway_outcome(
         &database.pool,
         &coordinator,
@@ -194,6 +225,10 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
         &final_outcome,
     )
     .await?;
+    assert_eq!(
+        final_result.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
     let failure_three_at = resolved_at(
         &database.pool,
         final_result.attempt().identity().attempt_id(),
@@ -213,28 +248,28 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     let final_events = events.lock().await.clone();
     assert_eq!(final_events.len(), 5);
     assert!(matches!(
-        &final_events[1].event,
+        &final_events[1],
         BillingEvent::SubscriptionPaymentFailed {
-            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled { retry_at, .. },
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
             ..
         } if *retry_at == failure_one_at + ChronoDuration::days(1)
     ));
     assert!(matches!(
-        &final_events[2].event,
+        &final_events[2],
         BillingEvent::SubscriptionPaymentFailed {
-            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled { retry_at, .. },
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
             ..
         } if *retry_at == failure_two_at + ChronoDuration::days(3)
     ));
     assert!(matches!(
-        &final_events[3].event,
+        &final_events[3],
         BillingEvent::SubscriptionPaymentFailed {
-            outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded { ended_at, .. },
+            disposition: SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at },
             ..
         } if *ended_at == failure_three_at
     ));
     assert!(matches!(
-        &final_events[4].event,
+        &final_events[4],
         BillingEvent::SubscriptionEnded {
             reason: SubscriptionEndReason::NonPayment,
             ended_at,

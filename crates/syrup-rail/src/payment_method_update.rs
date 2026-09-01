@@ -2,11 +2,11 @@ use std::fmt;
 
 use crate::{
     BillingContact, BillingContactSnapshot, BillingScopeId, CurrencyCode, GatewayAccountId,
-    GatewayConfigurationId, GatewayProviderKey, GatewayTransactionId, IdempotencyKey, Money,
-    PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PaymentMethodUpdateSnapshot,
-    PaymentToken, PlanKey, ResolvedGateway, SubscriberId, SubscriptionId,
-    SubscriptionPaymentContext,
+    GatewayAccountMode, GatewayConfigurationId, GatewayProviderKey, GatewayTransactionId,
+    IdempotencyKey, Money, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget,
+    PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentToken, PlanKey, ResolvedGateway,
+    SubscriberId, SubscriptionId, SubscriptionPaymentContext,
 };
 use thiserror::Error;
 
@@ -119,6 +119,7 @@ impl SubscriptionPaymentMethodReplacement {
         payment_method_id: PaymentMethodId,
         initial_transaction_id: GatewayTransactionId,
         currency: CurrencyCode,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
         if gateway.billing_scope_id() != command.billing_scope_id()
             || gateway.gateway_configuration_id() != command.gateway_configuration_id()
@@ -138,6 +139,7 @@ impl SubscriptionPaymentMethodReplacement {
                 expected_state,
                 currency,
             ),
+            required_gateway_account_mode,
         )
     }
 
@@ -147,12 +149,14 @@ impl SubscriptionPaymentMethodReplacement {
         command: &ReplaceSubscriptionPaymentMethod,
         gateway: &ResolvedGateway,
         terms: SubscriptionPaymentMethodReplacementLockedTerms,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
         Self::from_locked_subscription_terms_for_attempt(
             command,
             gateway,
             command.attempt_id(),
             terms,
+            required_gateway_account_mode,
         )
     }
 
@@ -161,6 +165,7 @@ impl SubscriptionPaymentMethodReplacement {
         gateway: &ResolvedGateway,
         attempt_id: PaymentAttemptId,
         terms: SubscriptionPaymentMethodReplacementLockedTerms,
+        required_gateway_account_mode: GatewayAccountMode,
     ) -> Result<Self, SubscriptionPaymentMethodReplacementBuildError> {
         let SubscriptionPaymentMethodReplacementLockedTerms {
             gateway_account_id,
@@ -179,14 +184,22 @@ impl SubscriptionPaymentMethodReplacement {
             command.subscriber_id(),
             gateway_account_id,
             gateway.gateway_configuration_id(),
+            required_gateway_account_mode,
         );
-        let request = PaymentAttemptRequest::canonical(
+        let fingerprint = PaymentAttemptFingerprint::for_subscription_payment_method_update(
+            command.plan_key(),
+            expected_state.subscription_id(),
+            expected_state.payment_method_id(),
+            expected_state.expected_initial_transaction_id(),
+        );
+        let request = PaymentAttemptRequest::new(
             PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
                 plan_key: command.plan_key().clone(),
                 payment_method_id: expected_state.payment_method_id(),
                 expected_state,
             },
             command.idempotency_key().clone(),
+            fingerprint,
             Money::new(0, currency).expect("zero payment-method replacement amount is valid"),
             gateway.mutation_reference_factory().for_attempt(
                 PaymentAttemptKind::SubscriptionPaymentMethodUpdate,
@@ -248,6 +261,7 @@ impl SubscriptionPaymentMethodReplacement {
                 self.expected_state().clone(),
                 self.request.amount().currency(),
             ),
+            self.identity.required_gateway_account_mode(),
         )
         .is_ok_and(|candidate| candidate.eq(self))
     }
@@ -299,6 +313,7 @@ pub enum SubscriptionPaymentMethodReplacementRejection {
     ChargeAttemptInProgress,
     PaymentMethodUpdateInProgress,
     GatewayConfigurationChanged,
+    GatewayAccountModeChanged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

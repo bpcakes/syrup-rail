@@ -59,6 +59,7 @@ pub(super) async fn insert_due_subscription_at(
     sqlx::query(
         r#"
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -66,6 +67,7 @@ pub(super) async fn insert_due_subscription_at(
             recurring_period_count, dunning_retry_delays_seconds,
             dunning_exhaustion, past_due_access, next_payment_attempt_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, 'active', $5, $6, 1900, 'USD', $7, $8, $8, $9,
             'recurring', 'calendar_months', 1, ARRAY[]::bigint[],
             'remain_past_due', 'suspend_immediately', $8
@@ -122,6 +124,7 @@ pub(super) async fn insert_due_subscription_population(
     sqlx::query(
         r#"
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -130,7 +133,7 @@ pub(super) async fn insert_due_subscription_population(
             dunning_exhaustion, past_due_access, next_payment_attempt_at
         )
         SELECT
-            md5('renewal-plan-subscription-' || value)::uuid,
+            'live', md5('renewal-plan-subscription-' || value)::uuid,
             $1,
             md5('renewal-plan-subscriber-' || value)::uuid,
             'plan-shape',
@@ -166,6 +169,7 @@ pub(super) async fn insert_due_subscription_population(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency,
@@ -176,6 +180,7 @@ pub(super) async fn insert_due_subscription_population(
             subscription_expected_status, resolved_at, created_at, updated_at
         )
         SELECT
+            'live',
             md5('renewal-plan-attempt-' || value)::uuid,
             $1,
             md5('renewal-plan-subscriber-' || value)::uuid,
@@ -252,6 +257,7 @@ pub(super) async fn insert_renewal_attempt(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency,
@@ -262,6 +268,7 @@ pub(super) async fn insert_renewal_attempt(
             subscription_expected_initial_transaction_id,
             subscription_expected_status
         ) VALUES (
+            'live',
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
             1900, 'USD', $11, $12, $13, $14, $15, $16, $17,
             $6, $18, 'active'
@@ -301,6 +308,7 @@ pub(super) async fn insert_pending_payment_method_update(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
             payment_method_id, attempt_kind, status, idempotency_key,
             request_fingerprint, amount_cents, currency,
@@ -309,6 +317,7 @@ pub(super) async fn insert_pending_payment_method_update(
             payment_method_update_expected_initial_transaction_id,
             created_at, updated_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, $5, $6,
             'subscription_payment_method_update', 'pending', $7, $8,
             0, 'USD', $9, $10, $11, $6, $12, $13, $13

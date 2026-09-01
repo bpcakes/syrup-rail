@@ -5,8 +5,7 @@ use postgres_test_harness::{HarnessConfig, PostgresHarness};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use syrup_rail::{
     BillingScopeId, CardLastFour, CurrencyCode, HostChargeTargetId, PaymentAttemptId,
-    PaymentCardBrand, PaymentCardDisplay, PlanKey, SubscriberId, SubscriptionId,
-    SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureOutcome, SubscriptionPhase,
+    PaymentCardBrand, PaymentCardDisplay, PlanKey, SubscriberId, SubscriptionId, SubscriptionPhase,
 };
 
 use super::*;
@@ -51,10 +50,10 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             attempt_id: attempt(12),
             subscription_id: subscription(20),
             plan_key: plan_key.clone(),
-            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
+            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled {
                 retry_at: ended_at,
-                access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
             },
+            access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
         },
         BillingEvent::SubscriptionEnded {
             attempt_id: attempt(12),
@@ -235,82 +234,6 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             HostBillingEventKindV1::HostChargePaid,
         ]
     );
-}
-
-#[test]
-fn version_one_failure_payloads_preserve_all_legacy_projection_matrices() {
-    let subject = BillingEventSubject::new(BillingScopeId::new(id(1)), SubscriberId::new(id(2)));
-    let failed_at = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
-    let retry_at = Utc.with_ymd_and_hms(2026, 8, 2, 0, 0, 0).unwrap();
-    let terminal_at = Utc.with_ymd_and_hms(2026, 8, 3, 0, 0, 0).unwrap();
-    let cases = [
-        (
-            SubscriptionPaymentFailureOutcome::RetryScheduled {
-                retry_at,
-                access: SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
-            },
-            serde_json::json!({ "kind": "retry_scheduled", "retry_at": retry_at }),
-            serde_json::json!({ "kind": "continues_during_dunning" }),
-        ),
-        (
-            SubscriptionPaymentFailureOutcome::RetryScheduled {
-                retry_at,
-                access: SubscriptionPaymentFailureAccess::Ended {
-                    access_ended_at: failed_at,
-                },
-            },
-            serde_json::json!({ "kind": "retry_scheduled", "retry_at": retry_at }),
-            serde_json::json!({ "kind": "ended", "access_ended_at": failed_at }),
-        ),
-        (
-            SubscriptionPaymentFailureOutcome::DunningExhausted {
-                exhausted_at: terminal_at,
-                access_ended_at: terminal_at,
-            },
-            serde_json::json!({ "kind": "dunning_exhausted", "exhausted_at": terminal_at }),
-            serde_json::json!({ "kind": "ended", "access_ended_at": terminal_at }),
-        ),
-        (
-            SubscriptionPaymentFailureOutcome::SubscriptionEnded {
-                ended_at: terminal_at,
-                access_ended_at: failed_at,
-            },
-            serde_json::json!({ "kind": "subscription_ended", "ended_at": terminal_at }),
-            serde_json::json!({ "kind": "ended", "access_ended_at": failed_at }),
-        ),
-    ];
-
-    for (index, (outcome, disposition, access)) in cases.into_iter().enumerate() {
-        let event = BillingEvent::SubscriptionPaymentFailed {
-            attempt_id: attempt(40 + index as u128),
-            subscription_id: subscription(20),
-            plan_key: PlanKey::new("base_subscription").unwrap(),
-            outcome,
-        };
-        let envelope = HostBillingEventEnvelopeV1::from_domain(
-            id(100 + index as u128),
-            failed_at,
-            subject,
-            &event,
-        );
-        let value = serde_json::to_value(&envelope).unwrap();
-        assert_eq!(value["payload"]["data"]["disposition"], disposition);
-        assert_eq!(value["payload"]["data"]["access"], access);
-
-        let replay = HostBillingEventEnvelopeV1::from_persisted_parts(
-            id(200 + index as u128),
-            failed_at,
-            envelope.event_version(),
-            envelope.billing_scope_id(),
-            envelope.subscriber_id(),
-            envelope.kind(),
-            envelope.semantic_kind(),
-            envelope.semantic_id(),
-            value["payload"].clone(),
-        )
-        .unwrap();
-        assert!(envelope.replay_matches(&replay));
-    }
 }
 
 #[test]

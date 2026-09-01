@@ -1,70 +1,105 @@
 # Syrup Rail PostgreSQL schema v4
 
-Schema v4 is the current canonical contract. New hosts copy `install.sql`
-byte-for-byte into an immutable host migration. Existing schema-v3 hosts stop
-all billing writers, drain billing traffic, and copy `upgrade_from_v3.sql`
-byte-for-byte into one forward-only transactional migration. Do not run
-`install.sql` over v3 and do not edit any shipped artifact under `schema/v1`,
-`schema/v2`, or `schema/v3`.
+Schema v4 is the current canonical contract for Syrup Rail 0.4. New hosts copy
+`install.sql` byte-for-byte into an immutable host migration. Existing
+schema-v3 hosts use the four forward-only stages below. The concurrent index
+stage is intentionally non-transactional; the other three commit separately.
+Do not run `install.sql` over v3 and do not edit any shipped artifact under
+`schema/v1`, `schema/v2`, or `schema/v3`.
 
-Version 3 allowed two external-reversal resolution tuples that the typed Rust
-model cannot represent: an initial-current-grant conflict paired with a generic
-processor-charge refund or void outcome. Version 4 tightens the existing named
-CHECK constraint to encode the complete typed tuple matrix.
+Version 4 adds the non-null `required_gateway_account_mode` snapshot to every
+payment attempt and subscription, plus a distinct
+`gateway_test_readiness_failed_before_submission` resolution. The snapshot
+records the trusted service policy that authorized any future provider
+submission as either `live` or `test`. It does not claim that NMI's separate
+account-mode query and transaction request are atomic.
 
-Adding the replacement constraint validates every retained attestation once.
-If an incompatible v3 row exists, PostgreSQL aborts the migration transaction.
-Keep the v3 application stopped, investigate the evidence, and use an audited
-host-owned repair process before retrying. Do not bypass the migration or
-rewrite financial evidence without that review.
+Every historical v3 attempt and subscription is backfilled as `live`. That is
+deterministic because all released service versions rejected test-mode accounts
+before any provider mutation. New test-authorized subscriptions retain that
+policy for renewal, recovery, and payment-method replacement work even after a
+shared NMI account is switched back to live mode.
 
-Run `preflight_from_v3.sql` well before the maintenance window. Its single
-read-only result reports `retained_attestation_count`, the volume the migration
-must scan, and `incompatible_attestation_count`, the rows that block the
-cutover. If it reports blockers, run the checked-in read-only
-`audit_incompatible_attestations_from_v3.sql`. The audit identifies each row by
-its internal attempt and processor-charge IDs and reports only the three fields
-of the incompatible tuple. It deliberately excludes gateway transaction IDs,
-actor and reason text, account metadata, processor responses, and card-display
-fields. Treat its output as protected financial evidence and keep access and
-exports inside the host's authorized operator process.
+## Required availability sign-off
 
-Rehearse the exact upgrade artifact on a production-like copy with a
-representative retained-attestation count, record its elapsed time, and budget
-the maintenance window from that observation. This repository has no
-host-independent row-count ceiling or downtime budget, so the host owns those
-operational limits. Complete the audited review before scheduling a cutover
-when the first preflight reports blockers. Because v3 writers can add rows,
-repeat the preflight after stopping them when an immediate zero-blocker result
-is part of the host's cutover evidence.
+By default, schedule all four stages in a full billing maintenance window.
+Before `prepare_from_v3.sql`, the deployment owner must explicitly accept and
+schedule the entire prepare → validate → concurrent-index → finalize window as
+one availability-controlled operation. Keeping v3 writers active through the
+first three stages is an exception that requires written sign-off that process
+restarts are prevented for the entire window. A v3 process restart after
+preparation cannot pass its startup schema assertion, and there is no rollback
+artifact; recovery is to finish the remaining stages and roll forward. Do not
+begin preparation without that operational sign-off.
 
-The `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock and scans the complete
-`billing_external_reversal_attestations` table while adding the validated
-replacement CHECK constraint. That lock blocks readers and writers and remains
-held until the host transaction commits or rolls back. Set host-appropriate
-`lock_timeout` and `statement_timeout` values outside the checked-in artifact
-so a deployment cannot wait or run longer than its approved maintenance
-budget. PostgreSQL can reduce reader-blocking scan time with a committed
-`NOT VALID` constraint followed by `VALIDATE CONSTRAINT`, but that is a
-different multi-transaction rollout: it creates an intermediate schema state
-and needs its own compatibility, failure-recovery, and rollback protocol. This
-repository does not supply that protocol. The supported artifact instead keeps
-the constraint replacement and validation atomic so a failed scan restores v3
-exactly and a committed cutover is immediately ready for v4 startup.
+## Staged v3 cutover
 
-For the cutover, prebuild and verify the schema-v4-aware application, drain
-schema-v3 billing traffic, stop all schema-v3 writers, apply
-`upgrade_from_v3.sql` in one database transaction, start the new application,
-and then resume billing work. A failure before commit rolls back to v3 and
-permits the stopped v3 application to resume. After commit, roll forward; do
-not restart a v3 writer against v4.
+Prebuild and verify the schema-v4-aware 0.4 application before beginning.
+Rehearse every stage against representative payment-attempt volume and set
+explicit migration lock and statement timeouts appropriate for the host.
 
-After a successful cutover, `assert_runtime_schema_v4_compatible` verifies the
-validated constraint and complete canonical catalog without scanning retained
-attestations. Schema v4 otherwise retains the complete v3 tables, constraints,
-functions, views, and reader-facing index contracts. The Rust package exposes
-the exact artifacts as `V4_INSTALL_SQL` and `V3_TO_V4_UPGRADE_SQL` behind the
-schema-contract test-support feature; `V3_TO_V4_PREFLIGHT_SQL` exposes the
-read-only sizing query and `V3_TO_V4_INCOMPATIBLE_ATTESTATION_AUDIT_SQL` exposes
-the minimized blocker audit there as well. Once released, all four artifacts
-and this guide are immutable.
+The committed prepare, validate, and index states are migration-only catalog states;
+none is a supported application runtime. No production schema assertion is
+expected to pass between preparation and finalization. Keep billing stopped for
+the default four-stage maintenance operation, and start 0.4 only after the v4
+assertion passes. Under the explicitly signed-off online-build exception, keep
+the existing v3 process running without restarting through prepare, validate,
+and index; stop all v3 billing writers for finalization. The risk window starts
+when `prepare_from_v3.sql` commits, not when finalization begins: an OOM, node
+drain, or unrelated restart in an intermediate state leaves the v3 process
+unable to pass its startup schema assertion.
+
+First apply `prepare_from_v3.sql` in its own transaction and commit it. It adds
+both columns with metadata-only constant `live` defaults, adds their closed
+`live`/`test` checks as `NOT VALID`, and replaces the resolution-code check with
+schema v4's expanded vocabulary as `NOT VALID`. The checks are enforced for new
+writes, but this short stage does not scan historical rows while holding its
+`ACCESS EXCLUSIVE` locks. A v3 writer may temporarily continue because an
+omitted mode receives the only historically valid value, `live`;
+avoid a process restart because the v3 catalog assertion intentionally rejects
+the prepared, no-longer-canonical catalog.
+
+Next apply `validate_from_v3.sql` in a separate transaction and commit it.
+PostgreSQL scans existing attempts under `SHARE UPDATE EXCLUSIVE`, allowing
+ordinary reads and writes to continue while proving every row satisfies the
+expanded constraints. Retry this stage if it times out; do not proceed until
+all constraints are valid.
+
+Next run every statement in `index_from_v3.sql` **outside an explicit
+transaction** while the v3 writers continue. It uses two `CREATE INDEX
+CONCURRENTLY` statements: one builds the mode-leading renewal-dispatch index,
+and the other builds the covering v4 replacement for the all-mode dispatch
+index. This keeps both table scans outside the final billing outage. If a build
+fails and leaves an invalid index, run `DROP INDEX CONCURRENTLY IF EXISTS` for
+`public.billing_subscriptions_due_mode_idx` and/or
+`public.billing_subscriptions_due_v4_idx` outside a transaction, then rerun the
+artifact. Confirm that both indexes are valid before finalization; the
+finalization artifact enforces this precondition before changing the canonical
+index name. The v4 startup assertion independently fails closed if either
+canonical result is missing or invalid after the name swap.
+
+Finally stop every schema-v3 billing writer, apply `upgrade_from_v3.sql` in its
+own transaction, and commit it immediately before starting the 0.4 application.
+This fast finalization swaps the prebuilt covering index into the canonical
+all-mode index name and drops both compatibility defaults, forcing every
+schema-v4 payment-attempt and subscription writer to state its trusted required
+mode explicitly. The Syrup Rail enrollment writer supplies the approved
+attempt's mode. Because the preceding concurrent stage already built both
+renewal-dispatch indexes, finalization contains only catalog changes and the
+current-subscription view replacement; still rehearse its lock acquisition
+against production traffic.
+After finalization, roll forward; never restart a v3 writer because omitted
+mode writes now fail.
+
+A failure before any stage commits rolls that stage back. After preparation
+commits, retry validation. Clean up an invalid concurrent index as described
+above before retrying its stage. After the index is valid, retry finalization.
+The runtime is schema v4 only after all four stages have completed and
+`assert_runtime_schema_v4_compatible` succeeds.
+
+Schema v4 otherwise retains the complete v3 tables, constraints, functions,
+views, and reader-facing index contracts. The Rust package exposes the exact
+artifacts as `V4_INSTALL_SQL`, `V3_TO_V4_PREPARE_SQL`,
+`V3_TO_V4_VALIDATE_SQL`, `V3_TO_V4_INDEX_SQL`, and `V3_TO_V4_UPGRADE_SQL`
+behind the schema-contract test-support feature. Once released, all files in
+this directory are immutable.

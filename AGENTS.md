@@ -28,9 +28,7 @@ This repository uses the shared `jig.sh` workflow. Keep repo-local business rule
 - Prefer direct cutovers only for internal code-only changes that can ship in one coordinated deploy.
 - Preserve compatibility or stage rollouts for persisted database state, queued job types, public API contracts, bookmarked routes, webhook boundaries, or source-of-truth moves that can straddle deploys.
 
-
-- The migration tree contains complete versioned schema artifacts. Never overwrite a shipped version; add the next forward-only version and its repository-owned cutover artifact.
-
+- Never overwrite an existing database migration; add a new forward-only migration instead.
 
 
 ## Backend Defaults
@@ -38,9 +36,9 @@ This repository uses the shared `jig.sh` workflow. Keep repo-local business rule
 - Treat `crates` as Rust crate roots.
 - Add crate-level `AGENTS.md` files when a crate has meaningful ownership, entrypoint, or invariant guidance that should travel with that crate.
 
-
-- Versioned SQL schema artifacts live under `crates/syrup-rail-postgres/schema`; do not use `scripts/jig sqlx migration add` in this layout.
-
+- Versioned SQL schema artifacts live under
+  `crates/syrup-rail-postgres/schema`; follow the crate guide for the current
+  artifact and immutable shipped versions.
 - SQLx metadata is committed in `crates/syrup-rail-postgres/.sqlx`.
 
 - Keep transport logic thin and business logic in the owning crate.
@@ -66,8 +64,6 @@ No web apps are configured in `.jig.toml`.
 
 
 - `scripts/jig check sqlx`
-
-
 
 - `scripts/jig check contract`
 
@@ -96,25 +92,27 @@ When a backend crate has a crate-level `AGENTS.md`, use these sections:
 ## Repository-specific schema workflow
 
 The PostgreSQL distribution schema uses complete versioned artifacts, not a
-flat SQLx migration directory. Schema v4 is current and `schema/v1/**` through
-`schema/v3/**` are immutable. Do not use `scripts/jig migration-add` for these
-artifacts; edit the current version only when it has not shipped, and otherwise
-add the next forward-only version and cutover artifact as directed by the
-PostgreSQL crate guide.
+flat SQLx migration directory. Schema v4 is current and `schema/v1/**`,
+`schema/v2/**`, plus `schema/v3/**` are immutable. Do not use
+`scripts/jig migration-add` for these artifacts; edit the current version only
+when it has not shipped, and otherwise add the next forward-only version and
+cutover artifact as directed by the PostgreSQL crate guide.
 
-<!-- bv-agent-instructions-v3 -->
+<!-- bv-agent-instructions-v4 -->
 
 ---
 
 ## Beads Workflow Integration
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking and [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (`bv`) for graph-aware triage. Issues are stored in `.beads/` and tracked in git. Current `br` workspaces normally export `.beads/issues.jsonl`; older `bd`/legacy workspaces may use `.beads/beads.jsonl`. `bv` auto-discovers the supported JSONL files, so agents should use `br`/`bv` commands instead of hard-coding a single filename.
+This project uses a Beads tracker—either the Go `bd` CLI or the Rust `br` CLI—for issue tracking, plus [beads_viewer](https://github.com/Dicklesworthstone/beads_viewer) (`bv`) for graph-aware triage. Issues are stored in `.beads/`. `bv` auto-discovers supported JSONL exports, including `.beads/issues.jsonl` and legacy `.beads/beads.jsonl`.
+
+**Choose the tracker CLI from this repository's instructions and configuration.** Use `bd` commands in a Go Beads workspace and `br` commands in a beads_rust workspace. Do not run both trackers against the same workspace or infer the tracker solely from the JSONL filename.
 
 ### Using bv as an AI sidecar
 
 bv is a graph-aware triage engine for Beads projects. Instead of parsing .beads/issues.jsonl / .beads/beads.jsonl directly or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
 
-**Scope boundary:** bv handles *what to work on* (triage, priority, planning). `br` handles creating, modifying, and closing beads.
+**Scope boundary:** bv handles *what to work on* (triage, priority, planning). The selected tracker CLI (`bd` or `br`) handles creating, claiming, modifying, and closing beads.
 
 **CRITICAL: Use ONLY --robot-* flags. Bare bv launches an interactive TUI that blocks your session.**
 
@@ -136,7 +134,7 @@ bv --robot-next          # Minimal: just the single top pick + claim command
 bv --robot-triage --format toon
 ```
 
-Before claiming, verify current state with `br show <id> --json` or `br ready --json`. `recommendations` can include graph-important blocked or assigned work; only `quick_ref.top_picks` and non-empty `claim_command` fields represent claimable work.
+Before claiming, verify current state with the selected tracker: `br show <id> --json`/`br ready --json` or `bd show <id> --json`/`bd ready --json`. `recommendations` can include graph-important blocked or assigned work; only `quick_ref.top_picks` and non-empty `claim_command` fields represent claimable work.
 
 #### Other bv Commands
 
@@ -159,7 +157,11 @@ bv --recipe actionable --robot-plan          # Pre-filter: ready to work (no blo
 bv --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
 ```
 
-### br Commands for Issue Management
+### Tracker Commands for Issue Management
+
+Use exactly one command family, matching the tracker configured for the repository.
+
+#### Rust beads_rust (`br`)
 
 ```bash
 br ready --json                       # Show issues ready to work (no blockers)
@@ -172,23 +174,36 @@ br close <id1> <id2> --reason="Completed" --json
 br sync --flush-only                  # Export DB to JSONL after Beads mutations
 ```
 
+#### Go Beads (`bd`)
+
+```bash
+bd ready --json                       # Show issues ready to work
+bd show <id> --json                   # Full issue details
+bd create "..." -t task -p 2 --json
+bd update <id> --claim --json         # Atomically claim work
+bd close <id> --json
+bd dep add <issue> <depends-on>
+bd export --no-memories -o .beads/beads.jsonl  # Refresh the export read by bv
+```
+
 ### Workflow Pattern
 
 1. **Triage**: Run `bv --robot-triage` to find the highest-impact actionable work
-2. **Claim**: Use `br update <id> --status=in_progress --json`
-3. **Work**: Implement the task
-4. **Complete**: Use `br close <id> --reason="Completed" --json`
-5. **Sync**: Run `br sync --flush-only` after Beads mutations so the JSONL export is current
+2. **Verify**: Check the selected tracker's `show`/`ready` output before claiming
+3. **Claim**: Use `br update <id> --status=in_progress --json` or `bd update <id> --claim --json`
+4. **Work**: Implement the task
+5. **Complete**: Use the selected tracker's `close` command
+6. **Refresh for bv**: Run `br sync --flush-only` or the `bd export` command above so the JSONL export is current
 
 ### Key Concepts
 
-- **Dependencies**: Issues can block other issues. `br ready --json` shows only unblocked work.
+- **Dependencies**: Issues can block other issues. `br ready --json` and `bd ready --json` show unblocked work.
 - **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers 0-4, not words)
 - **Types**: task, bug, feature, epic, chore, docs, question
-- **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
+- **Blocking**: Use `br dep add <issue> <depends-on>` or `bd dep add <issue> <depends-on>` to add dependencies
 
 ### Git Policy
 
-`br` never commits or pushes. Follow this repository's own git instructions before staging, committing, or pushing. If the repository says "commit only when asked," that rule overrides any generic workflow advice.
+Tracker commands do not grant permission to commit or push application code. Follow this repository's own git and tracker instructions before staging, committing, syncing, or pushing. If the repository says "commit only when asked," that rule overrides any generic workflow advice.
 
 <!-- end-bv-agent-instructions -->

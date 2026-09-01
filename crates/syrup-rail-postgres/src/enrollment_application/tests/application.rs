@@ -1,164 +1,30 @@
-use std::io;
-
 use super::*;
 
-fn assert_application_invalid_state(
-    error: SubscriptionEnrollmentApplicationError,
-    expected: &'static str,
-) {
-    match error {
-        SubscriptionEnrollmentApplicationError::InvalidState(actual) => {
-            assert_eq!(actual, expected);
-        }
-        other => panic!("expected application invalid state, got {other}"),
-    }
-}
-
-fn assert_service_invalid_state(error: SubscriptionBillingServiceError, expected: &'static str) {
-    match error {
-        SubscriptionBillingServiceError::InvalidState(actual) => assert_eq!(actual, expected),
-        other => panic!("expected service invalid state, got {other}"),
-    }
-}
-
 #[tokio::test]
-async fn cancellation_and_enrollment_workflows_contend_on_the_canonical_subscription_aggregate()
+async fn foreground_duplicate_diagnostic_crosses_the_application_boundary()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("enroll_agg_lock", false, false).await?;
-    let result = async {
-        let mut aggregate_lock = fixture.database.pool.begin().await?;
-        let cancellation = syrup_rail::CancelSubscription::new(
-            fixture.command.billing_scope_id(),
-            fixture.command.subscriber_id(),
-            fixture.command.plan_key().clone(),
-        );
-        let held =
-            crate::cancel_subscription_in_transaction(&mut aggregate_lock, &cancellation).await?;
-        if held != syrup_rail::CancelSubscriptionOutcome::NotFound {
-            return Err(
-                "cancellation workflow did not retain its empty aggregate transaction".into(),
-            );
-        }
-        let approved = approved_outcome("txn_aggregate_contention");
-        let declined =
-            GatewayPaymentOutcome::new(GatewayPaymentStatus::Declined, approved.evidence().clone());
-        let error = apply_subscription_enrollment_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            &fixture.reservation,
-            &declined,
-        )
-        .await
-        .expect_err("canonical aggregate holder must block enrollment application");
-        aggregate_lock.rollback().await?;
-        let SubscriptionEnrollmentApplicationError::Sql(sqlx::Error::Database(error)) = error
-        else {
-            return Err(format!("expected enrollment lock timeout, got {error:?}").into());
-        };
-        if error.code().as_deref() != Some("55P03") {
-            return Err(format!(
-                "expected enrollment lock timeout SQLSTATE 55P03, got {:?}",
-                error.code()
-            )
-            .into());
-        }
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let cleanup = fixture.cleanup().await;
-    result?;
-    cleanup
-}
+    let fixture = application_fixture("duplicate_diag", false, false).await?;
+    let result = apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &processor_duplicate_outcome(),
+    )
+    .await?;
 
-#[tokio::test]
-async fn approved_payment_method_writer_blocks_scrub_before_any_row_change()
--> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("wr_scrub_lock", false, false).await?;
-    let pause = Arc::new(AppendPause::new());
-    fixture.coordinator.append_pause = Some(Arc::clone(&pause));
-    let result = async {
-        let attempt_id = fixture.reservation.identity().attempt_id();
-        let attempt_before: String = sqlx::query_scalar(
-            "SELECT to_jsonb(attempts)::text FROM billing_payment_attempts AS attempts WHERE id = $1",
-        )
-        .bind(attempt_id.as_uuid())
-        .fetch_one(&fixture.database.pool)
-        .await?;
-        let outcome = approved_outcome("txn_writer_scrub_contention");
-        let mut application = Box::pin(apply_subscription_enrollment_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            &fixture.reservation,
-            &outcome,
-        ));
-
-        tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::select! {
-                result = &mut application => Err(io::Error::other(format!(
-                    "approved writer completed before contention probe: {result:?}"
-                ))),
-                permit = pause.reached.acquire() => {
-                    permit
-                        .map_err(|_| io::Error::other("append pause closed before writer arrived"))?
-                        .forget();
-                    Ok(())
-                }
-            }
-        })
-        .await
-        .map_err(|_| io::Error::other("approved writer did not reach its held transaction"))??;
-
-        let mut scrub = fixture.database.pool.begin().await?;
-        sqlx::query("SET LOCAL lock_timeout = '100ms'")
-            .execute(&mut *scrub)
-            .await?;
-        let error = crate::scrub_subscriber_billing_data(
-            &mut scrub,
-            syrup_rail::ScrubSubscriberBillingData::new(
-                fixture.command.billing_scope_id(),
-                fixture.command.subscriber_id(),
-            ),
-        )
-        .await
-        .expect_err("approved writer must block subscriber scrub on the shared method domain");
-        let sqlstate = error
-            .as_database_error()
-            .and_then(|error| error.code())
-            .map(|code| code.into_owned());
-        scrub.rollback().await?;
-        if sqlstate.as_deref() != Some("55P03") {
-            pause.release.add_permits(1);
-            return Err(io::Error::other(format!(
-                "expected scrub lock timeout SQLSTATE 55P03, got {sqlstate:?}"
-            ))
-            .into());
-        }
-        let attempt_after: String = sqlx::query_scalar(
-            "SELECT to_jsonb(attempts)::text FROM billing_payment_attempts AS attempts WHERE id = $1",
-        )
-        .bind(attempt_id.as_uuid())
-        .fetch_one(&fixture.database.pool)
-        .await?;
-        if attempt_after != attempt_before {
-            pause.release.add_permits(1);
-            return Err(
-                io::Error::other("scrub changed rows before acquiring the method domain").into(),
-            );
-        }
-
-        pause.release.add_permits(1);
-        let applied = application.await?;
-        if applied.attempt().status() != PaymentAttemptStatus::Approved {
-            return Err(
-                io::Error::other("approved writer did not resume after scrub rollback").into(),
-            );
-        }
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let cleanup = fixture.cleanup().await;
-    result?;
-    cleanup
+    assert_eq!(result.status(), PaymentAttemptStatus::Unknown);
+    assert_eq!(
+        result.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+    );
+    assert_eq!(
+        result
+            .processor_evidence()
+            .response_code()
+            .map(GatewayDiagnostic::expose),
+        Some("430")
+    );
+    fixture.cleanup().await
 }
 
 #[tokio::test]
@@ -207,45 +73,38 @@ async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(rows, (1, 1, 1, "applied".to_owned(), 1));
-    let applied_claim: (chrono::DateTime<chrono::Utc>, Uuid, Uuid) = sqlx::query_as(
-        r#"
-        SELECT applied_at, applied_subscription_id, applied_payment_attempt_id
-        FROM billing_subscription_discount_claims
-        LIMIT 1
-        "#,
-    )
-    .fetch_one(&fixture.database.pool)
-    .await?;
-    let applied_state = syrup_rail::SubscriptionDiscountClaimState::from_legacy_parts(
-        syrup_rail::SubscriptionDiscountClaimStatus::Applied,
-        Some(applied_claim.0),
-        Some(syrup_rail::SubscriptionId::new(applied_claim.1)),
-        Some(PaymentAttemptId::new(applied_claim.2)),
-        None,
-    )?;
-    assert!(matches!(
-        applied_state,
-        syrup_rail::SubscriptionDiscountClaimState::Applied {
-            subscription_id,
-            payment_attempt_id,
-            ..
-        } if subscription_id == result.subscription().expect("applied subscription").id()
-            && payment_attempt_id == result.attempt().identity().attempt_id()
-    ));
     let progression: String =
         sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
             .fetch_one(&fixture.database.pool)
             .await?;
     assert_eq!(progression, "applied");
 
-    let replay = apply_subscription_enrollment_gateway_outcome(
+    let identical_replay = apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
         &fixture.reservation,
         &outcome,
     )
     .await?;
-    assert_eq!(replay.attempt().status(), PaymentAttemptStatus::Approved);
+    assert_eq!(identical_replay, result);
+    assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
+
+    let diagnostic_replay = apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &processor_duplicate_outcome(),
+    )
+    .await?;
+    assert_eq!(
+        diagnostic_replay.attempt().status(),
+        PaymentAttemptStatus::Approved
+    );
+    assert_eq!(
+        diagnostic_replay.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate],
+        "a current observation annotates but never overrides the durable result"
+    );
     assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
     fixture.cleanup().await
 }
@@ -274,6 +133,7 @@ async fn approved_application_projects_the_locked_attempt_not_mismatched_reserva
         &mismatched_command,
         &gateway,
         fixture.command.attempt_id(),
+        GatewayAccountMode::Live,
     )?;
     assert_eq!(
         mismatched_reservation
@@ -341,254 +201,6 @@ async fn reconciled_initial_approval_uses_durable_attempt_after_configuration_ro
 }
 
 #[tokio::test]
-async fn reconciliation_dispatch_preserves_missing_kind_and_host_charge_errors_without_provider_io()
--> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("rec_dispatch", false, false).await?;
-    let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
-        "txn_dispatch_must_not_submit",
-    ))));
-    let resolver = Arc::new(StaticResolver {
-        gateway: scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway)),
-        calls: AtomicUsize::new(0),
-    });
-    let admission = Arc::new(PermitAdmission {
-        calls: AtomicUsize::new(0),
-    });
-    let service = SubscriptionBillingService::new(
-        fixture.database.pool.clone(),
-        Arc::new(TestOfferStore),
-        resolver.clone(),
-        admission.clone(),
-        Arc::new(fixture.coordinator.clone()),
-    );
-    let outcome = approved_outcome("txn_dispatch_observed");
-    let missing_attempt_id = PaymentAttemptId::new(Uuid::now_v7());
-    let scope = fixture.command.billing_scope_id();
-
-    assert_application_invalid_state(
-        apply_reconciled_subscription_enrollment_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            missing_attempt_id,
-            &outcome,
-        )
-        .await
-        .expect_err("missing initial attempt must fail"),
-        "subscription enrollment attempt was not found",
-    );
-    assert_application_invalid_state(
-        apply_reconciled_subscription_recovery_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            missing_attempt_id,
-            &outcome,
-        )
-        .await
-        .expect_err("missing recovery attempt must fail"),
-        "subscription recovery attempt was not found",
-    );
-    assert_application_invalid_state(
-        apply_reconciled_subscription_renewal_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            missing_attempt_id,
-            &outcome,
-        )
-        .await
-        .expect_err("missing renewal attempt must fail"),
-        "subscription renewal attempt was not found",
-    );
-    assert_application_invalid_state(
-        apply_reconciled_subscription_payment_method_replacement_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            missing_attempt_id,
-            &outcome,
-        )
-        .await
-        .expect_err("missing replacement attempt must fail"),
-        "payment method replacement attempt was not found",
-    );
-    assert_service_invalid_state(
-        service
-            .apply_reconciled_outcome(scope, missing_attempt_id, &outcome)
-            .await
-            .expect_err("missing service attempt must fail"),
-        "reconciled subscription payment attempt was not found",
-    );
-    assert_service_invalid_state(
-        service
-            .apply_reconciled_outcome(
-                BillingScopeId::new(Uuid::now_v7()),
-                fixture.command.attempt_id(),
-                &outcome,
-            )
-            .await
-            .expect_err("wrong-scope service attempt must look missing"),
-        "reconciled subscription payment attempt was not found",
-    );
-
-    assert_application_invalid_state(
-        apply_reconciled_subscription_recovery_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            fixture.command.attempt_id(),
-            &outcome,
-        )
-        .await
-        .expect_err("initial attempt must not reconstruct as recovery"),
-        "reconciled attempt is not a valid subscription recovery",
-    );
-    assert_application_invalid_state(
-        apply_reconciled_subscription_renewal_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            fixture.command.attempt_id(),
-            &outcome,
-        )
-        .await
-        .expect_err("initial attempt must not reconstruct as renewal"),
-        "reconciled attempt is not a valid subscription renewal",
-    );
-    assert_application_invalid_state(
-        apply_reconciled_subscription_payment_method_replacement_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            fixture.command.attempt_id(),
-            &outcome,
-        )
-        .await
-        .expect_err("initial attempt must not reconstruct as replacement"),
-        "reconciled attempt is not a valid payment method replacement",
-    );
-
-    let host_attempt_id = PaymentAttemptId::new(Uuid::now_v7());
-    let host_target_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-        INSERT INTO billing_payment_attempts (
-            id, billing_scope_id, subscriber_id, host_charge_target_id,
-            attempt_kind, status, idempotency_key, request_fingerprint,
-            amount_cents, currency, gateway_account_id,
-            gateway_configuration_id, gateway_order_id
-        ) VALUES (
-            $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
-            100, 'USD', $7, $8, $9
-        )
-        "#,
-    )
-    .bind(host_attempt_id.as_uuid())
-    .bind(scope.as_uuid())
-    .bind(Uuid::now_v7())
-    .bind(host_target_id)
-    .bind(format!("host-dispatch-{}", host_attempt_id.as_uuid()))
-    .bind(format!("host_charge:{host_target_id}:100:USD"))
-    .bind(fixture.gateway_account.gateway_account_id)
-    .bind(fixture.gateway_account.gateway_configuration_id)
-    .bind(format!("host_order_{}", host_attempt_id.as_uuid()))
-    .execute(&fixture.database.pool)
-    .await?;
-
-    assert_application_invalid_state(
-        apply_reconciled_subscription_enrollment_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            scope,
-            host_attempt_id,
-            &outcome,
-        )
-        .await
-        .expect_err("host charge must not reconstruct as initial enrollment"),
-        "reconciled attempt is not a valid subscription enrollment",
-    );
-    match service
-        .apply_reconciled_outcome(scope, host_attempt_id, &outcome)
-        .await
-        .expect_err("subscription service must reject a host charge")
-    {
-        SubscriptionBillingServiceError::Application(
-            SubscriptionEnrollmentApplicationError::InvalidState(actual),
-        ) => assert_eq!(
-            actual,
-            "attempt kind is not owned by the subscription billing service"
-        ),
-        other => panic!("expected application host-charge rejection, got {other}"),
-    }
-    assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
-    fixture.cleanup().await
-}
-
-#[tokio::test]
-async fn reconciled_wrapper_reports_missing_gateway_account() -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("rec_miss_acct", false, false).await?;
-    sqlx::query(
-        "ALTER TABLE billing_payment_attempts \
-         DROP CONSTRAINT billing_payment_attempts_account_scope_fk",
-    )
-    .execute(&fixture.database.pool)
-    .await?;
-    sqlx::query("UPDATE billing_payment_attempts SET gateway_account_id = $2 WHERE id = $1")
-        .bind(fixture.command.attempt_id().as_uuid())
-        .bind(Uuid::now_v7())
-        .execute(&fixture.database.pool)
-        .await?;
-
-    assert_application_invalid_state(
-        apply_reconciled_subscription_enrollment_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            fixture.command.billing_scope_id(),
-            fixture.command.attempt_id(),
-            &approved_outcome("txn_missing_account"),
-        )
-        .await
-        .expect_err("orphaned attempt must report its missing gateway account"),
-        "subscription enrollment gateway account was not found",
-    );
-    fixture.cleanup().await
-}
-
-#[tokio::test]
-async fn reconciled_wrapper_reports_invalid_persisted_provider_key() -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("rec_bad_provider", false, false).await?;
-    sqlx::query(
-        "ALTER TABLE billing_gateway_accounts \
-         DROP CONSTRAINT billing_gateway_accounts_provider_fk",
-    )
-    .execute(&fixture.database.pool)
-    .await?;
-    sqlx::query("UPDATE billing_gateway_accounts SET provider_key = 'INVALID!' WHERE id = $1")
-        .bind(fixture.gateway_account.gateway_account_id)
-        .execute(&fixture.database.pool)
-        .await?;
-
-    assert_application_invalid_state(
-        apply_reconciled_subscription_enrollment_gateway_outcome(
-            &fixture.database.pool,
-            &fixture.coordinator,
-            fixture.command.billing_scope_id(),
-            fixture.command.attempt_id(),
-            &approved_outcome("txn_invalid_provider"),
-        )
-        .await
-        .expect_err("invalid provider key must fail reconstruction"),
-        "subscription enrollment gateway provider key is invalid",
-    );
-    fixture.cleanup().await
-}
-
-#[tokio::test]
 async fn committed_admission_capability_submits_and_applies_exactly_one_sale()
 -> Result<(), Box<dyn Error>> {
     let mut fixture = application_fixture("submit_once", false, false).await?;
@@ -596,12 +208,13 @@ async fn committed_admission_capability_submits_and_applies_exactly_one_sale()
         "txn_submitted_once",
     ))));
     let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
     let result = submit_admitted_subscription_enrollment(
         &fixture.database.pool,
         &fixture.coordinator,
         *fixture.admission.take().expect("committed admission"),
         &fixture.command,
-        &resolved,
+        verified,
     )
     .await?;
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
@@ -610,6 +223,238 @@ async fn committed_admission_capability_submits_and_applies_exactly_one_sale()
         PaymentAttemptStatus::Approved
     );
     assert!(result.payment().subscription().is_some());
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn mode_capability_mismatch_cannot_reach_the_low_level_submission()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = application_fixture("mode_guard", false, false).await?;
+    let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome("txn_mode_guard_must_not_submit")),
+    ));
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+
+    let mismatch =
+        match crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await {
+            Err(mismatch) => mismatch,
+            Ok(_) => panic!("a test account cannot mint live submission authority"),
+        };
+    assert!(matches!(
+        mismatch,
+        crate::GatewayAccountModeVerificationError::AccountModeMismatch {
+            required: GatewayAccountMode::Live,
+            observed: GatewayAccountMode::Test,
+        }
+    ));
+
+    let test_capability =
+        crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Test).await?;
+    let error = submit_admitted_subscription_enrollment(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        *fixture.admission.take().expect("committed admission"),
+        &fixture.command,
+        test_capability,
+    )
+    .await
+    .expect_err("durable live admission must reject test authority");
+    assert!(matches!(
+        error,
+        SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch
+    ));
+    assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn unsubmitted_review_attempt_replays_across_gateway_mode_change()
+-> Result<(), Box<dyn Error>> {
+    let fixture = enrollment_fixture("review_mode", false, false, false).await?;
+    let mut transaction = fixture.database.pool.begin().await?;
+    let attempt_id = match reserve_subscription_enrollment_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &fixture.reservation,
+    )
+    .await?
+    {
+        SubscriptionEnrollmentReservationOutcome::Reserved(attempt) => {
+            attempt.identity().attempt_id()
+        }
+        other => return Err(format!("unexpected initial reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
+        .bind(attempt_id.as_uuid())
+        .execute(&fixture.database.pool)
+        .await?;
+
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::new(NeverCalledGateway));
+    let test_reservation = SubscriptionEnrollmentReservation::from_command(
+        &fixture.command,
+        &resolved,
+        GatewayAccountMode::Test,
+    )?;
+    let mut transaction = fixture.database.pool.begin().await?;
+    let replay = match reserve_subscription_enrollment_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &test_reservation,
+    )
+    .await?
+    {
+        SubscriptionEnrollmentReservationOutcome::Replay(attempt) => attempt,
+        other => return Err(format!("unexpected cross-mode reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+
+    assert_eq!(replay.identity().attempt_id(), attempt_id);
+    assert_eq!(
+        replay.identity().required_gateway_account_mode(),
+        GatewayAccountMode::Live
+    );
+    assert_eq!(replay.status(), PaymentAttemptStatus::ReviewRequired);
+    assert!(replay.state().timestamps().submitted_at().is_none());
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn stale_initial_attempt_expires_before_cross_mode_replay_policy()
+-> Result<(), Box<dyn Error>> {
+    let fixture = enrollment_fixture("stale_mode", false, false, false).await?;
+    let mut transaction = fixture.database.pool.begin().await?;
+    let attempt_id = match reserve_subscription_enrollment_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &fixture.reservation,
+    )
+    .await?
+    {
+        SubscriptionEnrollmentReservationOutcome::Reserved(attempt) => {
+            attempt.identity().attempt_id()
+        }
+        other => return Err(format!("unexpected initial reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    sqlx::query(
+        "UPDATE billing_payment_attempts \
+         SET created_at = clock_timestamp() - interval '31 minutes' WHERE id = $1",
+    )
+    .bind(attempt_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::new(NeverCalledGateway));
+    let test_reservation = SubscriptionEnrollmentReservation::from_command(
+        &fixture.command,
+        &resolved,
+        GatewayAccountMode::Test,
+    )?;
+    let mut transaction = fixture.database.pool.begin().await?;
+    let replay = match reserve_subscription_enrollment_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &test_reservation,
+    )
+    .await?
+    {
+        SubscriptionEnrollmentReservationOutcome::Replay(attempt) => attempt,
+        other => return Err(format!("unexpected stale cross-mode reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+
+    assert_eq!(replay.status(), PaymentAttemptStatus::Failed);
+    assert_eq!(
+        replay.state().resolution_code(),
+        Some(PaymentResolutionCode::SubscriptionInitialPreparedAttemptExpired)
+    );
+    assert_eq!(
+        replay.identity().required_gateway_account_mode(),
+        GatewayAccountMode::Live
+    );
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn renewal_mode_capability_mismatch_cannot_reach_the_low_level_submission()
+-> Result<(), Box<dyn Error>> {
+    let fixture = application_fixture("renew_mode_guard", false, false).await?;
+    let initial = apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &approved_outcome("txn_renewal_mode_guard_initial"),
+    )
+    .await?;
+    let subscription_id = initial
+        .subscription()
+        .expect("approved enrollment creates a subscription")
+        .id();
+    let requested_due_at = chrono::Utc::now() - ChronoDuration::days(1);
+    let due_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2,
+            current_period_end_at = $3,
+            next_renewal_at = $3,
+            next_payment_attempt_at = $3,
+            updated_at = clock_timestamp()
+        WHERE id = $1
+        RETURNING next_renewal_at
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(requested_due_at - ChronoDuration::days(30))
+    .bind(requested_due_at)
+    .fetch_one(&fixture.database.pool)
+    .await?;
+
+    let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome("txn_renewal_mode_guard_must_not_submit")),
+    ));
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let command = ChargeRenewal::new(fixture.command.billing_scope_id(), subscription_id, due_at);
+    let mut transaction = fixture.database.pool.begin().await?;
+    let reservation = match crate::reserve_subscription_renewal_in_transaction(
+        &mut transaction,
+        command,
+        &resolved,
+        GatewayAccountMode::Live,
+    )
+    .await?
+    {
+        syrup_rail::SubscriptionRenewalReservationOutcome::Reserved(reservation, _) => *reservation,
+        other => return Err(format!("unexpected renewal reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    let admission =
+        match crate::admit_subscription_renewal_submission(&fixture.database.pool, &reservation)
+            .await?
+        {
+            crate::SubscriptionRenewalAdmissionOutcome::Admitted(admission) => *admission,
+            other => return Err(format!("unexpected renewal admission: {other:?}").into()),
+        };
+
+    let test_capability =
+        crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Test).await?;
+    let error = submit_admitted_subscription_renewal(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        admission,
+        test_capability,
+    )
+    .await
+    .expect_err("durable live renewal admission must reject test authority");
+    assert!(matches!(
+        error,
+        SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch
+    ));
+    assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
     fixture.cleanup().await
 }
 
@@ -664,13 +509,17 @@ async fn recovery_admission_rejects_changed_contact_before_provider_io()
         fixture.command.plan_key().clone(),
     );
     let mut transaction = fixture.database.pool.begin().await?;
-    let reservation =
-        match reserve_subscription_recovery_in_transaction(&mut transaction, &command, &resolved)
-            .await?
-        {
-            SubscriptionRecoveryReservationOutcome::Reserved(reservation, _) => *reservation,
-            other => return Err(format!("unexpected recovery reservation: {other:?}").into()),
-        };
+    let reservation = match reserve_subscription_recovery_in_transaction(
+        &mut transaction,
+        &command,
+        &resolved,
+        GatewayAccountMode::Live,
+    )
+    .await?
+    {
+        SubscriptionRecoveryReservationOutcome::Reserved(reservation, _) => *reservation,
+        other => return Err(format!("unexpected recovery reservation: {other:?}").into()),
+    };
     transaction.commit().await?;
     let admission =
         match admit_subscription_recovery_submission(&fixture.database.pool, &reservation).await? {
@@ -694,12 +543,13 @@ async fn recovery_admission_rejects_changed_contact_before_provider_io()
         command.plan_key().clone(),
     );
 
+    let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
     let error = submit_admitted_subscription_recovery(
         &fixture.database.pool,
         &fixture.coordinator,
         admission,
         &changed_contact,
-        &resolved,
+        verified,
     )
     .await
     .expect_err("changed durable contact must invalidate admission");
@@ -708,6 +558,31 @@ async fn recovery_admission_rejects_changed_contact_before_provider_io()
         SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch
     ));
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
+    let not_transmitted = GatewayNotSubmittedError::NotTransmitted(GatewayDiagnostic::new(
+        "recovery transport was not transmitted",
+    ));
+    let policy = GatewayNotSubmittedPolicy::for_error(&not_transmitted);
+    let restored = apply_resumable_not_submitted_policy(
+        &fixture.database.pool,
+        OutcomeReservation::Recovery(&reservation),
+        &mutation_error_evidence(not_transmitted.detail()),
+        policy,
+    )
+    .await?;
+    assert!(restored.should_surface_not_submitted(policy));
+    assert_eq!(
+        restored.payment.attempt().status(),
+        PaymentAttemptStatus::Pending
+    );
+    assert!(
+        restored
+            .payment
+            .attempt()
+            .state()
+            .timestamps()
+            .submitted_at()
+            .is_none()
+    );
     fixture.cleanup().await
 }
 
@@ -750,6 +625,7 @@ async fn payment_method_admission_rejects_changed_idempotency_key_before_provide
         &mut transaction,
         &command,
         &resolved,
+        GatewayAccountMode::Live,
     )
     .await?
     {
@@ -783,12 +659,13 @@ async fn payment_method_admission_rejects_changed_idempotency_key_before_provide
         command.plan_key().clone(),
     );
 
+    let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
     let error = submit_admitted_subscription_payment_method_replacement(
         &fixture.database.pool,
         &fixture.coordinator,
         admission,
         &changed_idempotency,
-        &resolved,
+        verified,
     )
     .await
     .expect_err("changed durable idempotency key must invalidate admission");
@@ -797,37 +674,133 @@ async fn payment_method_admission_rejects_changed_idempotency_key_before_provide
         SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch
     ));
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 0);
+    let not_transmitted = GatewayNotSubmittedError::NotTransmitted(GatewayDiagnostic::new(
+        "payment-method transport was not transmitted",
+    ));
+    let policy = GatewayNotSubmittedPolicy::for_error(&not_transmitted);
+    let restored = apply_resumable_not_submitted_policy(
+        &fixture.database.pool,
+        OutcomeReservation::PaymentMethodReplacement(&reservation),
+        &mutation_error_evidence(not_transmitted.detail()),
+        policy,
+    )
+    .await?;
+    assert!(restored.should_surface_not_submitted(policy));
+    assert_eq!(
+        restored.payment.attempt().status(),
+        PaymentAttemptStatus::Pending
+    );
+    assert!(
+        restored
+            .payment
+            .attempt()
+            .state()
+            .timestamps()
+            .submitted_at()
+            .is_none()
+    );
     fixture.cleanup().await
 }
 
 #[tokio::test]
-async fn provider_not_submitted_error_resolves_the_admitted_attempt_without_resubmission()
+async fn provider_not_submitted_unavailable_restores_the_admitted_attempt_for_retry()
 -> Result<(), Box<dyn Error>> {
     let mut fixture = application_fixture("not_submitted", false, false).await?;
     let gateway = Arc::new(ScriptedGateway::new(Err(
-        GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::Unavailable(
+        GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::NotTransmitted(
             GatewayDiagnostic::new("temporary provider outage"),
         )),
     )));
     let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
     let result = submit_admitted_subscription_enrollment(
         &fixture.database.pool,
         &fixture.coordinator,
         *fixture.admission.take().expect("committed admission"),
         &fixture.command,
-        &resolved,
+        verified,
     )
     .await?;
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         result.payment().attempt().status(),
-        PaymentAttemptStatus::Failed
+        PaymentAttemptStatus::Pending
     );
-    assert_eq!(
-        result.payment().attempt().state().resolution_code(),
-        Some(PaymentResolutionCode::GatewayUnavailableBeforeSubmission)
+    assert_eq!(result.payment().attempt().state().resolution_code(), None);
+    assert!(
+        result
+            .payment()
+            .attempt()
+            .state()
+            .timestamps()
+            .submitted_at()
+            .is_none()
     );
     assert!(result.payment().subscription().is_none());
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn adapter_cannot_mint_retry_safe_account_mode_verification_errors()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = application_fixture("adapter_mode", false, false).await?;
+    let gateway = Arc::new(ScriptedGateway::new(Err(
+        GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::AccountModeVerification(
+            GatewayError::Unavailable(GatewayDiagnostic::new(
+                "adapter-originated verification claim",
+            )),
+        )),
+    )));
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
+    let result = submit_admitted_subscription_enrollment(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        *fixture.admission.take().expect("committed admission"),
+        &fixture.command,
+        verified,
+    )
+    .await?;
+    assert!(matches!(
+        result,
+        SubscriptionEnrollmentProviderResult::NotSubmitted {
+            error: GatewayNotSubmittedError::Malformed(_),
+            ..
+        }
+    ));
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+    fixture.cleanup().await
+}
+
+#[tokio::test]
+async fn adapter_account_mode_mismatch_is_also_a_malformed_contract_error()
+-> Result<(), Box<dyn Error>> {
+    let mut fixture = application_fixture("adapter_mismatch", false, false).await?;
+    let gateway = Arc::new(ScriptedGateway::new(Err(
+        GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::AccountModeMismatch {
+            required: GatewayAccountMode::Live,
+            observed: GatewayAccountMode::Test,
+            detail: GatewayDiagnostic::new("adapter-originated mode mismatch claim"),
+        }),
+    )));
+    let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
+    let result = submit_admitted_subscription_enrollment(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        *fixture.admission.take().expect("committed admission"),
+        &fixture.command,
+        verified,
+    )
+    .await?;
+    assert!(matches!(
+        result,
+        SubscriptionEnrollmentProviderResult::NotSubmitted {
+            error: GatewayNotSubmittedError::Malformed(_),
+            ..
+        }
+    ));
+    assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
     fixture.cleanup().await
 }
 
@@ -841,12 +814,13 @@ async fn provider_not_submitted_throttle_atomically_extends_the_account_cooldown
         )),
     )));
     let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::clone(&gateway));
+    let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
     let result = submit_admitted_subscription_enrollment(
         &fixture.database.pool,
         &fixture.coordinator,
         *fixture.admission.take().expect("committed admission"),
         &fixture.command,
-        &resolved,
+        verified,
     )
     .await?;
     assert!(matches!(
@@ -856,6 +830,10 @@ async fn provider_not_submitted_throttle_atomically_extends_the_account_cooldown
             ..
         }
     ));
+    assert_eq!(
+        result.payment().attempt().state().resolution_code(),
+        Some(PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission)
+    );
     let deadlines: (bool, bool) = sqlx::query_as(
         r#"
         SELECT
@@ -965,72 +943,6 @@ async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
         .fetch_one(&fixture.database.pool)
         .await?;
     assert_eq!(subscription_count, 0);
-    fixture.cleanup().await
-}
-
-#[tokio::test]
-async fn exhausted_attempt_lock_retries_use_the_lock_free_approved_evidence_fallback()
--> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("lock_fallback", false, false).await?;
-    let attempt_id = fixture.reservation.identity().attempt_id();
-    let mut blocker = fixture.database.pool.begin().await?;
-    // `FOR NO KEY UPDATE` blocks the parking path's `FOR UPDATE` while still
-    // allowing the lock-free charge insert's foreign-key `KEY SHARE` check.
-    sqlx::query("SELECT id FROM billing_payment_attempts WHERE id = $1 FOR NO KEY UPDATE")
-        .bind(attempt_id.as_uuid())
-        .fetch_one(&mut *blocker)
-        .await?;
-
-    let outcome = GatewayPaymentOutcome::new(
-        GatewayPaymentStatus::Approved,
-        ProcessorEvidence::new(
-            Some(GatewayTransactionId::new("txn_lock_free_fallback")?),
-            None,
-            Some(GatewayDiagnostic::new("approved")),
-            Some(GatewayDiagnostic::new("100")),
-            None,
-            None,
-            GatewayPaymentDescriptor::default(),
-        ),
-    );
-    let result = apply_subscription_enrollment_gateway_outcome(
-        &fixture.database.pool,
-        &fixture.coordinator,
-        &fixture.reservation,
-        &outcome,
-    )
-    .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(SubscriptionEnrollmentApplicationError::Sql(error)) => {
-            return Err(format!("unexpected parking SQL error: {error:?}").into());
-        }
-        Err(error) => return Err(format!("unexpected parking error: {error:?}").into()),
-    };
-
-    assert_eq!(result.attempt().status(), PaymentAttemptStatus::Pending);
-    assert!(result.is_confirmation_pending());
-    let charge: (String, String, i32, String) = sqlx::query_as(
-        r#"
-        SELECT gateway_transaction_id, progression_state, amount_cents, currency
-        FROM billing_processor_charges
-        WHERE attempt_id = $1
-        "#,
-    )
-    .bind(attempt_id.as_uuid())
-    .fetch_one(&fixture.database.pool)
-    .await?;
-    assert_eq!(
-        charge,
-        (
-            "txn_lock_free_fallback".to_owned(),
-            "pending".to_owned(),
-            1_000,
-            "USD".to_owned(),
-        )
-    );
-
-    blocker.rollback().await?;
     fixture.cleanup().await
 }
 

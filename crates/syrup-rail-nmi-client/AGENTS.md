@@ -11,8 +11,8 @@ transaction queries, and report parsing.
 - `ClientFactory` in `src/client.rs` owns the shared credential-free HTTP pool and
   report-operation admission budget.
 - `Client` in `src/client.rs` is an account-bound concrete NMI client.
-- `Endpoint` and `Credentials` in `src/configuration.rs` validate provider
-  connection configuration.
+- `Endpoint`, `Credentials`, and `DuplicateCheck` in `src/configuration.rs`
+  validate provider connection and account-level duplicate-check policy.
 - Public request, response, and error types live with their implementations in
   `src/requests.rs`, `src/responses.rs`, and `src/errors.rs`; `src/lib.rs` is the
   stable re-export facade.
@@ -28,6 +28,8 @@ transaction queries, and report parsing.
 ## Invariants
 
 - Never retry a mutation internally.
+- Keep processor duplicate-check policy explicit and account-bound; do not
+  select it per sale or treat it as durable idempotency.
 - Preserve the distinction between known non-submission and an indeterminate
   mutation outcome.
 - Never expose credentials, provider bodies, identifiers, or free-form provider

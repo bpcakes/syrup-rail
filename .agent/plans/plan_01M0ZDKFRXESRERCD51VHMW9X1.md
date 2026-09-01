@@ -1,0 +1,1 @@
+Research NMI limits and alternatives, then eliminate implicit Live constructors, move the single mode verification before side-effectful renewal and new host-charge preparation while carrying the opaque capability to submission, add direct boundary and lifecycle regression tests, update docs, and run all gates.

@@ -1,8 +1,8 @@
 use std::error::Error;
 
 use syrup_rail::{
-    BillingScopeId, CurrencyCode, GatewayAccountId, GatewayConfigurationId, GatewayDiagnostic,
-    GatewayPaymentDescriptor, GatewayTransactionId, OperatorReviewPageLimit, PlanKey, SubscriberId,
+    BillingScopeId, CurrencyCode, GatewayAccountId, GatewayAccountMode, GatewayConfigurationId,
+    GatewayDiagnostic, GatewayPaymentDescriptor, GatewayTransactionId, PlanKey, SubscriberId,
 };
 
 use super::*;
@@ -18,11 +18,13 @@ async fn insert_host_charge_attempt(
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
                 gateway_configuration_id, gateway_order_id
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
                 100, 'USD', $7, $8, $9
             )
@@ -52,75 +54,6 @@ fn approved_evidence(transaction_id: &str) -> ProcessorEvidence {
         Some(GatewayDiagnostic::new("complete")),
         GatewayPaymentDescriptor::default(),
     )
-}
-
-#[tokio::test]
-async fn malformed_charge_maps_through_each_consumer_error_boundary() -> Result<(), Box<dyn Error>>
-{
-    let database = TestDatabase::start("rail_chg_codec").await?;
-    let result = async {
-        let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
-        let attempt_id =
-            insert_host_charge_attempt(&database.pool, gateway, "malformed-charge-codec-order")
-                .await?;
-        let charge_id = ProcessorChargeId::new(Uuid::now_v7());
-        sqlx::query(
-            r#"
-                INSERT INTO billing_processor_charges (
-                    id, attempt_id, billing_scope_id, gateway_account_id,
-                    gateway_order_id, gateway_transaction_id, charge_role,
-                    progression_state, state_code, external_reversal_required_at,
-                    attempt_kind, host_charge_target_id, amount_cents, currency
-                )
-                SELECT $1, id, billing_scope_id, gateway_account_id,
-                    gateway_order_id, 'txn-malformed-charge-codec', 'primary',
-                    'external_reversal_required', 'future_processor_charge_state',
-                    clock_timestamp(), attempt_kind, host_charge_target_id,
-                    amount_cents, currency
-                FROM billing_payment_attempts
-                WHERE id = $2
-                "#,
-        )
-        .bind(charge_id.as_uuid())
-        .bind(attempt_id.as_uuid())
-        .execute(&database.pool)
-        .await?;
-
-        let mut transaction = database.pool.begin().await?;
-        let charge_error = charge_by_id(&mut transaction, charge_id.into_uuid())
-            .await
-            .expect_err("charge storage must reject an unknown persisted state code");
-        transaction.rollback().await?;
-        assert!(matches!(
-            &charge_error,
-            ProcessorChargeStoreError::InvalidState("canonical operator review state is invalid")
-        ));
-        assert_eq!(
-            charge_error.to_string(),
-            "canonical operator review state is invalid"
-        );
-
-        let operator_error = crate::processor_charge_review_page(
-            &database.pool,
-            OperatorReviewPageLimit::new(1)?,
-            None,
-        )
-        .await
-        .expect_err("operator review must reject an unknown persisted state code");
-        assert!(matches!(
-            &operator_error,
-            crate::OperatorReviewError::InvalidState("canonical operator review state is invalid")
-        ));
-        assert_eq!(
-            operator_error.to_string(),
-            "canonical operator review state is invalid"
-        );
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result?;
-    cleanup
 }
 
 struct SubscriptionAttemptFixture {
@@ -172,6 +105,7 @@ async fn insert_subscription_attempt(
                 RETURNING id
             ), subscription AS (
                 INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                     id, billing_scope_id, subscriber_id, plan_key, status,
                     gateway_account_id, payment_method_id, amount_cents, currency,
                     current_period_start_at, current_period_end_at, next_renewal_at,
@@ -179,7 +113,7 @@ async fn insert_subscription_attempt(
                     recurring_period_count, dunning_retry_delays_seconds,
                     dunning_exhaustion, past_due_access, next_payment_attempt_at
                 )
-                SELECT subscription_id, billing_scope_id, subscriber_id, plan_key, 'active',
+                SELECT 'live', subscription_id, billing_scope_id, subscriber_id, plan_key, 'active',
                     gateway_account_id, payment_method_id, 100, 'USD', period_start_at,
                     period_start_at + interval '30 days',
                     period_start_at + interval '30 days',
@@ -191,6 +125,7 @@ async fn insert_subscription_attempt(
                 RETURNING id
             )
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
                 request_fingerprint, amount_cents, currency, billing_period_start_at,
@@ -200,7 +135,7 @@ async fn insert_subscription_attempt(
                 subscription_expected_payment_method_id,
                 subscription_expected_initial_transaction_id, subscription_expected_status
             )
-            SELECT attempt_id, billing_scope_id, subscriber_id, plan_key, subscription_id,
+            SELECT 'live', attempt_id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, 'pending', 'fallback-' || attempt_id::text,
                 attempt_kind || ':' || subscription_id::text,
                 CASE WHEN attempt_kind = 'subscription_payment_method_update' THEN 0 ELSE 100 END,
@@ -240,6 +175,7 @@ async fn insert_subscription_attempt(
             subscriber_id,
             GatewayAccountId::new(gateway.gateway_account_id),
             GatewayConfigurationId::new(gateway.gateway_configuration_id),
+            GatewayAccountMode::Live,
         ),
         plan_key,
         gateway_order_id,

@@ -1,5 +1,3 @@
-use std::{io, time::Duration as StdDuration};
-
 use super::*;
 
 #[tokio::test]
@@ -39,6 +37,7 @@ async fn active_grant_blocks_only_its_exact_plan() -> Result<(), Box<dyn Error>>
             full_price("basic", 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     assert_eq!(
@@ -59,6 +58,7 @@ async fn active_grant_blocks_only_its_exact_plan() -> Result<(), Box<dyn Error>>
             full_price("premium", 2_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
@@ -92,6 +92,7 @@ async fn gateway_configuration_rotation_rejects_prepared_submission() -> Result<
             full_price(plan_key, 1_000),
         ),
         &gateway,
+        GatewayAccountMode::Live,
     )?;
     let mut transaction = database.pool.begin().await?;
     assert!(matches!(
@@ -128,6 +129,127 @@ async fn gateway_configuration_rotation_rejects_prepared_submission() -> Result<
             && attempt.state().timestamps().submitted_at().is_none()
     ));
     transaction.commit().await?;
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn enrollment_admission_returns_typed_rejection_for_changed_required_mode()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("enr_mode_admit").await?;
+    install_host_offers(&database).await?;
+    let account = create_gateway_account(&database.pool, "nmi").await?;
+    let plan_key = "base_subscription";
+    set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
+    let gateway = resolved_gateway(account);
+    let command = enrollment_command(
+        account,
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        "admission-mode-change",
+        full_price(plan_key, 1_000),
+    );
+    let live_reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    assert!(matches!(
+        reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &live_reservation,
+        )
+        .await?,
+        SubscriptionEnrollmentReservationOutcome::Reserved(_)
+    ));
+    transaction.commit().await?;
+
+    let test_reservation = SubscriptionEnrollmentReservation::from_command(
+        &command,
+        &gateway,
+        GatewayAccountMode::Test,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    let rejected = admit_subscription_enrollment_submission_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &test_reservation,
+    )
+    .await?;
+    assert!(matches!(
+        rejected,
+        SubscriptionEnrollmentSubmissionOutcome::Rejected {
+            ref attempt,
+            reason: SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged,
+        } if attempt.status() == PaymentAttemptStatus::Pending
+            && attempt.state().timestamps().submitted_at().is_none()
+    ));
+    transaction.commit().await?;
+    let mut transaction = database.pool.begin().await?;
+    assert!(matches!(
+        admit_subscription_enrollment_submission_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &live_reservation,
+        )
+        .await?,
+        SubscriptionEnrollmentSubmissionOutcome::Admitted(_)
+    ));
+    transaction.rollback().await?;
+
+    let withdrawn_command = enrollment_command(
+        account,
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        "withdrawn-offer-mode-change",
+        full_price(plan_key, 1_000),
+    );
+    let withdrawn_live_reservation = SubscriptionEnrollmentReservation::from_command(
+        &withdrawn_command,
+        &gateway,
+        GatewayAccountMode::Live,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    assert!(matches!(
+        reserve_subscription_enrollment_in_transaction(
+            &mut transaction,
+            &TestOfferStore,
+            &withdrawn_live_reservation,
+        )
+        .await?,
+        SubscriptionEnrollmentReservationOutcome::Reserved(_)
+    ));
+    transaction.commit().await?;
+    sqlx::query(
+        "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
+    )
+    .bind(account.billing_scope_id)
+    .bind(plan_key)
+    .execute(&database.pool)
+    .await?;
+    let withdrawn_test_reservation = SubscriptionEnrollmentReservation::from_command(
+        &withdrawn_command,
+        &gateway,
+        GatewayAccountMode::Test,
+    )?;
+    let mut transaction = database.pool.begin().await?;
+    let rejected = admit_subscription_enrollment_submission_in_transaction(
+        &mut transaction,
+        &TestOfferStore,
+        &withdrawn_test_reservation,
+    )
+    .await?;
+    assert!(matches!(
+        rejected,
+        SubscriptionEnrollmentSubmissionOutcome::Rejected {
+            ref attempt,
+            reason: SubscriptionEnrollmentSubmissionRejection::GatewayAccountModeChanged,
+        } if attempt.status() == PaymentAttemptStatus::Pending
+            && attempt.state().timestamps().submitted_at().is_none()
+    ));
+    transaction.commit().await?;
     database.cleanup().await
 }
 
@@ -140,6 +262,7 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, host_charge_target_id,
                 attempt_kind, status, idempotency_key, request_fingerprint,
                 amount_cents, currency, gateway_account_id,
@@ -149,6 +272,7 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
                 gateway_condition, billing_first_name, billing_last_name,
                 billing_email
             ) VALUES (
+                'live',
                 $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
                 1000, 'USD', $7, $8, $9, $10, $11, $12, $13, $14,
                 $15, $16, $17, $18
@@ -186,41 +310,11 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
         .await?
         .is_none()
     );
-    let idempotency_key = IdempotencyKey::new("idempotency-secret")?;
-    assert!(
-        find_payment_attempt_by_idempotency(
-            &mut transaction,
-            BillingScopeId::new(Uuid::now_v7()),
-            SubscriberId::new(subscriber_id),
-            &idempotency_key,
-        )
-        .await?
-        .is_none()
-    );
-    assert!(
-        find_payment_attempt_by_idempotency(
-            &mut transaction,
-            BillingScopeId::new(account.billing_scope_id),
-            SubscriberId::new(Uuid::now_v7()),
-            &idempotency_key,
-        )
-        .await?
-        .is_none()
-    );
-    let found = find_payment_attempt_by_idempotency(
-        &mut transaction,
-        BillingScopeId::new(account.billing_scope_id),
-        SubscriberId::new(subscriber_id),
-        &idempotency_key,
-    )
-    .await?
-    .expect("exact owner row should load without a lock");
-    assert_eq!(found.identity().attempt_id().as_uuid(), &attempt_id);
     let attempt = lock_payment_attempt_by_idempotency_in_transaction(
         &mut transaction,
         BillingScopeId::new(account.billing_scope_id),
         SubscriberId::new(subscriber_id),
-        &idempotency_key,
+        &IdempotencyKey::new("idempotency-secret")?,
     )
     .await?
     .expect("exact owner row should load");
@@ -253,356 +347,6 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
         assert!(!debug.contains(secret), "debug leaked {secret}");
     }
     transaction.rollback().await?;
-    database.cleanup().await
-}
-
-#[tokio::test]
-async fn idempotency_find_completes_while_explicit_lock_times_out_on_a_held_row()
--> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("attempt_lockmode").await?;
-    let result = async {
-        let account = create_gateway_account(&database.pool, "nmi").await?;
-        let attempt_id = Uuid::now_v7();
-        let subscriber_id = Uuid::now_v7();
-        let idempotency_key = IdempotencyKey::new("idempotency-lock-mode")?;
-        sqlx::query(
-            r#"
-                INSERT INTO billing_payment_attempts (
-                    id, billing_scope_id, subscriber_id, host_charge_target_id,
-                    attempt_kind, status, idempotency_key, request_fingerprint,
-                    amount_cents, currency, gateway_account_id,
-                    gateway_configuration_id, gateway_order_id
-                ) VALUES (
-                    $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
-                    1000, 'USD', $7, $8, $9
-                )
-                "#,
-        )
-        .bind(attempt_id)
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
-        .bind(Uuid::now_v7())
-        .bind(idempotency_key.expose())
-        .bind("fingerprint-lock-mode")
-        .bind(account.gateway_account_id)
-        .bind(account.gateway_configuration_id)
-        .bind("order-lock-mode")
-        .execute(&database.pool)
-        .await?;
-
-        let billing_scope_id = BillingScopeId::new(account.billing_scope_id);
-        let subscriber_id = SubscriberId::new(subscriber_id);
-        let mut holder = database.pool.begin().await?;
-        let held = lock_payment_attempt_by_idempotency_in_transaction(
-            &mut holder,
-            billing_scope_id,
-            subscriber_id,
-            &idempotency_key,
-        )
-        .await?
-        .expect("holder must lock the idempotency row");
-        assert_eq!(held.identity().attempt_id().as_uuid(), &attempt_id);
-
-        let mut finder = database.pool.begin().await?;
-        let found = tokio::time::timeout(
-            StdDuration::from_secs(1),
-            find_payment_attempt_by_idempotency(
-                &mut finder,
-                billing_scope_id,
-                subscriber_id,
-                &idempotency_key,
-            ),
-        )
-        .await
-        .map_err(|_| io::Error::other("unlocked idempotency find waited on the row lock"))??
-        .expect("find must see the exact owner row while another transaction holds its lock");
-        assert_eq!(found.identity().attempt_id().as_uuid(), &attempt_id);
-        finder.rollback().await?;
-
-        let mut contender = database.pool.begin().await?;
-        sqlx::query("SET LOCAL lock_timeout = '100ms'")
-            .execute(&mut *contender)
-            .await?;
-        let error = tokio::time::timeout(
-            StdDuration::from_secs(1),
-            lock_payment_attempt_by_idempotency(
-                &mut contender,
-                billing_scope_id,
-                subscriber_id,
-                &idempotency_key,
-            ),
-        )
-        .await
-        .map_err(|_| io::Error::other("explicit idempotency lock did not time out"))?
-        .expect_err("explicit idempotency lock must wait for the held row");
-        let PaymentAttemptStoreError::Sql(error) = error else {
-            return Err(io::Error::other(format!(
-                "expected a PostgreSQL lock timeout, got {error}"
-            ))
-            .into());
-        };
-        let code = error
-            .as_database_error()
-            .and_then(|database_error| database_error.code())
-            .map(|code| code.into_owned());
-        if code.as_deref() != Some("55P03") {
-            return Err(
-                io::Error::other(format!("expected PostgreSQL lock timeout, got {error}")).into(),
-            );
-        }
-        contender.rollback().await?;
-        holder.rollback().await?;
-        Ok::<_, Box<dyn Error>>(())
-    }
-    .await;
-    let cleanup = database.cleanup().await;
-    result?;
-    cleanup
-}
-
-#[tokio::test]
-async fn renewal_and_recovery_share_one_lossless_insert_codec() -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("attempt_codec").await?;
-    let account = create_gateway_account(&database.pool, "nmi").await?;
-    let base_time: DateTime<Utc> =
-        sqlx::query_scalar("SELECT date_trunc('microseconds', clock_timestamp())")
-            .fetch_one(&database.pool)
-            .await?;
-    let currency = CurrencyCode::new("USD")?;
-
-    for (position, kind, expected_status) in [
-        (
-            1,
-            PaymentAttemptKind::SubscriptionRenewal,
-            SubscriptionStatus::Active,
-        ),
-        (
-            2,
-            PaymentAttemptKind::SubscriptionRecovery,
-            SubscriptionStatus::PastDue,
-        ),
-    ] {
-        let subscriber_id = Uuid::now_v7();
-        let subscription_id = Uuid::now_v7();
-        let target_method_id = Uuid::now_v7();
-        let expected_method_id = Uuid::now_v7();
-        for (method_id, reference) in [
-            (target_method_id, format!("target-method-{position}")),
-            (expected_method_id, format!("expected-method-{position}")),
-        ] {
-            sqlx::query(
-                r#"
-                INSERT INTO billing_payment_methods (
-                    id, billing_scope_id, subscriber_id, gateway_account_id,
-                    gateway_payment_method_reference, status
-                ) VALUES ($1, $2, $3, $4, $5, 'active')
-                "#,
-            )
-            .bind(method_id)
-            .bind(account.billing_scope_id)
-            .bind(subscriber_id)
-            .bind(account.gateway_account_id)
-            .bind(reference)
-            .execute(&database.pool)
-            .await?;
-        }
-
-        let plan_key = PlanKey::new(format!("codec_plan_{position}"))?;
-        let initial_transaction = format!("initial-transaction-{position}");
-        let period_start = base_time + Duration::days(i64::from(position));
-        let period_end = period_start + Duration::days(30);
-        sqlx::query(
-            r#"
-            INSERT INTO billing_subscriptions (
-                id, billing_scope_id, subscriber_id, plan_key, status,
-                gateway_account_id, payment_method_id, amount_cents, currency,
-                current_period_start_at, current_period_end_at, next_renewal_at,
-                initial_transaction_id, phase, recurring_period_kind,
-                recurring_period_count, dunning_retry_delays_seconds,
-                dunning_exhaustion, past_due_access, next_payment_attempt_at
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, 'USD',
-                $9, $10, $10, $11, 'recurring', 'calendar_months', 1,
-                ARRAY[]::bigint[], 'remain_past_due', 'suspend_immediately', $10
-            )
-            "#,
-        )
-        .bind(subscription_id)
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
-        .bind(plan_key.as_str())
-        .bind(expected_status.as_str())
-        .bind(account.gateway_account_id)
-        .bind(expected_method_id)
-        .bind(1_000 + position)
-        .bind(period_start - Duration::days(30))
-        .bind(period_start)
-        .bind(&initial_transaction)
-        .execute(&database.pool)
-        .await?;
-
-        let attempt_id = PaymentAttemptId::new(Uuid::now_v7());
-        let identity = PaymentAttemptIdentity::new(
-            attempt_id,
-            BillingScopeId::new(account.billing_scope_id),
-            SubscriberId::new(subscriber_id),
-            GatewayAccountId::new(account.gateway_account_id),
-            GatewayConfigurationId::new(account.gateway_configuration_id),
-        );
-        let expected_state = SubscriptionPaymentStateSnapshot::new(
-            SubscriptionId::new(subscription_id),
-            PaymentMethodId::new(expected_method_id),
-            GatewayTransactionId::new(initial_transaction.clone())?,
-            expected_status,
-        )?;
-        let period = BillingPeriod::new(period_start, period_end)?;
-        let target = match kind {
-            PaymentAttemptKind::SubscriptionRenewal => PaymentAttemptTarget::SubscriptionRenewal {
-                plan_key: plan_key.clone(),
-                payment_method_id: PaymentMethodId::new(target_method_id),
-                period,
-                expected_state,
-            },
-            PaymentAttemptKind::SubscriptionRecovery => {
-                PaymentAttemptTarget::SubscriptionRecovery {
-                    plan_key: plan_key.clone(),
-                    payment_method_id: PaymentMethodId::new(target_method_id),
-                    period,
-                    expected_state,
-                }
-            }
-            _ => unreachable!(),
-        };
-        let idempotency_key = IdempotencyKey::new(format!("codec-key-{position}"))?;
-        let fingerprint = PaymentAttemptFingerprint::new(format!("codec-fingerprint-{position}"))?;
-        let amount = Money::new(1_000 + position, currency)?;
-        let gateway_order_id = GatewayOrderId::from_generated_attempt(
-            format!("codec-{position}-{}", attempt_id.as_uuid().simple()),
-            attempt_id,
-        )?;
-        let billing_contact = BillingContactSnapshot::from_parts(
-            Some(format!("First{position}")),
-            Some(format!("Last{position}")),
-            Some(format!("codec{position}@example.test")),
-        );
-        let request = PaymentAttemptRequest::from_persisted_parts(
-            target,
-            idempotency_key.clone(),
-            fingerprint.clone(),
-            amount,
-            gateway_order_id,
-            billing_contact.clone(),
-        );
-
-        let mut transaction = database.pool.begin().await?;
-        assert!(insert_subscription_charge_attempt(&mut transaction, identity, &request).await?);
-        assert!(
-            !insert_subscription_charge_attempt(&mut transaction, identity, &request).await?,
-            "ON CONFLICT must report that the duplicate was not inserted"
-        );
-        transaction.commit().await?;
-
-        let row = sqlx::query("SELECT * FROM billing_payment_attempts WHERE id = $1")
-            .bind(attempt_id.as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
-        assert_eq!(row.try_get::<Uuid, _>("id")?, attempt_id.into_uuid());
-        assert_eq!(
-            row.try_get::<Uuid, _>("billing_scope_id")?,
-            account.billing_scope_id
-        );
-        assert_eq!(row.try_get::<Uuid, _>("subscriber_id")?, subscriber_id);
-        assert_eq!(row.try_get::<String, _>("plan_key")?, plan_key.as_str());
-        assert_eq!(row.try_get::<Uuid, _>("subscription_id")?, subscription_id);
-        assert_eq!(
-            row.try_get::<Uuid, _>("payment_method_id")?,
-            target_method_id
-        );
-        assert_eq!(row.try_get::<String, _>("attempt_kind")?, kind.as_str());
-        assert_eq!(row.try_get::<String, _>("status")?, "pending");
-        assert_eq!(
-            row.try_get::<String, _>("idempotency_key")?,
-            idempotency_key.expose()
-        );
-        assert_eq!(
-            row.try_get::<String, _>("request_fingerprint")?,
-            fingerprint.expose()
-        );
-        assert_eq!(row.try_get::<i32, _>("amount_cents")?, amount.cents());
-        assert_eq!(row.try_get::<String, _>("currency")?, "USD");
-        assert_eq!(
-            row.try_get::<DateTime<Utc>, _>("billing_period_start_at")?,
-            period_start
-        );
-        assert_eq!(
-            row.try_get::<DateTime<Utc>, _>("billing_period_end_at")?,
-            period_end
-        );
-        assert_eq!(
-            row.try_get::<Uuid, _>("gateway_account_id")?,
-            account.gateway_account_id
-        );
-        assert_eq!(
-            row.try_get::<Uuid, _>("gateway_configuration_id")?,
-            account.gateway_configuration_id
-        );
-        assert_eq!(
-            row.try_get::<String, _>("gateway_order_id")?,
-            request.gateway_order_id().expose()
-        );
-        assert_eq!(
-            row.try_get::<Option<String>, _>("billing_first_name")?
-                .as_deref(),
-            billing_contact.first_name()
-        );
-        assert_eq!(
-            row.try_get::<Option<String>, _>("billing_last_name")?
-                .as_deref(),
-            billing_contact.last_name()
-        );
-        assert_eq!(
-            row.try_get::<Option<String>, _>("billing_email")?
-                .as_deref(),
-            billing_contact.email()
-        );
-        assert_eq!(
-            row.try_get::<Uuid, _>("subscription_expected_payment_method_id")?,
-            expected_method_id
-        );
-        assert_eq!(
-            row.try_get::<String, _>("subscription_expected_initial_transaction_id")?,
-            initial_transaction
-        );
-        assert_eq!(
-            row.try_get::<String, _>("subscription_expected_status")?,
-            expected_status.as_str()
-        );
-
-        let mut transaction = database.pool.begin().await?;
-        let loaded = find_payment_attempt_by_id_in_transaction(
-            &mut transaction,
-            identity.billing_scope_id(),
-            attempt_id,
-        )
-        .await?
-        .expect("inserted subscription charge must hydrate");
-        transaction.rollback().await?;
-        assert_eq!(loaded.kind(), kind);
-        assert_eq!(
-            loaded.request().target().payment_method_id(),
-            Some(PaymentMethodId::new(target_method_id))
-        );
-        assert_eq!(
-            loaded
-                .request()
-                .target()
-                .subscription_payment_state_snapshot()
-                .expect("subscription snapshot")
-                .payment_method_id(),
-            PaymentMethodId::new(expected_method_id)
-        );
-    }
-
     database.cleanup().await
 }
 
@@ -640,6 +384,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
     sqlx::query(
         r#"
             INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key, status,
                 gateway_account_id, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
@@ -647,6 +392,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
                 recurring_period_count, dunning_retry_delays_seconds,
                 dunning_exhaustion, past_due_access, next_payment_attempt_at
             ) VALUES (
+                'live',
                 $1, $2, $3, 'premium', 'active', $4, $5, 1000, 'USD',
                 $6, $7, $7, 'txn-initial', 'recurring', 'calendar_months', 1,
                 ARRAY[]::bigint[], 'remain_past_due', 'suspend_immediately', $7
@@ -670,6 +416,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
+                required_gateway_account_mode,
                 id, billing_scope_id, subscriber_id, plan_key,
                 subscription_id, payment_method_id, attempt_kind, status,
                 idempotency_key, request_fingerprint, amount_cents, currency,
@@ -680,6 +427,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
                 subscription_expected_initial_transaction_id,
                 subscription_expected_status
             ) VALUES (
+                'live',
                 $1, $2, $3, 'premium', $4, $5,
                 'subscription_recovery', 'approved', $6, $7, 1000, 'USD',
                 $8, $9, $10, $11, $12, 'txn-recovery', now(), now(),

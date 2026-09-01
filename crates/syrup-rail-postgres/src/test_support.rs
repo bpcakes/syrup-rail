@@ -12,13 +12,13 @@ use syrup_rail::{
 
 use crate::schema_contract::{
     V1_INSTALL_SQL, V1_TO_V2_UPGRADE_SQL, V2_INSTALL_SQL, V2_TO_V3_UPGRADE_SQL, V3_INSTALL_SQL,
-    V3_TO_V4_UPGRADE_SQL, V4_INSTALL_SQL,
+    V3_TO_V4_INDEX_SQL, V3_TO_V4_PREPARE_SQL, V3_TO_V4_UPGRADE_SQL, V3_TO_V4_VALIDATE_SQL,
+    V4_INSTALL_SQL,
 };
 
 pub(crate) struct TestDatabase {
     harness: PostgresHarness,
     lease: DatabaseLease,
-    database_url: String,
     pub(crate) pool: PgPool,
 }
 
@@ -97,6 +97,51 @@ impl TestDatabase {
     }
 
     pub(crate) async fn upgrade_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
+        self.prepare_v3_to_v4().await?;
+        self.validate_v3_to_v4().await?;
+        self.index_v3_to_v4().await?;
+        self.finalize_v3_to_v4().await
+    }
+
+    pub(crate) async fn prepare_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::raw_sql(V3_TO_V4_PREPARE_SQL)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn validate_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::raw_sql(V3_TO_V4_VALIDATE_SQL)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn index_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
+        // Each concurrent build must be its own top-level PostgreSQL command;
+        // sending the multi-statement artifact as one query would create an
+        // implicit transaction block that CREATE INDEX CONCURRENTLY rejects.
+        let statements = V3_TO_V4_INDEX_SQL
+            .split_terminator(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statements.len(),
+            2,
+            "schema-v4 index artifact must contain exactly two simple statements"
+        );
+        for statement in statements {
+            sqlx::raw_sql(statement).execute(&self.pool).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn finalize_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
         sqlx::raw_sql(V3_TO_V4_UPGRADE_SQL)
             .execute(&mut *transaction)
@@ -109,22 +154,16 @@ impl TestDatabase {
         let harness =
             PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await?;
         let lease = harness.empty_database().await?;
-        let database_url = lease.database_url().to_owned();
         let pool = PgPoolOptions::new()
             .max_connections(4)
-            .connect(&database_url)
+            .connect(lease.database_url())
             .await?;
         sqlx::raw_sql(install_sql).execute(&pool).await?;
         Ok(Self {
             harness,
             lease,
-            database_url,
             pool,
         })
-    }
-
-    pub(crate) fn database_url(&self) -> &str {
-        &self.database_url
     }
 
     pub(crate) async fn cleanup(self) -> Result<(), Box<dyn Error>> {

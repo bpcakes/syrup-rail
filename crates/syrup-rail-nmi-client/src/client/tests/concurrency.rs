@@ -20,10 +20,11 @@ fn report_query() -> ReportQuery {
 
 fn account_client(factory: &ClientFactory, endpoint: &Endpoint, ordinal: usize) -> Client {
     factory
-        .client(
+        .client_with_duplicate_check(
             endpoint.clone(),
             Credentials::new(format!("private_{ordinal}"), format!("query_{ordinal}"))
                 .expect("test credentials should validate"),
+            DuplicateCheck::ProcessorConfigured,
         )
         .expect("loopback client should construct")
 }

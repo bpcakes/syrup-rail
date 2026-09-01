@@ -135,6 +135,7 @@ async fn blocker_fixture(pool: &PgPool) -> Result<BlockerFixture, sqlx::Error> {
     sqlx::query(
         r#"
         INSERT INTO billing_subscriptions (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key, status,
             gateway_account_id, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -142,6 +143,7 @@ async fn blocker_fixture(pool: &PgPool) -> Result<BlockerFixture, sqlx::Error> {
             recurring_period_count, dunning_retry_delays_seconds,
             dunning_exhaustion, past_due_access, next_payment_attempt_at
         ) VALUES (
+            'live',
             $1, $2, $3, 'matrix_plan', 'active', $4, $5, 100, 'USD',
             $6, $7, $7, 'txn_matrix_initial', 'recurring',
             'calendar_months', 1, ARRAY[]::bigint[], 'remain_past_due',
@@ -204,6 +206,7 @@ async fn insert_attempt(
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
+            required_gateway_account_mode,
             id, billing_scope_id, subscriber_id, plan_key,
             host_charge_target_id, subscription_id, payment_method_id,
             attempt_kind, status, idempotency_key, request_fingerprint,
@@ -224,6 +227,7 @@ async fn insert_attempt(
             subscription_initial_dunning_exhaustion,
             subscription_initial_past_due_access, created_at, updated_at
         ) VALUES (
+            'live',
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
             $12, 'USD', $13, $14, $15, $16, $17, $18, $19,
             $20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
