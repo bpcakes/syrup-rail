@@ -1,0 +1,1 @@
+Preserve fail-closed GatewayPaymentOutcome certainty while making observation-local diagnostics distinct from durable payment-result status. Rename the unreleased result diagnostic API, add duplicate replay and operator-review exit regressions, clarify public contracts, remove redundant Debug and dead ordering logic, then run focused and required repository gates.

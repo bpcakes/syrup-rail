@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 
+use crate::gateway::normalize_gateway_payment_diagnostics;
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
     ChargeAmount, GatewayAccountMode, GatewayConfigurationId, GatewayPaymentDiagnostic,
@@ -298,7 +299,7 @@ impl HostChargeTargetTransitionOutcome {
 pub struct HostChargePaymentResult {
     attempt: PaymentAttempt,
     pending_confirmation_evidence: Option<ApprovedProcessorEvidence>,
-    gateway_diagnostics: Vec<GatewayPaymentDiagnostic>,
+    observation_diagnostics: Vec<GatewayPaymentDiagnostic>,
 }
 
 impl PartialEq for HostChargePaymentResult {
@@ -324,7 +325,7 @@ impl HostChargePaymentResult {
         Ok(Self {
             attempt,
             pending_confirmation_evidence: None,
-            gateway_diagnostics: Vec::new(),
+            observation_diagnostics: Vec::new(),
         })
     }
 
@@ -339,7 +340,7 @@ impl HostChargePaymentResult {
         Ok(Self {
             attempt,
             pending_confirmation_evidence: Some(evidence),
-            gateway_diagnostics: Vec::new(),
+            observation_diagnostics: Vec::new(),
         })
     }
 
@@ -348,16 +349,36 @@ impl HostChargePaymentResult {
     ///
     /// These diagnostics are foreground routing facts, not durable attempt
     /// state. A later replay reconstructs the canonical payment result from
-    /// persisted processor evidence and may not contain them.
-    pub fn with_gateway_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
-        self.gateway_diagnostics = diagnostics;
+    /// persisted processor evidence and may not contain them. Duplicate values
+    /// are removed and order carries no chronology or precedence semantics.
+    pub fn with_observation_diagnostics(
+        mut self,
+        diagnostics: Vec<GatewayPaymentDiagnostic>,
+    ) -> Self {
+        self.observation_diagnostics = normalize_gateway_payment_diagnostics(diagnostics);
         self
     }
 
     /// Returns payload-free diagnostics from the gateway observation applied
-    /// by the current call.
+    /// by the current call. Route by membership rather than sequence.
+    pub fn observation_diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
+        &self.observation_diagnostics
+    }
+
+    #[deprecated(
+        since = "0.5.1",
+        note = "use HostChargePaymentResult::with_observation_diagnostics"
+    )]
+    pub fn with_gateway_diagnostics(self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
+        self.with_observation_diagnostics(diagnostics)
+    }
+
+    #[deprecated(
+        since = "0.5.1",
+        note = "use HostChargePaymentResult::observation_diagnostics"
+    )]
     pub fn gateway_diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
-        &self.gateway_diagnostics
+        self.observation_diagnostics()
     }
 
     pub const fn attempt(&self) -> &PaymentAttempt {

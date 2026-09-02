@@ -26,13 +26,14 @@ use super::{
     OutcomeResolutionCommand, RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
     RECOVERY_INCOMPLETE_APPROVAL_TEXT, RECOVERY_STALE_STATE_TEXT, RateLimitCooldown,
     SubscriptionEnrollmentApplicationError, advance_subscription_discount_after_successful_charge,
-    apply_resumable_not_submitted_policy, disable_payment_method_if_unreferenced,
-    finalize_approved_application, is_retryable_evidence_error, load_applied_subscription,
-    load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
-    lock_subscription_aggregate, mark_attempt_approved, mutation_error_evidence,
-    park_locked_attempt, payment_result_for_attempt,
-    persist_approved_evidence_without_attempt_lock, recovery_subscription_matches,
-    resolve_pool_outcome, set_application_timeouts, upsert_payment_method,
+    append_subscription_observation_diagnostics, apply_resumable_not_submitted_policy,
+    disable_payment_method_if_unreferenced, finalize_approved_application,
+    is_retryable_evidence_error, load_applied_subscription, load_subscription,
+    lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
+    mark_attempt_approved, mutation_error_evidence, park_locked_attempt,
+    payment_result_for_attempt, persist_approved_evidence_without_attempt_lock,
+    recovery_subscription_matches, resolve_pool_outcome, set_application_timeouts,
+    stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 /// One committed final-admission result authorizing exactly one immediate
@@ -222,7 +223,7 @@ pub async fn apply_subscription_recovery_gateway_outcome(
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     apply_subscription_recovery_gateway_decision(pool, coordinator, reservation, outcome)
         .await
-        .map(|result| result.with_gateway_diagnostics(outcome.diagnostics().to_vec()))
+        .map(|result| append_subscription_observation_diagnostics(result, outcome.diagnostics()))
 }
 
 async fn apply_subscription_recovery_gateway_decision(
@@ -385,6 +386,12 @@ async fn apply_recovery_approved_on_connection(
         lock_expected_reservation_attempt(connection, OutcomeReservation::Recovery(reservation))
             .await?;
 
+    let (conflicting_payment, conflict_diagnostics) =
+        stop_conflicting_subscription_approval(connection, &attempt, evidence).await?;
+    if let Some(payment) = conflicting_payment {
+        return Ok((payment, None));
+    }
+
     if attempt.status() == PaymentAttemptStatus::Approved {
         let subscription = load_applied_subscription(connection, &attempt)
             .await?
@@ -425,13 +432,12 @@ async fn apply_recovery_approved_on_connection(
             )
             .await?;
         }
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(
-                attempt,
-                approved_evidence.clone(),
-            )?,
-            None,
-        ));
+        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
+            attempt,
+            approved_evidence.clone(),
+        )?
+        .with_observation_diagnostics(conflict_diagnostics);
+        return Ok((payment, None));
     }
 
     let observation = observe_processor_charge(

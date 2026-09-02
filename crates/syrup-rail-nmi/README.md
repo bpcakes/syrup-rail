@@ -5,8 +5,8 @@ gateway and lifecycle-evidence contracts.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.0"
-syrup-rail-nmi = "0.5.0"
+syrup-rail = "0.5.1"
+syrup-rail-nmi = "0.5.1"
 ```
 
 The adapter re-exports the matching raw client as
@@ -29,14 +29,39 @@ An NMI duplicate response code `430` remains an unknown outcome requiring exact
 reconciliation; the raw client exposes
 `DuplicateTransactionAtProcessor`, and the adapter maps it to the
 provider-neutral `GatewayPaymentDiagnostic::ProcessorReportedDuplicate` on
-`GatewayPaymentOutcome`. Foreground `syrup-rail-postgres` subscription and
-host-charge results copy it to `gateway_diagnostics()`, so hosts can route on
-the typed fact without parsing provider text. Those result diagnostics describe
-the observation applied by the current call; they are not separately persisted
-and a later attempt replay may not contain them. The exact response code remains
-durable processor evidence. A current diagnostic never overrides the returned
-durable attempt status or evidence; hosts must use those authoritative fields
-when deciding whether submission is complete or reconciliation is required.
+`GatewayPaymentOutcome`. Processor-error codes `400`, `440`, and `441`,
+communication-error codes `420` and `421`, and an otherwise unresolved generic
+provider error likewise remain unknown because NMI does not guarantee that they
+had no financial effect; the adapter exposes
+`GatewayPaymentDiagnostic::IndeterminatePaymentOutcome`. Every other raw or
+adapter-discovered payment-evidence anomaly also crosses that boundary as a
+payload-free provider-neutral diagnostic, so hosts never need to reconstruct
+decision safety from provider response text. A missing identifier does not
+erase a valid sibling, but an invalid, conflicting, or adapter-rejected
+identifier quarantines the complete NMI identity bundle. This prevents a
+parseable sibling from becoming durable authority after its diagnostic
+provenance is no longer present. Identity quarantine does not turn an otherwise
+determinate decline or failure into an unknown outcome; approvals still fail
+closed. Diagnostics are deduplicated and canonically ordered, but order has no
+chronology or precedence semantics; use `has_diagnostic()` for routing by
+membership. Foreground
+`syrup-rail-postgres` subscription and host-charge results copy diagnostics to
+`observation_diagnostics()`. Those result diagnostics describe the observation
+applied by the current call; they are not separately persisted and a later
+attempt replay may not contain them. Exact response fields remain durable
+processor evidence. The 0.5.0 `gateway_diagnostics()` names remain as deprecated
+compatibility aliases. The gateway outcome's effective status already includes
+the core diagnostic-certainty policy; a diagnostic copied onto a foreground
+result does not rewrite an earlier durable replay result. Hosts must use the
+returned status and evidence when deciding whether submission is complete or
+reconciliation is required. NMI
+documents exact order-ID lookup but does not define an empty query result as
+final. A stale empty observation therefore remains operator review for sales
+and renewal/dunning attempts rather than becoming a determinate failure.
+For a nonempty order-only query, the raw client accepts a coherent decline or
+determinate failure only after the response echoes that order ID and contains
+exactly one transaction record; an unusable response transaction ID remains a
+diagnostic rather than weakening the independently bound non-approved decision.
 The duplicate is not mapped to a card decline or known non-submission. Keep the
 processor duplicate window shorter than the shortest normal billing or renewal
 interval and the minimum replacement-charge interval, then wait out that window

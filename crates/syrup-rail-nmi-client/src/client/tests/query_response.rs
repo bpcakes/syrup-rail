@@ -189,18 +189,34 @@ fn query_outcome_accepts_empty_optional_customer_vault_id() {
 
 #[test]
 fn query_outcome_rejects_invalid_or_conflicting_identity_elements() {
-    for transaction in [
-        "<response>1</response><transaction_id>txn_first</transaction_id><transaction_id>txn_second</transaction_id><customer_vault_id>vault_valid</customer_vault_id>",
-        "<response>1</response><transaction_id>txn_valid</transaction_id><customer_vault_id>vault_first</customer_vault_id><customer_vault_id>vault_second</customer_vault_id>",
-        "<response>1</response><transaction_id><nested>txn_invalid</nested></transaction_id><customer_vault_id>vault_valid</customer_vault_id>",
-        "<response>2</response><transaction_id></transaction_id><customer_vault_id>vault_valid</customer_vault_id>",
+    for (transaction, expected_status) in [
+        (
+            "<response>1</response><transaction_id>txn_first</transaction_id><transaction_id>txn_second</transaction_id><customer_vault_id>vault_valid</customer_vault_id>",
+            PaymentStatus::Unknown,
+        ),
+        (
+            "<response>1</response><transaction_id>txn_valid</transaction_id><customer_vault_id>vault_first</customer_vault_id><customer_vault_id>vault_second</customer_vault_id>",
+            PaymentStatus::Unknown,
+        ),
+        (
+            "<response>1</response><transaction_id><nested>txn_invalid</nested></transaction_id><customer_vault_id>vault_valid</customer_vault_id>",
+            PaymentStatus::Unknown,
+        ),
+        (
+            "<response>2</response><transaction_id></transaction_id><customer_vault_id>vault_valid</customer_vault_id>",
+            PaymentStatus::Declined,
+        ),
+        (
+            "<response>3</response><response_code>300</response_code><transaction_id>txn_first</transaction_id><transaction_id>txn_second</transaction_id><customer_vault_id>vault_valid</customer_vault_id>",
+            PaymentStatus::Failed,
+        ),
     ] {
         let outcome = query_outcome_from_xml(&format!(
             "<nm_response><transaction>{transaction}</transaction></nm_response>"
         ))
-        .expect("invalid XML identity should produce an unknown outcome")
+        .expect("invalid XML identity should quarantine its identity bundle")
         .expect("transaction should be present");
-        assert_eq!(outcome.status, PaymentStatus::Unknown);
+        assert_eq!(outcome.status, expected_status);
         assert_eq!(outcome.transaction_id, None);
         assert_eq!(outcome.customer_vault_id, None);
     }
@@ -339,10 +355,69 @@ fn query_duplicate_response_code_remains_reconcilable_and_composes_diagnostics()
     assert_eq!(
         outcome.diagnostics,
         vec![
-            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
             PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
         ]
     );
+}
+
+#[test]
+fn query_error_evidence_distinguishes_failed_from_indeterminate() {
+    let failed = query_outcome_from_xml(
+        r#"
+        <nm_response>
+          <transaction>
+            <transaction_id>txn_query_failed</transaction_id>
+            <condition>failed</condition>
+          </transaction>
+        </nm_response>
+        "#,
+    )
+    .expect("documented failed condition should parse")
+    .expect("failed transaction should be present");
+    assert_eq!(failed.status, PaymentStatus::Failed);
+    assert!(failed.diagnostics.is_empty());
+
+    let generic_error = query_outcome_from_xml(
+        r#"
+        <nm_response>
+          <transaction>
+            <transaction_id>txn_query_error</transaction_id>
+            <condition>error</condition>
+          </transaction>
+        </nm_response>
+        "#,
+    )
+    .expect("generic error condition should parse conservatively")
+    .expect("generic error transaction should be present");
+    assert_eq!(generic_error.status, PaymentStatus::Unknown);
+    assert_eq!(
+        generic_error.diagnostics,
+        vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome]
+    );
+
+    for response_code in ["400", "420", "421", "440", "441"] {
+        let outcome = query_outcome_from_xml(&format!(
+            r#"
+            <nm_response>
+              <transaction>
+                <transaction_id>txn_query_indeterminate</transaction_id>
+                <response>3</response>
+                <response_code>{response_code}</response_code>
+              </transaction>
+            </nm_response>
+            "#
+        ))
+        .expect("indeterminate response code should parse conservatively")
+        .expect("indeterminate transaction should be present");
+
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{response_code}");
+        assert_eq!(
+            outcome.diagnostics,
+            vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome],
+            "{response_code}"
+        );
+    }
 }
 
 #[test]

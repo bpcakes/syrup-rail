@@ -30,12 +30,13 @@ use super::{
     INCOMPLETE_APPROVAL_TEXT, INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation,
     OutcomeResolutionBoundary, OutcomeResolutionCommand, RateLimitCooldown,
     SubscriptionEnrollmentApplicationError, TERMINAL_APPROVAL_RACE_TEXT,
-    apply_resumable_not_submitted_policy, finalize_approved_application,
-    is_retryable_evidence_error, load_applied_subscription, load_subscription,
-    lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
-    mark_attempt_approved, mutation_error_evidence, park_locked_attempt,
-    payment_result_for_attempt, persist_approved_evidence_without_attempt_lock,
-    resolve_pool_outcome, set_application_timeouts, upsert_payment_method,
+    append_subscription_observation_diagnostics, apply_resumable_not_submitted_policy,
+    finalize_approved_application, is_retryable_evidence_error, load_applied_subscription,
+    load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
+    lock_subscription_aggregate, mark_attempt_approved, mutation_error_evidence,
+    park_locked_attempt, payment_result_for_attempt,
+    persist_approved_evidence_without_attempt_lock, resolve_pool_outcome, set_application_timeouts,
+    stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 mod approval;
@@ -248,7 +249,7 @@ pub async fn apply_subscription_enrollment_gateway_outcome(
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     apply_subscription_enrollment_gateway_decision(pool, coordinator, reservation, outcome)
         .await
-        .map(|result| result.with_gateway_diagnostics(outcome.diagnostics().to_vec()))
+        .map(|result| append_subscription_observation_diagnostics(result, outcome.diagnostics()))
 }
 
 async fn apply_subscription_enrollment_gateway_decision(

@@ -7,7 +7,7 @@ manage NMI plans or subscription schedules.
 
 ```toml
 [dependencies]
-syrup-rail-nmi-client = "0.5.0"
+syrup-rail-nmi-client = "0.5.1"
 ```
 
 The client never retries mutations. `MutationError::Indeterminate` and
@@ -73,6 +73,42 @@ malformed identity fields. Callers must reconcile the durable attempt before
 any replacement charge. NMI documents `430` only as a duplicate at the
 processor and does not guarantee that no transaction or financial evidence
 exists.
+
+NMI likewise documents response codes `400`, `440`, and `441` as processor
+errors, plus `420` and `421` as communication errors, without guaranteeing that
+the attempted payment had no financial effect. They remain
+`PaymentStatus::Unknown` and carry
+`PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome`; reconcile them before
+any replacement charge. A bare `response=3` or generic `error` state has the
+same conservative provenance when no detailed decision resolves it. In
+contrast, the more specific gateway or account configuration codes `300`,
+`410`, `411`, `460`, and `461` remain determinate failures. The broad
+`response=3` field is compatible with either category and does not override the
+detailed response code. It is omitted from diagnostics only when compatible
+failure evidence wins the complete reduction; if malformed or conflicting
+sibling evidence keeps the aggregate outcome unknown, the indeterminate
+provenance remains attached.
+
+Raw identity conflicts clear the complete identity bundle because neither
+identifier can be associated safely with the response. They make approvals
+unknown, but do not overturn an otherwise coherent decline or determinate
+failure. A merely missing identity is different: it does not make a present
+sibling contradictory. A later adapter may also reject an otherwise
+unambiguous identifier under stricter provider-neutral syntax; the NMI adapter
+applies the same quarantine rule.
+
+For an order-ID-only exact query, the client accepts a coherent decline or
+determinate failure only after the response echoes the requested order ID and
+contains exactly one transaction record. A missing or contradictory response
+transaction ID remains quarantined and diagnosed, but does not erase that
+independent selector binding. The parser distinguishes an absent transaction
+ID from a present but invalid one before quarantining the identity bundle, so
+these conditions retain distinct diagnostics. Approved query results still
+require a usable transaction ID.
+
+`PaymentOutcome::diagnostics()` has set semantics: values are deduplicated and
+canonically ordered. That order is not provider chronology or policy
+precedence; route by diagnostic membership rather than sequence.
 
 Keep the processor's `duplicateTime` shorter than the host's shortest normal
 billing or renewal interval and its minimum replacement-charge interval. If

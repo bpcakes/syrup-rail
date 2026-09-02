@@ -1,8 +1,9 @@
 use std::borrow::Cow;
 
 use crate::{
-    AccountMode, PaymentDescriptor, PaymentOutcome, SensitiveText, TransactionAction,
-    TransactionQuery, TransactionReport, TransactionReportDiagnostic,
+    AccountMode, PaymentDescriptor, PaymentOutcome, PaymentOutcomeDiagnostic, PaymentStatus,
+    SensitiveText, TransactionAction, TransactionQuery, TransactionReport,
+    TransactionReportDiagnostic,
 };
 
 use super::super::{
@@ -12,7 +13,7 @@ use super::super::{
 };
 use super::common::{
     DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
-    ScalarOccurrenceCollector, finalize_foreground_identifiers, normalize_gateway_state,
+    ScalarOccurrenceCollector, finalize_payment_identifiers, normalize_gateway_state,
     resolve_optional_scalar,
 };
 
@@ -143,7 +144,9 @@ pub(in crate::client) fn query_outcome_for_request_from_xml(
     };
     // The gateway response must echo every selector supplied by the caller.
     // A missing field cannot prove that query.php returned the requested
-    // transaction rather than an unrelated record.
+    // transaction rather than an unrelated record. Either selector can provide
+    // that correlation independently; transaction-identity usability remains a
+    // separate property of the returned payment evidence.
     bind_exact_query_identifier(
         trimmed_optional(&request.transaction_id),
         &response.transaction_id,
@@ -217,7 +220,13 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
         IdentifierPresence::Required,
     );
     let response_transaction_identifier = transaction_identifier.clone();
-    let (transaction_id, customer_vault_id) = finalize_foreground_identifiers(
+    if matches!(transaction_identifier, ResolvedScalar::Missing) {
+        diagnostics.push(PaymentOutcomeDiagnostic::MissingTransactionIdentifier);
+        if status == PaymentStatus::Approved {
+            status = PaymentStatus::Unknown;
+        }
+    }
+    let (transaction_id, customer_vault_id) = finalize_payment_identifiers(
         &mut status,
         transaction_identifier,
         collect_xml_identifier(
@@ -251,7 +260,8 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
                 card_exp_year: None,
             },
             diagnostics,
-        },
+        }
+        .normalize_diagnostics(),
         transaction_id: response_transaction_identifier,
         order_id: order_identifier,
     }))

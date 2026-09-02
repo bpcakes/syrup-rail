@@ -8,9 +8,12 @@ them in dependency order:
 3. `syrup-rail-postgres`
 4. `syrup-rail-nmi`
 
-The workspace dependency requirements must match the release version. In
-particular, the Postgres and NMI packages can use APIs added in the matching
-core release and must not claim compatibility with an older core package.
+The workspace's internal dependency requirements must exactly match the
+release version. The four crates share payment-evidence semantics as well as
+Rust APIs, so an apparently compatible patch-level mix can change conservative
+diagnostic routing. In particular, the Postgres and NMI packages can use APIs
+and policy added in the matching core release and must not claim compatibility
+with an older or newer core package.
 
 ## Preflight
 

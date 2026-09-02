@@ -71,6 +71,34 @@ pub(crate) enum ObservedCharge {
     OwnedByOtherAttempt,
 }
 
+/// Promotes a replayed conflicting charge into the operator reversal queue
+/// without reopening a charge whose reversal was already attested.
+pub(crate) async fn promote_conflicting_charge_to_external_reversal(
+    connection: &mut PgConnection,
+    observation: ObservedCharge,
+) -> Result<(), ProcessorChargeStoreError> {
+    let ObservedCharge::Owned(charge) = observation else {
+        return Ok(());
+    };
+    match charge_by_id(connection, charge.id).await?.progression() {
+        ProcessorChargeProgression::Pending
+        | ProcessorChargeProgression::ReconciliationRequired => {
+            transition_charge(
+                connection,
+                charge.id,
+                ProcessorChargeProgression::ExternalReversalRequired,
+                None,
+            )
+            .await
+        }
+        ProcessorChargeProgression::ExternalReversalRequired
+        | ProcessorChargeProgression::ExternallyReversed => Ok(()),
+        ProcessorChargeProgression::Applied => Err(ProcessorChargeStoreError::InvalidState(
+            "an applied processor charge cannot become a conflicting external reversal",
+        )),
+    }
+}
+
 /// Frozen subscription charge dimensions used to retain approved processor
 /// evidence when the owning payment-attempt row cannot be locked in time.
 ///

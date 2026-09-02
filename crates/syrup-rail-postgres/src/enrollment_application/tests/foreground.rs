@@ -5,6 +5,7 @@ use crate::{
 };
 
 mod readiness;
+mod reconciliation;
 mod reservation;
 mod stale_replay;
 
@@ -887,8 +888,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
 
     let parked_outcome =
-        approved_outcome_with_reference(Some("txn_method_parked"), "vault_method_parked")
-            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+        approved_outcome_with_reference(Some("txn_method_parked"), "vault_method_parked");
     let parked_gateway = Arc::new(ScriptedGateway::for_stored_method(Ok(
         parked_outcome.clone()
     )));
@@ -965,27 +965,81 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         PaymentAttemptStatus::ReviewRequired
     );
     assert!(parked.subscription().is_none());
-    assert_eq!(
-        parked.gateway_diagnostics(),
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
-    );
+    assert!(parked.observation_diagnostics().is_empty());
     let parked_replay = parked_service
         .replace_payment_method(parked_command)
         .await?;
     assert_eq!(parked_replay, parked);
     assert_eq!(parked_replay.attempt(), parked.attempt());
-    assert!(parked_replay.gateway_diagnostics().is_empty());
+    assert!(parked_replay.observation_diagnostics().is_empty());
     assert!(parked_replay.subscription().is_none());
     assert_eq!(parked_gateway.store_calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
 
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET initial_transaction_id = 'txn_method_new', updated_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+    let conflicting_reconciliation = parked_service
+        .apply_reconciled_outcome(
+            parked.attempt().identity().billing_scope_id(),
+            parked.attempt().identity().attempt_id(),
+            &approved_outcome_with_reference(
+                Some("txn_method_conflicting_observation"),
+                "vault_method_conflicting_observation",
+            ),
+        )
+        .await?;
+    assert_eq!(
+        conflicting_reconciliation.attempt().status(),
+        PaymentAttemptStatus::ReviewRequired
+    );
+    assert!(conflicting_reconciliation.subscription().is_none());
+    assert_eq!(
+        conflicting_reconciliation.observation_diagnostics(),
+        &[
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
+        ]
+    );
+    let preserved_review_identity: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT gateway_transaction_id, gateway_payment_method_reference \
+         FROM billing_payment_attempts WHERE id = $1",
+    )
+    .bind(parked.attempt().identity().attempt_id().as_uuid())
+    .fetch_one(&fixture.database.pool)
+    .await?;
+    assert_eq!(
+        preserved_review_identity,
+        (
+            Some("txn_method_parked".to_owned()),
+            Some("vault_method_parked".to_owned()),
+        )
+    );
+    let current_method_reference: String = sqlx::query_scalar(
+        r#"
+        SELECT method.gateway_payment_method_reference
+        FROM billing_subscriptions AS subscription
+        INNER JOIN billing_payment_methods AS method
+            ON method.id = subscription.payment_method_id
+        WHERE subscription.id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .fetch_one(&fixture.database.pool)
+    .await?;
+    assert_eq!(current_method_reference, "vault_method_new");
+
     let additional_transaction_id = "txn_method_unexpected_additional";
     let reconciled_outcome = approved_outcome_with_reference(
         Some(additional_transaction_id),
         "vault_method_unexpected_additional",
-    )
-    .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+    );
     let reconciled = service
         .apply_reconciled_outcome(
             result.attempt().identity().billing_scope_id(),
@@ -998,8 +1052,11 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         PaymentAttemptStatus::Approved
     );
     assert_eq!(
-        reconciled.gateway_diagnostics(),
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        reconciled.observation_diagnostics(),
+        &[
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
+        ]
     );
     let additional_progression: String = sqlx::query_scalar(
         r#"
@@ -1025,119 +1082,5 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(card.brand(), &PaymentCardBrand::Visa);
     assert_eq!(card.last_four().expose(), "4242");
     drop(events);
-    fixture.cleanup().await
-}
-
-#[tokio::test]
-async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_atomically()
--> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("svc_ready_429", false, false, false).await?;
-    let resolved = scripted_resolved_gateway(
-        fixture.gateway_account,
-        Arc::new(RateLimitedReadinessGateway),
-    );
-    let resolver = Arc::new(StaticResolver {
-        gateway: resolved,
-        calls: AtomicUsize::new(0),
-    });
-    let admission = Arc::new(PermitAdmission {
-        calls: AtomicUsize::new(0),
-    });
-    let service = SubscriptionBillingService::new(
-        fixture.database.pool.clone(),
-        Arc::new(TestOfferStore),
-        resolver.clone(),
-        admission.clone(),
-        Arc::new(fixture.coordinator.clone()),
-    );
-
-    let error = service
-        .enroll(fixture.command.clone())
-        .await
-        .expect_err("provider readiness throttle must return a typed cooldown");
-    assert!(matches!(
-        error,
-        SubscriptionBillingServiceError::GatewayMutationCooldown {
-            scope: GatewayMutationCooldownScope::Provider
-        }
-    ));
-    assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
-    let state: (String, Option<String>, bool, bool) = sqlx::query_as(
-        r#"
-        SELECT attempt.status, attempt.resolution_code,
-            COALESCE(account.mutation_rate_limited_until > clock_timestamp(), false),
-            provider.rate_limited_until > clock_timestamp()
-        FROM billing_payment_attempts AS attempt
-        INNER JOIN billing_gateway_accounts AS account
-            ON account.id = attempt.gateway_account_id
-        INNER JOIN billing_gateway_provider_rate_limits AS provider
-            ON provider.provider_key = account.provider_key
-        WHERE attempt.id = $1
-        "#,
-    )
-    .bind(fixture.command.attempt_id().as_uuid())
-    .fetch_one(&fixture.database.pool)
-    .await?;
-    assert_eq!(state.0, "failed");
-    assert_eq!(
-        state.1.as_deref(),
-        Some("gateway_provider_rate_limited_before_submission")
-    );
-    assert!(!state.2);
-    assert!(state.3);
-    fixture.cleanup().await
-}
-
-#[tokio::test]
-async fn foreground_fresh_cooldown_after_readiness_prevents_the_admitted_sale()
--> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("svc_fresh_stop", false, false, false).await?;
-    let gateway = Arc::new(CooldownDuringReadinessGateway {
-        pool: fixture.database.pool.clone(),
-        account_id: fixture.gateway_account.gateway_account_id,
-    });
-    let resolved = scripted_resolved_gateway(fixture.gateway_account, gateway);
-    let resolver = Arc::new(StaticResolver {
-        gateway: resolved,
-        calls: AtomicUsize::new(0),
-    });
-    let admission = Arc::new(PermitAdmission {
-        calls: AtomicUsize::new(0),
-    });
-    let service = SubscriptionBillingService::new(
-        fixture.database.pool.clone(),
-        Arc::new(TestOfferStore),
-        resolver,
-        admission,
-        Arc::new(fixture.coordinator.clone()),
-    );
-
-    let error = service
-        .enroll(fixture.command.clone())
-        .await
-        .expect_err("fresh cooldown must close the one-shot sale boundary");
-    assert!(matches!(
-        error,
-        SubscriptionBillingServiceError::GatewayMutationCooldown {
-            scope: GatewayMutationCooldownScope::Account
-        }
-    ));
-    let attempt: (String, Option<String>, bool) = sqlx::query_as(
-        r#"
-        SELECT status, resolution_code, submitted_at IS NOT NULL
-        FROM billing_payment_attempts
-        WHERE id = $1
-        "#,
-    )
-    .bind(fixture.command.attempt_id().as_uuid())
-    .fetch_one(&fixture.database.pool)
-    .await?;
-    assert_eq!(attempt.0, "failed");
-    assert_eq!(
-        attempt.1.as_deref(),
-        Some("gateway_account_mutation_cooldown_before_submission")
-    );
-    assert!(!attempt.2);
     fixture.cleanup().await
 }

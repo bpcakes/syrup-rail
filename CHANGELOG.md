@@ -4,6 +4,130 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-09-02
+
+### Added
+
+- Expose call-scoped payment-result diagnostics through
+  `observation_diagnostics()` and the corresponding `with_` and `into_parts_`
+  methods. The name distinguishes the latest gateway observation from the
+  authoritative durable attempt status it annotates.
+
+### Fixed
+
+- Treat a blank or JSON `null` foreground transaction identifier like an omitted
+  identifier for every non-approved NMI decision. Declines remain `Declined`;
+  response codes `300`, `410`, `411`, `460`, and `461` remain `Failed`; and
+  processor-error codes `400`, `440`, and `441`, communication-error codes `420`
+  and `421`, and otherwise unresolved generic provider errors remain `Unknown`
+  because NMI does not guarantee that they had no financial effect. Approved
+  responses still fail closed through the public operation's required-identity check,
+  while any independently valid customer-vault identifier remains available as
+  reconciliation evidence and cannot be refined into approved evidence.
+  Conflicting identity aliases clear the identity bundle while preserving an
+  otherwise determinate decline or failure. Exact-query XML still rejects
+  multiple records and binds every selector supplied by the caller; an
+  order-only result may retain a coherent non-approved decision after its
+  matching order ID is bound, while an unusable response transaction ID remains
+  quarantined and diagnosed. The exact-query parser distinguishes a genuinely
+  absent transaction ID from a present but invalid ID before identity-bundle
+  quarantine, so it does not mislabel rejected evidence as missing.
+- Preserve every payload-free NMI payment anomaly across the provider-neutral
+  gateway boundary. Missing, malformed, conflicting, and unrecognized decision
+  or identifier evidence—including values rejected by stricter provider-neutral
+  identifier admission—no longer disappears before host policy can inspect
+  `GatewayPaymentOutcome::diagnostics()`. A missing identity may leave its valid
+  sibling available for reconciliation, but an invalid, conflicting, or
+  adapter-rejected identity quarantines the complete NMI identity bundle so a
+  parseable sibling cannot later become authoritative. Identity quarantine does
+  not erase an otherwise determinate decline or failure.
+  Every reconciled payment workflow now compares observed identities with the
+  current durable attempt under its canonical application lock. Conflicts keep
+  the attempt unresolved without overwriting its forensic identity bundle;
+  conflicting approvals are retained in the processor-charge ledger as
+  reconciliation-required observations instead of mutating subscription or
+  host-target state. Approvals never restore a missing or quarantined identity
+  from older evidence. Compatible non-approved observations may retain a
+  durable identity, but their decision and descriptor bundles come entirely
+  from the current observation so evidence from separate responses cannot
+  synthesize approval. When an unanchored partial identity must be discarded
+  to preserve that bundle boundary, the result reports the rejected field as a
+  typed observation conflict instead of silently losing it.
+  Already-terminal attempts compare the raw observation rather than a
+  backfilled replay and report identity conflicts without rewriting the durable
+  winner; a conflicting late approval is recorded for external reversal, and
+  replaying an older reconciliation-required charge after the attempt becomes
+  approved promotes it into that reversal queue.
+  A contradictory payment-method reference for the same known processor
+  transaction is reported as observation metadata conflict without rewriting
+  or reclassifying an already-applied charge. For an unresolved attempt, the
+  approval still enters the charge ledger; an existing immutable charge with
+  contradictory metadata fails visibly rather than making the approval
+  disappear. Late approvals after a durable decline or failure carry those
+  identity-conflict diagnostics through the existing reversal-retention path.
+  Late-approval parking preserves any established attempt observation instead
+  of replacing it with sparse or conflicting identity fields, while retaining
+  the raw approval in the charge ledger. Reconciled approvals use the same transaction-local
+  charge-observation and parking core as foreground approvals, and exhausted
+  host-coordinator retries fall back to the same locked pool-backed
+  reconciliation policy instead of losing or blindly writing the latest
+  approval; that fallback cannot demote an already applied charge into the
+  external-reversal queue.
+  Diagnostics are deduplicated in a canonical order and have set semantics;
+  route with `has_diagnostic()` rather than assigning meaning to sequence.
+- Make payment certainty a monotonic invariant of `GatewayPaymentOutcome`:
+  malformed, conflicting, unrecognized, missing, indeterminate, unmapped, or
+  processor-duplicate decision diagnostics force `Unknown` from any reported
+  status. Replacing diagnostics cannot restore an earlier terminal status.
+  Identity diagnostics remain field-usability facts and now quarantine their
+  corresponding fields on `GatewayPaymentOutcome`, so workflow-specific
+  identity requirements cannot accidentally apply diagnosed evidence. A
+  missing identity leaves an approval visible for workflow-specific parking;
+  an invalid or conflicting identity makes an approval `Unknown`. Neither kind
+  converts an explicit decline or failure into reconciliation work.
+- Preserve generic provider-error provenance when malformed or conflicting
+  sibling evidence prevents a reported failure from winning the complete NMI
+  decision reduction.
+- Pin the four coordinated Syrup Rail crates to the exact same internal release
+  version. Payment-diagnostic fallback is deliberately conservative, so Cargo
+  must not silently combine different patch-level policy vocabularies. The
+  release preflight verifies the exact `=VERSION` requirements.
+
+### Deprecated
+
+- Deprecate the 0.5.0 payment-result `gateway_diagnostics()` names in favor of
+  their observation-specific replacements. The compatibility methods continue
+  to forward without changing behavior.
+
+### Action required for hosts
+
+- Remove host-side parsing or reclassification of NMI response strings when
+  upgrading. Use `GatewayPaymentOutcome::status()` as the authoritative
+  decision and typed `GatewayPaymentDiagnostic` values for anomaly routing.
+  The diagnostic enum remains non-exhaustive; retain a wildcard match arm.
+- Audit custom `Gateway` adapters that call `with_diagnostics()`. Decision-
+  certainty and processor-duplicate diagnostics now make `Approved`,
+  `Declined`, or `Failed` effectively `Unknown`, and that downgrade is sticky.
+  Identity diagnostics do not reclassify determinate non-approved decisions.
+  They remove the corresponding unusable identity from the returned outcome;
+  retain raw provider evidence only at the adapter's protected diagnostic
+  boundary, not as application authority.
+  Route exclusively on the returned `status()` rather than a status captured
+  before diagnostics were attached.
+- Expect processor-error codes `400`, `440`, and `441` plus otherwise unresolved
+  generic provider errors to enter exact reconciliation instead of terminal
+  failure handling. NMI does not document an empty exact-query result as final,
+  so a stale empty result remains operator review for sales and renewal/dunning
+  attempts rather than consuming a determinate failure.
+- Monitor the age and volume of `attempt_review_page` results and drain them
+  through the privileged operator workflow. Syrup Rail exposes bounded review
+  and resolution primitives, but the host owns scheduling, alerting, operator
+  authorization, and presentation. After the operator has independently
+  established that an attempt with no gateway reference and no approval
+  evidence had no financial effect, use `fail_review_required_attempt`; rows
+  carrying a gateway reference or approval evidence deliberately remain open
+  for stronger reconciliation or reversal evidence.
+
 ## [0.5.0] - 2026-08-28
 
 ### Fixed
@@ -695,7 +819,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/bpcakes/syrup-rail/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/bpcakes/syrup-rail/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/bpcakes/syrup-rail/compare/v0.2.0...v0.3.0

@@ -1,4 +1,4 @@
-# Syrup Rail 0.5.0 public API
+# Syrup Rail 0.5.1 public API
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -141,11 +141,24 @@ unclaimed work without changing their financial outcome, so the host can alert
 on that target while unrelated work and the account's remaining reconciliation
 phases continue. Exact provider queries are reserved for attempts with
 `submitted_at IS NOT NULL`.
+
+The host also owns operator-review scheduling and alerting. Page
+`attempt_review_page` on a bounded cadence, monitor both backlog size and the
+age of the oldest item, and route authorized decisions through the exported
+operator-review workflows. Syrup Rail owns the durable review state and atomic
+resolution primitives; it does not run workers, send alerts, authenticate
+operators, or provide an operator interface.
+`fail_review_required_attempt` is the bounded exit for an authorized operator
+who has independently established that an attempt with no gateway reference
+and no approval evidence had no financial effect. Attempts with either kind of
+evidence remain open for stronger reconciliation or reversal evidence rather
+than being expired automatically.
+
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
 Use `assert_runtime_schema_v4_compatible` after host migrations and before
-serving billing traffic. Version 0.5.0 supports PostgreSQL 18 and schema v4 only;
+serving billing traffic. Version 0.5.1 supports PostgreSQL 18 and schema v4 only;
 the assertion is read-only and does not install or upgrade a schema. It
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is
@@ -170,6 +183,44 @@ must match the durable attempt, so callers cannot bypass the account-mode guard
 while applying an admitted attempt. `ResolvedGateway` still exposes raw gateway
 mutations for host-owned composition outside these ledger-aware APIs; those
 calls do not inherit the attempt-bound guard or ledger guarantees.
+`GatewayPaymentOutcome::status()` is nevertheless the authoritative payment
+decision for every adapter. Attaching an indeterminate, conflicting, malformed,
+unrecognized, missing, unmapped, or processor-duplicate decision diagnostic
+monotonically forces `Unknown`; replacing diagnostics cannot restore a terminal
+status. Identity diagnostics instead describe field usability and quarantine
+the corresponding field from the outcome. A missing required identity leaves
+an approval visible so its workflow can park the incomplete approval. An
+invalid or conflicting identity prevents the approval from remaining
+authoritative while leaving a determinate decline or failure terminal;
+third-party adapters do not need to duplicate that status policy.
+Reconciliation never restores a missing or quarantined identity into an
+approving observation. Every payment workflow compares new identity evidence
+with the durable attempt under its canonical application lock. A conflict
+leaves the attempt unresolved; an otherwise approving conflicting observation
+is recorded in the processor-charge ledger as reconciliation-required rather
+than mutating subscription or host-target state. For unresolved non-approved
+observations the application may retain a compatible durable identity, but the
+current observation supplies the complete decision and descriptor bundles;
+fields from separate processor observations are not combined into synthetic
+approval evidence. Already-terminal attempts compare the raw observation with
+their durable evidence so a sparse observation cannot become an exact replay;
+identity conflicts annotate the current call without rewriting that durable
+winner, and a conflicting approval is retained for external reversal. If that
+charge was first recorded as reconciliation-required, replay after the attempt
+becomes approved promotes it into the external-reversal review queue. Parking a
+late approval likewise preserves an established attempt observation rather
+than replacing it with sparse or conflicting fields. The raw approval remains
+available in the processor-charge ledger. A payment-method-reference conflict
+on the same known processor transaction instead annotates the call without
+reclassifying its existing applied charge; terminal late-approval paths retain
+the same diagnostics while preserving their reversal evidence.
+Enrollment and host-charge application results expose the current call's
+diagnostics through `observation_diagnostics()`. Those annotations do not
+reinterpret an already durable attempt status: for example, replaying a
+duplicate observation after an approval was durably applied returns the
+approved result annotated with that observation. This separates uncertain
+provider observations from authoritative durable replay instead of weakening
+the adapter boundary.
 Low-level recovery, renewal, and payment-method replacement reservation
 functions likewise require an explicit `GatewayAccountMode`; there is no
 implicit live-mode reservation API. Enrollment, host-charge, recovery,

@@ -173,24 +173,48 @@ fn payment_decision_evidence_is_reduced_symmetrically() {
 }
 
 #[test]
-fn communication_and_duplicate_response_codes_require_reconciliation() {
-    for response_code in ["420", "421", "430"] {
+fn processor_communication_and_duplicate_codes_require_reconciliation() {
+    for response_code in ["400", "420", "421", "430", "440", "441"] {
         assert_eq!(
             payment_status_from_response_code(response_code),
             PaymentStatus::Unknown
         );
         let outcome = payment_outcome_from_json_text(&format!(
-            r#"{{"transaction_id":"txn_ambiguous_code","response":"1","response_code":"{response_code}"}}"#
+            r#"{{"transaction_id":"txn_ambiguous_code","response_code":"{response_code}"}}"#
         ))
         .expect("ambiguous response code should parse conservatively");
         assert_eq!(
             outcome.status,
             PaymentStatus::Unknown,
+            "response code {response_code} must remain reconcilable"
+        );
+        let expected = if response_code == "430" {
+            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor
+        } else {
+            PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome
+        };
+        assert_eq!(outcome.diagnostics, vec![expected], "{response_code}");
+
+        let approved_outcome = payment_outcome_from_json_text(&format!(
+            r#"{{"transaction_id":"txn_ambiguous_approval","response":"1","response_code":"{response_code}"}}"#
+        ))
+        .expect("indeterminate response code must veto coarse approval");
+        assert_eq!(
+            approved_outcome.status,
+            PaymentStatus::Unknown,
             "response code {response_code} must veto approval"
+        );
+        assert_eq!(
+            approved_outcome.diagnostics,
+            vec![
+                expected,
+                PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+            ],
+            "{response_code}"
         );
     }
 
-    for response_code in ["300", "400", "410", "411", "440", "441", "460", "461"] {
+    for response_code in ["300", "410", "411", "460", "461"] {
         assert_eq!(
             payment_status_from_response_code(response_code),
             PaymentStatus::Failed
@@ -213,11 +237,27 @@ fn documented_v5_duplicate_rejection_remains_reconcilable() {
     assert_eq!(outcome.transaction_id, None);
     assert_eq!(
         outcome.diagnostics,
-        vec![
-            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
-            PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
-        ]
+        vec![PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor]
     );
+}
+
+#[test]
+fn foreground_json_absence_preserves_non_approved_decisions() {
+    for id in ["null", r#""""#, r#""   ""#] {
+        let failed = payment_outcome_from_json_text(&format!(
+            r#"{{"response":"3","response_code":"300","id":{id}}}"#
+        ))
+        .expect("blank terminal identity should be treated as absent");
+        assert_eq!(failed.status, PaymentStatus::Failed, "id={id}");
+        assert!(failed.diagnostics.is_empty(), "id={id}");
+
+        let declined = payment_outcome_from_json_text(&format!(
+            r#"{{"response":"2","response_code":"200","id":{id}}}"#
+        ))
+        .expect("blank declined identity should be treated as absent");
+        assert_eq!(declined.status, PaymentStatus::Declined, "id={id}");
+        assert!(declined.diagnostics.is_empty(), "id={id}");
+    }
 }
 
 #[test]
@@ -237,13 +277,18 @@ fn duplicate_response_code_composes_with_other_decision_diagnostics() {
                 .expect("duplicate response with anomalous evidence should parse conservatively");
 
         assert_eq!(outcome.status, PaymentStatus::Unknown);
-        assert_eq!(
-            outcome.diagnostics,
-            vec![
+        let expected = match expected {
+            PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField => vec![
+                PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
                 PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
-                expected,
-            ]
-        );
+            ],
+            PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence => vec![
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+                PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence,
+            ],
+            _ => unreachable!("test table contains only the two named diagnostics"),
+        };
+        assert_eq!(outcome.diagnostics, expected);
     }
 }
 
@@ -321,8 +366,9 @@ fn conflicting_unknown_response_codes_preserve_each_diagnostic() {
         assert_eq!(
             outcome.diagnostics,
             vec![
-                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
                 PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+                PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome,
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
             ],
             "{json}"
         );
@@ -549,6 +595,66 @@ fn known_unknown_gateway_states_do_not_emit_diagnostics() {
 
         assert_eq!(outcome.status, PaymentStatus::Unknown, "{status}");
         assert!(outcome.diagnostics.is_empty(), "{status}");
+    }
+}
+
+#[test]
+fn generic_gateway_errors_have_indeterminate_provenance() {
+    for (json, expected) in [
+        (
+            r#"{"id":"txn_generic_error","status":"error"}"#,
+            vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome],
+        ),
+        (
+            r#"{"id":"txn_generic_error","condition":"error"}"#,
+            vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome],
+        ),
+        (
+            r#"{"id":"txn_generic_error","response":"3","status":"pending"}"#,
+            vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome],
+        ),
+        (
+            r#"{"id":"txn_generic_error","response":"3","status":"provider_surprise"}"#,
+            vec![
+                PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome,
+                PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence,
+            ],
+        ),
+        (
+            r#"{"id":"txn_generic_error","status":"error","status":"provider_surprise"}"#,
+            vec![
+                PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+                PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome,
+            ],
+        ),
+        (
+            r#"{"id":"txn_generic_error","response":"3","status":"failed","condition":"pending"}"#,
+            vec![
+                PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome,
+                PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+            ],
+        ),
+    ] {
+        let outcome = payment_outcome_from_json_text(json)
+            .expect("a recognized generic gateway error should parse");
+
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{json}");
+        assert_eq!(outcome.diagnostics, expected, "{json}");
+    }
+}
+
+#[test]
+fn json_determinate_failure_supersedes_generic_error_provenance() {
+    for json in [
+        r#"{"id":"txn_failed","response":"3","status":"failed"}"#,
+        r#"{"id":"txn_failed","response":"3","condition":"failed"}"#,
+        r#"{"id":"txn_failed","response":"3","response_code":"300"}"#,
+    ] {
+        let outcome = payment_outcome_from_json_text(json)
+            .expect("determinate failure evidence should resolve the generic error");
+
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{json}");
+        assert!(outcome.diagnostics.is_empty(), "{json}");
     }
 }
 

@@ -209,41 +209,31 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
             }
         }
     }
-    let diagnostics = parts
+    let mut diagnostics = parts
         .diagnostics
         .iter()
-        .filter_map(map_payment_diagnostic)
+        .map(map_payment_diagnostic)
         .collect();
-    let mut status = map_payment_status(parts.status);
-    let transaction_id = validated_transaction_id(parts.transaction_id);
-    let payment_method_reference = validated_payment_method_reference(parts.customer_vault_id);
-    if transaction_id.is_err() {
-        tracing::warn!(
-            provider = "nmi",
-            identifier_kind = "transaction",
-            "NMI returned an identifier rejected by Syrup Rail policy"
-        );
+    let status = map_payment_status(parts.status);
+    let mut identifiers = adapt_payment_identifiers(
+        parts.transaction_id,
+        parts.customer_vault_id,
+        &mut diagnostics,
+    );
+    let invalid_identity_bundle = diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic,
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier
+                | GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference
+        )
+    });
+    if invalid_identity_bundle {
+        identifiers.transaction_id = None;
+        identifiers.payment_method_reference = None;
     }
-    if payment_method_reference.is_err() {
-        tracing::warn!(
-            provider = "nmi",
-            identifier_kind = "customer_vault",
-            "NMI returned an identifier rejected by Syrup Rail policy"
-        );
-    }
-    let (transaction_id, payment_method_reference) =
-        match (transaction_id, payment_method_reference) {
-            (Ok(transaction_id), Ok(payment_method_reference)) => {
-                (transaction_id, payment_method_reference)
-            }
-            _ => {
-                status = GatewayPaymentStatus::Unknown;
-                (None, None)
-            }
-        };
     let evidence = ProcessorEvidence::new(
-        transaction_id,
-        payment_method_reference,
+        identifiers.transaction_id,
+        identifiers.payment_method_reference,
         sanitized_text(parts.response),
         sanitized_text(parts.response_code),
         sanitized_text(parts.response_text),
@@ -253,14 +243,39 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
     GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics)
 }
 
-fn map_payment_diagnostic(
-    diagnostic: &PaymentOutcomeDiagnostic,
-) -> Option<GatewayPaymentDiagnostic> {
+fn map_payment_diagnostic(diagnostic: &PaymentOutcomeDiagnostic) -> GatewayPaymentDiagnostic {
     match diagnostic {
-        PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
-            Some(GatewayPaymentDiagnostic::ProcessorReportedDuplicate)
+        PaymentOutcomeDiagnostic::MissingTransactionIdentifier => {
+            GatewayPaymentDiagnostic::MissingTransactionIdentifier
         }
-        _ => None,
+        PaymentOutcomeDiagnostic::MissingCustomerVaultIdentifier => {
+            GatewayPaymentDiagnostic::MissingPaymentMethodReference
+        }
+        PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier => {
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier
+        }
+        PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier => {
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference
+        }
+        PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField => {
+            GatewayPaymentDiagnostic::InvalidOrConflictingDecisionField
+        }
+        PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome => {
+            GatewayPaymentDiagnostic::IndeterminatePaymentOutcome
+        }
+        PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate
+        }
+        PaymentOutcomeDiagnostic::ConflictingDecisionEvidence => {
+            GatewayPaymentDiagnostic::ConflictingDecisionEvidence
+        }
+        PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence => {
+            GatewayPaymentDiagnostic::UnrecognizedDecisionEvidence
+        }
+        PaymentOutcomeDiagnostic::MissingDecisionEvidence => {
+            GatewayPaymentDiagnostic::MissingDecisionEvidence
+        }
+        _ => GatewayPaymentDiagnostic::UnmappedProviderDiagnostic,
     }
 }
 
@@ -270,6 +285,48 @@ fn map_payment_status(status: PaymentStatus) -> GatewayPaymentStatus {
         PaymentStatus::Declined => GatewayPaymentStatus::Declined,
         PaymentStatus::Unknown => GatewayPaymentStatus::Unknown,
         PaymentStatus::Failed => GatewayPaymentStatus::Failed,
+    }
+}
+
+struct AdaptedPaymentIdentifiers {
+    transaction_id: Option<GatewayTransactionId>,
+    payment_method_reference: Option<syrup_rail::GatewayPaymentMethodReference>,
+}
+
+fn adapt_payment_identifiers(
+    transaction_id: Option<SensitiveText>,
+    payment_method_reference: Option<SensitiveText>,
+    diagnostics: &mut Vec<GatewayPaymentDiagnostic>,
+) -> AdaptedPaymentIdentifiers {
+    let transaction_id = match validated_transaction_id(transaction_id) {
+        Ok(transaction_id) => transaction_id,
+        Err(()) => {
+            tracing::warn!(
+                provider = "nmi",
+                identifier_kind = "transaction",
+                "NMI returned an identifier rejected by Syrup Rail policy"
+            );
+            diagnostics.push(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier);
+            None
+        }
+    };
+    let payment_method_reference =
+        match validated_payment_method_reference(payment_method_reference) {
+            Ok(payment_method_reference) => payment_method_reference,
+            Err(()) => {
+                tracing::warn!(
+                    provider = "nmi",
+                    identifier_kind = "customer_vault",
+                    "NMI returned an identifier rejected by Syrup Rail policy"
+                );
+                diagnostics
+                    .push(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference);
+                None
+            }
+        };
+    AdaptedPaymentIdentifiers {
+        transaction_id,
+        payment_method_reference,
     }
 }
 
@@ -445,314 +502,4 @@ fn map_query_error(error: QueryError) -> GatewayError {
 }
 
 #[cfg(test)]
-mod tests {
-    use syrup_rail::{
-        ChargeAmount, CurrencyCode, GatewayLifecycleQuarantineReason, PaymentCardBrand,
-        PaymentToken,
-    };
-    use syrup_rail_nmi_client::{
-        ClientFactory, Credentials, DuplicateCheck, Endpoint, PaymentDescriptor,
-        PaymentOutcomeParts, TransactionReportParts,
-    };
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    use super::*;
-
-    fn text(value: &str) -> SensitiveText {
-        SensitiveText::new(value)
-    }
-
-    fn empty_outcome(status: PaymentStatus) -> PaymentOutcomeParts {
-        PaymentOutcomeParts {
-            status,
-            transaction_id: None,
-            customer_vault_id: None,
-            response: None,
-            response_code: None,
-            response_text: None,
-            condition: None,
-            descriptor: PaymentDescriptor::default(),
-            diagnostics: Vec::new(),
-        }
-    }
-
-    async fn gateway_with_response(
-        response_body: &'static str,
-    ) -> (NmiPaymentGateway, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test listener should bind");
-        let endpoint = Endpoint::parse_loopback_http(format!(
-            "http://{}",
-            listener.local_addr().expect("test listener address")
-        ))
-        .expect("loopback endpoint should validate");
-        let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.expect("sale should connect");
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            let header_end = loop {
-                let read = stream.read(&mut chunk).await.expect("request should read");
-                assert!(read > 0, "request closed before headers");
-                request.extend_from_slice(&chunk[..read]);
-                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                    break end + 4;
-                }
-            };
-            let content_length = String::from_utf8_lossy(&request[..header_end])
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse::<usize>().ok())
-                        .flatten()
-                })
-                .unwrap_or_default();
-            while request.len() < header_end + content_length {
-                let read = stream
-                    .read(&mut chunk)
-                    .await
-                    .expect("request body should read");
-                assert!(read > 0, "request closed before body");
-                request.extend_from_slice(&chunk[..read]);
-            }
-            let headers = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                response_body.len()
-            );
-            stream
-                .write_all(headers.as_bytes())
-                .await
-                .expect("response headers should write");
-            stream
-                .write_all(response_body.as_bytes())
-                .await
-                .expect("response body should write");
-        });
-        let credentials = Credentials::new("private_key".to_owned(), "query_key".to_owned())
-            .expect("test credentials should validate");
-        let client = ClientFactory::new_with_loopback_http()
-            .expect("test factory should construct")
-            .client_with_duplicate_check(endpoint, credentials, DuplicateCheck::ProcessorConfigured)
-            .expect("test client should construct");
-        (NmiPaymentGateway::new(client), server)
-    }
-
-    #[test]
-    fn non_usd_sale_is_rejected_before_transport() {
-        let attempt_id: PaymentAttemptId = "00000000-0000-0000-0000-000000000000".parse().unwrap();
-        let request = GatewaySaleRequest::new(
-            ChargeAmount::new(100, CurrencyCode::new("EUR").unwrap()).unwrap(),
-            GatewayOrderId::from_generated_attempt(
-                "ck_order_00000000000000000000000000000000",
-                attempt_id,
-            )
-            .unwrap(),
-            GatewaySaleIntent::OneTime {
-                payment_token: PaymentToken::new("tok_safe").unwrap(),
-            },
-            None,
-        );
-        assert!(matches!(
-            map_sale_request(request),
-            Err(GatewayMutationError::NotSubmitted(
-                GatewayNotSubmittedError::Malformed(_)
-            ))
-        ));
-    }
-
-    #[test]
-    fn invalid_either_identifier_downgrades_and_clears_both() {
-        let mut parts = empty_outcome(PaymentStatus::Approved);
-        parts.transaction_id = Some(text("txn_safe"));
-        parts.customer_vault_id = Some(text("bad vault"));
-        let outcome = map_payment_outcome_parts(parts);
-        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
-        assert!(outcome.transaction_id().is_none());
-        assert!(outcome.payment_method_reference().is_none());
-    }
-
-    #[test]
-    fn processor_duplicate_diagnostic_crosses_the_provider_neutral_boundary() {
-        let mut parts = empty_outcome(PaymentStatus::Unknown);
-        parts.response_code = Some(text("430"));
-        parts.diagnostics = vec![PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor];
-
-        let outcome = map_payment_outcome_parts(parts);
-
-        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
-        assert_eq!(
-            outcome.diagnostics(),
-            &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
-        );
-        assert_eq!(
-            outcome.response_code().map(GatewayDiagnostic::expose),
-            Some("430")
-        );
-    }
-
-    #[tokio::test]
-    async fn parsed_processor_duplicate_reaches_the_gateway_boundary() {
-        let (gateway, server) = gateway_with_response(
-            r#"{"response":"3","response_code":"430","response_text":"Duplicate transaction"}"#,
-        )
-        .await;
-        let attempt_id: PaymentAttemptId = "00000000-0000-0000-0000-000000000430".parse().unwrap();
-        let request = GatewaySaleRequest::new(
-            ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap(),
-            GatewayOrderId::from_generated_attempt(
-                "ck_order_00000000000000000000000000000430",
-                attempt_id,
-            )
-            .unwrap(),
-            GatewaySaleIntent::OneTime {
-                payment_token: PaymentToken::new("tok_duplicate").unwrap(),
-            },
-            None,
-        );
-
-        let outcome =
-            tokio::time::timeout(std::time::Duration::from_secs(5), gateway.sale(request))
-                .await
-                .expect("test sale should not hang")
-                .expect("430 should be an outcome");
-
-        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
-        assert_eq!(
-            outcome.diagnostics(),
-            &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
-        );
-        assert_eq!(
-            outcome.response_code().map(GatewayDiagnostic::expose),
-            Some("430")
-        );
-        tokio::time::timeout(std::time::Duration::from_secs(5), server)
-            .await
-            .expect("test server should not hang")
-            .expect("test server assertions should pass");
-    }
-
-    #[test]
-    fn descriptor_admission_preserves_exact_bounds() {
-        let descriptor = map_payment_descriptor_parts(PaymentDescriptorParts {
-            payment_type: Some(text("creditcard")),
-            card_brand: Some(text("visa")),
-            card_last4: Some(text("1234")),
-            card_exp_month: Some(12),
-            card_exp_year: Some(2100),
-        });
-        assert_eq!(
-            descriptor.card_brand().map(GatewayDiagnostic::expose),
-            Some("visa")
-        );
-        assert_eq!(
-            descriptor.canonical_card_brand(),
-            Some(syrup_rail::PaymentCardBrand::Visa)
-        );
-        assert_eq!(descriptor.card_last_four().unwrap().expose(), "1234");
-        assert_eq!(descriptor.card_exp_month(), Some(12));
-        assert_eq!(descriptor.card_exp_year(), Some(2100));
-
-        let invalid = map_payment_descriptor_parts(PaymentDescriptorParts {
-            payment_type: None,
-            card_brand: None,
-            card_last4: Some(text("１２３４")),
-            card_exp_month: Some(0),
-            card_exp_year: Some(2101),
-        });
-        assert!(invalid.card_last_four().is_none());
-        assert_eq!(invalid.card_exp_month(), None);
-        assert_eq!(invalid.card_exp_year(), None);
-    }
-
-    #[test]
-    fn documented_nmi_card_schemes_have_canonical_projections() {
-        let schemes = [
-            ("visa", PaymentCardBrand::Visa),
-            ("mastercard", PaymentCardBrand::Mastercard),
-            ("amex", PaymentCardBrand::AmericanExpress),
-            ("discover", PaymentCardBrand::Discover),
-            ("diners", PaymentCardBrand::DinersClub),
-            ("Diners", PaymentCardBrand::DinersClub),
-            ("jcb", PaymentCardBrand::Jcb),
-            ("maestro", PaymentCardBrand::Maestro),
-        ];
-
-        for (provider_value, expected) in schemes {
-            let descriptor = map_payment_descriptor_parts(PaymentDescriptorParts {
-                payment_type: Some(text("creditcard")),
-                card_brand: Some(text(provider_value)),
-                card_last4: None,
-                card_exp_month: None,
-                card_exp_year: None,
-            });
-            assert_eq!(
-                descriptor.card_brand().map(GatewayDiagnostic::expose),
-                Some(provider_value)
-            );
-            assert_eq!(descriptor.canonical_card_brand(), Some(expected));
-        }
-    }
-
-    #[test]
-    fn invalid_optional_locator_does_not_discard_safe_sibling() {
-        let report = map_transaction_report_parts(TransactionReportParts {
-            transaction_id: Some(text("bad transaction")),
-            order_id: Some(text("ck_order_safe")),
-            condition: Some(text("complete")),
-            actions: Vec::new(),
-            diagnostics: Vec::new(),
-        });
-        let GatewayTransactionReport::Evidence(evidence) = report else {
-            panic!("safe order locator should admit evidence");
-        };
-        assert!(evidence.transaction_id().is_none());
-        assert_eq!(evidence.order_id().unwrap().expose(), "ck_order_safe");
-    }
-
-    #[test]
-    fn malformed_report_without_identifiers_is_quarantined() {
-        let report = map_transaction_report_parts(TransactionReportParts {
-            transaction_id: None,
-            order_id: None,
-            condition: None,
-            actions: Vec::new(),
-            diagnostics: vec![TransactionReportDiagnostic::MalformedStructure],
-        });
-        let GatewayTransactionReport::Quarantine(quarantine) = report else {
-            panic!("malformed structure should quarantine");
-        };
-        assert_eq!(
-            quarantine.reason(),
-            GatewayLifecycleQuarantineReason::MalformedReportStructure
-        );
-    }
-
-    #[test]
-    fn canonical_generated_order_survives_luhn_false_positive_uuid_digits() {
-        let value = "ck_renewal_00000000000000000000000000000000";
-        assert!(syrup_rail::string_contains_raw_card_data(value));
-        let report = map_transaction_report_parts(TransactionReportParts {
-            transaction_id: None,
-            order_id: Some(text(value)),
-            condition: Some(text("complete")),
-            actions: Vec::new(),
-            diagnostics: Vec::new(),
-        });
-        let GatewayTransactionReport::Evidence(evidence) = report else {
-            panic!("canonical generated order should remain usable");
-        };
-        assert_eq!(evidence.order_id().unwrap().expose(), value);
-    }
-
-    #[test]
-    fn descriptor_carries_current_nmi_query_envelope() {
-        let policy = NmiPaymentGateway::lifecycle_query_policy();
-        assert_eq!(policy.cursor_key().as_str(), "nmi_approved_lifecycle");
-        assert_eq!(policy.overlap(), Duration::minutes(5));
-        assert_eq!(policy.page_size().get(), 100);
-        assert_eq!(policy.ordinary_page_limit().get(), 20);
-        assert_eq!(policy.max_window_splits().get(), 12);
-        assert_eq!(policy.narrow_window_drain_page_limit().get(), 2_000);
-    }
-}
+mod tests;
