@@ -1,3 +1,5 @@
+// agentic-loc-exception: Stable public domain facade remains under the absolute limit; split follow-up is tracked separately.
+
 use std::fmt;
 
 use crate::gateway::normalize_gateway_payment_diagnostics;

@@ -1,3 +1,5 @@
+// agentic-loc-exception: Release-critical workflow remains under the absolute limit; split follow-up is tracked separately.
+
 use std::fmt;
 
 use sqlx::{PgConnection, PgPool};

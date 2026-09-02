@@ -1,3 +1,5 @@
+// agentic-loc-exception: Shared test fixtures remain under the absolute limit; split follow-up is tracked separately.
+
 use std::{
     collections::VecDeque,
     error::Error,
