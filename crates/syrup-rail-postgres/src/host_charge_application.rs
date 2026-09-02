@@ -4,12 +4,12 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, ChargeHostTarget,
-    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
-    GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, HostChargePaymentResult,
-    HostChargePaymentResultBuildError, HostChargeReservation, HostChargeTargetTransition,
-    HostChargeTargetTransitionKind, HostChargeTargetTransitionOutcome, PaymentAttempt,
-    PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
-    ProcessorEvidence,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentDiagnostic,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent,
+    GatewaySaleRequest, HostChargePaymentResult, HostChargePaymentResultBuildError,
+    HostChargeReservation, HostChargeTargetTransition, HostChargeTargetTransitionKind,
+    HostChargeTargetTransitionOutcome, PaymentAttempt, PaymentAttemptStatus, PaymentResolutionCode,
+    ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
 };
 use thiserror::Error;
 
@@ -29,10 +29,14 @@ use crate::{
         RateLimitCooldown, RateLimitCooldownCommitError, RateLimitCooldownOperation,
         SubscriptionEnrollmentApplicationError, commit_rate_limit_cooldown_for_operation,
         map_attempt_transition_error, mutation_error_evidence, park_locked_attempt,
-        restore_prepared_attempt_submission, set_application_timeouts,
+        processor_identity_conflict_diagnostics, reconcile_non_approved_evidence,
+        restore_prepared_attempt_submission, same_processor_transaction, set_application_timeouts,
         should_surface_not_submitted_application,
     },
-    processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
+    processor_charges::{
+        ObservedCharge, observe_processor_charge, promote_conflicting_charge_to_external_reversal,
+        transition_charge,
+    },
 };
 
 const BILLING_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
@@ -43,6 +47,15 @@ const APPROVED_STALE_TARGET_TEXT: &str =
     "Approved host charge could not update its target because the target changed.";
 const APPROVED_STORAGE_FAILURE_TEXT: &str =
     "Approved host charge could not be applied; manual review is required.";
+
+fn append_host_observation_diagnostics(
+    result: HostChargePaymentResult,
+    diagnostics: &[GatewayPaymentDiagnostic],
+) -> HostChargePaymentResult {
+    let mut combined = result.observation_diagnostics().to_vec();
+    combined.extend_from_slice(diagnostics);
+    result.with_observation_diagnostics(combined)
+}
 
 #[derive(Debug, Error)]
 pub enum HostChargeApplicationError {
@@ -332,7 +345,7 @@ pub async fn apply_host_charge_gateway_outcome(
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
     apply_host_charge_gateway_decision(pool, coordinator, targets, reservation, outcome)
         .await
-        .map(|result| result.with_gateway_diagnostics(outcome.diagnostics().to_vec()))
+        .map(|result| append_host_observation_diagnostics(result, outcome.diagnostics()))
 }
 
 async fn apply_host_charge_gateway_decision(
@@ -504,6 +517,10 @@ async fn apply_host_charge_approved(
         )
         .await?;
     let attempt = lock_expected_host_charge(connection, reservation).await?;
+    if !processor_identity_conflict_diagnostics(&attempt, evidence).is_empty() {
+        transaction.rollback().await?;
+        return observe_conflicting_host_charge_approval(coordinator, reservation, evidence).await;
+    }
     if attempt.status() == PaymentAttemptStatus::Approved {
         // Host target callbacks establish the repository-wide target -> attempt
         // lock order. Once this lock proves approval already committed, a
@@ -612,6 +629,53 @@ async fn apply_host_charge_approved(
     }
 }
 
+async fn observe_conflicting_host_charge_approval(
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &HostChargeReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
+    let identity = reservation.identity();
+    let mut transaction = coordinator
+        .begin(
+            BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id()),
+            BILLING_LOCK_TIMEOUT,
+        )
+        .await?;
+    let connection = transaction.connection();
+    set_application_timeouts(connection).await?;
+    let attempt = lock_expected_host_charge(connection, reservation).await?;
+    let diagnostics = processor_identity_conflict_diagnostics(&attempt, evidence);
+    if diagnostics.is_empty() {
+        transaction.rollback().await?;
+        return Ok(HostChargePaymentResult::new(attempt)?);
+    }
+    if attempt.status() == PaymentAttemptStatus::Approved
+        && same_processor_transaction(&attempt, evidence)
+    {
+        transaction.commit().await?;
+        return Ok(append_host_observation_diagnostics(
+            HostChargePaymentResult::new(attempt)?,
+            &diagnostics,
+        ));
+    }
+    let progression = if attempt.status().is_resolvable() {
+        ProcessorChargeProgression::ReconciliationRequired
+    } else {
+        ProcessorChargeProgression::ExternalReversalRequired
+    };
+    let observation = observe_processor_charge(connection, &attempt, evidence, progression).await?;
+    if progression == ProcessorChargeProgression::ExternalReversalRequired
+        && evidence.transaction_id().is_some()
+    {
+        promote_conflicting_charge_to_external_reversal(connection, observation).await?;
+    }
+    transaction.commit().await?;
+    Ok(append_host_observation_diagnostics(
+        HostChargePaymentResult::new(attempt)?,
+        &diagnostics,
+    ))
+}
+
 async fn observe_terminal_host_charge_approval(
     coordinator: &dyn BillingTransactionCoordinator,
     reservation: &HostChargeReservation,
@@ -714,7 +778,12 @@ async fn resolve_host_charge_non_approved(
             "host target refused a payment outcome; leaving the canonical attempt unresolved"
         );
         transaction.rollback().await?;
-        let application = canonical_host_charge_resolution_application(pool, reservation).await?;
+        let mut application =
+            canonical_host_charge_resolution_application(pool, reservation).await?;
+        let diagnostics =
+            processor_identity_conflict_diagnostics(application.payment.attempt(), evidence);
+        application.payment =
+            append_host_observation_diagnostics(application.payment, &diagnostics);
         if !host_charge_attempt_may_resolve(application.payment.attempt(), resolution.boundary) {
             return Ok(application);
         }
@@ -723,11 +792,22 @@ async fn resolve_host_charge_non_approved(
         ));
     }
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
+    let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
+    let diagnostics = reconciled.identity_conflict_diagnostics();
     let may_resolve = host_charge_attempt_may_resolve(&attempt, resolution.boundary);
     if !may_resolve {
         transaction.rollback().await?;
-        return canonical_host_charge_resolution_application(pool, reservation).await;
+        let mut canonical = canonical_host_charge_resolution_application(pool, reservation).await?;
+        canonical.payment = append_host_observation_diagnostics(canonical.payment, &diagnostics);
+        return Ok(canonical);
     }
+    if reconciled.has_identity_conflict() {
+        transaction.rollback().await?;
+        let mut canonical = canonical_host_charge_resolution_application(pool, reservation).await?;
+        canonical.payment = append_host_observation_diagnostics(canonical.payment, &diagnostics);
+        return Ok(canonical);
+    }
+    let evidence = &reconciled.evidence;
     persist_attempt_transition(
         &mut transaction,
         &attempt,
@@ -870,7 +950,10 @@ async fn resolve_host_charge_unknown(
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
+    let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
+    let diagnostics = reconciled.identity_conflict_diagnostics();
     if !attempt.status().is_terminal() {
+        let evidence = &reconciled.evidence;
         persist_attempt_transition(
             &mut transaction,
             &attempt,
@@ -902,7 +985,10 @@ async fn resolve_host_charge_unknown(
         INVALID_HOST_CHARGE_STATE,
     ))?;
     transaction.commit().await?;
-    Ok(HostChargePaymentResult::new(attempt)?)
+    Ok(append_host_observation_diagnostics(
+        HostChargePaymentResult::new(attempt)?,
+        &diagnostics,
+    ))
 }
 
 async fn commit_host_charge_cooldown(
@@ -936,6 +1022,35 @@ async fn park_host_charge_approved(
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
+    let diagnostics = processor_identity_conflict_diagnostics(&attempt, evidence);
+    if !diagnostics.is_empty() {
+        if attempt.status() == PaymentAttemptStatus::Approved
+            && same_processor_transaction(&attempt, evidence)
+        {
+            transaction.commit().await?;
+            return Ok(append_host_observation_diagnostics(
+                HostChargePaymentResult::new(attempt)?,
+                &diagnostics,
+            ));
+        }
+        let progression = if attempt.status().is_resolvable() {
+            ProcessorChargeProgression::ReconciliationRequired
+        } else {
+            ProcessorChargeProgression::ExternalReversalRequired
+        };
+        let observation =
+            observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
+        if progression == ProcessorChargeProgression::ExternalReversalRequired {
+            promote_conflicting_charge_to_external_reversal(&mut transaction, observation).await?;
+        } else if let ObservedCharge::Owned(charge) = observation {
+            transition_charge(&mut transaction, charge.id, progression, None).await?;
+        }
+        transaction.commit().await?;
+        return Ok(append_host_observation_diagnostics(
+            HostChargePaymentResult::new(attempt)?,
+            &diagnostics,
+        ));
+    }
     let progression = if evidence.transaction_id().is_some() {
         ProcessorChargeProgression::ExternalReversalRequired
     } else {
@@ -1696,11 +1811,19 @@ mod tests {
     }
 
     fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
+        approved_outcome_with_reference(transaction_id, None)
+    }
+
+    fn approved_outcome_with_reference(
+        transaction_id: &str,
+        payment_method_reference: Option<&str>,
+    ) -> GatewayPaymentOutcome {
         GatewayPaymentOutcome::new(
             GatewayPaymentStatus::Approved,
             ProcessorEvidence::new(
                 Some(GatewayTransactionId::new(transaction_id).unwrap()),
-                None,
+                payment_method_reference
+                    .map(|value| syrup_rail::GatewayPaymentMethodReference::new(value).unwrap()),
                 Some(GatewayDiagnostic::new("1")),
                 None,
                 Some(GatewayDiagnostic::new("approved")),
@@ -1708,6 +1831,22 @@ mod tests {
                 GatewayPaymentDescriptor::default(),
             ),
         )
+    }
+
+    fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
+        GatewayPaymentOutcome::new(
+            GatewayPaymentStatus::Unknown,
+            ProcessorEvidence::new(
+                None,
+                None,
+                Some(GatewayDiagnostic::new("3")),
+                Some(GatewayDiagnostic::new("430")),
+                Some(GatewayDiagnostic::new("Duplicate transaction")),
+                None,
+                GatewayPaymentDescriptor::default(),
+            ),
+        )
+        .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
     }
 
     #[tokio::test]
@@ -1745,11 +1884,10 @@ mod tests {
             let gateway = Arc::new(ScriptedGateway {
                 account_mode: GatewayAccountMode::Test,
                 sale_calls: AtomicUsize::new(0),
-                outcome: Mutex::new(Some(
-                    approved_outcome("host_txn_approved").with_diagnostics(vec![
-                        GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
-                    ]),
-                )),
+                outcome: Mutex::new(Some(approved_outcome_with_reference(
+                    "host_txn_approved",
+                    Some("host_vault_observed"),
+                ))),
             });
             let resolver = Arc::new(StaticResolver {
                 gateway: resolved_gateway(account, gateway.clone()),
@@ -1789,39 +1927,92 @@ mod tests {
 
             let first = service.charge_host_target(command.clone()).await?;
             assert_eq!(first.status(), PaymentAttemptStatus::Approved);
-            assert_eq!(
-                first.gateway_diagnostics(),
-                &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
-            );
+            assert!(first.observation_diagnostics().is_empty());
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
             assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
+            sqlx::query(
+                "UPDATE billing_payment_attempts \
+                 SET gateway_payment_method_reference = 'host_vault_durable' WHERE id = $1",
+            )
+            .bind(first.attempt().identity().attempt_id().as_uuid())
+            .execute(&database.pool)
+            .await?;
+            let applied_reservation = HostChargeReservation::from_command(
+                &command,
+                syrup_rail::HostChargeTargetSnapshot::new(
+                    HostChargeTargetId::new(target_id),
+                    ChargeAmount::new(1250, CurrencyCode::new("USD")?)?,
+                ),
+                &resolver.gateway,
+                first.attempt().identity().attempt_id(),
+                GatewayAccountMode::Test,
+            )?;
+            let applied_conflicting_evidence = ProcessorEvidence::new(
+                Some(GatewayTransactionId::new("host_txn_approved")?),
+                Some(syrup_rail::GatewayPaymentMethodReference::new(
+                    "host_vault_observed",
+                )?),
+                Some(GatewayDiagnostic::new("1")),
+                None,
+                Some(GatewayDiagnostic::new("approved")),
+                Some(GatewayDiagnostic::new("complete")),
+                GatewayPaymentDescriptor::default(),
+            );
+            let applied_conflict = park_host_charge_approved(
+                &database.pool,
+                &applied_reservation,
+                &applied_conflicting_evidence,
+            )
+            .await?;
+            assert_eq!(applied_conflict.status(), PaymentAttemptStatus::Approved);
+            assert_eq!(
+                applied_conflict.observation_diagnostics(),
+                &[GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference]
+            );
+            let applied_progression: String = sqlx::query_scalar(
+                "SELECT progression_state FROM billing_processor_charges \
+                 WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            )
+            .bind(first.attempt().identity().attempt_id().as_uuid())
+            .bind("host_txn_approved")
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(applied_progression, "applied");
+            sqlx::query(
+                "UPDATE billing_payment_attempts \
+                 SET gateway_payment_method_reference = 'host_vault_observed' WHERE id = $1",
+            )
+            .bind(first.attempt().identity().attempt_id().as_uuid())
+            .execute(&database.pool)
+            .await?;
             sqlx::query("UPDATE host_charge_targets SET status = 'reversed' WHERE id = $1")
                 .bind(target_id)
                 .execute(&database.pool)
                 .await?;
-            let approved_replay = approved_outcome("host_txn_approved")
-                .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+            let duplicate_replay = processor_duplicate_outcome();
             let reconciled_replay = apply_reconciled_host_charge_gateway_outcome(
                 &database.pool,
                 coordinator.as_ref(),
                 &RefusingTransitionTargets,
                 syrup_rail::BillingScopeId::new(account.billing_scope_id),
                 first.attempt().identity().attempt_id(),
-                &approved_replay,
+                &duplicate_replay,
             )
             .await?;
             assert_eq!(reconciled_replay.attempt(), first.attempt());
+            assert_eq!(reconciled_replay.status(), PaymentAttemptStatus::Approved);
             assert_eq!(
-                reconciled_replay.gateway_diagnostics(),
-                &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+                reconciled_replay.observation_diagnostics(),
+                &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate],
+                "the duplicate observation annotates but cannot override durable approval"
             );
             let live_service = service
                 .clone()
                 .with_required_gateway_account_mode(GatewayAccountMode::Live);
             let replay = live_service.charge_host_target(command).await?;
             assert_eq!(replay.attempt(), first.attempt());
-            assert!(replay.gateway_diagnostics().is_empty());
+            assert!(replay.observation_diagnostics().is_empty());
             assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
             assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
             assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
@@ -1839,6 +2030,224 @@ mod tests {
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(charge_state, "applied");
+            let late_decline = GatewayPaymentOutcome::new(
+                GatewayPaymentStatus::Declined,
+                ProcessorEvidence::new(
+                    Some(GatewayTransactionId::new("host_txn_late_decline")?),
+                    None,
+                    Some(GatewayDiagnostic::new("2")),
+                    Some(GatewayDiagnostic::new("200")),
+                    Some(GatewayDiagnostic::new("Declined")),
+                    Some(GatewayDiagnostic::new("declined")),
+                    GatewayPaymentDescriptor::default(),
+                ),
+            );
+            let terminal_decline = apply_reconciled_host_charge_gateway_outcome(
+                &database.pool,
+                coordinator.as_ref(),
+                &RefusingTransitionTargets,
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                first.attempt().identity().attempt_id(),
+                &late_decline,
+            )
+            .await?;
+            assert_eq!(terminal_decline.attempt(), first.attempt());
+            assert_eq!(
+                terminal_decline.observation_diagnostics(),
+                &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
+            );
+            let terminal_approval = apply_reconciled_host_charge_gateway_outcome(
+                &database.pool,
+                coordinator.as_ref(),
+                &TestTargets,
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                first.attempt().identity().attempt_id(),
+                &approved_outcome("host_txn_late_approval"),
+            )
+            .await?;
+            assert_eq!(terminal_approval.attempt(), first.attempt());
+            assert_eq!(
+                terminal_approval.observation_diagnostics(),
+                &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
+            );
+            let terminal_approval_charge: String = sqlx::query_scalar(
+                "SELECT progression_state FROM billing_processor_charges \
+                 WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            )
+            .bind(first.attempt().identity().attempt_id().as_uuid())
+            .bind("host_txn_late_approval")
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(terminal_approval_charge, "external_reversal_required");
+
+            sqlx::query(
+                "UPDATE billing_processor_charges \
+                 SET progression_state = 'reconciliation_required', \
+                     reconciliation_required_at = clock_timestamp(), \
+                     external_reversal_required_at = NULL \
+                 WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            )
+            .bind(first.attempt().identity().attempt_id().as_uuid())
+            .bind("host_txn_late_approval")
+            .execute(&database.pool)
+            .await?;
+            let promoted_terminal_approval = apply_reconciled_host_charge_gateway_outcome(
+                &database.pool,
+                coordinator.as_ref(),
+                &TestTargets,
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                first.attempt().identity().attempt_id(),
+                &approved_outcome("host_txn_late_approval"),
+            )
+            .await?;
+            assert_eq!(promoted_terminal_approval.attempt(), first.attempt());
+            assert_eq!(
+                promoted_terminal_approval.observation_diagnostics(),
+                &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
+            );
+            let promoted_terminal_charge: String = sqlx::query_scalar(
+                "SELECT progression_state FROM billing_processor_charges \
+                 WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            )
+            .bind(first.attempt().identity().attempt_id().as_uuid())
+            .bind("host_txn_late_approval")
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(promoted_terminal_charge, "external_reversal_required");
+
+            let conflicting_target_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
+            )
+            .bind(conflicting_target_id)
+            .bind(account.billing_scope_id)
+            .bind(subscriber_id)
+            .execute(&database.pool)
+            .await?;
+            let conflicting_command = ChargeHostTarget::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                HostChargeTargetId::new(conflicting_target_id),
+                GatewayConfigurationId::new(account.gateway_configuration_id),
+                PaymentToken::new("tok_host_conflict")?,
+                IdempotencyKey::new("host-conflict")?,
+                None,
+            );
+            let conflicting_attempt_id = PaymentAttemptId::new(Uuid::now_v7());
+            let conflicting_reservation = HostChargeReservation::from_command(
+                &conflicting_command,
+                syrup_rail::HostChargeTargetSnapshot::new(
+                    HostChargeTargetId::new(conflicting_target_id),
+                    ChargeAmount::new(1250, CurrencyCode::new("USD")?)?,
+                ),
+                &resolver.gateway,
+                conflicting_attempt_id,
+                GatewayAccountMode::Test,
+            )?;
+            let mut transaction = database.pool.begin().await?;
+            assert!(matches!(
+                reserve_host_charge_in_transaction(
+                    &mut transaction,
+                    &TestTargets,
+                    &conflicting_reservation,
+                )
+                .await?,
+                HostChargeReservationOutcome::Reserved(_)
+            ));
+            transaction.commit().await?;
+            assert!(matches!(
+                admit_host_charge_submission(
+                    &database.pool,
+                    &TestTargets,
+                    &conflicting_reservation,
+                )
+                .await?,
+                HostChargeAdmissionOutcome::Admitted(_)
+            ));
+            let unknown = GatewayPaymentOutcome::new(
+                GatewayPaymentStatus::Unknown,
+                ProcessorEvidence::new(
+                    Some(GatewayTransactionId::new("host_txn_durable")?),
+                    Some(syrup_rail::GatewayPaymentMethodReference::new(
+                        "host_vault_durable",
+                    )?),
+                    Some(GatewayDiagnostic::new("3")),
+                    Some(GatewayDiagnostic::new("400")),
+                    Some(GatewayDiagnostic::new("Processor outcome unknown")),
+                    Some(GatewayDiagnostic::new("unknown")),
+                    GatewayPaymentDescriptor::default(),
+                ),
+            );
+            let durable = apply_host_charge_gateway_outcome(
+                &database.pool,
+                coordinator.as_ref(),
+                &TestTargets,
+                &conflicting_reservation,
+                &unknown,
+            )
+            .await?;
+            assert_eq!(durable.status(), PaymentAttemptStatus::Unknown);
+            let same_transaction_conflict =
+                approved_outcome_with_reference("host_txn_durable", Some("host_vault_conflict"));
+            let conflict = apply_reconciled_host_charge_gateway_outcome(
+                &database.pool,
+                coordinator.as_ref(),
+                &TestTargets,
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                conflicting_attempt_id,
+                &same_transaction_conflict,
+            )
+            .await?;
+            assert_eq!(conflict.status(), PaymentAttemptStatus::Unknown);
+            assert_eq!(
+                conflict.observation_diagnostics(),
+                &[GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference]
+            );
+            let conflict_state: (Option<String>, Option<String>, String) = sqlx::query_as(
+                "SELECT gateway_transaction_id, gateway_payment_method_reference, \
+                        progression_state \
+                 FROM billing_processor_charges WHERE attempt_id = $1",
+            )
+            .bind(conflicting_attempt_id.as_uuid())
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(
+                conflict_state,
+                (
+                    Some("host_txn_durable".to_owned()),
+                    Some("host_vault_conflict".to_owned()),
+                    "reconciliation_required".to_owned(),
+                )
+            );
+            let fallback_evidence = approved_outcome("host_txn_fallback_conflict")
+                .evidence()
+                .clone();
+            let fallback = park_host_charge_approved(
+                &database.pool,
+                &conflicting_reservation,
+                &fallback_evidence,
+            )
+            .await?;
+            assert_eq!(fallback.status(), PaymentAttemptStatus::Unknown);
+            assert_eq!(
+                fallback.observation_diagnostics(),
+                &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
+            );
+            let fallback_charge_state: String = sqlx::query_scalar(
+                "SELECT progression_state FROM billing_processor_charges \
+                 WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            )
+            .bind(conflicting_attempt_id.as_uuid())
+            .bind("host_txn_fallback_conflict")
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(fallback_charge_state, "reconciliation_required");
+            let target_status: String =
+                sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
+                    .bind(conflicting_target_id)
+                    .fetch_one(&database.pool)
+                    .await?;
+            assert_eq!(target_status, "pending");
             let event_keys = events
                 .lock()
                 .await

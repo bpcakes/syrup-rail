@@ -64,26 +64,63 @@ pub enum PaymentStatus {
     Failed,
 }
 
-/// A payload-free reason that provider evidence could not be trusted normally.
-///
-/// Callers may safely use these values in logs and metrics. Raw provider values
-/// remain available only through the redacted [`SensitiveText`] boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum PaymentOutcomeDiagnostic {
-    MissingTransactionIdentifier,
-    MissingCustomerVaultIdentifier,
-    InvalidOrConflictingTransactionIdentifier,
-    InvalidOrConflictingCustomerVaultIdentifier,
-    InvalidOrConflictingDecisionField,
-    /// NMI reported response code `430`, "Duplicate transaction at processor".
+macro_rules! define_payment_outcome_diagnostics {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident
+            ),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        pub enum $name {
+            $(
+                $(#[$variant_meta])*
+                $variant,
+            )+
+        }
+
+        impl $name {
+            /// Every diagnostic variant supported by this client version.
+            ///
+            /// Provider adapters can use this list to prove that their typed
+            /// mapping covers the complete current diagnostic vocabulary while
+            /// retaining a fallback for future non-exhaustive variants. This is
+            /// not a closed set: compatible releases may append new variants.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+define_payment_outcome_diagnostics! {
+    /// A payload-free reason that provider evidence could not be trusted normally.
     ///
-    /// This remains an unknown payment outcome that requires reconciliation;
-    /// the diagnostic only makes the provider's duplicate decision observable.
-    DuplicateTransactionAtProcessor,
-    ConflictingDecisionEvidence,
-    UnrecognizedDecisionEvidence,
-    MissingDecisionEvidence,
+    /// Callers may safely use these values in logs and metrics. Raw provider values
+    /// remain available only through the redacted [`SensitiveText`] boundary.
+    /// Variant declaration order defines the canonical order returned by
+    /// [`PaymentOutcome::diagnostics`]; append new variants.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    #[non_exhaustive]
+    pub enum PaymentOutcomeDiagnostic {
+        MissingTransactionIdentifier,
+        MissingCustomerVaultIdentifier,
+        InvalidOrConflictingTransactionIdentifier,
+        InvalidOrConflictingCustomerVaultIdentifier,
+        InvalidOrConflictingDecisionField,
+        /// NMI reported an error without guaranteeing that the attempted
+        /// payment had no financial effect.
+        IndeterminatePaymentOutcome,
+        /// NMI reported response code `430`, "Duplicate transaction at processor".
+        ///
+        /// This remains an unknown payment outcome that requires reconciliation;
+        /// the diagnostic only makes the provider's duplicate decision observable.
+        DuplicateTransactionAtProcessor,
+        ConflictingDecisionEvidence,
+        UnrecognizedDecisionEvidence,
+        MissingDecisionEvidence,
+    }
 }
 
 #[derive(Default)]
@@ -155,8 +192,19 @@ impl PaymentOutcome {
         self.status
     }
 
+    /// Returns payload-free diagnostics as a canonically ordered set.
+    ///
+    /// Order carries no provider chronology or policy precedence. Route by
+    /// membership rather than sequence.
     pub fn diagnostics(&self) -> &[PaymentOutcomeDiagnostic] {
         &self.diagnostics
+    }
+
+    pub(crate) fn normalize_diagnostics(mut self) -> Self {
+        self.diagnostics
+            .sort_unstable_by_key(|diagnostic| *diagnostic as usize);
+        self.diagnostics.dedup();
+        self
     }
 
     pub fn into_parts(self) -> PaymentOutcomeParts {
@@ -295,4 +343,56 @@ pub struct TransactionReportParts {
     pub condition: Option<SensitiveText>,
     pub actions: Vec<TransactionAction>,
     pub diagnostics: Vec<TransactionReportDiagnostic>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payment_outcome_diagnostic_vocabulary_is_append_only() {
+        assert_eq!(
+            PaymentOutcomeDiagnostic::ALL,
+            &[
+                PaymentOutcomeDiagnostic::MissingTransactionIdentifier,
+                PaymentOutcomeDiagnostic::MissingCustomerVaultIdentifier,
+                PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+                PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier,
+                PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+                PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome,
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+                PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+                PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence,
+                PaymentOutcomeDiagnostic::MissingDecisionEvidence,
+            ]
+        );
+    }
+
+    #[test]
+    fn payment_outcome_diagnostics_have_set_semantics() {
+        let outcome = PaymentOutcome {
+            status: PaymentStatus::Unknown,
+            transaction_id: None,
+            customer_vault_id: None,
+            response: None,
+            response_code: None,
+            response_text: None,
+            condition: None,
+            descriptor: PaymentDescriptor::default(),
+            diagnostics: vec![
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+                PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+            ],
+        }
+        .normalize_diagnostics();
+
+        assert_eq!(
+            outcome.diagnostics(),
+            &[
+                PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,
+                PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
+            ]
+        );
+    }
 }

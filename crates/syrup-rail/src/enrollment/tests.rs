@@ -131,6 +131,7 @@ fn approved_result_confirmation(transaction_id: &str) -> ApprovedProcessorEviden
 }
 
 #[test]
+#[allow(deprecated)]
 fn payment_result_constructors_reject_crossed_state_invariants() {
     let approved = result_test_attempt(PaymentAttemptStatus::Approved);
     let pending = result_test_attempt(PaymentAttemptStatus::Pending);
@@ -152,10 +153,23 @@ fn payment_result_constructors_reject_crossed_state_invariants() {
     let durable_host_result = HostChargePaymentResult::new(host_attempt.clone()).unwrap();
     let host_result = durable_host_result
         .clone()
-        .with_gateway_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+        .with_observation_diagnostics(vec![
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+            GatewayPaymentDiagnostic::IndeterminatePaymentOutcome,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]);
     assert_eq!(host_result, durable_host_result);
     assert_eq!(
-        host_result.gateway_diagnostics(),
+        host_result.observation_diagnostics(),
+        &[
+            GatewayPaymentDiagnostic::IndeterminatePaymentOutcome,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]
+    );
+    let legacy_host_result = durable_host_result
+        .with_gateway_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+    assert_eq!(
+        legacy_host_result.gateway_diagnostics(),
         &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
     );
     assert_eq!(
@@ -244,7 +258,7 @@ fn payment_result_constructors_reject_crossed_state_invariants() {
     assert_eq!(applied.subscription(), Some(&subscription));
     assert!(!applied.is_confirmation_pending());
     let (_, applied_subscription, applied_confirmation, applied_diagnostics) =
-        applied.into_parts_with_gateway_diagnostics();
+        applied.into_parts_with_observation_diagnostics();
     assert_eq!(applied_subscription, Some(subscription));
     assert_eq!(applied_confirmation, None);
     assert!(applied_diagnostics.is_empty());
@@ -253,19 +267,40 @@ fn payment_result_constructors_reject_crossed_state_invariants() {
         SubscriptionEnrollmentPaymentResult::not_applied(pending.clone()).unwrap();
     let not_applied = durable_not_applied
         .clone()
-        .with_gateway_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+        .with_observation_diagnostics(vec![
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+            GatewayPaymentDiagnostic::IndeterminatePaymentOutcome,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]);
     assert_eq!(not_applied, durable_not_applied);
     assert_eq!(not_applied.status(), PaymentAttemptStatus::Pending);
     assert_eq!(not_applied.subscription(), None);
     assert!(!not_applied.is_confirmation_pending());
     assert_eq!(
-        not_applied.gateway_diagnostics(),
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        not_applied.observation_diagnostics(),
+        &[
+            GatewayPaymentDiagnostic::IndeterminatePaymentOutcome,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]
     );
-    let (_, _, _, diagnostics) = not_applied.into_parts_with_gateway_diagnostics();
+    let (_, _, _, diagnostics) = not_applied.into_parts_with_observation_diagnostics();
     assert_eq!(
         diagnostics,
-        vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        vec![
+            GatewayPaymentDiagnostic::IndeterminatePaymentOutcome,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]
+    );
+    let legacy_not_applied = durable_not_applied
+        .with_gateway_diagnostics(vec![GatewayPaymentDiagnostic::IndeterminatePaymentOutcome]);
+    assert_eq!(
+        legacy_not_applied.gateway_diagnostics(),
+        &[GatewayPaymentDiagnostic::IndeterminatePaymentOutcome]
+    );
+    let (_, _, _, legacy_diagnostics) = legacy_not_applied.into_parts_with_gateway_diagnostics();
+    assert_eq!(
+        legacy_diagnostics,
+        vec![GatewayPaymentDiagnostic::IndeterminatePaymentOutcome]
     );
 
     let confirmation_pending = SubscriptionEnrollmentPaymentResult::confirmation_pending(

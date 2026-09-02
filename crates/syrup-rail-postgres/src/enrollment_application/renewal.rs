@@ -24,13 +24,14 @@ use super::{
     OutcomeResolutionCommand, PreparedAttemptReplay, RENEWAL_APPROVED_STORAGE_FAILURE_TEXT,
     RENEWAL_INCOMPLETE_APPROVAL_TEXT, RENEWAL_STALE_STATE_TEXT, RateLimitCooldown,
     SubscriptionEnrollmentApplicationError, advance_subscription_discount_after_successful_charge,
-    clear_resolved_attempt_submission, commit_rate_limit_cooldown, finalize_approved_application,
-    is_retryable_evidence_error, load_applied_subscription, load_subscription,
-    lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
-    map_attempt_transition_error, mark_attempt_approved, mutation_error_evidence,
-    park_locked_attempt, payment_result_for_attempt, payment_result_for_reservation_attempt,
-    persist_attempt_transition, renewal_subscription_matches, resolve_pool_outcome,
-    set_application_timeouts,
+    append_subscription_observation_diagnostics, clear_resolved_attempt_submission,
+    commit_rate_limit_cooldown, finalize_approved_application, is_retryable_evidence_error,
+    load_applied_subscription, load_subscription, lock_expected_reservation_attempt,
+    lock_payment_method_domain, lock_subscription_aggregate, map_attempt_transition_error,
+    mark_attempt_approved, mutation_error_evidence, park_locked_attempt,
+    payment_result_for_attempt, payment_result_for_reservation_attempt, persist_attempt_transition,
+    reconcile_non_approved_evidence, renewal_subscription_matches, resolve_pool_outcome,
+    set_application_timeouts, stop_conflicting_subscription_approval,
 };
 
 /// One committed final-admission result authorizing exactly one immediate
@@ -238,7 +239,7 @@ pub async fn apply_subscription_renewal_gateway_outcome(
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     apply_subscription_renewal_gateway_decision(pool, coordinator, reservation, outcome)
         .await
-        .map(|result| result.with_gateway_diagnostics(outcome.diagnostics().to_vec()))
+        .map(|result| append_subscription_observation_diagnostics(result, outcome.diagnostics()))
 }
 
 async fn apply_subscription_renewal_gateway_decision(
@@ -402,6 +403,12 @@ async fn apply_renewal_approved_on_connection(
     let attempt =
         lock_expected_reservation_attempt(connection, OutcomeReservation::Renewal(reservation))
             .await?;
+
+    let (conflicting_payment, conflict_diagnostics) =
+        stop_conflicting_subscription_approval(connection, &attempt, evidence).await?;
+    if let Some(payment) = conflicting_payment {
+        return Ok((payment, None));
+    }
     if attempt.status() == PaymentAttemptStatus::Approved {
         let subscription = load_applied_subscription(connection, &attempt)
             .await?
@@ -442,13 +449,12 @@ async fn apply_renewal_approved_on_connection(
             )
             .await?;
         }
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(
-                attempt,
-                approved_evidence.clone(),
-            )?,
-            None,
-        ));
+        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
+            attempt,
+            approved_evidence.clone(),
+        )?
+        .with_observation_diagnostics(conflict_diagnostics);
+        return Ok((payment, None));
     }
     let observation = observe_processor_charge(
         connection,
@@ -627,6 +633,14 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
         lock_subscription_aggregate(connection, identity.subscriber_id(), reservation.plan_key())
             .await?;
         let attempt = lock_expected_reservation_attempt(connection, reservation).await?;
+        let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
+        let diagnostics = reconciled.identity_conflict_diagnostics();
+        let resolution = if reconciled.has_identity_conflict() {
+            OutcomeResolutionCommand::unknown(None)
+        } else {
+            resolution
+        };
+        let evidence = &reconciled.evidence;
         let may_resolve = resolution.may_resolve(
             attempt.status(),
             attempt.state().timestamps().submitted_at().is_some(),
@@ -672,7 +686,10 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
                 }
             }
         }
-        let result = payment_result_for_reservation_attempt(connection, reservation).await?;
+        let result = append_subscription_observation_diagnostics(
+            payment_result_for_reservation_attempt(connection, reservation).await?,
+            &diagnostics,
+        );
         Ok::<_, SubscriptionEnrollmentApplicationError>((result, events, may_resolve))
     }
     .await;

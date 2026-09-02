@@ -7,7 +7,7 @@ use super::super::{
 };
 use super::common::{
     DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedPaymentDecision,
-    ResolvedScalar, ScalarOccurrence, ScalarOccurrenceCollector, finalize_foreground_identifiers,
+    ResolvedScalar, ScalarOccurrence, ScalarOccurrenceCollector, finalize_payment_identifiers,
     rate_limited_wire_error, resolve_optional_scalar,
 };
 
@@ -131,7 +131,7 @@ pub(in crate::client) fn payment_outcome_from_json(
         resolve_optional_scalar(collect_json_direct_scalar(value, "response_text", true).finish());
     let mut status = decision.status;
     let mut diagnostics = decision.diagnostics;
-    let (transaction_id, customer_vault_id) = finalize_foreground_identifiers(
+    let (transaction_id, customer_vault_id) = finalize_payment_identifiers(
         &mut status,
         collect_json_identifier(
             value,
@@ -151,7 +151,8 @@ pub(in crate::client) fn payment_outcome_from_json(
         condition: sensitive_gateway_field(decision.condition),
         descriptor: descriptor_from_json(value),
         diagnostics,
-    })
+    }
+    .normalize_diagnostics())
 }
 
 fn payment_decision_from_json(value: &LosslessJsonValue) -> ResolvedPaymentDecision {

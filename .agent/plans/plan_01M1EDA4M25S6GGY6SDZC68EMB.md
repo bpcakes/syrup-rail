@@ -30,6 +30,10 @@ package release, and verify the full repository gates.
   `Approved` outcome. This is the appropriate authority for missing-identity
   handling; the wire parser should reserve its stronger anomaly for conflicting
   or malformed non-empty identifiers.
+- NMI's published response contract does not guarantee that processor-originated
+  codes `400`, `440`, or `441` had no financial effect. Treating broad
+  `response=3` evidence as a determinate failure also conflated a provider error
+  with the more specific payment certainty carried by `response_code`.
 
 ## Decision Log
 
@@ -47,13 +51,22 @@ package release, and verify the full repository gates.
   non-exhaustive fallback maps future provider diagnostics to
   `UnmappedProviderDiagnostic`, so adding a raw diagnostic cannot silently
   erase all provenance again.
+- Preserve broad provider-error evidence until detailed decision evidence is
+  reduced. Processor-originated errors without a no-effect guarantee remain
+  `Unknown` and cross the adapter as a typed reconciliation diagnostic.
+- Give gateway diagnostics set semantics at the core boundary: normalize and
+  deduplicate them, expose membership routing, and explicitly make sequence
+  non-semantic.
 
 ## Outcomes & Retrospective
 
 - Commit `5f1b38d` makes foreground mutation parsing distinguish absent
-  transaction identity from contradictory identity evidence. All documented
-  terminal NMI error codes now remain determinate with blank identity, while
-  approved outcomes and mixed blank/non-empty aliases still fail closed.
+  transaction identity from contradictory identity evidence. The review
+  follow-up preserves broad provider-error evidence until detailed codes resolve
+  certainty: documented gateway/configuration failures remain determinate,
+  while processor-originated errors without a no-effect guarantee remain
+  reconcilable. Approved outcomes and mixed blank/non-empty aliases still fail
+  closed.
 - Commit `bca2bc7` expands the provider-neutral anomaly vocabulary and maps
   every current raw NMI diagnostic, including a future-proof non-exhaustive
   fallback.
@@ -94,8 +107,10 @@ provider-neutral diagnostic contract, and
 
 ## Validation and acceptance
 
-- NMI terminal codes 300, 400, 410, 411, 440, 441, 460, and 461 remain
-  `Failed` when the response supplies an empty transaction identifier.
+- NMI determinate failure codes 300, 410, 411, 460, and 461 remain `Failed`
+  when the response supplies an empty transaction identifier.
+- Processor-originated codes 400, 440, and 441 remain `Unknown` with typed
+  indeterminate-processor provenance.
 - Approved responses with an empty transaction identifier remain `Unknown`
   with a missing-identity diagnostic.
 - Empty plus non-empty aliases remain `Unknown` with an invalid/conflicting

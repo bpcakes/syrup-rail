@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::gateway::normalize_gateway_payment_diagnostics;
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
     ChargeAmount, DiscountClaimId, DiscountCodeId, GatewayAccountMode, GatewayConfigurationId,
@@ -592,7 +593,7 @@ pub enum SubscriptionEnrollmentSubmissionOutcome {
 pub struct SubscriptionEnrollmentPaymentResult {
     attempt: PaymentAttempt,
     state: SubscriptionEnrollmentPaymentResultState,
-    gateway_diagnostics: Vec<GatewayPaymentDiagnostic>,
+    observation_diagnostics: Vec<GatewayPaymentDiagnostic>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -650,7 +651,7 @@ impl SubscriptionEnrollmentPaymentResult {
         Ok(Self {
             attempt,
             state: SubscriptionEnrollmentPaymentResultState::Applied(subscription),
-            gateway_diagnostics: Vec::new(),
+            observation_diagnostics: Vec::new(),
         })
     }
 
@@ -665,7 +666,7 @@ impl SubscriptionEnrollmentPaymentResult {
         Ok(Self {
             attempt,
             state: SubscriptionEnrollmentPaymentResultState::NotApplied,
-            gateway_diagnostics: Vec::new(),
+            observation_diagnostics: Vec::new(),
         })
     }
 
@@ -686,7 +687,7 @@ impl SubscriptionEnrollmentPaymentResult {
         Ok(Self {
             attempt,
             state: SubscriptionEnrollmentPaymentResultState::ConfirmationPending(evidence),
-            gateway_diagnostics: Vec::new(),
+            observation_diagnostics: Vec::new(),
         })
     }
 
@@ -695,16 +696,36 @@ impl SubscriptionEnrollmentPaymentResult {
     ///
     /// These diagnostics are foreground routing facts, not durable attempt
     /// state. A later replay reconstructs the canonical payment result from
-    /// persisted processor evidence and may not contain them.
-    pub fn with_gateway_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
-        self.gateway_diagnostics = diagnostics;
+    /// persisted processor evidence and may not contain them. Duplicate values
+    /// are removed and order carries no chronology or precedence semantics.
+    pub fn with_observation_diagnostics(
+        mut self,
+        diagnostics: Vec<GatewayPaymentDiagnostic>,
+    ) -> Self {
+        self.observation_diagnostics = normalize_gateway_payment_diagnostics(diagnostics);
         self
     }
 
     /// Returns payload-free diagnostics from the gateway observation applied
-    /// by the current call.
+    /// by the current call. Route by membership rather than sequence.
+    pub fn observation_diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
+        &self.observation_diagnostics
+    }
+
+    #[deprecated(
+        since = "0.5.1",
+        note = "use SubscriptionEnrollmentPaymentResult::with_observation_diagnostics"
+    )]
+    pub fn with_gateway_diagnostics(self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
+        self.with_observation_diagnostics(diagnostics)
+    }
+
+    #[deprecated(
+        since = "0.5.1",
+        note = "use SubscriptionEnrollmentPaymentResult::observation_diagnostics"
+    )]
     pub fn gateway_diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
-        &self.gateway_diagnostics
+        self.observation_diagnostics()
     }
 
     pub const fn attempt(&self) -> &PaymentAttempt {
@@ -750,10 +771,10 @@ impl SubscriptionEnrollmentPaymentResult {
 
     /// Consumes the result into its original durable parts.
     ///
-    /// This compatibility method drops foreground gateway diagnostics. Use
-    /// [`Self::into_parts_with_gateway_diagnostics`] when routing them matters.
+    /// This compatibility method drops observation-local diagnostics. Use
+    /// [`Self::into_parts_with_observation_diagnostics`] when routing them matters.
     #[deprecated(
-        note = "this drops gateway diagnostics; use SubscriptionEnrollmentPaymentResult::into_parts_with_gateway_diagnostics"
+        note = "this drops observation diagnostics; use SubscriptionEnrollmentPaymentResult::into_parts_with_observation_diagnostics"
     )]
     pub fn into_parts(
         self,
@@ -763,12 +784,12 @@ impl SubscriptionEnrollmentPaymentResult {
         Option<ProcessorEvidence>,
     ) {
         let (attempt, subscription, pending_evidence, _) =
-            self.into_parts_with_gateway_diagnostics();
+            self.into_parts_with_observation_diagnostics();
         (attempt, subscription, pending_evidence)
     }
 
-    /// Consumes the result without discarding foreground gateway diagnostics.
-    pub fn into_parts_with_gateway_diagnostics(
+    /// Consumes the result without discarding observation-local diagnostics.
+    pub fn into_parts_with_observation_diagnostics(
         self,
     ) -> (
         PaymentAttempt,
@@ -776,7 +797,7 @@ impl SubscriptionEnrollmentPaymentResult {
         Option<ProcessorEvidence>,
         Vec<GatewayPaymentDiagnostic>,
     ) {
-        let diagnostics = self.gateway_diagnostics;
+        let diagnostics = self.observation_diagnostics;
         let (attempt, subscription, pending_evidence) = match self.state {
             SubscriptionEnrollmentPaymentResultState::Applied(subscription) => {
                 (self.attempt, Some(subscription), None)
@@ -787,6 +808,21 @@ impl SubscriptionEnrollmentPaymentResult {
             }
         };
         (attempt, subscription, pending_evidence, diagnostics)
+    }
+
+    #[deprecated(
+        since = "0.5.1",
+        note = "use SubscriptionEnrollmentPaymentResult::into_parts_with_observation_diagnostics"
+    )]
+    pub fn into_parts_with_gateway_diagnostics(
+        self,
+    ) -> (
+        PaymentAttempt,
+        Option<Subscription>,
+        Option<ProcessorEvidence>,
+        Vec<GatewayPaymentDiagnostic>,
+    ) {
+        self.into_parts_with_observation_diagnostics()
     }
 }
 

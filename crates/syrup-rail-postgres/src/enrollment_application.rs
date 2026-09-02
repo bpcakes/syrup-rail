@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool, Row};
 use syrup_rail::{
     BillingEvent, BillingScopeId, GatewayAccountMode, GatewayDiagnostic, GatewayError,
-    GatewayNotSubmittedError, GatewayOrderId, GatewayProviderKey, PaymentAttempt,
-    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptStatus,
-    PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorChargeProgression, ProcessorEvidence,
-    SubscriberId, Subscription, SubscriptionEnrollmentPaymentResult,
-    SubscriptionEnrollmentPaymentResultBuildError, SubscriptionEnrollmentReservation,
-    SubscriptionId, SubscriptionPaymentMethodReplacement, SubscriptionRecoveryReservation,
-    SubscriptionRenewalReservation,
+    GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDiagnostic, GatewayProviderKey,
+    PaymentAttempt, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
+    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey,
+    ProcessorChargeProgression, ProcessorEvidence, SubscriberId, Subscription,
+    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPaymentResultBuildError,
+    SubscriptionEnrollmentReservation, SubscriptionId, SubscriptionPaymentMethodReplacement,
+    SubscriptionRecoveryReservation, SubscriptionRenewalReservation,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -24,6 +24,7 @@ use crate::{
     },
     processor_charges::{
         LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, observe_processor_charge,
+        promote_conflicting_charge_to_external_reversal,
     },
     renewal_failure::RenewalFailureStoreError,
     subscription_persistence::{
@@ -793,6 +794,15 @@ impl OutcomeApplication {
     }
 }
 
+pub(crate) fn append_subscription_observation_diagnostics(
+    result: SubscriptionEnrollmentPaymentResult,
+    diagnostics: &[GatewayPaymentDiagnostic],
+) -> SubscriptionEnrollmentPaymentResult {
+    let mut combined = result.observation_diagnostics().to_vec();
+    combined.extend_from_slice(diagnostics);
+    result.with_observation_diagnostics(combined)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PreparedAttemptReplay {
     Supported,
@@ -819,7 +829,6 @@ async fn resolve_pool_outcome(
     resolution: OutcomeResolutionCommand,
 ) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
-    let prepared_attempt_replay = reservation.prepared_attempt_replay();
     if let Some(cooldown) = resolution.cooldown {
         commit_rate_limit_cooldown(pool, reservation, cooldown).await?;
     }
@@ -832,6 +841,241 @@ async fn resolve_pool_outcome(
     )
     .await?;
     let attempt = lock_expected_reservation_attempt(&mut transaction, reservation).await?;
+    let application =
+        resolve_locked_outcome(&mut transaction, reservation, attempt, evidence, resolution)
+            .await?;
+    transaction.commit().await?;
+    Ok(application)
+}
+
+pub(crate) struct ReconciledNonApprovedEvidence {
+    pub(crate) evidence: ProcessorEvidence,
+    pub(crate) transaction_id_conflict: bool,
+    pub(crate) payment_method_reference_conflict: bool,
+    discarded_transaction_id: bool,
+    discarded_payment_method_reference: bool,
+}
+
+impl ReconciledNonApprovedEvidence {
+    pub(crate) const fn has_identity_conflict(&self) -> bool {
+        self.transaction_id_conflict || self.payment_method_reference_conflict
+    }
+
+    pub(crate) fn identity_conflict_diagnostics(&self) -> Vec<GatewayPaymentDiagnostic> {
+        identity_conflict_diagnostics(
+            self.transaction_id_conflict || self.discarded_transaction_id,
+            self.payment_method_reference_conflict || self.discarded_payment_method_reference,
+        )
+    }
+}
+
+fn identity_conflict_diagnostics(
+    transaction_id_conflict: bool,
+    payment_method_reference_conflict: bool,
+) -> Vec<GatewayPaymentDiagnostic> {
+    let mut diagnostics = Vec::with_capacity(2);
+    if transaction_id_conflict {
+        diagnostics.push(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier);
+    }
+    if payment_method_reference_conflict {
+        diagnostics.push(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference);
+    }
+    diagnostics
+}
+
+pub(crate) fn processor_identity_conflict_diagnostics(
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> Vec<GatewayPaymentDiagnostic> {
+    let persisted = attempt.state().processor_evidence();
+    identity_conflict_diagnostics(
+        identifiers_conflict(persisted.transaction_id(), observed.transaction_id()),
+        identifiers_conflict(
+            persisted.payment_method_reference(),
+            observed.payment_method_reference(),
+        ),
+    )
+}
+
+pub(crate) fn same_processor_transaction(
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> bool {
+    let persisted = attempt.state().processor_evidence().transaction_id();
+    persisted.is_some() && persisted == observed.transaction_id()
+}
+
+/// Stops a conflicting approval before it can replace the durable identity or
+/// mutate subscription state. The newly observed charge remains traceable for
+/// operator reconciliation while the canonical attempt stays unresolved.
+pub(crate) async fn stop_conflicting_subscription_approval(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> Result<
+    (
+        Option<SubscriptionEnrollmentPaymentResult>,
+        Vec<GatewayPaymentDiagnostic>,
+    ),
+    SubscriptionEnrollmentApplicationError,
+> {
+    let diagnostics = processor_identity_conflict_diagnostics(attempt, observed);
+    if diagnostics.is_empty() {
+        return Ok((None, diagnostics));
+    }
+    if !attempt.status().is_resolvable() && attempt.status() != PaymentAttemptStatus::Approved {
+        return Ok((None, diagnostics));
+    }
+    if attempt.status() == PaymentAttemptStatus::Approved
+        && same_processor_transaction(attempt, observed)
+    {
+        let payment = payment_result_for_attempt(connection, attempt.clone()).await?;
+        return Ok((
+            Some(payment.with_observation_diagnostics(diagnostics)),
+            Vec::new(),
+        ));
+    }
+    let progression = if attempt.status().is_resolvable() || attempt.request().amount().cents() == 0
+    {
+        ProcessorChargeProgression::ReconciliationRequired
+    } else {
+        ProcessorChargeProgression::ExternalReversalRequired
+    };
+    let observation = observe_processor_charge(connection, attempt, observed, progression).await?;
+    if progression == ProcessorChargeProgression::ExternalReversalRequired
+        && observed.transaction_id().is_some()
+    {
+        promote_conflicting_charge_to_external_reversal(connection, observation).await?;
+    }
+    let payment = payment_result_for_attempt(connection, attempt.clone()).await?;
+    Ok((
+        Some(payment.with_observation_diagnostics(diagnostics)),
+        Vec::new(),
+    ))
+}
+
+/// Builds durable non-approved evidence without treating fields from separate
+/// processor observations as one approving response.
+///
+/// A concrete identity conflict preserves the established forensic bundle and
+/// forces callers to leave the attempt unresolved. Otherwise the current
+/// observation owns the complete decision and descriptor bundles. Missing
+/// identity fields may retain established values, but an unanchored partial
+/// identity cannot delete or replace an existing durable bundle.
+pub(crate) fn reconcile_non_approved_evidence(
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> ReconciledNonApprovedEvidence {
+    let persisted = attempt.state().processor_evidence();
+    let transaction_id_conflict =
+        identifiers_conflict(persisted.transaction_id(), observed.transaction_id());
+    let payment_method_reference_conflict = identifiers_conflict(
+        persisted.payment_method_reference(),
+        observed.payment_method_reference(),
+    );
+    if !attempt.status().is_resolvable() {
+        return ReconciledNonApprovedEvidence {
+            evidence: observed.clone(),
+            transaction_id_conflict,
+            payment_method_reference_conflict,
+            discarded_transaction_id: false,
+            discarded_payment_method_reference: false,
+        };
+    }
+    if transaction_id_conflict || payment_method_reference_conflict {
+        return ReconciledNonApprovedEvidence {
+            evidence: persisted.clone(),
+            transaction_id_conflict,
+            payment_method_reference_conflict,
+            discarded_transaction_id: false,
+            discarded_payment_method_reference: false,
+        };
+    }
+
+    let observed_transaction_id = observed.transaction_id();
+    let observed_payment_method_reference = observed.payment_method_reference();
+    let persisted_transaction_id = persisted.transaction_id();
+    let persisted_payment_method_reference = persisted.payment_method_reference();
+    // A partial identity from a different observation cannot be spliced onto
+    // the established sibling. Preserve the durable bundle, but make the
+    // rejected field observable to host policy instead of silently dropping
+    // it.
+    let discarded_transaction_id = observed_transaction_id.is_some()
+        && observed_payment_method_reference.is_none()
+        && persisted_transaction_id.is_none()
+        && persisted_payment_method_reference.is_some();
+    let discarded_payment_method_reference = observed_transaction_id.is_none()
+        && observed_payment_method_reference.is_some()
+        && persisted_transaction_id.is_some()
+        && persisted_payment_method_reference.is_none();
+    let (transaction_id, payment_method_reference) =
+        match (observed_transaction_id, observed_payment_method_reference) {
+            (None, None) => (
+                persisted_transaction_id.cloned(),
+                persisted_payment_method_reference.cloned(),
+            ),
+            (Some(transaction_id), Some(payment_method_reference)) => (
+                Some(transaction_id.clone()),
+                Some(payment_method_reference.clone()),
+            ),
+            (Some(transaction_id), None) if persisted_transaction_id == Some(transaction_id) => (
+                Some(transaction_id.clone()),
+                persisted_payment_method_reference.cloned(),
+            ),
+            (None, Some(payment_method_reference))
+                if persisted_payment_method_reference == Some(payment_method_reference) =>
+            {
+                (
+                    persisted_transaction_id.cloned(),
+                    Some(payment_method_reference.clone()),
+                )
+            }
+            (Some(transaction_id), None) if !persisted.has_gateway_reference() => {
+                (Some(transaction_id.clone()), None)
+            }
+            (None, Some(payment_method_reference)) if !persisted.has_gateway_reference() => {
+                (None, Some(payment_method_reference.clone()))
+            }
+            (Some(_), None) | (None, Some(_)) => (
+                persisted_transaction_id.cloned(),
+                persisted_payment_method_reference.cloned(),
+            ),
+        };
+    ReconciledNonApprovedEvidence {
+        evidence: ProcessorEvidence::new(
+            transaction_id,
+            payment_method_reference,
+            observed.response().cloned(),
+            observed.response_code().cloned(),
+            observed.response_text().cloned(),
+            observed.condition().cloned(),
+            observed.descriptor().clone(),
+        ),
+        transaction_id_conflict: false,
+        payment_method_reference_conflict: false,
+        discarded_transaction_id,
+        discarded_payment_method_reference,
+    }
+}
+
+fn identifiers_conflict<T: Eq>(persisted: Option<&T>, observed: Option<&T>) -> bool {
+    matches!((persisted, observed), (Some(persisted), Some(observed)) if persisted != observed)
+}
+
+async fn resolve_locked_outcome(
+    connection: &mut PgConnection,
+    reservation: OutcomeReservation<'_>,
+    attempt: PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    mut resolution: OutcomeResolutionCommand,
+) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
+    let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
+    let diagnostics = reconciled.identity_conflict_diagnostics();
+    if reconciled.has_identity_conflict() {
+        resolution = OutcomeResolutionCommand::unknown(None);
+    }
+    let evidence = &reconciled.evidence;
+    let prepared_attempt_replay = reservation.prepared_attempt_replay();
     let applied = resolution.may_resolve(
         attempt.status(),
         attempt.state().timestamps().submitted_at().is_some(),
@@ -839,7 +1083,7 @@ async fn resolve_pool_outcome(
     if applied {
         let status = resolution.resolved_status(reservation.operation(), attempt.status());
         persist_attempt_transition(
-            &mut transaction,
+            connection,
             &attempt,
             evidence,
             AttemptTransition::Resolved {
@@ -850,11 +1094,11 @@ async fn resolve_pool_outcome(
         .await
         .map_err(map_attempt_transition_error)?;
         if resolution.clears_submitted_at() {
-            clear_resolved_attempt_submission(&mut transaction, &attempt).await?;
+            clear_resolved_attempt_submission(connection, &attempt).await?;
         }
         if resolution.records_pending_evidence(status) && evidence.indicates_approved_payment() {
             observe_processor_charge(
-                &mut transaction,
+                connection,
                 &attempt,
                 evidence,
                 ProcessorChargeProgression::Pending,
@@ -862,8 +1106,10 @@ async fn resolve_pool_outcome(
             .await?;
         }
     }
-    let result = payment_result_for_reservation_attempt(&mut transaction, reservation).await?;
-    transaction.commit().await?;
+    let result = append_subscription_observation_diagnostics(
+        payment_result_for_reservation_attempt(connection, reservation).await?,
+        &diagnostics,
+    );
     Ok(OutcomeApplication {
         payment: result,
         applied,
@@ -1515,10 +1761,24 @@ pub(crate) async fn park_locked_attempt(
     resolution_code: Option<PaymentResolutionCode>,
     message: &'static str,
 ) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    // A late approval is a separate processor observation. Its raw evidence is
+    // stored in the charge ledger before callers park the attempt, so replacing
+    // an existing attempt snapshot here would either erase a sparse durable
+    // identity or manufacture a cross-observation bundle. Only a still-pending
+    // attempt without an established gateway reference adopts this observation
+    // as its first attempt-level evidence.
+    let durable_evidence = attempt.state().processor_evidence();
+    let attempt_evidence = if attempt.status() == PaymentAttemptStatus::Pending
+        && !durable_evidence.has_gateway_reference()
+    {
+        evidence
+    } else {
+        durable_evidence
+    };
     persist_attempt_transition(
         connection,
         attempt,
-        evidence,
+        attempt_evidence,
         AttemptTransition::LateApprovalReview {
             resolution_code,
             message,

@@ -1,13 +1,11 @@
-use std::{fmt, num::NonZeroU32, sync::Arc};
+use std::{fmt, num::NonZeroU32};
 
-use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use crate::{
     BillingContact, ChargeAmount, GatewayDiagnostic, GatewayLifecycleCursorKey, GatewayOrderId,
-    GatewayPaymentMethodReference, GatewayTransactionId, PaymentAttemptId, PaymentAttemptKind,
-    PaymentToken,
+    GatewayPaymentMethodReference, GatewayTransactionId, PaymentToken,
 };
 
 /// Cooldown applied after a determinate account- or provider-scoped mutation
@@ -20,8 +18,13 @@ pub use self::lifecycle::{
     GatewayLifecycleQuarantineResolutionReason, GatewayLifecycleQuarantineResolutionReasonError,
     GatewayLifecycleState, GatewayTransactionReport, PaymentReversalKind,
 };
+pub use self::port::{
+    GatewayError, GatewayMutationError, GatewayMutationReferenceFactory, GatewayNotSubmittedError,
+    MutationCertainty, PaymentGateway, SharedGatewayMutationReferenceFactory, SharedPaymentGateway,
+};
 
 mod lifecycle;
+mod port;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayAccountMode {
@@ -286,11 +289,53 @@ pub enum GatewayPaymentStatus {
     Failed,
 }
 
+// Keep the public enum and its exhaustive variant list generated from one
+// declaration so adding a diagnostic cannot silently escape policy tests.
+macro_rules! define_gateway_payment_diagnostics {
+    (
+        $(#[$enum_meta:meta])*
+        pub enum $name:ident {
+            $(
+                $(#[$variant_meta:meta])*
+                $variant:ident
+            ),+ $(,)?
+        }
+    ) => {
+        $(#[$enum_meta])*
+        pub enum $name {
+            $(
+                $(#[$variant_meta])*
+                $variant,
+            )+
+        }
+
+        impl $name {
+            /// Every provider-neutral payment diagnostic supported by this
+            /// version.
+            ///
+            /// Adapters and policy tests can use this list to prove complete
+            /// coverage while retaining a wildcard for future non-exhaustive
+            /// variants. This is the current-version vocabulary, not a closed
+            /// set: compatible releases may append new variants.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+        }
+    };
+}
+
+define_gateway_payment_diagnostics! {
 /// Provider-neutral diagnostics that require host policy beyond the payment
 /// status alone.
 ///
 /// These diagnostics intentionally contain no provider payload. Exact gateway
 /// response fields remain available through [`ProcessorEvidence`].
+/// On [`GatewayPaymentOutcome`] they qualify the current observation and may
+/// force its status to [`GatewayPaymentStatus::Unknown`]. Durable application
+/// results expose them separately as observation-local annotations and never
+/// reinterpret an already persisted attempt status.
+///
+/// Variant declaration order defines the canonical order returned by payment
+/// outcomes. Append new variants, and classify their certainty effect in the
+/// adjacent policy method.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum GatewayPaymentDiagnostic {
@@ -299,16 +344,33 @@ pub enum GatewayPaymentDiagnostic {
     /// An approved processor decision did not include the requested stored
     /// payment-method identity.
     MissingPaymentMethodReference,
-    /// Transaction-identity evidence was malformed or contradictory.
+    /// Transaction-identity evidence was malformed, contradictory, or rejected
+    /// by provider-neutral identifier admission.
+    ///
+    /// Attaching this diagnostic to a [`GatewayPaymentOutcome`] quarantines the
+    /// outcome's transaction identity and prevents an approval from remaining
+    /// authoritative. A determinate decline or failure remains terminal.
     InvalidOrConflictingTransactionIdentifier,
-    /// Stored-payment-method identity evidence was malformed or contradictory.
+    /// Stored-payment-method identity evidence was malformed, contradictory, or
+    /// rejected by provider-neutral identifier admission.
+    ///
+    /// Attaching this diagnostic to a [`GatewayPaymentOutcome`] quarantines the
+    /// outcome's payment-method reference and prevents an approval from
+    /// remaining authoritative. A determinate decline or failure remains
+    /// terminal.
     InvalidOrConflictingPaymentMethodReference,
     /// One processor decision field was malformed or internally contradictory.
     InvalidOrConflictingDecisionField,
+    /// The provider reported an error without proving that the attempted
+    /// payment had no financial effect.
+    ///
+    /// Reconcile the durable attempt before retrying or treating it as failed.
+    IndeterminatePaymentOutcome,
     /// The processor reported the payment as a duplicate.
     ///
     /// This does not prove that the current attempt was submitted or identify
-    /// an earlier transaction. Reconcile the durable attempt before retrying.
+    /// an earlier transaction. It forces an unknown outcome; reconcile the
+    /// durable attempt before retrying.
     ProcessorReportedDuplicate,
     /// Individually recognized processor decision fields disagreed.
     ConflictingDecisionEvidence,
@@ -318,7 +380,55 @@ pub enum GatewayPaymentDiagnostic {
     MissingDecisionEvidence,
     /// The provider adapter received a newer payload-free diagnostic category
     /// that the current provider-neutral contract does not yet name.
+    ///
+    /// Treat the outcome conservatively and update the adapter before routing
+    /// on the new category. This fallback preserves anomaly provenance when a
+    /// provider client and its adapter are upgraded independently.
     UnmappedProviderDiagnostic,
+}
+}
+
+impl GatewayPaymentDiagnostic {
+    /// Whether this diagnostic means that no terminal payment decision is safe.
+    ///
+    /// Identity diagnostics describe evidence usability, not payment certainty.
+    /// Workflows separately park approvals that lack an identity they require.
+    /// Every decision anomaly and an unreconciled processor duplicate instead
+    /// require exact reconciliation regardless of the provider-reported status.
+    const fn requires_unknown_status(self) -> bool {
+        match self {
+            Self::MissingTransactionIdentifier
+            | Self::MissingPaymentMethodReference
+            | Self::InvalidOrConflictingTransactionIdentifier
+            | Self::InvalidOrConflictingPaymentMethodReference => false,
+            Self::InvalidOrConflictingDecisionField
+            | Self::IndeterminatePaymentOutcome
+            | Self::ProcessorReportedDuplicate
+            | Self::ConflictingDecisionEvidence
+            | Self::UnrecognizedDecisionEvidence
+            | Self::MissingDecisionEvidence
+            | Self::UnmappedProviderDiagnostic => true,
+        }
+    }
+
+    /// Whether this diagnostic prevents a provider-reported approval from
+    /// remaining authoritative.
+    const fn prevents_approval(self) -> bool {
+        self.requires_unknown_status()
+            || matches!(
+                self,
+                Self::InvalidOrConflictingTransactionIdentifier
+                    | Self::InvalidOrConflictingPaymentMethodReference
+            )
+    }
+}
+
+pub(crate) fn normalize_gateway_payment_diagnostics(
+    mut diagnostics: Vec<GatewayPaymentDiagnostic>,
+) -> Vec<GatewayPaymentDiagnostic> {
+    diagnostics.sort_unstable_by_key(|diagnostic| *diagnostic as usize);
+    diagnostics.dedup();
+    diagnostics
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -651,9 +761,48 @@ impl GatewayPaymentOutcome {
         }
     }
 
-    /// Attaches provider-neutral diagnostics derived by a gateway adapter.
+    /// Attaches provider-neutral diagnostics derived by the current gateway
+    /// observation.
+    ///
+    /// Diagnostics have set semantics: duplicate values are removed and the
+    /// returned slice uses a canonical order. Callers should route by membership
+    /// rather than treating that order as provider chronology or precedence.
+    /// Diagnostics about decision certainty and unreconciled processor
+    /// duplicates conservatively force an unknown status regardless of the
+    /// provider-reported status. Missing-identity diagnostics quarantine the
+    /// corresponding field while leaving an approval visible for workflow
+    /// parking. Invalid or conflicting identity instead prevents an approval
+    /// from remaining authoritative, while preserving a determinate decline or
+    /// failure.
+    ///
+    /// A certainty downgrade is monotonic. Replacing the diagnostic set cannot
+    /// restore a terminal decision after earlier evidence made it unknown.
     pub fn with_diagnostics(mut self, diagnostics: Vec<GatewayPaymentDiagnostic>) -> Self {
-        self.diagnostics = diagnostics;
+        self.diagnostics = normalize_gateway_payment_diagnostics(diagnostics);
+        if self.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                GatewayPaymentDiagnostic::MissingTransactionIdentifier
+                    | GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier
+            )
+        }) {
+            self.evidence.transaction_id = None;
+        }
+        if self.diagnostics.iter().any(|diagnostic| {
+            matches!(
+                diagnostic,
+                GatewayPaymentDiagnostic::MissingPaymentMethodReference
+                    | GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference
+            )
+        }) {
+            self.evidence.payment_method_reference = None;
+        }
+        if self.diagnostics.iter().any(|diagnostic| {
+            diagnostic.requires_unknown_status()
+                || self.status == GatewayPaymentStatus::Approved && diagnostic.prevents_approval()
+        }) {
+            self.status = GatewayPaymentStatus::Unknown;
+        }
         self
     }
 
@@ -666,8 +815,18 @@ impl GatewayPaymentOutcome {
     }
 
     /// Returns payload-free diagnostics suitable for host policy and routing.
+    ///
+    /// The slice is deduplicated and canonically ordered. Its order carries no
+    /// provider chronology or policy precedence; use [`Self::has_diagnostic`]
+    /// for membership-based routing.
     pub fn diagnostics(&self) -> &[GatewayPaymentDiagnostic] {
         &self.diagnostics
+    }
+
+    /// Returns whether this outcome contains a particular payload-free
+    /// diagnostic.
+    pub fn has_diagnostic(&self, diagnostic: GatewayPaymentDiagnostic) -> bool {
+        self.diagnostics.contains(&diagnostic)
     }
 
     /// Refines this outcome's evidence only when the provider decision is
@@ -728,234 +887,6 @@ impl GatewayPaymentOutcome {
         self.evidence.descriptor()
     }
 }
-
-#[derive(Error)]
-pub enum GatewayError {
-    #[error("gateway rejected the request before processing")]
-    RequestRejected(GatewayDiagnostic),
-    #[error("gateway response was malformed")]
-    Malformed(GatewayDiagnostic),
-    #[error("gateway configuration is invalid")]
-    Configuration(GatewayDiagnostic),
-    #[error("gateway is unavailable")]
-    Unavailable(GatewayDiagnostic),
-    #[error("gateway rate limit exceeded")]
-    RateLimited(GatewayDiagnostic),
-}
-
-impl fmt::Debug for GatewayError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (variant, detail) = match self {
-            Self::RequestRejected(detail) => ("RequestRejected", detail),
-            Self::Malformed(detail) => ("Malformed", detail),
-            Self::Configuration(detail) => ("Configuration", detail),
-            Self::Unavailable(detail) => ("Unavailable", detail),
-            Self::RateLimited(detail) => ("RateLimited", detail),
-        };
-        formatter
-            .debug_struct(variant)
-            .field("has_detail", &(!detail.is_empty()))
-            .finish()
-    }
-}
-
-impl GatewayError {
-    pub const fn detail(&self) -> &GatewayDiagnostic {
-        match self {
-            Self::RequestRejected(detail)
-            | Self::Malformed(detail)
-            | Self::Configuration(detail)
-            | Self::Unavailable(detail)
-            | Self::RateLimited(detail) => detail,
-        }
-    }
-}
-
-/// Proof from a gateway adapter that the provider never received a mutation.
-///
-/// Returning any variant authorizes ledger-aware callers to restore prepared
-/// work and retry the same provider mutation when policy permits. Adapters must
-/// use [`GatewayMutationError::Indeterminate`] once request transmission may
-/// have begun. Misclassifying an in-flight request as not submitted can cause a
-/// duplicate provider mutation on same-key retry.
-///
-/// This enum is intentionally exhaustive: adding a variant must break every
-/// persistence adapter at compile time so retry safety, durable resolution,
-/// cooldown scope, and host-target consequences are classified together.
-#[derive(Error)]
-pub enum GatewayNotSubmittedError {
-    #[error("gateway rejected the mutation request")]
-    RequestRejected(GatewayDiagnostic),
-    #[error("gateway mutation request is malformed")]
-    Malformed(GatewayDiagnostic),
-    #[error("gateway mutation configuration is invalid")]
-    Configuration(GatewayDiagnostic),
-    /// Transport failed before request transmission began. This is not a
-    /// generic transient transport error: returning it certifies that the
-    /// provider could not have received the mutation.
-    #[error("gateway mutation was not transmitted")]
-    NotTransmitted(GatewayDiagnostic),
-    #[error("gateway mutation was rate limited before submission")]
-    RateLimited(GatewayDiagnostic),
-    /// Reserved for a caller-owned account-mode check performed immediately
-    /// before invoking the mutation endpoint.
-    ///
-    /// Gateway adapters must not return this variant from `sale` or
-    /// `store_payment_method`; verified submission wrappers normalize any such
-    /// adapter response to an ordinary terminal not-submitted error.
-    #[error("gateway account mode changed before mutation submission")]
-    AccountModeMismatch {
-        required: GatewayAccountMode,
-        observed: GatewayAccountMode,
-        detail: GatewayDiagnostic,
-    },
-    /// Reserved for a caller-owned account-mode query performed immediately
-    /// before invoking the mutation endpoint. Gateway adapters must not return
-    /// this variant from mutation methods.
-    #[error("gateway account mode could not be verified before mutation submission")]
-    AccountModeVerification(#[source] GatewayError),
-}
-
-impl fmt::Debug for GatewayNotSubmittedError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (variant, detail) = match self {
-            Self::RequestRejected(detail) => ("RequestRejected", detail),
-            Self::Malformed(detail) => ("Malformed", detail),
-            Self::Configuration(detail) => ("Configuration", detail),
-            Self::NotTransmitted(detail) => ("NotTransmitted", detail),
-            Self::RateLimited(detail) => ("RateLimited", detail),
-            Self::AccountModeMismatch {
-                required,
-                observed,
-                detail,
-            } => {
-                return formatter
-                    .debug_struct("AccountModeMismatch")
-                    .field("required", required)
-                    .field("observed", observed)
-                    .field("has_detail", &(!detail.is_empty()))
-                    .finish();
-            }
-            Self::AccountModeVerification(error) => {
-                return formatter
-                    .debug_tuple("AccountModeVerification")
-                    .field(error)
-                    .finish();
-            }
-        };
-        formatter
-            .debug_struct(variant)
-            .field("has_detail", &(!detail.is_empty()))
-            .finish()
-    }
-}
-
-impl GatewayNotSubmittedError {
-    pub const fn detail(&self) -> &GatewayDiagnostic {
-        match self {
-            Self::RequestRejected(detail)
-            | Self::Malformed(detail)
-            | Self::Configuration(detail)
-            | Self::NotTransmitted(detail)
-            | Self::RateLimited(detail) => detail,
-            Self::AccountModeMismatch { detail, .. } => detail,
-            Self::AccountModeVerification(error) => error.detail(),
-        }
-    }
-}
-
-/// Gateway mutation failure classified by whether provider receipt is possible.
-///
-/// Adapter implementations must return `NotSubmitted` only with proof that no
-/// request bytes could have reached the provider. Once transmission may have
-/// begun, return an indeterminate variant even if the transport later reports
-/// an ordinary unavailable or rate-limit error.
-#[derive(Error)]
-pub enum GatewayMutationError {
-    #[error("gateway mutation was not submitted")]
-    NotSubmitted(#[source] GatewayNotSubmittedError),
-    #[error("gateway mutation was rate limited with an indeterminate outcome")]
-    RateLimitedIndeterminate(GatewayDiagnostic),
-    #[error("gateway mutation outcome is indeterminate")]
-    Indeterminate(GatewayDiagnostic),
-}
-
-impl fmt::Debug for GatewayMutationError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotSubmitted(error) => {
-                formatter.debug_tuple("NotSubmitted").field(error).finish()
-            }
-            Self::RateLimitedIndeterminate(detail) => formatter
-                .debug_struct("RateLimitedIndeterminate")
-                .field("has_detail", &(!detail.is_empty()))
-                .finish(),
-            Self::Indeterminate(detail) => formatter
-                .debug_struct("Indeterminate")
-                .field("has_detail", &(!detail.is_empty()))
-                .finish(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MutationCertainty {
-    /// The adapter certifies that the provider never received the request.
-    /// Ledger-aware callers may use this proof to permit same-key resubmission.
-    NotSubmitted,
-    Indeterminate,
-}
-
-impl GatewayMutationError {
-    pub const fn detail(&self) -> &GatewayDiagnostic {
-        match self {
-            Self::NotSubmitted(error) => error.detail(),
-            Self::RateLimitedIndeterminate(detail) | Self::Indeterminate(detail) => detail,
-        }
-    }
-
-    pub const fn certainty(&self) -> MutationCertainty {
-        match self {
-            Self::NotSubmitted(_) => MutationCertainty::NotSubmitted,
-            Self::RateLimitedIndeterminate(_) | Self::Indeterminate(_) => {
-                MutationCertainty::Indeterminate
-            }
-        }
-    }
-}
-
-#[async_trait]
-pub trait PaymentGateway: Send + Sync {
-    async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError>;
-
-    async fn sale(
-        &self,
-        request: GatewaySaleRequest,
-    ) -> Result<GatewayPaymentOutcome, GatewayMutationError>;
-
-    async fn store_payment_method(
-        &self,
-        request: GatewayStorePaymentMethodRequest,
-    ) -> Result<GatewayPaymentOutcome, GatewayMutationError>;
-
-    async fn query_transaction(
-        &self,
-        request: GatewayQueryRequest,
-    ) -> Result<Option<GatewayPaymentOutcome>, GatewayError>;
-
-    async fn query_transaction_reports(
-        &self,
-        request: GatewayTransactionReportRequest,
-    ) -> Result<Vec<GatewayTransactionReport>, GatewayError>;
-}
-
-pub trait GatewayMutationReferenceFactory: Send + Sync {
-    fn for_attempt(&self, kind: PaymentAttemptKind, attempt_id: PaymentAttemptId)
-    -> GatewayOrderId;
-}
-
-pub type SharedPaymentGateway = Arc<dyn PaymentGateway>;
-pub type SharedGatewayMutationReferenceFactory = Arc<dyn GatewayMutationReferenceFactory>;
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum GatewayLifecycleQueryPolicyError {

@@ -329,6 +329,22 @@ fn unknown_outcome() -> GatewayPaymentOutcome {
     )
 }
 
+fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
+    GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Unknown,
+        ProcessorEvidence::new(
+            None,
+            None,
+            Some(GatewayDiagnostic::new("3")),
+            Some(GatewayDiagnostic::new("430")),
+            Some(GatewayDiagnostic::new("Duplicate transaction")),
+            None,
+            GatewayPaymentDescriptor::default(),
+        ),
+    )
+    .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
+}
+
 async fn reserve_and_admit_renewal(
     pool: &PgPool,
     gateway: &ResolvedGateway,

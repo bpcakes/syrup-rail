@@ -137,17 +137,40 @@ fn classic_payment_outcome_accepts_consistent_duplicate_aliases() {
 }
 
 #[test]
-fn classic_payment_outcome_rejects_empty_or_conflicting_duplicates() {
-    for response in [
-        "response=1&transactionid=txn_first&transactionid=txn_second&customer_vault_id=vault_valid",
-        "response=1&transactionid=txn_valid&customer_vault_id=vault_first&customer_vaultid=vault_second",
-        "response=1&transactionid=&transaction_id=txn_valid&customer_vault_id=vault_valid",
+fn classic_payment_outcome_rejects_invalid_identity_bundle() {
+    for (response, expected_status, expected_diagnostic) in [
+        (
+            "response=1&transactionid=txn_first&transactionid=txn_second&customer_vault_id=vault_valid",
+            PaymentStatus::Unknown,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ),
+        (
+            "response=1&transactionid=txn_valid&customer_vault_id=vault_first&customer_vaultid=vault_second",
+            PaymentStatus::Unknown,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier,
+        ),
+        (
+            "response=1&transactionid=&transaction_id=txn_valid&customer_vault_id=vault_valid",
+            PaymentStatus::Unknown,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ),
+        (
+            "response=2&transactionid=txn_first&transactionid=txn_second&customer_vault_id=vault_valid",
+            PaymentStatus::Declined,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ),
+        (
+            "response=3&response_code=300&transactionid=txn_first&transactionid=txn_second&customer_vault_id=vault_valid",
+            PaymentStatus::Failed,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ),
     ] {
         let outcome = classic_payment_outcome_from_form(response)
-            .expect("invalid classic identity should produce an unknown outcome");
-        assert_eq!(outcome.status, PaymentStatus::Unknown);
+            .expect("invalid classic identity should quarantine its identity bundle");
+        assert_eq!(outcome.status, expected_status);
         assert_eq!(outcome.transaction_id, None);
         assert_eq!(outcome.customer_vault_id, None);
+        assert_eq!(outcome.diagnostics, vec![expected_diagnostic]);
     }
 }
 
@@ -223,8 +246,8 @@ fn classic_payment_outcome_preserves_vault_disabled_failure() {
 }
 
 #[test]
-fn classic_terminal_response_codes_accept_an_empty_transaction_identifier() {
-    for response_code in ["300", "400", "410", "411", "440", "441", "460", "461"] {
+fn classic_determinate_failure_codes_accept_an_empty_transaction_identifier() {
+    for response_code in ["300", "410", "411", "460", "461"] {
         let response = format!(
             "response=3&responsetext=Terminal+gateway+failure&response_code={response_code}&transactionid="
         );
@@ -238,13 +261,83 @@ fn classic_terminal_response_codes_accept_an_empty_transaction_identifier() {
 }
 
 #[test]
-fn classic_terminal_response_rejects_absent_and_present_transaction_aliases() {
+fn classic_indeterminate_error_codes_remain_reconcilable_without_an_identifier() {
+    for response_code in ["400", "420", "421", "440", "441"] {
+        let response = format!(
+            "response=3&responsetext=Processor+error&response_code={response_code}&transactionid="
+        );
+        let outcome = classic_payment_outcome_from_form(&response)
+            .expect("a processor error should remain an outcome");
+
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{response_code}");
+        assert_eq!(outcome.transaction_id, None, "{response_code}");
+        assert_eq!(
+            outcome.diagnostics,
+            vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome],
+            "{response_code}"
+        );
+    }
+}
+
+#[test]
+fn classic_generic_provider_error_has_indeterminate_provenance() {
+    for (response, expected) in [
+        (
+            "response=3&responsetext=System+error&transactionid=",
+            vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome],
+        ),
+        (
+            "response=3&status=pending&responsetext=System+error&transactionid=",
+            vec![PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome],
+        ),
+        (
+            "response=3&status=provider_surprise&responsetext=System+error&transactionid=",
+            vec![
+                PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome,
+                PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence,
+            ],
+        ),
+        (
+            "response=3&status=failed&condition=pending&responsetext=Conflicting+system+error&transactionid=",
+            vec![
+                PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome,
+                PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
+            ],
+        ),
+    ] {
+        let outcome = classic_payment_outcome_from_form(response)
+            .expect("a recognized generic provider error should remain an outcome");
+
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{response}");
+        assert_eq!(outcome.transaction_id, None, "{response}");
+        assert_eq!(outcome.diagnostics, expected, "{response}");
+    }
+}
+
+#[test]
+fn classic_determinate_failure_supersedes_generic_error_provenance() {
+    for response in [
+        "response=3&condition=failed&responsetext=Terminal+failure&transactionid=",
+        "response=3&status=failed&responsetext=Terminal+failure&transactionid=",
+        "response=3&response_code=300&responsetext=Terminal+failure&transactionid=",
+    ] {
+        let outcome = classic_payment_outcome_from_form(response)
+            .expect("determinate failure evidence should resolve the generic error");
+
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{response}");
+        assert_eq!(outcome.transaction_id, None, "{response}");
+        assert!(outcome.diagnostics.is_empty(), "{response}");
+    }
+}
+
+#[test]
+fn classic_terminal_response_quarantines_identity_without_erasing_failure() {
     let outcome = classic_payment_outcome_from_form(
         "response=3&response_code=300&transactionid=&transaction_id=txn_conflicting_failure",
     )
-    .expect("conflicting terminal response identity should remain reconcilable");
+    .expect("conflicting terminal response identity should remain failed");
 
-    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(outcome.status, PaymentStatus::Failed);
     assert_eq!(outcome.transaction_id, None);
     assert_eq!(
         outcome.diagnostics,
@@ -287,10 +380,7 @@ fn classic_duplicate_response_code_requires_reconciliation() {
     );
     assert_eq!(
         outcome.diagnostics,
-        vec![
-            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
-            PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
-        ]
+        vec![PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor]
     );
 }
 
@@ -304,10 +394,7 @@ fn classic_duplicate_response_treats_an_empty_identity_as_absent() {
     assert_eq!(outcome.status, PaymentStatus::Unknown);
     assert_eq!(
         outcome.diagnostics,
-        vec![
-            PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
-            PaymentOutcomeDiagnostic::ConflictingDecisionEvidence,
-        ]
+        vec![PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor]
     );
 }
 

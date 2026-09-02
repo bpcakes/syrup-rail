@@ -28,6 +28,10 @@ pub(in crate::client) enum ScalarOccurrence<'a> {
 
 #[derive(Clone, Copy)]
 pub(super) enum IdentifierPresence {
+    /// Exact-query transaction records are expected to carry their processor
+    /// identity. Absence or contradiction is reported as unusable identity;
+    /// the query boundary separately binds every supplied selector before a
+    /// non-approved decision can be accepted.
     Required,
     /// Foreground mutation responses may explicitly report that no
     /// transaction identity was created. Public operation policy separately
@@ -185,12 +189,12 @@ impl ScalarOccurrenceCollector {
                 observed_normalized,
                 wire_spellings: self.exact_wire_spellings,
                 saw_bounded_occurrence: self.saw_bounded_occurrence,
-                ..DecisionField::default()
+                ..DecisionField::empty(kind)
             };
         }
         let Some(selected) = self.values.first() else {
             debug_assert!(!self.saw_occurrence);
-            return DecisionField::default();
+            return DecisionField::empty(kind);
         };
         let selected_evidence = kind.classify(selected);
         let selected_normalized = kind.normalize(selected);
@@ -234,6 +238,7 @@ impl ScalarOccurrenceCollector {
                 .cloned()
         };
         DecisionField {
+            kind,
             raw,
             evidence: (!invalid_or_conflicting)
                 .then_some(selected_evidence)
@@ -256,17 +261,56 @@ pub(super) enum DecisionFieldKind {
     GatewayState,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DecisionEvidence {
+    PaymentStatus(PaymentStatus),
+    ProviderError,
+    IndeterminatePaymentOutcome,
+    ProcessorDuplicate,
+}
+
+impl DecisionEvidence {
+    const fn payment_status(self) -> Option<PaymentStatus> {
+        match self {
+            Self::PaymentStatus(status) => Some(status),
+            Self::IndeterminatePaymentOutcome | Self::ProcessorDuplicate => {
+                Some(PaymentStatus::Unknown)
+            }
+            Self::ProviderError => None,
+        }
+    }
+
+    const fn diagnostic(self) -> Option<PaymentOutcomeDiagnostic> {
+        match self {
+            Self::IndeterminatePaymentOutcome => {
+                Some(PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome)
+            }
+            Self::ProcessorDuplicate => {
+                Some(PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor)
+            }
+            Self::PaymentStatus(_) | Self::ProviderError => None,
+        }
+    }
+}
+
 impl DecisionFieldKind {
-    fn classify(self, value: &str) -> Option<PaymentStatus> {
+    fn classify(self, value: &str) -> Option<DecisionEvidence> {
         match self {
             Self::Response => match value.trim() {
-                "1" => Some(PaymentStatus::Approved),
-                "2" => Some(PaymentStatus::Declined),
-                "3" => Some(PaymentStatus::Failed),
+                "1" => Some(DecisionEvidence::PaymentStatus(PaymentStatus::Approved)),
+                "2" => Some(DecisionEvidence::PaymentStatus(PaymentStatus::Declined)),
+                // NMI defines response=3 as either a transaction-data error or
+                // a system error. It is recognized evidence, but it does not
+                // by itself prove whether processing had a financial effect.
+                "3" => Some(DecisionEvidence::ProviderError),
                 _ => None,
             },
-            Self::ResponseCode => classified_payment_status_from_response_code(value),
-            Self::GatewayState => classified_payment_status_from_gateway_state(value),
+            Self::ResponseCode => classified_decision_evidence_from_response_code(value),
+            Self::GatewayState if normalize_gateway_state(value) == "error" => {
+                Some(DecisionEvidence::ProviderError)
+            }
+            Self::GatewayState => classified_payment_status_from_gateway_state(value)
+                .map(DecisionEvidence::PaymentStatus),
         }
     }
 
@@ -283,10 +327,10 @@ impl DecisionFieldKind {
     }
 }
 
-#[derive(Default)]
 pub(super) struct DecisionField {
+    kind: DecisionFieldKind,
     raw: Option<String>,
-    evidence: Option<PaymentStatus>,
+    evidence: Option<DecisionEvidence>,
     saw_occurrence: bool,
     invalid_or_conflicting: bool,
     unrecognized: bool,
@@ -297,10 +341,25 @@ pub(super) struct DecisionField {
 }
 
 impl DecisionField {
-    fn contains_normalized(&self, expected: &str) -> bool {
+    fn empty(kind: DecisionFieldKind) -> Self {
+        Self {
+            kind,
+            raw: None,
+            evidence: None,
+            saw_occurrence: false,
+            invalid_or_conflicting: false,
+            unrecognized: false,
+            exact_wire_spelling: None,
+            observed_normalized: Vec::new(),
+            wire_spellings: Vec::new(),
+            saw_bounded_occurrence: false,
+        }
+    }
+
+    fn observed_evidence(&self, expected: DecisionEvidence) -> bool {
         self.observed_normalized
             .iter()
-            .any(|value| value == expected)
+            .any(|value| self.kind.classify(value) == Some(expected))
     }
 
     fn exactly_matches(&self, expected: &str) -> bool {
@@ -332,7 +391,6 @@ impl DecisionField {
     }
 }
 
-#[derive(Default)]
 pub(super) struct PaymentDecisionFields {
     response: DecisionField,
     response_code: DecisionField,
@@ -390,10 +448,27 @@ impl PaymentDecisionFields {
             &self.status,
             &self.condition,
         ];
-        let mut diagnostics = Vec::new();
-        if self.response_code.contains_normalized("430") {
-            diagnostics.push(PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor);
-        }
+        let specific_error_evidence = [
+            DecisionEvidence::IndeterminatePaymentOutcome,
+            DecisionEvidence::ProcessorDuplicate,
+        ];
+        let has_specific_error_diagnostic = specific_error_evidence
+            .into_iter()
+            .any(|evidence| self.response_code.observed_evidence(evidence));
+        let mut diagnostics: Vec<_> = specific_error_evidence
+            .into_iter()
+            .filter(|evidence| self.response_code.observed_evidence(*evidence))
+            .filter_map(DecisionEvidence::diagnostic)
+            .collect();
+        let saw_provider_error = self
+            .response
+            .observed_evidence(DecisionEvidence::ProviderError)
+            || self
+                .status
+                .observed_evidence(DecisionEvidence::ProviderError)
+            || self
+                .condition
+                .observed_evidence(DecisionEvidence::ProviderError);
         let status = if fields.iter().any(|field| field.invalid_or_conflicting) {
             diagnostics.push(PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField);
             PaymentStatus::Unknown
@@ -401,19 +476,36 @@ impl PaymentDecisionFields {
             diagnostics.push(PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence);
             PaymentStatus::Unknown
         } else {
-            let mut evidence = fields.iter().filter_map(|field| field.evidence);
+            let mut evidence = fields
+                .iter()
+                .filter_map(|field| field.evidence.and_then(DecisionEvidence::payment_status));
             match evidence.next() {
+                None if saw_provider_error => PaymentStatus::Unknown,
                 None => {
                     diagnostics.push(PaymentOutcomeDiagnostic::MissingDecisionEvidence);
                     PaymentStatus::Unknown
                 }
-                Some(status) if evidence.any(|candidate| candidate != status) => {
+                Some(status)
+                    if evidence.any(|candidate| candidate != status)
+                        || saw_provider_error
+                            && matches!(
+                                status,
+                                PaymentStatus::Approved | PaymentStatus::Declined
+                            ) =>
+                {
                     diagnostics.push(PaymentOutcomeDiagnostic::ConflictingDecisionEvidence);
                     PaymentStatus::Unknown
                 }
                 Some(status) => status,
             }
         };
+        // A generic provider error is safely superseded only when a compatible,
+        // determinate failure wins the complete reduction. Merely observing a
+        // failed field is insufficient when malformed or conflicting sibling
+        // evidence forces the aggregate result to remain unknown.
+        if saw_provider_error && status != PaymentStatus::Failed && !has_specific_error_diagnostic {
+            diagnostics.push(PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome);
+        }
         let has_structured_evidence = self.response.saw_occurrence
             || self.response_code.saw_occurrence
             || self.status.saw_occurrence
@@ -453,7 +545,15 @@ pub(super) fn resolve_optional_scalar(value: ResolvedScalar) -> (Option<String>,
     }
 }
 
-pub(super) fn finalize_foreground_identifiers(
+/// Resolves missing identities independently, but rejects a structurally
+/// invalid identity bundle as a unit for every payment response shape.
+///
+/// A missing field says nothing about the trustworthiness of its sibling. An
+/// invalid or conflicting field instead means the response cannot safely bind
+/// either identifier to the same processor decision. Identity usability is
+/// distinct from payment certainty: coherent declines and determinate failures
+/// remain terminal, while approvals fail closed.
+pub(super) fn finalize_payment_identifiers(
     status: &mut PaymentStatus,
     transaction: ResolvedScalar,
     vault: ResolvedScalar,
@@ -468,7 +568,9 @@ pub(super) fn finalize_foreground_identifiers(
         diagnostics.push(PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier);
     }
     if invalid_transaction || invalid_vault {
-        *status = PaymentStatus::Unknown;
+        if *status == PaymentStatus::Approved {
+            *status = PaymentStatus::Unknown;
+        }
         return (None, None);
     }
     (transaction.map(Into::into), vault.map(Into::into))
@@ -476,8 +578,8 @@ pub(super) fn finalize_foreground_identifiers(
 
 #[derive(Clone, Copy)]
 pub(in crate::client) enum ApprovedIdentityRequirement {
-    Transaction,
-    TransactionAndCustomerVault,
+    ApprovedTransaction,
+    ApprovedTransactionAndCustomerVault,
 }
 
 pub(in crate::client) fn require_approved_identities(
@@ -491,7 +593,7 @@ pub(in crate::client) fn require_approved_identities(
     let missing_transaction = outcome.transaction_id.is_none();
     let missing_customer_vault = matches!(
         requirement,
-        ApprovedIdentityRequirement::TransactionAndCustomerVault
+        ApprovedIdentityRequirement::ApprovedTransactionAndCustomerVault
     ) && outcome.customer_vault_id.is_none();
     if missing_transaction {
         outcome
@@ -503,10 +605,11 @@ pub(in crate::client) fn require_approved_identities(
             .diagnostics
             .push(PaymentOutcomeDiagnostic::MissingCustomerVaultIdentifier);
     }
-    if missing_transaction || missing_customer_vault {
+    if outcome.status == PaymentStatus::Approved && (missing_transaction || missing_customer_vault)
+    {
         outcome.status = PaymentStatus::Unknown;
     }
-    outcome
+    outcome.normalize_diagnostics()
 }
 
 pub(super) fn normalize_gateway_state(value: &str) -> String {
@@ -527,25 +630,30 @@ fn classified_payment_status_from_gateway_state(value: &str) -> Option<PaymentSt
         "approved" | "complete" | "completed" | "captured" | "success" | "successful"
         | "pendingsettlement" => Some(PaymentStatus::Approved),
         "declined" => Some(PaymentStatus::Declined),
-        "failed" | "error" => Some(PaymentStatus::Failed),
+        "failed" => Some(PaymentStatus::Failed),
         "voided" | "canceled" | "refunded" | "chargeback" | "unknown" | "pending" | "queued"
         | "inprogress" | "processing" | "review" | "underreview" => Some(PaymentStatus::Unknown),
         _ => None,
     }
 }
 
-fn classified_payment_status_from_response_code(value: &str) -> Option<PaymentStatus> {
+fn classified_decision_evidence_from_response_code(value: &str) -> Option<DecisionEvidence> {
     match value.trim().parse::<u16>() {
-        Ok(100) => Some(PaymentStatus::Approved),
-        Ok(200..=299) => Some(PaymentStatus::Declined),
-        Ok(300 | 400 | 410 | 411 | 440 | 441 | 460 | 461) => Some(PaymentStatus::Failed),
-        Ok(420 | 421) => Some(PaymentStatus::Unknown),
+        Ok(100) => Some(DecisionEvidence::PaymentStatus(PaymentStatus::Approved)),
+        Ok(200..=299) => Some(DecisionEvidence::PaymentStatus(PaymentStatus::Declined)),
+        Ok(300 | 410 | 411 | 460 | 461) => {
+            Some(DecisionEvidence::PaymentStatus(PaymentStatus::Failed))
+        }
+        // NMI documents these as processor-originated errors, but does not
+        // guarantee that they had no financial effect. Keep them reconcilable.
+        // https://docs.nmi.com/reference/response-codes
+        Ok(400 | 420 | 421 | 440 | 441) => Some(DecisionEvidence::IndeterminatePaymentOutcome),
         // NMI documents 430 only as "Duplicate transaction at processor". It
         // does not guarantee that the processor produced no transaction or
         // other financial evidence, so this must remain reconcilable rather
         // than becoming a known non-submission.
         // https://docs.nmi.com/reference/response-codes
-        Ok(430) => Some(PaymentStatus::Unknown),
+        Ok(430) => Some(DecisionEvidence::ProcessorDuplicate),
         _ => None,
     }
 }
@@ -560,7 +668,9 @@ pub(super) fn rate_limited_wire_error() -> WireError {
 
 #[cfg(test)]
 pub(in crate::client) fn payment_status_from_response_code(value: &str) -> PaymentStatus {
-    classified_payment_status_from_response_code(value).unwrap_or(PaymentStatus::Unknown)
+    classified_decision_evidence_from_response_code(value)
+        .and_then(DecisionEvidence::payment_status)
+        .unwrap_or(PaymentStatus::Unknown)
 }
 
 #[cfg(test)]

@@ -152,6 +152,67 @@ async fn stale_local_subscription_charges_fail_without_exact_query() -> Result<(
     cleanup
 }
 
+#[tokio::test]
+async fn stale_empty_query_for_submitted_unknown_renewal_requires_review_without_dunning()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("recon_renew_unk").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "test_gateway").await?;
+        let attempt_id = insert_subscription_charge_attempt(
+            &database.pool,
+            account,
+            "subscription_renewal",
+            "unknown",
+            Utc::now() - Duration::minutes(31),
+        )
+        .await?;
+        sqlx::query("UPDATE billing_payment_attempts SET submitted_at = created_at WHERE id = $1")
+            .bind(attempt_id)
+            .execute(&database.pool)
+            .await?;
+        let subscription_before: (String, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, next_payment_attempt_at FROM billing_subscriptions \
+             WHERE id = (SELECT subscription_id FROM billing_payment_attempts WHERE id = $1)",
+        )
+        .bind(attempt_id)
+        .fetch_one(&database.pool)
+        .await?;
+
+        let claimed = claim_exact_reconciliation_attempts(
+            &database.pool,
+            GatewayAccountId::new(account.gateway_account_id),
+        )
+        .await?;
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(*claimed[0].identity().attempt_id().as_uuid(), attempt_id);
+        assert!(
+            apply_exact_query_observation(
+                &database.pool,
+                &claimed[0],
+                ExactQueryObservation::NoTransaction,
+            )
+            .await?
+        );
+        assert_eq!(
+            attempt_status(&database.pool, attempt_id).await?,
+            "review_required"
+        );
+        let subscription_after: (String, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, next_payment_attempt_at FROM billing_subscriptions \
+             WHERE id = (SELECT subscription_id FROM billing_payment_attempts WHERE id = $1)",
+        )
+        .bind(attempt_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(subscription_after, subscription_before);
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
 async fn insert_subscription_charge_attempt(
     pool: &sqlx::PgPool,
     account: crate::test_support::GatewayAccountFixture,
