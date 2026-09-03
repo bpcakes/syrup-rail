@@ -225,7 +225,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     .await?;
     assert_eq!(unknown.status(), syrup_rail::PaymentAttemptStatus::Unknown);
     assert_eq!(
-        unknown.gateway_diagnostics(),
+        unknown.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
     );
     let retry_after_unknown: Option<DateTime<Utc>> = sqlx::query_scalar(
@@ -265,8 +265,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     );
 
     let recovered_outcome =
-        approved_outcome_with_reference("discounted_trial_recovery", "vault_recovery")
-            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+        approved_outcome_with_reference("discounted_trial_recovery", "vault_recovery");
     let recovered = apply_reconciled_subscription_recovery_gateway_outcome(
         &database.pool,
         &coordinator,
@@ -275,10 +274,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         &recovered_outcome,
     )
     .await?;
-    assert_eq!(
-        recovered.gateway_diagnostics(),
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
-    );
+    assert!(recovered.observation_diagnostics().is_empty());
     let subscription = recovered
         .subscription()
         .expect("approved recovery restores subscription");

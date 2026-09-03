@@ -5,6 +5,7 @@ use crate::{
 };
 
 mod readiness;
+mod reconciliation;
 mod reservation;
 mod stale_replay;
 
@@ -1001,13 +1002,10 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         &parked_outcome,
     )
     .await?;
-    assert_eq!(
-        parked.attempt().status(),
-        PaymentAttemptStatus::ReviewRequired
-    );
+    assert_eq!(parked.attempt().status(), PaymentAttemptStatus::Unknown);
     assert!(parked.subscription().is_none());
     assert_eq!(
-        parked.gateway_diagnostics(),
+        parked.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
     );
     let parked_replay = parked_service
@@ -1015,44 +1013,8 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         .await?;
     assert_eq!(parked_replay, parked);
     assert_eq!(parked_replay.attempt(), parked.attempt());
-    assert!(parked_replay.gateway_diagnostics().is_empty());
+    assert!(parked_replay.observation_diagnostics().is_empty());
     assert!(parked_replay.subscription().is_none());
-    assert_eq!(parked_gateway.store_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
-    assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
-
-    let observed_transaction_id = "txn_method_observed_after_review";
-    let observed_outcome = GatewayPaymentOutcome::new(
-        GatewayPaymentStatus::Approved,
-        ProcessorEvidence::new(
-            Some(GatewayTransactionId::new(observed_transaction_id)?),
-            Some(GatewayPaymentMethodReference::new(
-                "vault_method_observed_after_review",
-            )?),
-            Some(GatewayDiagnostic::new("observed-response")),
-            Some(GatewayDiagnostic::new("observed-code")),
-            Some(GatewayDiagnostic::new("Observed response text")),
-            Some(GatewayDiagnostic::new("observed-condition")),
-            GatewayPaymentDescriptor::from_provider_parts(
-                Some(GatewayDiagnostic::new("creditcard")),
-                Some(GatewayDiagnostic::new("mastercard")),
-                Some("5555"),
-                Some(11),
-                Some(2032),
-            ),
-        ),
-    );
-    let merged_outcome = payment_method_replacement::reconciled_outcome_with_persisted_evidence(
-        parked.attempt(),
-        &observed_outcome,
-    );
-    let merged_evidence = merged_outcome.evidence();
-    assert_eq!(merged_outcome.status(), GatewayPaymentStatus::Approved);
-    assert_eq!(
-        merged_evidence,
-        parked.attempt().state().processor_evidence(),
-        "review-required replacement reconciliation must prefer every persisted field"
-    );
     assert_eq!(parked_gateway.store_calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
@@ -1075,12 +1037,16 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         PaymentAttemptStatus::Approved
     );
     assert_eq!(
-        reconciled.gateway_diagnostics(),
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        reconciled.observation_diagnostics(),
+        &[
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]
     );
-    let additional_progression: String = sqlx::query_scalar(
+    let additional_charge_count: i64 = sqlx::query_scalar(
         r#"
-        SELECT progression_state
+        SELECT count(*)
         FROM billing_processor_charges
         WHERE attempt_id = $1 AND gateway_transaction_id = $2
         "#,
@@ -1089,7 +1055,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     .bind(additional_transaction_id)
     .fetch_one(&fixture.database.pool)
     .await?;
-    assert_eq!(additional_progression, "reconciliation_required");
+    assert_eq!(additional_charge_count, 0);
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);

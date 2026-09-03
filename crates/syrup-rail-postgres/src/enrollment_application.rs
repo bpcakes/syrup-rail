@@ -4,13 +4,13 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool, Row};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingScopeId, GatewayAccountMode, GatewayDiagnostic,
-    GatewayError, GatewayNotSubmittedError, GatewayOrderId, GatewayProviderKey, PaymentAttempt,
-    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptStatus,
-    PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorChargeProgression, ProcessorEvidence,
-    Subscription, SubscriptionEnrollmentPaymentResult,
-    SubscriptionEnrollmentPaymentResultBuildError, SubscriptionEnrollmentReservation,
-    SubscriptionId, SubscriptionPaymentMethodReplacement, SubscriptionRecoveryReservation,
-    SubscriptionRenewalReservation,
+    GatewayError, GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDiagnostic,
+    GatewayProviderKey, PaymentAttempt, PaymentAttemptIdentity, PaymentAttemptKind,
+    PaymentAttemptRequest, PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey,
+    ProcessorChargeProgression, ProcessorEvidence, Subscription,
+    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPaymentResultBuildError,
+    SubscriptionEnrollmentReservation, SubscriptionId, SubscriptionPaymentMethodReplacement,
+    SubscriptionRecoveryReservation, SubscriptionRenewalReservation,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -25,6 +25,7 @@ use crate::{
     },
     processor_charges::{
         LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, observe_processor_charge,
+        promote_conflicting_charge_to_external_reversal,
     },
     renewal_failure::RenewalFailureStoreError,
     subscription_persistence::{
@@ -33,9 +34,12 @@ use crate::{
 };
 
 mod initial;
+mod outcome_support;
 mod payment_method_replacement;
 mod recovery;
 mod renewal;
+
+pub(crate) use outcome_support::*;
 
 pub(crate) use initial::resolve_non_approved_outcome;
 pub use initial::{
@@ -468,7 +472,7 @@ pub(crate) enum RateLimitCooldownPersistence {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RateLimitCooldownCommitDisposition {
+pub(crate) enum RateLimitCooldownCommitDisposition {
     Applied,
     IdentityNotDurable,
     IdentityChanged,
@@ -750,21 +754,12 @@ async fn apply_reconciled_gateway_outcome_for(
                 .await
         }
         ReservationOperation::PaymentMethodReplacement => {
-            let outcome = payment_method_replacement::reconciled_outcome_with_persisted_evidence(
-                &attempt, outcome,
-            );
-            let reservation =
-                SubscriptionPaymentMethodReplacement::from_attempt(&attempt, provider_key)
-                    .map_err(|_| {
-                        SubscriptionEnrollmentApplicationError::InvalidState(
-                            operation.invalid_attempt_message(),
-                        )
-                    })?;
-            apply_subscription_payment_method_replacement_gateway_outcome(
+            apply_reconciled_subscription_payment_method_replacement_gateway_outcome(
                 pool,
                 coordinator,
-                &reservation,
-                &outcome,
+                billing_scope_id,
+                attempt_id,
+                outcome,
             )
             .await
         }
@@ -775,7 +770,7 @@ async fn apply_reconciled_gateway_outcome_for(
 /// provider outcome. It keeps each operation's matching rule explicit while
 /// sharing only the common locking and cooldown mechanics.
 #[derive(Clone, Copy)]
-enum OutcomeReservation<'a> {
+pub(crate) enum OutcomeReservation<'a> {
     Initial(&'a SubscriptionEnrollmentReservation),
     Recovery(&'a SubscriptionRecoveryReservation),
     Renewal(&'a SubscriptionRenewalReservation),
@@ -1175,6 +1170,15 @@ impl OutcomeApplication {
     }
 }
 
+pub(crate) fn append_subscription_observation_diagnostics(
+    result: SubscriptionEnrollmentPaymentResult,
+    diagnostics: &[GatewayPaymentDiagnostic],
+) -> SubscriptionEnrollmentPaymentResult {
+    let mut combined = result.observation_diagnostics().to_vec();
+    combined.extend_from_slice(diagnostics);
+    result.with_observation_diagnostics(combined)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PreparedAttemptReplay {
     Supported,
@@ -1201,7 +1205,6 @@ async fn resolve_pool_outcome(
     resolution: OutcomeResolutionCommand,
 ) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
-    let prepared_attempt_replay = reservation.prepared_attempt_replay();
     if let Some(cooldown) = resolution.cooldown {
         commit_rate_limit_cooldown(pool, reservation, cooldown).await?;
     }
@@ -1214,6 +1217,241 @@ async fn resolve_pool_outcome(
     )
     .await?;
     let attempt = lock_expected_reservation_attempt(&mut transaction, reservation).await?;
+    let application =
+        resolve_locked_outcome(&mut transaction, reservation, attempt, evidence, resolution)
+            .await?;
+    transaction.commit().await?;
+    Ok(application)
+}
+
+pub(crate) struct ReconciledNonApprovedEvidence {
+    pub(crate) evidence: ProcessorEvidence,
+    pub(crate) transaction_id_conflict: bool,
+    pub(crate) payment_method_reference_conflict: bool,
+    discarded_transaction_id: bool,
+    discarded_payment_method_reference: bool,
+}
+
+impl ReconciledNonApprovedEvidence {
+    pub(crate) const fn has_identity_conflict(&self) -> bool {
+        self.transaction_id_conflict || self.payment_method_reference_conflict
+    }
+
+    pub(crate) fn identity_conflict_diagnostics(&self) -> Vec<GatewayPaymentDiagnostic> {
+        identity_conflict_diagnostics(
+            self.transaction_id_conflict || self.discarded_transaction_id,
+            self.payment_method_reference_conflict || self.discarded_payment_method_reference,
+        )
+    }
+}
+
+fn identity_conflict_diagnostics(
+    transaction_id_conflict: bool,
+    payment_method_reference_conflict: bool,
+) -> Vec<GatewayPaymentDiagnostic> {
+    let mut diagnostics = Vec::with_capacity(2);
+    if transaction_id_conflict {
+        diagnostics.push(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier);
+    }
+    if payment_method_reference_conflict {
+        diagnostics.push(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference);
+    }
+    diagnostics
+}
+
+pub(crate) fn processor_identity_conflict_diagnostics(
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> Vec<GatewayPaymentDiagnostic> {
+    let persisted = attempt.state().processor_evidence();
+    identity_conflict_diagnostics(
+        identifiers_conflict(persisted.transaction_id(), observed.transaction_id()),
+        identifiers_conflict(
+            persisted.payment_method_reference(),
+            observed.payment_method_reference(),
+        ),
+    )
+}
+
+pub(crate) fn same_processor_transaction(
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> bool {
+    let persisted = attempt.state().processor_evidence().transaction_id();
+    persisted.is_some() && persisted == observed.transaction_id()
+}
+
+/// Stops a conflicting approval before it can replace the durable identity or
+/// mutate subscription state. The newly observed charge remains traceable for
+/// operator reconciliation while the canonical attempt stays unresolved.
+pub(crate) async fn stop_conflicting_subscription_approval(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> Result<
+    (
+        Option<SubscriptionEnrollmentPaymentResult>,
+        Vec<GatewayPaymentDiagnostic>,
+    ),
+    SubscriptionEnrollmentApplicationError,
+> {
+    let diagnostics = processor_identity_conflict_diagnostics(attempt, observed);
+    if diagnostics.is_empty() {
+        return Ok((None, diagnostics));
+    }
+    if !attempt.status().is_resolvable() && attempt.status() != PaymentAttemptStatus::Approved {
+        return Ok((None, diagnostics));
+    }
+    if attempt.status() == PaymentAttemptStatus::Approved
+        && same_processor_transaction(attempt, observed)
+    {
+        let payment = payment_result_for_attempt(connection, attempt.clone()).await?;
+        return Ok((
+            Some(payment.with_observation_diagnostics(diagnostics)),
+            Vec::new(),
+        ));
+    }
+    let progression = if attempt.status().is_resolvable() || attempt.request().amount().cents() == 0
+    {
+        ProcessorChargeProgression::ReconciliationRequired
+    } else {
+        ProcessorChargeProgression::ExternalReversalRequired
+    };
+    let observation = observe_processor_charge(connection, attempt, observed, progression).await?;
+    if progression == ProcessorChargeProgression::ExternalReversalRequired
+        && observed.transaction_id().is_some()
+    {
+        promote_conflicting_charge_to_external_reversal(connection, observation).await?;
+    }
+    let payment = payment_result_for_attempt(connection, attempt.clone()).await?;
+    Ok((
+        Some(payment.with_observation_diagnostics(diagnostics)),
+        Vec::new(),
+    ))
+}
+
+/// Builds durable non-approved evidence without treating fields from separate
+/// processor observations as one approving response.
+///
+/// A concrete identity conflict preserves the established forensic bundle and
+/// forces callers to leave the attempt unresolved. Otherwise the current
+/// observation owns the complete decision and descriptor bundles. Missing
+/// identity fields may retain established values, but an unanchored partial
+/// identity cannot delete or replace an existing durable bundle.
+pub(crate) fn reconcile_non_approved_evidence(
+    attempt: &PaymentAttempt,
+    observed: &ProcessorEvidence,
+) -> ReconciledNonApprovedEvidence {
+    let persisted = attempt.state().processor_evidence();
+    let transaction_id_conflict =
+        identifiers_conflict(persisted.transaction_id(), observed.transaction_id());
+    let payment_method_reference_conflict = identifiers_conflict(
+        persisted.payment_method_reference(),
+        observed.payment_method_reference(),
+    );
+    if !attempt.status().is_resolvable() {
+        return ReconciledNonApprovedEvidence {
+            evidence: observed.clone(),
+            transaction_id_conflict,
+            payment_method_reference_conflict,
+            discarded_transaction_id: false,
+            discarded_payment_method_reference: false,
+        };
+    }
+    if transaction_id_conflict || payment_method_reference_conflict {
+        return ReconciledNonApprovedEvidence {
+            evidence: persisted.clone(),
+            transaction_id_conflict,
+            payment_method_reference_conflict,
+            discarded_transaction_id: false,
+            discarded_payment_method_reference: false,
+        };
+    }
+
+    let observed_transaction_id = observed.transaction_id();
+    let observed_payment_method_reference = observed.payment_method_reference();
+    let persisted_transaction_id = persisted.transaction_id();
+    let persisted_payment_method_reference = persisted.payment_method_reference();
+    // A partial identity from a different observation cannot be spliced onto
+    // the established sibling. Preserve the durable bundle, but make the
+    // rejected field observable to host policy instead of silently dropping
+    // it.
+    let discarded_transaction_id = observed_transaction_id.is_some()
+        && observed_payment_method_reference.is_none()
+        && persisted_transaction_id.is_none()
+        && persisted_payment_method_reference.is_some();
+    let discarded_payment_method_reference = observed_transaction_id.is_none()
+        && observed_payment_method_reference.is_some()
+        && persisted_transaction_id.is_some()
+        && persisted_payment_method_reference.is_none();
+    let (transaction_id, payment_method_reference) =
+        match (observed_transaction_id, observed_payment_method_reference) {
+            (None, None) => (
+                persisted_transaction_id.cloned(),
+                persisted_payment_method_reference.cloned(),
+            ),
+            (Some(transaction_id), Some(payment_method_reference)) => (
+                Some(transaction_id.clone()),
+                Some(payment_method_reference.clone()),
+            ),
+            (Some(transaction_id), None) if persisted_transaction_id == Some(transaction_id) => (
+                Some(transaction_id.clone()),
+                persisted_payment_method_reference.cloned(),
+            ),
+            (None, Some(payment_method_reference))
+                if persisted_payment_method_reference == Some(payment_method_reference) =>
+            {
+                (
+                    persisted_transaction_id.cloned(),
+                    Some(payment_method_reference.clone()),
+                )
+            }
+            (Some(transaction_id), None) if !persisted.has_gateway_reference() => {
+                (Some(transaction_id.clone()), None)
+            }
+            (None, Some(payment_method_reference)) if !persisted.has_gateway_reference() => {
+                (None, Some(payment_method_reference.clone()))
+            }
+            (Some(_), None) | (None, Some(_)) => (
+                persisted_transaction_id.cloned(),
+                persisted_payment_method_reference.cloned(),
+            ),
+        };
+    ReconciledNonApprovedEvidence {
+        evidence: ProcessorEvidence::new(
+            transaction_id,
+            payment_method_reference,
+            observed.response().cloned(),
+            observed.response_code().cloned(),
+            observed.response_text().cloned(),
+            observed.condition().cloned(),
+            observed.descriptor().clone(),
+        ),
+        transaction_id_conflict: false,
+        payment_method_reference_conflict: false,
+        discarded_transaction_id,
+        discarded_payment_method_reference,
+    }
+}
+
+fn identifiers_conflict<T: Eq>(persisted: Option<&T>, observed: Option<&T>) -> bool {
+    matches!((persisted, observed), (Some(persisted), Some(observed)) if persisted != observed)
+}
+
+async fn resolve_locked_outcome(
+    connection: &mut PgConnection,
+    reservation: OutcomeReservation<'_>,
+    attempt: PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    mut resolution: OutcomeResolutionCommand,
+) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
+    let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
+    let diagnostics = reconciled.identity_conflict_diagnostics();
+    if reconciled.has_identity_conflict() {
+        resolution = OutcomeResolutionCommand::unknown(None);
+    }
+    let evidence = &reconciled.evidence;
+    let prepared_attempt_replay = reservation.prepared_attempt_replay();
     let applied = resolution.may_resolve(
         attempt.status(),
         attempt.state().timestamps().submitted_at().is_some(),
@@ -1221,7 +1459,7 @@ async fn resolve_pool_outcome(
     if applied {
         let status = resolution.resolved_status(reservation.operation(), attempt.status());
         persist_attempt_transition(
-            &mut transaction,
+            connection,
             &attempt,
             evidence,
             AttemptTransition::Resolved {
@@ -1232,11 +1470,11 @@ async fn resolve_pool_outcome(
         .await
         .map_err(map_attempt_transition_error)?;
         if resolution.clears_submitted_at() {
-            clear_resolved_attempt_submission(&mut transaction, &attempt).await?;
+            clear_resolved_attempt_submission(connection, &attempt).await?;
         }
         if resolution.records_pending_evidence(status) && evidence.indicates_approved_payment() {
             observe_processor_charge(
-                &mut transaction,
+                connection,
                 &attempt,
                 evidence,
                 ProcessorChargeProgression::Pending,
@@ -1244,8 +1482,10 @@ async fn resolve_pool_outcome(
             .await?;
         }
     }
-    let result = payment_result_for_reservation_attempt(&mut transaction, reservation).await?;
-    transaction.commit().await?;
+    let result = append_subscription_observation_diagnostics(
+        payment_result_for_reservation_attempt(connection, reservation).await?,
+        &diagnostics,
+    );
     Ok(OutcomeApplication {
         payment: result,
         applied,
@@ -1383,374 +1623,6 @@ async fn payment_result_for_reservation_attempt(
     payment_result_for_attempt(connection, attempt).await
 }
 
-async fn commit_rate_limit_cooldown(
-    pool: &PgPool,
-    reservation: OutcomeReservation<'_>,
-    cooldown: RateLimitCooldown,
-) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    // Provider/account backoff protects work beyond this one attempt. Commit it
-    // independently before outcome resolution so a concurrent canonical winner,
-    // later projection failure, or crash cannot erase an observed throttle. The
-    // fail-safe side is conservative pacing; same-key replay can still finish
-    // any unresolved application.
-    match commit_rate_limit_cooldown_for_operation(
-        pool,
-        reservation.identity(),
-        reservation.provider_key(),
-        cooldown,
-        RateLimitCooldownOperation::Subscription,
-    )
-    .await
-    {
-        Ok(()) => Ok(()),
-        Err(RateLimitCooldownCommitError::Sql(error)) => Err(error.into()),
-        Err(RateLimitCooldownCommitError::MissingProviderCooldown) => Err(
-            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE),
-        ),
-    }
-}
-
-async fn commit_rate_limit_cooldown_for_identity(
-    pool: &PgPool,
-    identity: PaymentAttemptIdentity,
-    provider_key: &GatewayProviderKey,
-    cooldown: RateLimitCooldown,
-) -> Result<RateLimitCooldownCommitDisposition, sqlx::Error> {
-    let mut transaction = pool.begin().await?;
-    set_application_timeouts(&mut transaction).await?;
-    if !rate_limit_cooldown_identity_is_durable(&mut transaction, identity).await? {
-        transaction.rollback().await?;
-        return Ok(RateLimitCooldownCommitDisposition::IdentityNotDurable);
-    }
-    match persist_rate_limit_cooldown(&mut transaction, identity, provider_key, cooldown).await? {
-        RateLimitCooldownPersistence::Applied => {
-            transaction.commit().await?;
-            Ok(RateLimitCooldownCommitDisposition::Applied)
-        }
-        RateLimitCooldownPersistence::IdentityChanged => {
-            transaction.rollback().await?;
-            Ok(RateLimitCooldownCommitDisposition::IdentityChanged)
-        }
-        RateLimitCooldownPersistence::MissingProviderCooldown => {
-            transaction.rollback().await?;
-            Ok(RateLimitCooldownCommitDisposition::MissingProviderCooldown)
-        }
-    }
-}
-
-pub(crate) async fn commit_rate_limit_cooldown_for_operation(
-    pool: &PgPool,
-    identity: PaymentAttemptIdentity,
-    provider_key: &GatewayProviderKey,
-    cooldown: RateLimitCooldown,
-    operation: RateLimitCooldownOperation,
-) -> Result<(), RateLimitCooldownCommitError> {
-    match commit_rate_limit_cooldown_for_identity(pool, identity, provider_key, cooldown).await? {
-        RateLimitCooldownCommitDisposition::Applied => Ok(()),
-        RateLimitCooldownCommitDisposition::IdentityNotDurable => {
-            tracing::warn!(
-                target: "syrup_rail::gateway_cooldown",
-                billing_scope_id = %identity.billing_scope_id().as_uuid(),
-                gateway_account_id = %identity.gateway_account_id().as_uuid(),
-                provider_key = provider_key.as_str(),
-                ?cooldown,
-                "{}",
-                operation.identity_not_durable_message()
-            );
-            Ok(())
-        }
-        RateLimitCooldownCommitDisposition::IdentityChanged => {
-            tracing::warn!(
-                target: "syrup_rail::gateway_cooldown",
-                billing_scope_id = %identity.billing_scope_id().as_uuid(),
-                gateway_account_id = %identity.gateway_account_id().as_uuid(),
-                provider_key = provider_key.as_str(),
-                ?cooldown,
-                "{}",
-                operation.identity_changed_message()
-            );
-            Ok(())
-        }
-        RateLimitCooldownCommitDisposition::MissingProviderCooldown => {
-            tracing::error!(
-                target: "syrup_rail::gateway_cooldown",
-                billing_scope_id = %identity.billing_scope_id().as_uuid(),
-                gateway_account_id = %identity.gateway_account_id().as_uuid(),
-                provider_key = provider_key.as_str(),
-                ?cooldown,
-                "{}",
-                operation.missing_provider_message()
-            );
-            Err(RateLimitCooldownCommitError::MissingProviderCooldown)
-        }
-    }
-}
-
-pub(crate) async fn rate_limit_cooldown_identity_is_durable(
-    connection: &mut PgConnection,
-    identity: PaymentAttemptIdentity,
-) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM billing_payment_attempts
-            WHERE id = $1
-                AND billing_scope_id = $2
-                AND subscriber_id = $3
-                AND gateway_account_id = $4
-                AND gateway_configuration_id = $5
-                AND required_gateway_account_mode = $6
-        )
-        "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(identity.required_gateway_account_mode().as_str())
-    .fetch_one(&mut *connection)
-    .await
-}
-
-pub(crate) async fn persist_rate_limit_cooldown(
-    connection: &mut PgConnection,
-    identity: PaymentAttemptIdentity,
-    provider_key: &GatewayProviderKey,
-    cooldown: RateLimitCooldown,
-) -> Result<RateLimitCooldownPersistence, sqlx::Error> {
-    if cooldown == RateLimitCooldown::Provider {
-        return persist_bound_provider_rate_limit_cooldown(
-            connection,
-            identity.billing_scope_id(),
-            identity.gateway_account_id(),
-            provider_key,
-        )
-        .await;
-    }
-    let result = sqlx::query(
-        r#"
-        UPDATE billing_gateway_accounts
-        SET mutation_rate_limited_until = GREATEST(
-                COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
-                clock_timestamp() + make_interval(secs => $4)
-            )
-        WHERE id = $1 AND billing_scope_id = $2
-            AND gateway_configuration_id = $3
-        "#,
-    )
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS)
-    .execute(&mut *connection)
-    .await?;
-    Ok(if result.rows_affected() == 1 {
-        RateLimitCooldownPersistence::Applied
-    } else {
-        RateLimitCooldownPersistence::IdentityChanged
-    })
-}
-
-pub(crate) async fn persist_bound_provider_rate_limit_cooldown(
-    connection: &mut PgConnection,
-    billing_scope_id: syrup_rail::BillingScopeId,
-    gateway_account_id: syrup_rail::GatewayAccountId,
-    provider_key: &GatewayProviderKey,
-) -> Result<RateLimitCooldownPersistence, sqlx::Error> {
-    let current_provider = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT provider_key
-        FROM billing_gateway_accounts
-        WHERE id = $1 AND billing_scope_id = $2
-        FOR UPDATE
-        "#,
-    )
-    .bind(gateway_account_id.as_uuid())
-    .bind(billing_scope_id.as_uuid())
-    .fetch_optional(&mut *connection)
-    .await?;
-    if current_provider.as_deref() != Some(provider_key.as_str()) {
-        return Ok(RateLimitCooldownPersistence::IdentityChanged);
-    }
-    let result = sqlx::query(
-        r#"
-        UPDATE billing_gateway_provider_rate_limits AS provider_limits
-        SET rate_limited_until = GREATEST(
-            provider_limits.rate_limited_until,
-            clock_timestamp() + make_interval(secs => $4)
-        )
-        FROM billing_gateway_accounts AS accounts
-        WHERE provider_limits.provider_key = $1
-            AND accounts.provider_key = provider_limits.provider_key
-            AND accounts.id = $2
-            AND accounts.billing_scope_id = $3
-        "#,
-    )
-    .bind(provider_key.as_str())
-    .bind(gateway_account_id.as_uuid())
-    .bind(billing_scope_id.as_uuid())
-    .bind(syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS)
-    .execute(&mut *connection)
-    .await?;
-    Ok(if result.rows_affected() == 1 {
-        RateLimitCooldownPersistence::Applied
-    } else {
-        RateLimitCooldownPersistence::MissingProviderCooldown
-    })
-}
-
-pub(crate) fn mutation_error_evidence(detail: &GatewayDiagnostic) -> ProcessorEvidence {
-    ProcessorEvidence::new(
-        None,
-        None,
-        None,
-        None,
-        Some(detail.clone()),
-        None,
-        syrup_rail::GatewayPaymentDescriptor::default(),
-    )
-}
-
-/// Complete durable policy for a mutation that provably stopped before the
-/// provider accepted it.
-///
-/// Keeping resolution, retry safety, cooldown, and claimed-target release in
-/// one exhaustive transform prevents a new error variant from acquiring only
-/// part of its required persistence behavior.
-///
-/// Every provably not-submitted transient outage restores a resumable prepared
-/// attempt. Automatic renewal cannot consume that retry classification because
-/// it has no prepared-attempt replay path.
-#[derive(Clone, Copy)]
-pub(crate) struct GatewayNotSubmittedPolicy {
-    resolution_code: PaymentResolutionCode,
-    retry_safety: GatewayNotSubmittedRetrySafety,
-    cooldown: Option<RateLimitCooldown>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GatewayNotSubmittedRetrySafety {
-    Terminal,
-    RestorePreparedWhenSupported,
-}
-
-impl GatewayNotSubmittedPolicy {
-    pub(crate) const fn for_error(error: &GatewayNotSubmittedError) -> Self {
-        match error {
-            GatewayNotSubmittedError::RequestRejected(_) => {
-                Self::terminal(PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission)
-            }
-            GatewayNotSubmittedError::Malformed(_) => {
-                Self::terminal(PaymentResolutionCode::GatewayMalformedBeforeSubmission)
-            }
-            GatewayNotSubmittedError::Configuration(_) => {
-                Self::terminal(PaymentResolutionCode::GatewayConfigurationBeforeSubmission)
-            }
-            GatewayNotSubmittedError::NotTransmitted(_) => {
-                Self::retryable(PaymentResolutionCode::GatewayUnavailableBeforeSubmission)
-            }
-            // An in-band mutation response proves this resolved merchant
-            // account was throttled before submission; another account may
-            // still submit. NMI's distinct HTTP 429 transport signal is
-            // documented as system-wide and indeterminate, so its provider
-            // cooldown is handled separately by RateLimitedIndeterminate.
-            GatewayNotSubmittedError::RateLimited(_) => Self::throttled(
-                PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission,
-                RateLimitCooldown::Account,
-            ),
-            GatewayNotSubmittedError::AccountModeMismatch { required, .. } => {
-                Self::for_account_mode_mismatch(*required)
-            }
-            GatewayNotSubmittedError::AccountModeVerification(error) => {
-                Self::for_readiness_error(error)
-            }
-        }
-    }
-
-    pub(crate) const fn for_readiness_error(error: &GatewayError) -> Self {
-        match error {
-            GatewayError::RequestRejected(_) => {
-                Self::terminal(PaymentResolutionCode::GatewayRequestRejectedBeforeSubmission)
-            }
-            GatewayError::Malformed(_) => {
-                Self::terminal(PaymentResolutionCode::GatewayMalformedBeforeSubmission)
-            }
-            GatewayError::Configuration(_) => {
-                Self::terminal(PaymentResolutionCode::GatewayConfigurationBeforeSubmission)
-            }
-            GatewayError::Unavailable(_) => {
-                Self::retryable(PaymentResolutionCode::GatewayUnavailableBeforeSubmission)
-            }
-            // Readiness adapters expose one coarse RateLimited category. NMI's
-            // query path collapses its system-wide HTTP 429 and any in-band
-            // throttle into that category, so provider scope is the
-            // conservative safe policy when the original signal is unavailable.
-            GatewayError::RateLimited(_) => Self::throttled(
-                PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission,
-                RateLimitCooldown::Provider,
-            ),
-        }
-    }
-
-    pub(crate) const fn for_account_mode_mismatch(required: GatewayAccountMode) -> Self {
-        Self::terminal(match required {
-            GatewayAccountMode::Live => {
-                PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission
-            }
-            GatewayAccountMode::Test => {
-                PaymentResolutionCode::GatewayTestReadinessFailedBeforeSubmission
-            }
-        })
-    }
-
-    const fn terminal(resolution_code: PaymentResolutionCode) -> Self {
-        Self {
-            resolution_code,
-            retry_safety: GatewayNotSubmittedRetrySafety::Terminal,
-            cooldown: None,
-        }
-    }
-
-    const fn throttled(
-        resolution_code: PaymentResolutionCode,
-        cooldown: RateLimitCooldown,
-    ) -> Self {
-        Self {
-            resolution_code,
-            retry_safety: GatewayNotSubmittedRetrySafety::Terminal,
-            cooldown: Some(cooldown),
-        }
-    }
-
-    const fn retryable(resolution_code: PaymentResolutionCode) -> Self {
-        Self {
-            resolution_code,
-            retry_safety: GatewayNotSubmittedRetrySafety::RestorePreparedWhenSupported,
-            cooldown: None,
-        }
-    }
-
-    pub(crate) const fn resolution_code(self) -> PaymentResolutionCode {
-        self.resolution_code
-    }
-
-    pub(crate) const fn cooldown(self) -> Option<RateLimitCooldown> {
-        self.cooldown
-    }
-
-    /// Whether a flow with a durable prepared replay path should undo its
-    /// admission after proving that the provider mutation was not contacted.
-    /// Automatic renewal has no such replay path and retains terminal handling.
-    pub(crate) const fn restores_prepared_attempt_when_supported(self) -> bool {
-        matches!(
-            self.retry_safety,
-            GatewayNotSubmittedRetrySafety::RestorePreparedWhenSupported
-        )
-    }
-}
-
 async fn persist_approved_evidence_without_attempt_lock(
     pool: &PgPool,
     terms: LockFreeApprovedEvidenceTerms<'_>,
@@ -1869,10 +1741,24 @@ pub(crate) async fn park_locked_attempt(
     resolution_code: Option<PaymentResolutionCode>,
     message: &'static str,
 ) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    // A late approval is a separate processor observation. Its raw evidence is
+    // stored in the charge ledger before callers park the attempt, so replacing
+    // an existing attempt snapshot here would either erase a sparse durable
+    // identity or manufacture a cross-observation bundle. Only a still-pending
+    // attempt without an established gateway reference adopts this observation
+    // as its first attempt-level evidence.
+    let durable_evidence = attempt.state().processor_evidence();
+    let attempt_evidence = if attempt.status() == PaymentAttemptStatus::Pending
+        && !durable_evidence.has_gateway_reference()
+    {
+        evidence
+    } else {
+        durable_evidence
+    };
     persist_attempt_transition(
         connection,
         attempt,
-        evidence,
+        attempt_evidence,
         AttemptTransition::LateApprovalReview {
             resolution_code,
             message,

@@ -69,8 +69,8 @@ publishable_crates=(
 )
 
 for crate in "${publishable_crates[@]}"; do
-  if ! grep -Fq "$crate = { version = \"$version\"," Cargo.toml; then
-    echo "Workspace dependency $crate does not require version $version." >&2
+  if ! grep -Fq "$crate = { version = \"=$version\"," Cargo.toml; then
+    echo "Workspace dependency $crate is not pinned exactly to version $version." >&2
     exit 1
   fi
 

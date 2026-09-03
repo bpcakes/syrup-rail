@@ -226,8 +226,8 @@ fn lossless_json_accepts_every_consistent_identity_alias_and_duplicate() {
 }
 
 #[test]
-fn lossless_json_rejects_duplicate_alias_conflicts_and_clears_both_identities() {
-    for (text, diagnostic) in [
+fn lossless_json_rejects_conflicting_identity_bundle() {
+    for (text, expected_status, diagnostic) in [
         (
             r#"{
                 "response":"1",
@@ -235,6 +235,7 @@ fn lossless_json_rejects_duplicate_alias_conflicts_and_clears_both_identities() 
                 "transaction_id":"txn_second",
                 "customer_vault_id":"vault_valid"
             }"#,
+            PaymentStatus::Unknown,
             PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
         ),
         (
@@ -244,6 +245,7 @@ fn lossless_json_rejects_duplicate_alias_conflicts_and_clears_both_identities() 
                 "customer_vault_id":"vault_first",
                 "customer_vault":{"id":"vault_second"}
             }"#,
+            PaymentStatus::Unknown,
             PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier,
         ),
         (
@@ -253,12 +255,34 @@ fn lossless_json_rejects_duplicate_alias_conflicts_and_clears_both_identities() 
                 "transaction":{"id":"txn_valid"},
                 "customer_vault_id":"vault_valid"
             }"#,
+            PaymentStatus::Unknown,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ),
+        (
+            r#"{
+                "response":"2",
+                "transaction_id":"txn_first",
+                "transaction_id":"txn_second",
+                "customer_vault_id":"vault_valid"
+            }"#,
+            PaymentStatus::Declined,
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ),
+        (
+            r#"{
+                "response":"3",
+                "response_code":"300",
+                "transaction_id":"txn_first",
+                "transaction_id":"txn_second",
+                "customer_vault_id":"vault_valid"
+            }"#,
+            PaymentStatus::Failed,
             PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
         ),
     ] {
         let outcome = payment_outcome_from_json_text(text)
-            .expect("identity conflict should produce an unknown outcome");
-        assert_eq!(outcome.status, PaymentStatus::Unknown);
+            .expect("identity conflict should quarantine its identity bundle");
+        assert_eq!(outcome.status, expected_status);
         assert_eq!(outcome.transaction_id, None);
         assert_eq!(outcome.customer_vault_id, None);
         assert_eq!(outcome.diagnostics, vec![diagnostic]);

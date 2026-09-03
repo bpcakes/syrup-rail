@@ -47,6 +47,12 @@ async fn apply_approved_on_connection(
         lock_expected_reservation_attempt(connection, OutcomeReservation::Initial(reservation))
             .await?;
 
+    let (conflicting_payment, conflict_diagnostics) =
+        stop_conflicting_subscription_approval(connection, &attempt, evidence).await?;
+    if let Some(payment) = conflicting_payment {
+        return Ok((payment, None));
+    }
+
     if attempt.status() == PaymentAttemptStatus::Approved {
         let subscription = load_applied_subscription(connection, &attempt).await?;
         let Some(subscription) = subscription else {
@@ -98,10 +104,9 @@ async fn apply_approved_on_connection(
             )
             .await?;
         }
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
-            None,
-        ));
+        let payment = SubscriptionEnrollmentPaymentResult::not_applied(parked)?
+            .with_observation_diagnostics(conflict_diagnostics);
+        return Ok((payment, None));
     }
 
     let observation = observe_processor_charge(

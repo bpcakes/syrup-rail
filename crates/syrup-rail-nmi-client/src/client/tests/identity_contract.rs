@@ -28,6 +28,33 @@ async fn public_sale_downgrades_approval_without_transaction_identity() {
 }
 
 #[tokio::test]
+async fn public_sale_treats_an_empty_approved_transaction_identity_as_missing() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 200 OK",
+        "application/json",
+        br#"{"status":"approved","id":""}"#.to_vec(),
+    )
+    .await;
+
+    let outcome = client
+        .sale(test_sale_request(PaymentSource::PaymentToken(
+            "tok_empty_transaction".to_owned(),
+        )))
+        .await
+        .expect("an empty approved identity is an anomalous outcome");
+
+    assert_eq!(outcome.status(), PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.diagnostics(),
+        &[PaymentOutcomeDiagnostic::MissingTransactionIdentifier]
+    );
+    assert!(outcome.into_parts().transaction_id.is_none());
+    let request = request_receiver.await.expect("request should be captured");
+    assert!(request.starts_with("POST /api/v5/payments/sale HTTP/1.1"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
 async fn public_vault_creation_sale_requires_transaction_and_vault_identities() {
     let (client, request_receiver, server) = spawn_capturing_server(
         "HTTP/1.1 200 OK",
@@ -92,6 +119,36 @@ async fn public_store_payment_method_requires_both_durable_identities() {
 }
 
 #[tokio::test]
+async fn public_store_payment_method_rejects_blank_transaction_with_valid_vault_identity() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 200 OK",
+        "text/plain",
+        b"response=1&response_code=100&transactionid=&customer_vault_id=vault_valid".to_vec(),
+    )
+    .await;
+
+    let outcome = client
+        .store_payment_method(test_store_payment_method_request())
+        .await
+        .expect("missing transaction identity is an anomalous outcome");
+
+    assert_eq!(outcome.status(), PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.diagnostics(),
+        &[PaymentOutcomeDiagnostic::MissingTransactionIdentifier]
+    );
+    let parts = outcome.into_parts();
+    assert!(parts.transaction_id.is_none());
+    assert_eq!(
+        parts.customer_vault_id.as_ref().map(SensitiveText::expose),
+        Some("vault_valid")
+    );
+    let request = request_receiver.await.expect("request should be captured");
+    assert!(request.starts_with("POST /api/transact.php HTTP/1.1"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
 async fn public_transaction_query_downgrades_approval_without_transaction_identity() {
     let (client, request_receiver, server) = spawn_capturing_server(
         "HTTP/1.1 200 OK",
@@ -117,6 +174,78 @@ async fn public_transaction_query_downgrades_approval_without_transaction_identi
     assert!(outcome.into_parts().transaction_id.is_none());
     let request = request_receiver.await.expect("request should be captured");
     assert!(request.starts_with("POST /api/query.php HTTP/1.1"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn order_only_query_retains_a_bound_decline_with_unusable_transaction_identity() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 200 OK",
+        "text/xml",
+        br#"<nm_response>
+            <transaction>
+                <response>2</response>
+                <transaction_id>txn_first</transaction_id>
+                <transaction_id>txn_second</transaction_id>
+                <order_id>order_requested</order_id>
+            </transaction>
+        </nm_response>"#
+            .to_vec(),
+    )
+    .await;
+
+    let outcome = client
+        .query_transaction(TransactionQuery {
+            transaction_id: None,
+            order_id: Some("order_requested".to_owned()),
+        })
+        .await
+        .expect("the matching order query should parse")
+        .expect("the matching transaction should be returned");
+
+    assert_eq!(outcome.status(), PaymentStatus::Declined);
+    assert_eq!(
+        outcome.diagnostics(),
+        &[PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier]
+    );
+    assert!(outcome.into_parts().transaction_id.is_none());
+    let request = request_receiver.await.expect("request should be captured");
+    assert!(request.contains("order_id=order_requested"));
+    server.await.expect("server task should finish");
+}
+
+#[tokio::test]
+async fn order_only_query_diagnoses_a_bound_decline_with_missing_transaction_identity() {
+    let (client, request_receiver, server) = spawn_capturing_server(
+        "HTTP/1.1 200 OK",
+        "text/xml",
+        br#"<nm_response>
+            <transaction>
+                <response>2</response>
+                <order_id>order_missing_transaction</order_id>
+            </transaction>
+        </nm_response>"#
+            .to_vec(),
+    )
+    .await;
+
+    let outcome = client
+        .query_transaction(TransactionQuery {
+            transaction_id: None,
+            order_id: Some("order_missing_transaction".to_owned()),
+        })
+        .await
+        .expect("the matching order query should parse")
+        .expect("the matching transaction should be returned");
+
+    assert_eq!(outcome.status(), PaymentStatus::Declined);
+    assert_eq!(
+        outcome.diagnostics(),
+        &[PaymentOutcomeDiagnostic::MissingTransactionIdentifier]
+    );
+    assert!(outcome.into_parts().transaction_id.is_none());
+    let request = request_receiver.await.expect("request should be captured");
+    assert!(request.contains("order_id=order_missing_transaction"));
     server.await.expect("server task should finish");
 }
 
@@ -234,6 +363,8 @@ async fn public_transaction_query_does_not_misclassify_an_unrelated_vault_identi
         .expect("the matching transaction should be returned");
 
     assert_eq!(outcome.status(), PaymentStatus::Unknown);
+    assert_eq!(outcome.transaction_id, None);
+    assert_eq!(outcome.customer_vault_id, None);
     assert_eq!(
         outcome.diagnostics(),
         &[PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier]

@@ -467,6 +467,22 @@ fn unknown_outcome() -> GatewayPaymentOutcome {
     )
 }
 
+fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
+    GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Unknown,
+        ProcessorEvidence::new(
+            None,
+            None,
+            Some(GatewayDiagnostic::new("3")),
+            Some(GatewayDiagnostic::new("430")),
+            Some(GatewayDiagnostic::new("Duplicate transaction")),
+            None,
+            GatewayPaymentDescriptor::default(),
+        ),
+    )
+    .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
+}
+
 async fn reserve_and_admit_renewal(
     pool: &PgPool,
     gateway: &ResolvedGateway,
@@ -525,6 +541,31 @@ async fn resolved_at(
         .bind(attempt_id.as_uuid())
         .fetch_one(pool)
         .await
+}
+
+async fn make_trial_due(
+    pool: &PgPool,
+    subscription_id: syrup_rail::SubscriptionId,
+) -> Result<DateTime<Utc>, sqlx::Error> {
+    let due_at: DateTime<Utc> =
+        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+            .fetch_one(pool)
+            .await?;
+    sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET current_period_start_at = $2 - interval '7 days',
+            current_period_end_at = $2,
+            next_renewal_at = $2,
+            next_payment_attempt_at = $2
+        WHERE id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(due_at)
+    .execute(pool)
+    .await?;
+    Ok(due_at)
 }
 
 async fn force_due_renewal(

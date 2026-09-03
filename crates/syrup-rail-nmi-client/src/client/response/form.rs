@@ -10,7 +10,7 @@ use super::super::{
 };
 use super::common::{
     DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
-    ScalarOccurrenceCollector, finalize_foreground_identifiers, rate_limited_wire_error,
+    ScalarOccurrenceCollector, finalize_payment_identifiers, rate_limited_wire_error,
     resolve_optional_scalar,
 };
 
@@ -77,7 +77,7 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
             ));
         }
     };
-    let (transaction_id, customer_vault_id) = finalize_foreground_identifiers(
+    let (transaction_id, customer_vault_id) = finalize_payment_identifiers(
         &mut status,
         transaction_identifier,
         customer_vault_identifier,
@@ -107,7 +107,8 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
             card_exp_year: None,
         },
         diagnostics,
-    })
+    }
+    .normalize_diagnostics())
 }
 
 pub(in crate::client) fn classic_form_has_payment_processing_evidence(
@@ -235,7 +236,7 @@ fn collect_classic_transaction_identifier(
             );
             outcome.record_identifier(
                 ScalarOccurrence::Scalar(Cow::Borrowed(value)),
-                IdentifierPresence::Required,
+                IdentifierPresence::ForegroundRequired,
             );
         }
     }

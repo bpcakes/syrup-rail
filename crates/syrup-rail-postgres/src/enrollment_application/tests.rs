@@ -1,3 +1,5 @@
+// agentic-loc-exception: Shared test fixtures remain under the absolute limit; split follow-up is tracked separately.
+
 use std::{
     collections::VecDeque,
     error::Error,
@@ -9,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
-use sqlx::{Postgres, Transaction};
+use sqlx::{PgConnection, Postgres, Transaction};
 use syrup_rail::{
     BillingContact, BillingContactSnapshot, BillingEventKey, BillingEventSubject, ChargeAmount,
     ChargeRenewal, CurrencyCode, EndUserMutationAdmission, EndUserMutationAdmissionResult,
@@ -20,13 +22,15 @@ use syrup_rail::{
     GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest,
     GatewayResolutionError, GatewayResolver, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
     GatewayTransactionId, GatewayTransactionReport, GatewayTransactionReportRequest,
-    IdempotencyKey, Money, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
-    PaymentAttemptIdentity, PaymentAttemptLifecycle, PaymentAttemptRequest, PaymentAttemptState,
-    PaymentAttemptTarget, PaymentAttemptTimestamps, PaymentCardBrand, PaymentGateway, PaymentToken,
-    PercentOffBasisPoints, RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod,
-    ResolvedGateway, SubscriberId, SubscriptionDiscountCode, SubscriptionDiscountDuration,
-    SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
-    SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentMethodReplacementRejection,
+    IdempotencyKey, ManualAttemptFailureOutcome, ManualFailureHostCharge, Money, PaymentAttempt,
+    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptLifecycle,
+    PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptTarget, PaymentAttemptTimestamps,
+    PaymentCardBrand, PaymentGateway, PaymentToken, PercentOffBasisPoints,
+    RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod, ResolvedGateway, SubscriberId,
+    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
+    SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentMethodReplacement,
+    SubscriptionPaymentMethodReplacementRejection,
     SubscriptionPaymentMethodReplacementReservationOutcome, SubscriptionRecoveryReservationOutcome,
     SubscriptionRecoveryReservationRejection, SubscriptionRenewalOutcome,
     SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
@@ -37,9 +41,10 @@ use tokio::sync::{Mutex, Semaphore};
 use super::*;
 use crate::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
-    BillingTransactionSubjectState, GatewayMutationCooldownScope, SubscriptionBillingService,
-    SubscriptionBillingServiceError, SubscriptionOfferStore, due_renewals,
-    reserve_subscription_enrollment_in_transaction,
+    BillingTransactionSubjectState, GatewayMutationCooldownScope, ManualAttemptFailureHostStore,
+    ManualAttemptFailureHostStoreError, ManualAttemptFailureHostTransitionOutcome,
+    SubscriptionBillingService, SubscriptionBillingServiceError, SubscriptionOfferStore,
+    due_renewals, fail_review_required_attempt, reserve_subscription_enrollment_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
     reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
     test_support::{TestDatabase, create_gateway_account, immediate_offer},
@@ -421,6 +426,7 @@ impl SubscriptionOfferStore for TestOfferStore {
 struct TestCoordinator {
     pool: PgPool,
     events: Arc<Mutex<Vec<BillingEvent>>>,
+    fail_begin: bool,
     fail_event: bool,
     append_pause: Option<Arc<AppendPause>>,
 }
@@ -439,6 +445,27 @@ impl AppendPause {
     }
 }
 
+struct NeverManualFailureHost;
+
+#[async_trait]
+impl ManualAttemptFailureHostStore for NeverManualFailureHost {
+    async fn lock_payment_failure_target(
+        &self,
+        _connection: &mut PgConnection,
+        _charge: ManualFailureHostCharge,
+    ) -> Result<(), ManualAttemptFailureHostStoreError> {
+        panic!("subscription enrollment review does not have a host-charge target")
+    }
+
+    async fn mark_payment_failed(
+        &self,
+        _connection: &mut PgConnection,
+        _charge: ManualFailureHostCharge,
+    ) -> Result<ManualAttemptFailureHostTransitionOutcome, ManualAttemptFailureHostStoreError> {
+        panic!("subscription enrollment review does not have a host-charge target")
+    }
+}
+
 #[async_trait]
 impl BillingTransactionCoordinator for TestCoordinator {
     async fn begin(
@@ -446,6 +473,9 @@ impl BillingTransactionCoordinator for TestCoordinator {
         _subject: BillingEventSubject,
         _lock_timeout: Duration,
     ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError> {
+        if self.fail_begin {
+            return Err(BillingTransactionError::new(InjectedHostError));
+        }
         Ok(Box::new(TestTransaction {
             transaction: Some(
                 self.pool
@@ -692,6 +722,7 @@ async fn enrollment_fixture(
     let coordinator = TestCoordinator {
         pool: database.pool.clone(),
         events: Arc::new(Mutex::new(Vec::new())),
+        fail_begin: false,
         fail_event,
         append_pause: None,
     };
@@ -703,6 +734,73 @@ async fn enrollment_fixture(
         gateway_account: account,
         admission,
     })
+}
+
+async fn reconciled_payment_method_replacement_fixture(
+    project: &str,
+) -> Result<(ApplicationFixture, SubscriptionPaymentMethodReplacement), Box<dyn Error>> {
+    let fixture = enrollment_fixture(project, false, false, false).await?;
+    let initial_gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
+        [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
+        Ok(approved_outcome_with_reference(
+            Some(&format!("txn_{project}_initial")),
+            &format!("vault_{project}_initial"),
+        )),
+    ));
+    let initial_service = SubscriptionBillingService::new(
+        fixture.database.pool.clone(),
+        Arc::new(TestOfferStore),
+        Arc::new(StaticResolver {
+            gateway: scripted_resolved_gateway(
+                fixture.gateway_account,
+                Arc::clone(&initial_gateway),
+            ),
+            calls: AtomicUsize::new(0),
+        }),
+        Arc::new(PermitAdmission {
+            calls: AtomicUsize::new(0),
+        }),
+        Arc::new(fixture.coordinator.clone()),
+    )
+    .with_required_gateway_account_mode(GatewayAccountMode::Test);
+    initial_service.enroll(fixture.command.clone()).await?;
+
+    let replacement_gateway =
+        scripted_resolved_gateway(fixture.gateway_account, Arc::new(NeverCalledGateway));
+    let command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new(format!("{project}-replacement-key"))?,
+            PaymentToken::new(format!("opaque-{project}-replacement-token"))?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let reservation = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &command,
+        &replacement_gateway,
+        GatewayAccountMode::Test,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(reservation, _) => {
+            *reservation
+        }
+        other => return Err(format!("unexpected replacement reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    match admit_subscription_payment_method_replacement(&fixture.database.pool, &reservation)
+        .await?
+    {
+        SubscriptionPaymentMethodReplacementAdmissionOutcome::Admitted(_) => {}
+        other => return Err(format!("unexpected replacement admission: {other:?}").into()),
+    }
+    Ok((fixture, reservation))
 }
 
 async fn hold_subscription_aggregate_lock(
@@ -741,6 +839,22 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
     .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
 }
 
+fn indeterminate_processor_error_outcome() -> GatewayPaymentOutcome {
+    GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Approved,
+        ProcessorEvidence::new(
+            None,
+            None,
+            Some(GatewayDiagnostic::new("3")),
+            Some(GatewayDiagnostic::new("400")),
+            Some(GatewayDiagnostic::new("Processor error")),
+            None,
+            GatewayPaymentDescriptor::default(),
+        ),
+    )
+    .with_diagnostics(vec![GatewayPaymentDiagnostic::IndeterminatePaymentOutcome])
+}
+
 fn approved_outcome_with_transaction(transaction_id: Option<&str>) -> GatewayPaymentOutcome {
     approved_outcome_with_reference(transaction_id, "vault_application")
 }
@@ -749,11 +863,19 @@ fn approved_outcome_with_reference(
     transaction_id: Option<&str>,
     payment_method_reference: &str,
 ) -> GatewayPaymentOutcome {
+    approved_outcome_with_optional_reference(transaction_id, Some(payment_method_reference))
+}
+
+fn approved_outcome_with_optional_reference(
+    transaction_id: Option<&str>,
+    payment_method_reference: Option<&str>,
+) -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
         ProcessorEvidence::new(
             transaction_id.map(|value| GatewayTransactionId::new(value).unwrap()),
-            Some(GatewayPaymentMethodReference::new(payment_method_reference).unwrap()),
+            payment_method_reference
+                .map(|value| GatewayPaymentMethodReference::new(value).unwrap()),
             Some(GatewayDiagnostic::new("1")),
             Some(GatewayDiagnostic::new("100")),
             Some(GatewayDiagnostic::new("Approved")),

@@ -310,7 +310,7 @@ impl Client {
         }
         Ok(require_approved_identities(
             outcome,
-            ApprovedIdentityRequirement::Transaction,
+            ApprovedIdentityRequirement::ApprovedTransaction,
         ))
     }
 
@@ -344,7 +344,7 @@ impl Client {
             .map(|outcome| {
                 require_approved_identities(
                     outcome,
-                    ApprovedIdentityRequirement::TransactionAndCustomerVault,
+                    ApprovedIdentityRequirement::ApprovedTransactionAndCustomerVault,
                 )
             })
             .map_err(WireError::after_success)
@@ -361,13 +361,7 @@ impl Client {
             .post_form_text("/api/query.php", &params)
             .await
             .map_err(WireError::into_query)?;
-        query_outcome_for_request_from_xml(&text, &request)
-            .map(|outcome| {
-                outcome.map(|outcome| {
-                    require_approved_identities(outcome, ApprovedIdentityRequirement::Transaction)
-                })
-            })
-            .map_err(WireError::into_query)
+        query_outcome_for_request_from_xml(&text, &request).map_err(WireError::into_query)
     }
 
     pub async fn query_transaction_reports(
@@ -410,7 +404,7 @@ impl Client {
             .map(|outcome| {
                 require_approved_identities(
                     outcome,
-                    ApprovedIdentityRequirement::TransactionAndCustomerVault,
+                    ApprovedIdentityRequirement::ApprovedTransactionAndCustomerVault,
                 )
             })
             .map_err(WireError::after_success)

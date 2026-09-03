@@ -32,7 +32,22 @@ async fn apply_payment_method_replacement_approved_on_connection(
     (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
     SubscriptionEnrollmentApplicationError,
 > {
-    let evidence = approved_evidence.evidence();
+    let attempt =
+        lock_payment_method_replacement_application_attempt(connection, reservation).await?;
+    apply_locked_payment_method_replacement_approved_outcome(
+        connection,
+        subject_state,
+        reservation,
+        attempt,
+        approved_evidence,
+    )
+    .await
+}
+
+pub(super) async fn lock_payment_method_replacement_application_attempt(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionPaymentMethodReplacement,
+) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
     set_application_timeouts(connection).await?;
     let identity = reservation.identity();
     lock_payment_method_domain(
@@ -48,6 +63,26 @@ async fn apply_payment_method_replacement_approved_on_connection(
         OutcomeReservation::PaymentMethodReplacement(reservation),
     )
     .await?;
+    Ok(attempt)
+}
+
+pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
+    connection: &mut PgConnection,
+    subject_state: BillingTransactionSubjectState,
+    reservation: &SubscriptionPaymentMethodReplacement,
+    attempt: PaymentAttempt,
+    approved_evidence: &ApprovedProcessorEvidence,
+) -> Result<
+    (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
+    SubscriptionEnrollmentApplicationError,
+> {
+    let evidence = approved_evidence.evidence();
+    let identity = reservation.identity();
+    let (conflicting_payment, conflict_diagnostics) =
+        stop_conflicting_subscription_approval(connection, &attempt, evidence).await?;
+    if let Some(payment) = conflicting_payment {
+        return Ok((payment, None));
+    }
     if attempt.status() == PaymentAttemptStatus::Approved {
         let subscription = load_applied_subscription(connection, &attempt)
             .await?
@@ -79,13 +114,12 @@ async fn apply_payment_method_replacement_approved_on_connection(
             ProcessorChargeProgression::ReconciliationRequired,
         )
         .await?;
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::confirmation_pending(
-                attempt,
-                approved_evidence.clone(),
-            )?,
-            None,
-        ));
+        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
+            attempt,
+            approved_evidence.clone(),
+        )?
+        .with_observation_diagnostics(conflict_diagnostics);
+        return Ok((payment, None));
     }
     let observation = observe_processor_charge(
         connection,

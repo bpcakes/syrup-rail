@@ -1,7 +1,7 @@
 use chrono::TimeZone;
 
 use super::*;
-use crate::{CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError};
+use crate::{CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError, PaymentAttemptId};
 
 #[test]
 fn gateway_account_mode_storage_values_round_trip_exhaustively() {
@@ -240,23 +240,231 @@ fn approved_payment_evidence_requires_identity_and_an_authoritative_decision() {
 fn gateway_outcome_carries_only_provider_neutral_payment_diagnostics() {
     let outcome =
         GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, ProcessorEvidence::default())
-            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+            .with_diagnostics(vec![
+                GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+                GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+                GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+            ]);
     assert_eq!(
         outcome.diagnostics(),
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        &[
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]
     );
+    assert!(outcome.has_diagnostic(GatewayPaymentDiagnostic::ProcessorReportedDuplicate));
+    assert!(!outcome.has_diagnostic(GatewayPaymentDiagnostic::MissingDecisionEvidence));
     let (status, evidence, diagnostics) = outcome.into_parts_with_diagnostics();
     assert_eq!(status, GatewayPaymentStatus::Unknown);
     assert_eq!(evidence, ProcessorEvidence::default());
     assert_eq!(
         diagnostics,
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
+        &[
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]
+    );
+    let reconstructed = GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics);
+    assert_eq!(reconstructed.status(), GatewayPaymentStatus::Unknown);
+    assert_eq!(
+        reconstructed.diagnostics(),
+        &[
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+        ]
     );
     assert!(
         GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, ProcessorEvidence::default())
             .diagnostics()
             .is_empty()
     );
+
+    let approved_duplicate =
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, ProcessorEvidence::default())
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
+    assert_eq!(approved_duplicate.status(), GatewayPaymentStatus::Unknown);
+    assert!(approved_duplicate.approved_evidence().is_none());
+
+    let approved_unmapped =
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, ProcessorEvidence::default())
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::UnmappedProviderDiagnostic]);
+    assert_eq!(approved_unmapped.status(), GatewayPaymentStatus::Unknown);
+    assert!(approved_unmapped.approved_evidence().is_none());
+}
+
+#[test]
+fn gateway_outcome_approval_policy_distinguishes_identity_from_decision_certainty() {
+    let policy = [
+        (
+            GatewayPaymentDiagnostic::MissingTransactionIdentifier,
+            GatewayPaymentStatus::Approved,
+        ),
+        (
+            GatewayPaymentDiagnostic::MissingPaymentMethodReference,
+            GatewayPaymentStatus::Approved,
+        ),
+        (
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::InvalidOrConflictingDecisionField,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::IndeterminatePaymentOutcome,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::ProcessorReportedDuplicate,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::ConflictingDecisionEvidence,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::UnrecognizedDecisionEvidence,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::MissingDecisionEvidence,
+            GatewayPaymentStatus::Unknown,
+        ),
+        (
+            GatewayPaymentDiagnostic::UnmappedProviderDiagnostic,
+            GatewayPaymentStatus::Unknown,
+        ),
+    ];
+    assert_eq!(
+        policy.map(|(diagnostic, _)| diagnostic),
+        GatewayPaymentDiagnostic::ALL
+    );
+
+    for (diagnostic, expected_status) in policy {
+        let outcome = GatewayPaymentOutcome::new(
+            GatewayPaymentStatus::Approved,
+            ProcessorEvidence::default(),
+        )
+        .with_diagnostics(vec![diagnostic]);
+
+        assert_eq!(outcome.status(), expected_status, "{diagnostic:?}");
+        assert_eq!(
+            outcome.approved_evidence().is_some(),
+            expected_status == GatewayPaymentStatus::Approved,
+            "{diagnostic:?}"
+        );
+    }
+}
+
+#[test]
+fn gateway_outcome_quarantines_every_diagnosed_identity() {
+    let evidence = || {
+        ProcessorEvidence::new(
+            Some(GatewayTransactionId::new("txn-diagnosed").unwrap()),
+            Some(GatewayPaymentMethodReference::new("method-diagnosed").unwrap()),
+            None,
+            None,
+            None,
+            None,
+            GatewayPaymentDescriptor::default(),
+        )
+    };
+
+    for (diagnostic, expected_status) in [
+        (
+            GatewayPaymentDiagnostic::MissingTransactionIdentifier,
+            GatewayPaymentStatus::Approved,
+        ),
+        (
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentStatus::Unknown,
+        ),
+    ] {
+        let outcome = GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, evidence())
+            .with_diagnostics(vec![diagnostic]);
+        assert_eq!(outcome.status(), expected_status);
+        assert!(outcome.transaction_id().is_none(), "{diagnostic:?}");
+        assert!(
+            outcome.payment_method_reference().is_some(),
+            "{diagnostic:?}"
+        );
+    }
+
+    for (diagnostic, expected_status) in [
+        (
+            GatewayPaymentDiagnostic::MissingPaymentMethodReference,
+            GatewayPaymentStatus::Approved,
+        ),
+        (
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
+            GatewayPaymentStatus::Unknown,
+        ),
+    ] {
+        let outcome = GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, evidence())
+            .with_diagnostics(vec![diagnostic]);
+        assert_eq!(outcome.status(), expected_status);
+        assert!(outcome.transaction_id().is_some(), "{diagnostic:?}");
+        assert!(
+            outcome.payment_method_reference().is_none(),
+            "{diagnostic:?}"
+        );
+    }
+
+    let outcome = GatewayPaymentOutcome::new(GatewayPaymentStatus::Declined, evidence())
+        .with_diagnostics(vec![
+            GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
+        ]);
+    assert_eq!(outcome.status(), GatewayPaymentStatus::Declined);
+    assert!(outcome.transaction_id().is_none());
+    assert!(outcome.payment_method_reference().is_none());
+}
+
+#[test]
+fn replacing_gateway_diagnostics_cannot_restore_a_terminal_status() {
+    let outcome =
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, ProcessorEvidence::default())
+            .with_diagnostics(vec![GatewayPaymentDiagnostic::IndeterminatePaymentOutcome]);
+    assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+
+    let outcome = outcome.with_diagnostics(vec![
+        GatewayPaymentDiagnostic::MissingPaymentMethodReference,
+    ]);
+    assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+    assert!(outcome.approved_evidence().is_none());
+}
+
+#[test]
+fn gateway_diagnostic_certainty_policy_applies_to_every_status() {
+    for status in [
+        GatewayPaymentStatus::Approved,
+        GatewayPaymentStatus::Declined,
+        GatewayPaymentStatus::Unknown,
+        GatewayPaymentStatus::Failed,
+    ] {
+        for &diagnostic in GatewayPaymentDiagnostic::ALL {
+            let outcome = GatewayPaymentOutcome::new(status, ProcessorEvidence::default())
+                .with_diagnostics(vec![diagnostic]);
+            let expected_status = if diagnostic.requires_unknown_status()
+                || status == GatewayPaymentStatus::Approved && diagnostic.prevents_approval()
+            {
+                GatewayPaymentStatus::Unknown
+            } else {
+                status
+            };
+
+            assert_eq!(
+                outcome.status(),
+                expected_status,
+                "{status:?} + {diagnostic:?}"
+            );
+        }
+    }
 }
 
 #[test]

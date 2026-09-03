@@ -18,7 +18,7 @@ on:
       - ".github/workflows/repo-policy.yml"
   push:
     branches:
-      - "main"
+      - "master"
     paths:
 
       - "crates/**"
@@ -82,7 +82,7 @@ jobs:
           rustflags: ""
       - name: Check Rust file LOC policy
         env:
-          JIG_DEFAULT_BRANCH: "main"
+          JIG_DEFAULT_BRANCH: "master"
         run: |
           set -euo pipefail
           if git rev-parse --verify "origin/$JIG_DEFAULT_BRANCH" >/dev/null 2>&1; then

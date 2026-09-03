@@ -35,7 +35,7 @@ zeroize = { version = "1", features = ["derive", "serde"] }
 
 postgres-test-harness = { git = "https://github.com/bpcakes/postgres-test-harness.git", rev = "473d280772672a435cafd81901eee6e6db0f32e4" }
 
-syrup-rail = { version = "0.6.0", path = "crates/syrup-rail" }
-syrup-rail-postgres = { version = "0.6.0", path = "crates/syrup-rail-postgres" }
-syrup-rail-nmi = { version = "0.6.0", path = "crates/syrup-rail-nmi" }
-syrup-rail-nmi-client = { version = "0.6.0", path = "crates/syrup-rail-nmi-client" }
+syrup-rail = { version = "=0.6.0", path = "crates/syrup-rail" }
+syrup-rail-postgres = { version = "=0.6.0", path = "crates/syrup-rail-postgres" }
+syrup-rail-nmi = { version = "=0.6.0", path = "crates/syrup-rail-nmi" }
+syrup-rail-nmi-client = { version = "=0.6.0", path = "crates/syrup-rail-nmi-client" }
