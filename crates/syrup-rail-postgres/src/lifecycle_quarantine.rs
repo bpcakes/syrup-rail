@@ -159,6 +159,25 @@ pub async fn claim_gateway_lifecycle_quarantine_alert(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
+    let owns_claim: bool = sqlx::query_scalar(
+        r#"
+        SELECT pg_try_advisory_xact_lock(
+            hashtextextended(
+                'syrup-rail:lifecycle-quarantine-alert:'
+                    || $1::uuid::text || ':' || $2::uuid::text,
+                0
+            )
+        )
+        "#,
+    )
+    .bind(account.billing_scope_id().as_uuid())
+    .bind(account.gateway_account_id().as_uuid())
+    .fetch_one(&mut *transaction)
+    .await?;
+    if !owns_claim {
+        transaction.rollback().await?;
+        return Ok(None);
+    }
     let row = sqlx::query(
         r#"
         WITH due AS MATERIALIZED (
@@ -472,7 +491,7 @@ fn quarantine_reason(
 
 #[cfg(test)]
 mod tests {
-    use std::error::Error;
+    use std::{error::Error, io};
 
     use super::*;
     use crate::{
@@ -480,6 +499,156 @@ mod tests {
         test_support::{TestDatabase, create_gateway_account},
     };
     use syrup_rail::{GatewayLifecycleQuarantine, GatewayProviderKey};
+
+    #[tokio::test]
+    async fn concurrent_alert_claim_has_one_winner() -> Result<(), Box<dyn Error>> {
+        let database = TestDatabase::start("rail_quar_claim").await?;
+        let first_fixture = create_gateway_account(&database.pool, "nmi").await?;
+        let first_account = GatewayLifecycleAccount::new(
+            BillingScopeId::new(first_fixture.billing_scope_id),
+            GatewayAccountId::new(first_fixture.gateway_account_id),
+            GatewayProviderKey::new("nmi")?,
+        );
+        let first_quarantine = GatewayLifecycleQuarantine::new(
+            Some(syrup_rail::GatewayTransactionId::new("txn-contended")?),
+            None,
+            GatewayLifecycleQuarantineReason::MalformedReportStructure,
+        )?;
+        record_gateway_lifecycle_quarantines(
+            &database.pool,
+            &first_account,
+            std::slice::from_ref(&first_quarantine),
+        )
+        .await?;
+
+        let second_fixture = create_gateway_account(&database.pool, "nmi").await?;
+        let second_account = GatewayLifecycleAccount::new(
+            BillingScopeId::new(second_fixture.billing_scope_id),
+            GatewayAccountId::new(second_fixture.gateway_account_id),
+            GatewayProviderKey::new("nmi")?,
+        );
+        let second_quarantine = GatewayLifecycleQuarantine::new(
+            Some(syrup_rail::GatewayTransactionId::new("txn-independent")?),
+            None,
+            GatewayLifecycleQuarantineReason::MalformedReportStructure,
+        )?;
+        record_gateway_lifecycle_quarantines(
+            &database.pool,
+            &second_account,
+            std::slice::from_ref(&second_quarantine),
+        )
+        .await?;
+
+        let mut blocker = database.pool.begin().await?;
+        sqlx::query(
+            r#"
+            SELECT id
+            FROM billing_gateway_lifecycle_quarantines
+            WHERE billing_scope_id = $1
+                AND gateway_account_id = $2
+                AND resolved_at IS NULL
+            FOR UPDATE
+            "#,
+        )
+        .bind(first_account.billing_scope_id().as_uuid())
+        .bind(first_account.gateway_account_id().as_uuid())
+        .fetch_one(&mut *blocker)
+        .await?;
+        let mut observer = database.pool.acquire().await?;
+
+        let claim_pool = database.pool.clone();
+        let claim_account = first_account.clone();
+        let first_claim = tokio::spawn(async move {
+            claim_gateway_lifecycle_quarantine_alert(
+                &claim_pool,
+                &claim_account,
+                Duration::from_secs(3_600),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if waiting_alert_claims(&mut observer).await? >= 1 {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("first alert claim did not reach its row-lock wait"))??;
+
+        let independent_claim = tokio::time::timeout(
+            Duration::from_millis(200),
+            claim_gateway_lifecycle_quarantine_alert(
+                &database.pool,
+                &second_account,
+                Duration::from_secs(3_600),
+            ),
+        )
+        .await
+        .map_err(|_| io::Error::other("a different account's alert claim was blocked"))??;
+        assert!(independent_claim.is_some());
+
+        let claim_pool = database.pool.clone();
+        let claim_account = first_account.clone();
+        let second_claim = tokio::spawn(async move {
+            claim_gateway_lifecycle_quarantine_alert(
+                &claim_pool,
+                &claim_account,
+                Duration::from_secs(3_600),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let waiting_claims = waiting_alert_claims(&mut observer).await?;
+                if waiting_claims >= 2 || first_claim.is_finished() || second_claim.is_finished() {
+                    return Ok::<_, sqlx::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("alert claims did not reach a deterministic outcome"))??;
+
+        blocker.rollback().await?;
+        let (first_result, second_result) = tokio::try_join!(first_claim, second_claim)?;
+        let successful_claims = [first_result?, second_result?]
+            .into_iter()
+            .filter(Option::is_some)
+            .count();
+        assert_eq!(successful_claims, 1);
+        assert!(
+            claim_gateway_lifecycle_quarantine_alert(
+                &database.pool,
+                &first_account,
+                Duration::from_secs(3_600),
+            )
+            .await?
+            .is_none()
+        );
+
+        drop(observer);
+        database.cleanup().await?;
+        Ok(())
+    }
+
+    async fn waiting_alert_claims(observer: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM pg_catalog.pg_stat_activity
+            WHERE datname = current_database()
+                AND pid <> pg_backend_pid()
+                AND wait_event_type = 'Lock'
+                AND query LIKE '%WITH due AS MATERIALIZED%'
+            "#,
+        )
+        .fetch_one(observer)
+        .await
+    }
 
     #[tokio::test]
     async fn alert_review_resolution_replay_and_reopen_are_exact_and_auditable()
