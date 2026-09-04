@@ -4,6 +4,15 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-04
+
+### Fixed
+
+- Serialize lifecycle-quarantine alert claims per gateway account so concurrent
+  claimants cannot both emit an operator alert within one cadence window.
+  Contending same-account callers now return `None` without waiting, while
+  claims for different accounts remain independent.
+
 ## [0.5.1] - 2026-09-02
 
 ### Added
@@ -819,7 +828,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/bpcakes/syrup-rail/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/bpcakes/syrup-rail/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/bpcakes/syrup-rail/compare/v0.3.0...v0.4.0
