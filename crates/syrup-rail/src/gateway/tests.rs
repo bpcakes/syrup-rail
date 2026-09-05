@@ -219,6 +219,13 @@ fn approval_evidence_uses_adapter_facts_without_reinterpreting_raw_fields() {
             .with_approval_evidence(Signal::Absent)
             .indicates_approved_payment()
     );
+    assert_eq!(
+        raw.clone()
+            .with_approval_evidence(Signal::Absent)
+            .approval_evidence(),
+        Signal::Unclassified,
+        "adding evidence cannot downgrade a conservative signal"
+    );
     assert!(
         !raw.clone()
             .with_approval_evidence(Signal::TextOnly)
@@ -591,8 +598,8 @@ fn unclassified_review_protection_does_not_depend_on_retained_text() {
             .with_approval_evidence(Signal::Unclassified)
             .may_indicate_approval()
     );
-    let local_note = ProcessorEvidence::new(Signal::Absent,
-
+    let local_note = ProcessorEvidence::new(
+        Signal::Absent,
         None,
         None,
         None,

@@ -321,8 +321,8 @@ async fn typed_approval_signals_survive_application_reload_and_replay() -> Resul
     use syrup_rail::ProcessorApprovalEvidence as Signal;
     for code in ["100", "0100", "+0100", "provider-specific-success"] {
         let fixture = application_fixture("approval_signal", false, false).await?;
-        let evidence = ProcessorEvidence::new(Signal::Structured,
-
+        let evidence = ProcessorEvidence::new(
+            Signal::Structured,
             Some(GatewayTransactionId::new("txn_approval_signal")?),
             None,
             None,
@@ -395,8 +395,8 @@ async fn manual_failure_uses_persisted_classification_and_protects_legacy_rows()
         Signal::Absent,
     ] {
         let fixture = application_fixture("manual_signal", false, false).await?;
-        let evidence = ProcessorEvidence::new(signal,
-
+        let evidence = ProcessorEvidence::new(
+            signal,
             None,
             None,
             None,
@@ -538,7 +538,16 @@ async fn unidentified_reconciliation_cannot_erase_approval_signals() -> Result<(
     use syrup_rail::ProcessorApprovalEvidence as Signal;
     let fixture = application_fixture("noid_signal", false, false).await?;
     let result = async {
-        let prior = ProcessorEvidence::default().with_approval_evidence(Signal::Structured);
+        let prior = ProcessorEvidence::new(
+            Signal::Structured,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            GatewayPaymentDescriptor::default(),
+        );
         let initial = apply_subscription_enrollment_gateway_outcome(&fixture.database.pool, &fixture.coordinator, &fixture.reservation, &GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, prior)).await?;
         let id = initial.attempt().identity().attempt_id();
         let reconciled = apply_reconciled_subscription_enrollment_gateway_outcome(&fixture.database.pool, &fixture.coordinator, fixture.reservation.identity().billing_scope_id(), id, &GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, ProcessorEvidence::default())).await?;

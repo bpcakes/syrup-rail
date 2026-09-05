@@ -84,6 +84,12 @@ for crate in "${publishable_crates[@]}"; do
   fi
 done
 
+unreleased_heading_count="$(grep -cFx '## [Unreleased]' CHANGELOG.md || true)"
+if [[ "$unreleased_heading_count" -ne 1 ]]; then
+  echo "CHANGELOG.md must contain exactly one canonical ## [Unreleased] heading." >&2
+  exit 1
+fi
+
 unreleased_body="$(awk '
   $0 == "## [Unreleased]" { in_unreleased = 1; next }
   in_unreleased && /^## \[/ { exit }

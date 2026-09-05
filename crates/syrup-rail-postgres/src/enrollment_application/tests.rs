@@ -826,8 +826,8 @@ fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
 fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
-        ProcessorEvidence::new(syrup_rail::ProcessorApprovalEvidence::Unclassified,
-
+        ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -843,8 +843,8 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
 fn indeterminate_processor_error_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
-        ProcessorEvidence::new(syrup_rail::ProcessorApprovalEvidence::Unclassified,
-
+        ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -874,8 +874,8 @@ fn approved_outcome_with_optional_reference(
 ) -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
-        ProcessorEvidence::new(syrup_rail::ProcessorApprovalEvidence::Structured,
-
+        ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Structured,
             transaction_id.map(|value| GatewayTransactionId::new(value).unwrap()),
             payment_method_reference
                 .map(|value| GatewayPaymentMethodReference::new(value).unwrap()),

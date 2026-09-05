@@ -622,4 +622,3 @@ pub(crate) fn same_processor_transaction(
     let persisted = attempt.state().processor_evidence().transaction_id();
     persisted.is_some() && persisted == observed.transaction_id()
 }
-

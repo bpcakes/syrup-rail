@@ -23,7 +23,8 @@ _No unreleased changes._
 
 - Gate `assert_runtime_schema_v4_compatible` behind
   `schema-contract-test-support`. Production startup now uses
-  `assert_runtime_schema_v5_compatible` after the required v5 cutover.
+  `assert_runtime_schema_v6_compatible` after the required v5-to-v6 cutover;
+  the v5 assertion only validates the old side while preparing that cutover.
 
 - Replace the NMI client's independent sale source, vault action, stored-
   credential, and currency fields with the closed `SaleIntent` contract.
@@ -132,10 +133,10 @@ _No unreleased changes._
 - Keep release-wrapper fixtures aligned with exact internal dependency pins
   and verify that non-exact pins are rejected before packaging.
 - Check documentation and doctests with default features as well as all
-  features, and correct renewal documentation to require the schema-v5 startup
+  features, and correct renewal documentation to require the schema-v6 startup
   assertion.
 - Share the current schema install selection between integration fixtures and
-  the independent SQLx metadata gate so both validate schema v5.
+  the independent SQLx metadata gate so both validate schema v6.
 - Make clean release preflight work under Bash 3.2 through 4.3 by avoiding
   nounset expansion of an empty optional-argument array. CI now exercises clean
   and `--allow-dirty` packaging under both current Bash and macOS Bash 3.2.

@@ -709,14 +709,15 @@ impl ProcessorEvidence {
         self.transaction_id.is_some() || self.payment_method_reference.is_some()
     }
 
-    /// Attaches the provider adapter's conservative approval-signal classification.
+    /// Adds conservative approval evidence without weakening an earlier signal.
     /// This is independent of the authoritative payment decision. Persistence
-    /// and evidence-copying code must retain it alongside the raw observation.
+    /// and evidence-copying code must retain the merged classification alongside
+    /// the raw observation.
     pub const fn with_approval_evidence(
         mut self,
         evidence: crate::ProcessorApprovalEvidence,
     ) -> Self {
-        self.approval_evidence = evidence;
+        self.approval_evidence = self.approval_evidence.merge(evidence);
         self
     }
 

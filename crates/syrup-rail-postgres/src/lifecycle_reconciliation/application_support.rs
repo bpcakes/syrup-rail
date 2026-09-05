@@ -605,4 +605,3 @@ fn latest_time(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Opt
         (None, None) => None,
     }
 }
-

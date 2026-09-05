@@ -522,4 +522,3 @@ fn validate_index_contract(
     }
     Ok(())
 }
-

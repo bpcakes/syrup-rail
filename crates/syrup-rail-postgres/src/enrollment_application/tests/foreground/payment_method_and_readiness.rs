@@ -312,7 +312,6 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(stale_result.status(), PaymentAttemptStatus::Failed);
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
 
-
     sqlx::query(
         "UPDATE billing_subscriptions \
          SET initial_transaction_id = 'txn_method_new', updated_at = clock_timestamp() \
@@ -347,15 +346,14 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(reservation, _) => {
             *reservation
         }
-        other => return Err(format!("unexpected review replacement reservation: {other:?}").into()),
+        other => {
+            return Err(format!("unexpected review replacement reservation: {other:?}").into());
+        }
     };
     transaction.commit().await?;
     assert!(matches!(
-        admit_subscription_payment_method_replacement(
-            &fixture.database.pool,
-            &review_reservation
-        )
-        .await?,
+        admit_subscription_payment_method_replacement(&fixture.database.pool, &review_reservation)
+            .await?,
         SubscriptionPaymentMethodReplacementAdmissionOutcome::Admitted(_)
     ));
     sqlx::query(
@@ -373,7 +371,10 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         &review_outcome,
     )
     .await?;
-    assert_eq!(review.attempt().status(), PaymentAttemptStatus::ReviewRequired);
+    assert_eq!(
+        review.attempt().status(),
+        PaymentAttemptStatus::ReviewRequired
+    );
     let preserved_review_identity: (Option<String>, Option<String>) = sqlx::query_as(
         "SELECT gateway_transaction_id, gateway_payment_method_reference \
          FROM billing_payment_attempts WHERE id = $1",
@@ -417,7 +418,6 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     .bind(subscription_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
-
 
     let parked_outcome =
         approved_outcome_with_reference(Some("txn_method_parked"), "vault_method_parked")

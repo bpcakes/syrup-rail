@@ -58,6 +58,22 @@ fn approved_evidence(transaction_id: &str) -> ProcessorEvidence {
     )
 }
 
+fn evidence_with_classification(
+    evidence: &ProcessorEvidence,
+    classification: syrup_rail::ProcessorApprovalEvidence,
+) -> ProcessorEvidence {
+    ProcessorEvidence::new(
+        classification,
+        evidence.transaction_id().cloned(),
+        evidence.payment_method_reference().cloned(),
+        evidence.response().cloned(),
+        evidence.response_code().cloned(),
+        evidence.response_text().cloned(),
+        evidence.condition().cloned(),
+        evidence.descriptor().clone(),
+    )
+}
+
 #[tokio::test]
 async fn malformed_charge_maps_through_each_consumer_error_boundary() -> Result<(), Box<dyn Error>>
 {
@@ -304,9 +320,10 @@ async fn lock_free_subscription_evidence_preserves_replay_and_ownership()
                 .await?,
                 LockFreeApprovedEvidenceOutcome::ExactReplay
             );
-            let classification_drift = evidence
-                .clone()
-                .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::TextOnly);
+            let classification_drift = evidence_with_classification(
+                &evidence,
+                syrup_rail::ProcessorApprovalEvidence::TextOnly,
+            );
             assert_eq!(
                 persist_approved_evidence_without_attempt_lock(
                     &database.pool,
@@ -475,9 +492,10 @@ async fn transaction_observation_preserves_exact_replay_and_rejects_drift()
             replay,
             ProcessorChargeObservationOutcome::ExactReplay(_)
         ));
-        let classification_drift = evidence
-            .clone()
-            .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::TextOnly);
+        let classification_drift = evidence_with_classification(
+            &evidence,
+            syrup_rail::ProcessorApprovalEvidence::TextOnly,
+        );
         let drift = observe_processor_charge_in_transaction(
             &mut transaction,
             attempt_id,
@@ -555,8 +573,10 @@ async fn transactionless_charge_identification_requires_matching_approval_classi
         )
         .await?;
 
-        let classification_drift = approved_evidence("txn_classification_drift")
-            .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::TextOnly);
+        let classification_drift = evidence_with_classification(
+            &approved_evidence("txn_classification_drift"),
+            syrup_rail::ProcessorApprovalEvidence::TextOnly,
+        );
         observe_processor_charge_in_transaction(
             &mut transaction,
             attempt_id,

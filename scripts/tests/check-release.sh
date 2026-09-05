@@ -162,6 +162,28 @@ if ! grep -Fqx "CHANGELOG.md must have no unreleased changes before publishing v
 fi
 cp "$test_root/release-CHANGELOG.md" "$fixture_root/CHANGELOG.md"
 
+cat >"$fixture_root/CHANGELOG.md" <<'EOF'
+## [Upcoming]
+
+_No unreleased changes._
+
+## [0.3.0] - 2026-08-23
+EOF
+calls="$test_root/unreleased-heading-invalid-cargo-calls"
+if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+  RELEASE_TEST_CARGO_CALLS="$calls" \
+  PATH="$test_root/bin:$PATH" \
+  "$modern_bash" "$subject" 0.3.0 >"$test_root/unreleased-heading-rejection" 2>&1; then
+  printf 'release checker accepted a missing canonical Unreleased heading\n' >&2
+  exit 1
+fi
+if ! grep -Fqx "CHANGELOG.md must contain exactly one canonical ## [Unreleased] heading." "$test_root/unreleased-heading-rejection" || [[ -e "$calls" ]]; then
+  printf 'unexpected Unreleased-heading rejection\n' >&2
+  cat "$test_root/unreleased-heading-rejection" >&2
+  exit 1
+fi
+cp "$test_root/release-CHANGELOG.md" "$fixture_root/CHANGELOG.md"
+
 if [[ -x /bin/bash ]] && /bin/bash -c '[[ ${BASH_VERSINFO[0]} -eq 3 && ${BASH_VERSINFO[1]} -eq 2 ]]'; then
   run_case "bash-3.2-clean" /bin/bash false ""
   run_case "bash-3.2-dirty" /bin/bash true " --allow-dirty" --allow-dirty

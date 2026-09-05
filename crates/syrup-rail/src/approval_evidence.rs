@@ -6,14 +6,17 @@ use std::str::FromStr;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ProcessorApprovalEvidence {
     /// The observation could not be classified, or a legacy writer omitted its
-    /// classification. Always protects manual review, even if raw fields were
-    /// discarded. Empty observations are explicitly `Absent`.
+    /// classification. Always protects manual review for payment-bearing
+    /// attempts, even if raw fields were discarded. Empty observations are
+    /// explicitly `Absent`.
     #[default]
     Unclassified,
     /// The adapter found no approval signal in this observation.
     Absent,
-    /// Free-form provider text suggests approval; this blocks manual failure
-    /// but is insufficient to identify a processor charge.
+    /// Free-form provider text suggests approval; this blocks manual failure for
+    /// payment-bearing attempts but is insufficient to identify a processor
+    /// charge. Snapshot-guarded zero-value payment-method updates use their
+    /// separate manual-closure policy.
     TextOnly,
     /// At least one structured provider field indicates approval. This is not
     /// proof of an authoritative approval when other evidence conflicts.

@@ -5,6 +5,51 @@ use crate::schema_contract::{
 };
 
 #[tokio::test]
+async fn fresh_v6_defaults_fail_closed_by_evidence_owner() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_v6_defaults").await?;
+    let result = async {
+        let defaults: Vec<(String, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT table_name, column_default
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND column_name = 'gateway_approval_evidence'
+              AND table_name IN (
+                  'billing_payment_attempts',
+                  'billing_processor_charges',
+                  'billing_external_reversal_attestations'
+              )
+            ORDER BY table_name
+            "#,
+        )
+        .fetch_all(&database.pool)
+        .await?;
+        assert_eq!(
+            defaults,
+            vec![
+                (
+                    "billing_external_reversal_attestations".to_owned(),
+                    Some("'unclassified'::text".to_owned()),
+                ),
+                (
+                    "billing_payment_attempts".to_owned(),
+                    Some("'absent'::text".to_owned()),
+                ),
+                (
+                    "billing_processor_charges".to_owned(),
+                    Some("'unclassified'::text".to_owned()),
+                ),
+            ]
+        );
+        Ok::<(), Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn runtime_schema_v6_matches_fresh_install_and_v5_upgrade() -> Result<(), Box<dyn Error>> {
     let fresh = TestDatabase::start("sr_fresh_v6").await?;
     let upgraded = TestDatabase::start_v5("sr_upgrade_v6").await?;
