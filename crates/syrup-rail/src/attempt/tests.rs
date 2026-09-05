@@ -534,6 +534,7 @@ fn typed_targets_preserve_exact_relationships() {
 #[test]
 fn durable_attempt_debug_is_value_free() {
     let evidence = ProcessorEvidence::new(
+        crate::ProcessorApprovalEvidence::Unclassified,
         Some(GatewayTransactionId::new("transaction-secret").unwrap()),
         Some(GatewayPaymentMethodReference::new("method-secret").unwrap()),
         Some(GatewayDiagnostic::new("response-secret")),

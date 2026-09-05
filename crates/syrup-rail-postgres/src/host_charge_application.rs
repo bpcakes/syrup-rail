@@ -458,6 +458,7 @@ pub(crate) async fn resolve_host_charge_before_submission(
         Some(syrup_rail::GatewayDiagnostic::new("failed"))
     };
     let evidence = ProcessorEvidence::new(
+        syrup_rail::ProcessorApprovalEvidence::Absent,
         None,
         None,
         None,
@@ -465,8 +466,7 @@ pub(crate) async fn resolve_host_charge_before_submission(
         Some(detail),
         condition,
         syrup_rail::GatewayPaymentDescriptor::default(),
-    )
-    .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Absent);
+    );
     resolve_host_charge_non_approved(
         pool,
         targets,

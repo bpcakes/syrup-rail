@@ -106,7 +106,7 @@ impl SubscriptionBillingService {
                 return self
                     .resolve_subscriber_readiness_failure(
                         SubscriberInitiatedReservation::PaymentMethodReplacement(&reservation),
-                        failure,
+                        failure.into(),
                         OutcomeResolutionBoundary::Prepared,
                     )
                     .await;

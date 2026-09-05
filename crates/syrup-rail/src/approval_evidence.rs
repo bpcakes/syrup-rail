@@ -61,3 +61,29 @@ impl FromStr for ProcessorApprovalEvidence {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessorApprovalEvidence::{Absent, Structured, TextOnly, Unclassified};
+
+    #[test]
+    fn merge_is_commutative_and_preserves_the_strongest_conservative_signal() {
+        let cases = [
+            (Absent, Absent, Absent),
+            (Absent, Unclassified, Unclassified),
+            (Absent, TextOnly, TextOnly),
+            (Absent, Structured, Structured),
+            (Unclassified, Unclassified, Unclassified),
+            (Unclassified, TextOnly, TextOnly),
+            (Unclassified, Structured, Structured),
+            (TextOnly, TextOnly, TextOnly),
+            (TextOnly, Structured, Structured),
+            (Structured, Structured, Structured),
+        ];
+
+        for (left, right, expected) in cases {
+            assert_eq!(left.merge(right), expected);
+            assert_eq!(right.merge(left), expected);
+        }
+    }
+}

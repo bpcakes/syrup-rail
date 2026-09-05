@@ -638,6 +638,7 @@ pub struct ProcessorEvidence {
 impl Default for ProcessorEvidence {
     fn default() -> Self {
         Self::new(
+            crate::ProcessorApprovalEvidence::Absent,
             None,
             None,
             None,
@@ -650,13 +651,12 @@ impl Default for ProcessorEvidence {
 }
 
 impl ProcessorEvidence {
-    /// Constructs legacy evidence without interpreting provider text. An empty
-    /// decision/reference bundle has no observed approval signal; nonempty
-    /// legacy evidence remains unclassified.
-    /// Provider adapters must attach their review classification with
-    /// [`Self::with_approval_evidence`]; persistence must restore its stored value.
+    /// Constructs evidence with an explicit provider-derived review
+    /// classification. Requiring this fact at construction prevents adapters
+    /// from silently omitting the classification while still compiling.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
+        approval_evidence: crate::ProcessorApprovalEvidence,
         transaction_id: Option<GatewayTransactionId>,
         payment_method_reference: Option<GatewayPaymentMethodReference>,
         response: Option<GatewayDiagnostic>,
@@ -666,17 +666,7 @@ impl ProcessorEvidence {
         descriptor: GatewayPaymentDescriptor,
     ) -> Self {
         Self {
-            approval_evidence: if transaction_id.is_none()
-                && payment_method_reference.is_none()
-                && response.is_none()
-                && response_code.is_none()
-                && response_text.is_none()
-                && condition.is_none()
-            {
-                crate::ProcessorApprovalEvidence::Absent
-            } else {
-                crate::ProcessorApprovalEvidence::Unclassified
-            },
+            approval_evidence,
             transaction_id,
             payment_method_reference,
             response,
@@ -730,7 +720,7 @@ impl ProcessorEvidence {
         self
     }
 
-    /// Returns the adapter's classification, or `Unclassified` for legacy input.
+    /// Returns the classification supplied when the evidence was constructed.
     pub const fn approval_evidence(&self) -> crate::ProcessorApprovalEvidence {
         self.approval_evidence
     }

@@ -280,6 +280,7 @@ async fn reconciled_initial_outcomes_cannot_replace_an_established_processor_ide
     let unknown = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_initial_durable")?),
             Some(GatewayPaymentMethodReference::new("vault_initial_durable")?),
             Some(GatewayDiagnostic::new("3")),
@@ -301,6 +302,7 @@ async fn reconciled_initial_outcomes_cannot_replace_an_established_processor_ide
     let conflicting_decline = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Declined,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_initial_conflict")?),
             None,
             Some(GatewayDiagnostic::new("2")),
@@ -467,6 +469,7 @@ async fn terminal_initial_reconciliation_reports_conflicts_without_rewriting_the
     let conflicting_decline = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Declined,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_initial_late_decline")?),
             None,
             Some(GatewayDiagnostic::new("2")),

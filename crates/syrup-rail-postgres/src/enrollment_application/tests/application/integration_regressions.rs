@@ -426,6 +426,7 @@ async fn exhausted_attempt_lock_retries_use_the_lock_free_approved_evidence_fall
     let outcome = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_lock_free_fallback")?),
             None,
             Some(GatewayDiagnostic::new("approved")),

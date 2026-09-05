@@ -127,6 +127,7 @@ impl SubscriptionBillingService {
         let condition = (code != PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
             .then(|| GatewayDiagnostic::new("failed"));
         let evidence = ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Absent,
             None,
             None,
             None,
@@ -134,8 +135,7 @@ impl SubscriptionBillingService {
             Some(detail),
             condition,
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Absent);
+        );
         let payment = reservation
             .resolve_non_approved(&self.pool, &evidence, code, cooldown, boundary)
             .await

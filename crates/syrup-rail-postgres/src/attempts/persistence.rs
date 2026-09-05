@@ -689,6 +689,9 @@ pub(crate) fn processor_evidence_from_row(
         return Err(invalid_state());
     }
     Ok(ProcessorEvidence::new(
+        row.try_get::<String, _>("gateway_approval_evidence")?
+            .parse()
+            .map_err(|_| invalid_state())?,
         row.try_get::<Option<String>, _>("gateway_transaction_id")?
             .map(GatewayTransactionId::new)
             .transpose()
@@ -702,11 +705,6 @@ pub(crate) fn processor_evidence_from_row(
         diagnostic(row, "gateway_response_text")?,
         diagnostic(row, "gateway_condition")?,
         descriptor,
-    )
-    .with_approval_evidence(
-        row.try_get::<String, _>("gateway_approval_evidence")?
-            .parse()
-            .map_err(|_| invalid_state())?,
     ))
 }
 

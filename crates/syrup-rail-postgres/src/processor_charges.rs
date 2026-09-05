@@ -282,22 +282,24 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock(
 
     let evidence_matches = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
-            AND gateway_response IS NOT DISTINCT FROM $4
-            AND gateway_response_code IS NOT DISTINCT FROM $5
-            AND gateway_response_text IS NOT DISTINCT FROM $6
-            AND gateway_condition IS NOT DISTINCT FROM $7
-            AND payment_type IS NOT DISTINCT FROM $8
-            AND card_brand IS NOT DISTINCT FROM $9
-            AND card_last4 IS NOT DISTINCT FROM $10
-            AND card_exp_month IS NOT DISTINCT FROM $11
-            AND card_exp_year IS NOT DISTINCT FROM $12
+        SELECT gateway_approval_evidence IS NOT DISTINCT FROM $3
+            AND gateway_payment_method_reference IS NOT DISTINCT FROM $4
+            AND gateway_response IS NOT DISTINCT FROM $5
+            AND gateway_response_code IS NOT DISTINCT FROM $6
+            AND gateway_response_text IS NOT DISTINCT FROM $7
+            AND gateway_condition IS NOT DISTINCT FROM $8
+            AND payment_type IS NOT DISTINCT FROM $9
+            AND card_brand IS NOT DISTINCT FROM $10
+            AND card_last4 IS NOT DISTINCT FROM $11
+            AND card_exp_month IS NOT DISTINCT FROM $12
+            AND card_exp_year IS NOT DISTINCT FROM $13
         FROM billing_processor_charges
         WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
         "#,
     )
     .bind(identity.attempt_id().as_uuid())
     .bind(transaction_id)
+    .bind(evidence.approval_evidence().as_str())
     .bind(
         evidence
             .payment_method_reference()

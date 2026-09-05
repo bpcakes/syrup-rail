@@ -134,19 +134,15 @@ pub(crate) fn reconcile_non_approved_evidence(
                 persisted_payment_method_reference.cloned(),
             ),
         };
-    // Only an accepted transaction identity establishes a replacement record.
-    // Quarantined/missing identities must not erase earlier approval signals.
-    let approval_evidence = if observed_transaction_id.is_some()
-        && transaction_id.as_ref() == observed_transaction_id
-    {
-        observed.approval_evidence()
-    } else {
-        persisted
-            .approval_evidence()
-            .merge(observed.approval_evidence())
-    };
+    // Approval classification is monotonic. Accepting a newly observed
+    // transaction identity may replace the identity bundle, but it must not
+    // erase a stronger signal retained from an earlier observation.
+    let approval_evidence = persisted
+        .approval_evidence()
+        .merge(observed.approval_evidence());
     ReconciledNonApprovedEvidence {
         evidence: ProcessorEvidence::new(
+            approval_evidence,
             transaction_id,
             payment_method_reference,
             observed.response().cloned(),
@@ -154,8 +150,7 @@ pub(crate) fn reconcile_non_approved_evidence(
             observed.response_text().cloned(),
             observed.condition().cloned(),
             observed.descriptor().clone(),
-        )
-        .with_approval_evidence(approval_evidence),
+        ),
         transaction_id_conflict: false,
         payment_method_reference_conflict: false,
         discarded_transaction_id,

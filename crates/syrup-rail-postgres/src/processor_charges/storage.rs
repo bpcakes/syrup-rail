@@ -10,16 +10,17 @@ pub(super) async fn matching_charge(
     sqlx::query(
         r#"
         SELECT id, charge_role,
-            gateway_payment_method_reference IS NOT DISTINCT FROM $3
-                AND gateway_response IS NOT DISTINCT FROM $4
-                AND gateway_response_code IS NOT DISTINCT FROM $5
-                AND gateway_response_text IS NOT DISTINCT FROM $6
-                AND gateway_condition IS NOT DISTINCT FROM $7
-                AND payment_type IS NOT DISTINCT FROM $8
-                AND card_brand IS NOT DISTINCT FROM $9
-                AND card_last4 IS NOT DISTINCT FROM $10
-                AND card_exp_month IS NOT DISTINCT FROM $11
-                AND card_exp_year IS NOT DISTINCT FROM $12 AS evidence_matches
+            gateway_approval_evidence IS NOT DISTINCT FROM $3
+                AND gateway_payment_method_reference IS NOT DISTINCT FROM $4
+                AND gateway_response IS NOT DISTINCT FROM $5
+                AND gateway_response_code IS NOT DISTINCT FROM $6
+                AND gateway_response_text IS NOT DISTINCT FROM $7
+                AND gateway_condition IS NOT DISTINCT FROM $8
+                AND payment_type IS NOT DISTINCT FROM $9
+                AND card_brand IS NOT DISTINCT FROM $10
+                AND card_last4 IS NOT DISTINCT FROM $11
+                AND card_exp_month IS NOT DISTINCT FROM $12
+                AND card_exp_year IS NOT DISTINCT FROM $13 AS evidence_matches
         FROM billing_processor_charges
         WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
         FOR UPDATE
@@ -27,6 +28,7 @@ pub(super) async fn matching_charge(
     )
     .bind(attempt.identity().attempt_id().as_uuid())
     .bind(transaction_id)
+    .bind(evidence.approval_evidence().as_str())
     .bind(
         evidence
             .payment_method_reference()
@@ -77,16 +79,17 @@ pub(super) async fn identify_transactionless(
     let row = sqlx::query(
         r#"
         SELECT id, charge_role,
-            gateway_payment_method_reference IS NOT DISTINCT FROM $2
-                AND gateway_response IS NOT DISTINCT FROM $3
-                AND gateway_response_code IS NOT DISTINCT FROM $4
-                AND gateway_response_text IS NOT DISTINCT FROM $5
-                AND gateway_condition IS NOT DISTINCT FROM $6
-                AND payment_type IS NOT DISTINCT FROM $7
-                AND card_brand IS NOT DISTINCT FROM $8
-                AND card_last4 IS NOT DISTINCT FROM $9
-                AND card_exp_month IS NOT DISTINCT FROM $10
-                AND card_exp_year IS NOT DISTINCT FROM $11 AS evidence_matches
+            gateway_approval_evidence IS NOT DISTINCT FROM $2
+                AND gateway_payment_method_reference IS NOT DISTINCT FROM $3
+                AND gateway_response IS NOT DISTINCT FROM $4
+                AND gateway_response_code IS NOT DISTINCT FROM $5
+                AND gateway_response_text IS NOT DISTINCT FROM $6
+                AND gateway_condition IS NOT DISTINCT FROM $7
+                AND payment_type IS NOT DISTINCT FROM $8
+                AND card_brand IS NOT DISTINCT FROM $9
+                AND card_last4 IS NOT DISTINCT FROM $10
+                AND card_exp_month IS NOT DISTINCT FROM $11
+                AND card_exp_year IS NOT DISTINCT FROM $12 AS evidence_matches
         FROM billing_processor_charges
         WHERE attempt_id = $1
             AND billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL
@@ -94,6 +97,7 @@ pub(super) async fn identify_transactionless(
         "#,
     )
     .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(evidence.approval_evidence().as_str())
     .bind(
         evidence
             .payment_method_reference()

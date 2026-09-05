@@ -321,7 +321,8 @@ async fn typed_approval_signals_survive_application_reload_and_replay() -> Resul
     use syrup_rail::ProcessorApprovalEvidence as Signal;
     for code in ["100", "0100", "+0100", "provider-specific-success"] {
         let fixture = application_fixture("approval_signal", false, false).await?;
-        let evidence = ProcessorEvidence::new(
+        let evidence = ProcessorEvidence::new(Signal::Structured,
+
             Some(GatewayTransactionId::new("txn_approval_signal")?),
             None,
             None,
@@ -329,8 +330,7 @@ async fn typed_approval_signals_survive_application_reload_and_replay() -> Resul
             None,
             None,
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(Signal::Structured);
+        );
         let outcome = GatewayPaymentOutcome::new(GatewayPaymentStatus::Unknown, evidence);
         for _ in 0..2 {
             let result = apply_subscription_enrollment_gateway_outcome(
@@ -395,7 +395,8 @@ async fn manual_failure_uses_persisted_classification_and_protects_legacy_rows()
         Signal::Absent,
     ] {
         let fixture = application_fixture("manual_signal", false, false).await?;
-        let evidence = ProcessorEvidence::new(
+        let evidence = ProcessorEvidence::new(signal,
+
             None,
             None,
             None,
@@ -403,8 +404,7 @@ async fn manual_failure_uses_persisted_classification_and_protects_legacy_rows()
             None,
             None,
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(signal);
+        );
         apply_subscription_enrollment_gateway_outcome(
             &fixture.database.pool,
             &fixture.coordinator,
@@ -549,9 +549,10 @@ async fn unidentified_reconciliation_cannot_erase_approval_signals() -> Result<(
             &fixture.database.pool, &fixture.coordinator,
             fixture.reservation.identity().billing_scope_id(), id,
             &GatewayPaymentOutcome::new(GatewayPaymentStatus::Declined,
-                ProcessorEvidence::new(Some(GatewayTransactionId::new("txn_verified_decline")?), None, None, None, None, None, GatewayPaymentDescriptor::default()).with_approval_evidence(Signal::Absent)),
+                ProcessorEvidence::new(Signal::Absent,
+Some(GatewayTransactionId::new("txn_verified_decline")?), None, None, None, None, None, GatewayPaymentDescriptor::default())),
         ).await?;
-        assert_eq!(matched.processor_evidence().approval_evidence(), Signal::Absent);
+        assert_eq!(matched.processor_evidence().approval_evidence(), Signal::Structured);
         assert_eq!(matched.status(), PaymentAttemptStatus::Declined);
         Ok::<(), Box<dyn Error>>(())
     }.await;

@@ -192,6 +192,10 @@ impl GatewayMutationError {
     /// certify approval-signal absence even when their retained text is empty.
     pub fn processor_evidence(&self) -> crate::ProcessorEvidence {
         crate::ProcessorEvidence::new(
+            match self.certainty() {
+                MutationCertainty::NotSubmitted => crate::ProcessorApprovalEvidence::Absent,
+                MutationCertainty::Indeterminate => crate::ProcessorApprovalEvidence::Unclassified,
+            },
             None,
             None,
             None,
@@ -200,10 +204,6 @@ impl GatewayMutationError {
             None,
             crate::GatewayPaymentDescriptor::default(),
         )
-        .with_approval_evidence(match self.certainty() {
-            MutationCertainty::NotSubmitted => crate::ProcessorApprovalEvidence::Absent,
-            MutationCertainty::Indeterminate => crate::ProcessorApprovalEvidence::Unclassified,
-        })
     }
 
     pub const fn detail(&self) -> &GatewayDiagnostic {

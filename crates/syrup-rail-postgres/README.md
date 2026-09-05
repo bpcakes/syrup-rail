@@ -17,6 +17,11 @@ cutover, and apply `schema/v6/upgrade_from_v5.sql` transactionally. Schemas v1
 through v5 are immutable. The [v6 guide](schema/v6/README.md) explains locking,
 historical classification, deployment, and recovery.
 
+Schema v5 is already immutable. Its fresh-install SQL has a historical comment
+that says "version 4" even though the catalog and artifact are schema v5. Do
+not edit or locally repair that shipped file; use its checked-in bytes and the
+v5 catalog fingerprint as authority. Schema v6 artifacts carry the corrected
+version label.
 
 After the host applies its migration and before it serves billing traffic,
 verify the runtime catalog:

@@ -34,9 +34,10 @@ All notable changes to the Syrup Rail crates are documented in this file.
   marked `Unclassified`; only entirely empty attempt evidence is initialized as
   `Absent`. Legacy local query notes stay protected because v5 could overwrite
   provider evidence with those notes. No provider strings are parsed.
-- Third-party adapters must attach explicit approval signals using
-  `ProcessorEvidence::with_approval_evidence`. The compatibility constructor
-  marks empty observations `Absent` and nonempty observations `Unclassified`.
+- Third-party adapters must pass an explicit approval classification to
+  `ProcessorEvidence::new`. This makes omitted classification a compile error;
+  adapters must deliberately use `Absent`, `TextOnly`, `Structured`, or the
+  fail-closed `Unclassified` value.
   Unclassified evidence always blocks manual failure and
   cannot create a new immutable pending charge without a structured signal.
   Raw-observation exact replay leaves already-recorded classifications unchanged.

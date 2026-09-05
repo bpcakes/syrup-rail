@@ -826,7 +826,8 @@ fn approved_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
 fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
-        ProcessorEvidence::new(
+        ProcessorEvidence::new(syrup_rail::ProcessorApprovalEvidence::Unclassified,
+
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -834,8 +835,7 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
             Some(GatewayDiagnostic::new("Duplicate transaction")),
             None,
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Unclassified),
+        ),
     )
     .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
 }
@@ -843,7 +843,8 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
 fn indeterminate_processor_error_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
-        ProcessorEvidence::new(
+        ProcessorEvidence::new(syrup_rail::ProcessorApprovalEvidence::Unclassified,
+
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -851,8 +852,7 @@ fn indeterminate_processor_error_outcome() -> GatewayPaymentOutcome {
             Some(GatewayDiagnostic::new("Processor error")),
             None,
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Unclassified),
+        ),
     )
     .with_diagnostics(vec![GatewayPaymentDiagnostic::IndeterminatePaymentOutcome])
 }
@@ -874,7 +874,8 @@ fn approved_outcome_with_optional_reference(
 ) -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
-        ProcessorEvidence::new(
+        ProcessorEvidence::new(syrup_rail::ProcessorApprovalEvidence::Structured,
+
             transaction_id.map(|value| GatewayTransactionId::new(value).unwrap()),
             payment_method_reference
                 .map(|value| GatewayPaymentMethodReference::new(value).unwrap()),
@@ -889,8 +890,7 @@ fn approved_outcome_with_optional_reference(
                 Some(12),
                 Some(2031),
             ),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Structured),
+        ),
     )
 }
 

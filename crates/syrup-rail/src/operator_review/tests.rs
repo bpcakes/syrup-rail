@@ -236,6 +236,7 @@
             &review_attempt(host(), 500, true, ProcessorEvidence::default())
         ));
         let approved = ProcessorEvidence::new(
+            crate::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             None,
@@ -249,6 +250,7 @@
         ));
 
         let update_evidence = ProcessorEvidence::new(
+            crate::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn-update-review").unwrap()),
             None,
             Some(GatewayDiagnostic::new("1")),

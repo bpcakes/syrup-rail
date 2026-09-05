@@ -278,6 +278,7 @@ fn terminal_approval_requires_reversal_only_with_charged_transaction() {
         "parking-policy-key",
     );
     let charged = ProcessorEvidence::new(
+        syrup_rail::ProcessorApprovalEvidence::Unclassified,
         Some(GatewayTransactionId::new("charged-transaction").unwrap()),
         None,
         None,

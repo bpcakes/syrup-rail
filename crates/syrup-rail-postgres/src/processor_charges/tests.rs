@@ -47,6 +47,7 @@ async fn insert_host_charge_attempt(
 
 fn approved_evidence(transaction_id: &str) -> ProcessorEvidence {
     ProcessorEvidence::new(
+        syrup_rail::ProcessorApprovalEvidence::Structured,
         Some(GatewayTransactionId::new(transaction_id).unwrap()),
         None,
         Some(GatewayDiagnostic::new("1")),
@@ -303,6 +304,18 @@ async fn lock_free_subscription_evidence_preserves_replay_and_ownership()
                 .await?,
                 LockFreeApprovedEvidenceOutcome::ExactReplay
             );
+            let classification_drift = evidence
+                .clone()
+                .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::TextOnly);
+            assert_eq!(
+                persist_approved_evidence_without_attempt_lock(
+                    &database.pool,
+                    lock_free_terms(&recovery, PaymentAttemptKind::SubscriptionRecovery),
+                    &classification_drift,
+                )
+                .await?,
+                LockFreeApprovedEvidenceOutcome::NotDurable
+            );
             let owner = insert_subscription_attempt(
                 &database.pool,
                 gateway,
@@ -462,8 +475,26 @@ async fn transaction_observation_preserves_exact_replay_and_rejects_drift()
             replay,
             ProcessorChargeObservationOutcome::ExactReplay(_)
         ));
+        let classification_drift = evidence
+            .clone()
+            .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::TextOnly);
+        let drift = observe_processor_charge_in_transaction(
+            &mut transaction,
+            attempt_id,
+            &order,
+            &classification_drift,
+            ProcessorChargeProgression::ReconciliationRequired,
+        )
+        .await;
+        assert!(matches!(
+            drift,
+            Err(ProcessorChargeStoreError::InvalidState(
+                "processor charge replay evidence changed"
+            ))
+        ));
         let mut changed = approved_evidence("txn_transactional");
         changed = ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Structured,
             changed.transaction_id().cloned(),
             changed.payment_method_reference().cloned(),
             changed.response().cloned(),
@@ -486,6 +517,73 @@ async fn transaction_observation_preserves_exact_replay_and_rejects_drift()
                 "processor charge replay evidence changed"
             ))
         ));
+        transaction.rollback().await?;
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn transactionless_charge_identification_requires_matching_approval_classification()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("rail_chg_class").await?;
+    let result = async {
+        let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
+        let attempt_id = insert_host_charge_attempt(&database.pool, gateway, "class-order").await?;
+        let order = GatewayOrderId::from_correlation("class-order")?;
+        let mut transactionless = approved_evidence("unused_transaction");
+        transactionless = ProcessorEvidence::new(
+            transactionless.approval_evidence(),
+            None,
+            transactionless.payment_method_reference().cloned(),
+            transactionless.response().cloned(),
+            transactionless.response_code().cloned(),
+            transactionless.response_text().cloned(),
+            transactionless.condition().cloned(),
+            transactionless.descriptor().clone(),
+        );
+        let mut transaction = database.pool.begin().await?;
+        observe_processor_charge_in_transaction(
+            &mut transaction,
+            attempt_id,
+            &order,
+            &transactionless,
+            ProcessorChargeProgression::ReconciliationRequired,
+        )
+        .await?;
+
+        let classification_drift = approved_evidence("txn_classification_drift")
+            .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::TextOnly);
+        observe_processor_charge_in_transaction(
+            &mut transaction,
+            attempt_id,
+            &order,
+            &classification_drift,
+            ProcessorChargeProgression::ReconciliationRequired,
+        )
+        .await?;
+
+        let charges: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT gateway_transaction_id, gateway_approval_evidence \
+             FROM billing_processor_charges WHERE attempt_id = $1 \
+             ORDER BY gateway_transaction_id NULLS FIRST",
+        )
+        .bind(attempt_id.as_uuid())
+        .fetch_all(&mut *transaction)
+        .await?;
+        assert_eq!(
+            charges,
+            vec![
+                (None, "structured".to_owned()),
+                (
+                    Some("txn_classification_drift".to_owned()),
+                    "text_only".to_owned()
+                ),
+            ]
+        );
         transaction.rollback().await?;
         Ok::<_, Box<dyn Error>>(())
     }

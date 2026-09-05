@@ -589,6 +589,7 @@ pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> Proc
         Some(GatewayDiagnostic::new("failed"))
     };
     ProcessorEvidence::new(
+        current.approval_evidence(),
         current.transaction_id().cloned(),
         current.payment_method_reference().cloned(),
         current.response().cloned(),
@@ -597,7 +598,6 @@ pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> Proc
         condition,
         current.descriptor().clone(),
     )
-    .with_approval_evidence(current.approval_evidence())
 }
 
 fn payment_method_update_has_processor_evidence(evidence: &ProcessorEvidence) -> bool {

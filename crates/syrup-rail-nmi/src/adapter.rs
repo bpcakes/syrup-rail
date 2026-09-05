@@ -227,6 +227,7 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
         identifiers.payment_method_reference = None;
     }
     let evidence = ProcessorEvidence::new(
+        approval_evidence,
         identifiers.transaction_id,
         identifiers.payment_method_reference,
         sanitized_text(parts.response),
@@ -234,8 +235,7 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
         sanitized_text(parts.response_text),
         sanitized_text(parts.condition),
         map_payment_descriptor_parts(parts.descriptor.into_parts()),
-    )
-    .with_approval_evidence(approval_evidence);
+    );
     GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics)
 }
 

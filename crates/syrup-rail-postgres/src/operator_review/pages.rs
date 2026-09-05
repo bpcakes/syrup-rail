@@ -171,6 +171,9 @@ fn processor_charge_from_review_row(row: &PgRow) -> Result<ProcessorCharge, Oper
         return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
     }
     let evidence = ProcessorEvidence::new(
+        row.try_get::<String, _>("review_charge_gateway_approval_evidence")?
+            .parse()
+            .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?,
         row.try_get::<Option<String>, _>("review_charge_gateway_transaction_id")?
             .map(GatewayTransactionId::new)
             .transpose()
@@ -184,11 +187,6 @@ fn processor_charge_from_review_row(row: &PgRow) -> Result<ProcessorCharge, Oper
         review_diagnostic(row, "review_charge_gateway_response_text")?,
         review_diagnostic(row, "review_charge_gateway_condition")?,
         descriptor,
-    )
-    .with_approval_evidence(
-        row.try_get::<String, _>("review_charge_gateway_approval_evidence")?
-            .parse()
-            .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?,
     );
     Ok(ProcessorCharge::new(
         ProcessorChargeId::new(row.try_get("review_charge_id")?),

@@ -67,6 +67,13 @@ pub const V4_TO_V5_UPGRADE_SQL: &str = include_str!("../schema/v5/upgrade_from_v
 /// Complete current install artifact, for host migration packaging and tests.
 pub const V6_INSTALL_SQL: &str = include_str!("../schema/v6/install.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Read-only v5-to-v6 preflight for sizing retained evidence classification.
+pub const V5_TO_V6_PREFLIGHT_SQL: &str = include_str!("../schema/v6/preflight_from_v5.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Read-only audit of review-required v5 attempts that remain unclassified.
+pub const V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL: &str =
+    include_str!("../schema/v6/audit_unclassified_review_attempts_from_v5.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// Forward-only v5-to-v6 upgrade; host applications own migration execution.
 pub const V5_TO_V6_UPGRADE_SQL: &str = include_str!("../schema/v6/upgrade_from_v5.sql");
 

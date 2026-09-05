@@ -539,6 +539,23 @@ enum SubscriberReadinessFailure {
     AccountMode(GatewayAccountMode),
 }
 
+/// Failures produced by the gateway readiness check itself. Cooldown is
+/// detected by a separate persistence-backed check and therefore cannot occur
+/// here.
+enum GatewayReadinessFailure {
+    Gateway(GatewayError),
+    AccountMode(GatewayAccountMode),
+}
+
+impl From<GatewayReadinessFailure> for SubscriberReadinessFailure {
+    fn from(failure: GatewayReadinessFailure) -> Self {
+        match failure {
+            GatewayReadinessFailure::Gateway(error) => Self::Gateway(error),
+            GatewayReadinessFailure::AccountMode(mode) => Self::AccountMode(mode),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SubscriberReadinessPolicy {
     resolution_code: PaymentResolutionCode,
@@ -652,14 +669,14 @@ fn map_subscriber_mutation_admission(
 async fn subscriber_gateway_readiness(
     gateway: &syrup_rail::ResolvedGateway,
     required_mode: GatewayAccountMode,
-) -> Result<ModeVerifiedGateway<'_>, SubscriberReadinessFailure> {
+) -> Result<ModeVerifiedGateway<'_>, GatewayReadinessFailure> {
     match verify_gateway_account_mode(gateway, required_mode).await {
         Ok(verified) => Ok(verified),
         Err(GatewayAccountModeVerificationError::AccountModeMismatch { required, .. }) => {
-            Err(SubscriberReadinessFailure::AccountMode(required))
+            Err(GatewayReadinessFailure::AccountMode(required))
         }
         Err(GatewayAccountModeVerificationError::Gateway(error)) => {
-            Err(SubscriberReadinessFailure::Gateway(error))
+            Err(GatewayReadinessFailure::Gateway(error))
         }
     }
 }

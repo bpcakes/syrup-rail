@@ -1,5 +1,8 @@
 use super::*;
-use crate::schema_contract::{V5_TO_V6_UPGRADE_SQL, V6_CATALOG_FINGERPRINT};
+use crate::schema_contract::{
+    V5_TO_V6_PREFLIGHT_SQL, V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL, V5_TO_V6_UPGRADE_SQL,
+    V6_CATALOG_FINGERPRINT,
+};
 
 #[tokio::test]
 async fn runtime_schema_v6_matches_fresh_install_and_v5_upgrade() -> Result<(), Box<dyn Error>> {
@@ -84,6 +87,27 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
           FROM billing_payment_attempts WHERE id = $1"#)
             .bind(attempt_id).bind(id).bind(detail).execute(&database.pool).await?;
     }
+    let mut preflight = database.pool.begin().await?;
+    sqlx::query("SET TRANSACTION READ ONLY")
+        .execute(&mut *preflight)
+        .await?;
+    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(V5_TO_V6_PREFLIGHT_SQL)
+        .fetch_one(&mut *preflight)
+        .await?;
+    assert_eq!(counts, (4, 1, 3, 0, 0));
+    let audited = sqlx::query(V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL)
+        .fetch_all(&mut *preflight)
+        .await?;
+    let mut audited_ids = audited
+        .iter()
+        .map(|row| row.try_get::<Uuid, _>("attempt_id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    audited_ids.sort_unstable();
+    let mut expected_ids = vec![attempt_id, local_id, error_id];
+    expected_ids.sort_unstable();
+    assert_eq!(audited_ids, expected_ids);
+    preflight.rollback().await?;
+
     database.upgrade_v5_to_v6().await?;
     for (id, expected) in [
         (empty_id, "absent"),

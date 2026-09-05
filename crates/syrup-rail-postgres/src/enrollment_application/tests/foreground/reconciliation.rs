@@ -87,6 +87,7 @@ async fn reconciled_unknown_payment_method_replacement_rejects_conflicting_ident
     let unknown_outcome = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_method_unknown_durable")?),
             Some(GatewayPaymentMethodReference::new(
                 "vault_method_unknown_durable",
@@ -313,6 +314,7 @@ async fn reconciled_replacement_never_restores_quarantined_durable_identity()
     let durable_outcome = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_repl_quarantine_durable")?),
             Some(GatewayPaymentMethodReference::new(
                 "vault_repl_quarantine_durable",
@@ -407,6 +409,7 @@ async fn reconciled_approval_cannot_inherit_a_durable_payment_method_reference()
     let durable_outcome = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_repl_no_inherit")?),
             Some(GatewayPaymentMethodReference::new(
                 "vault_repl_no_inherit_durable",
@@ -498,6 +501,7 @@ async fn unanchored_reconciliation_preserves_durable_identity_without_splicing_d
     let durable_outcome = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             Some(GatewayPaymentMethodReference::new(
                 "vault_repl_no_splice_durable",
@@ -519,6 +523,7 @@ async fn unanchored_reconciliation_preserves_durable_identity_without_splicing_d
     let observation = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_repl_no_splice_observed")?),
             None,
             None,

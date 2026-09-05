@@ -41,7 +41,7 @@ impl SubscriptionBillingService {
         }
         match subscriber_gateway_readiness(&gateway, self.required_gateway_account_mode).await {
             Ok(_) => {}
-            Err(SubscriberReadinessFailure::Gateway(GatewayError::RateLimited(_))) => {
+            Err(GatewayReadinessFailure::Gateway(GatewayError::RateLimited(_))) => {
                 self.extend_provider_cooldown(
                     command.billing_scope_id(),
                     account.account_id,
@@ -50,17 +50,12 @@ impl SubscriptionBillingService {
                 .await?;
                 return Ok(SubscriptionRenewalOutcome::Noop);
             }
-            Err(SubscriberReadinessFailure::Gateway(error)) => {
+            Err(GatewayReadinessFailure::Gateway(error)) => {
                 return Err(SubscriptionBillingServiceError::GatewayReadiness(error));
             }
-            Err(SubscriberReadinessFailure::AccountMode(_)) => {
+            Err(GatewayReadinessFailure::AccountMode(_)) => {
                 return Err(SubscriptionBillingServiceError::GatewayReadiness(
                     GatewayError::Configuration(gateway_account_mode_mismatch_detail()),
-                ));
-            }
-            Err(SubscriberReadinessFailure::Cooldown(_)) => {
-                return Err(SubscriptionBillingServiceError::InvalidState(
-                    INVALID_SERVICE_STATE,
                 ));
             }
         }
@@ -310,7 +305,7 @@ impl SubscriptionBillingService {
         match subscriber_gateway_readiness(gateway, self.required_gateway_account_mode).await {
             Ok(verified_gateway) => Ok(Some(verified_gateway)),
             Err(failure) => {
-                self.resolve_renewal_readiness_failure(reservation, failure, boundary)
+                self.resolve_renewal_readiness_failure(reservation, failure.into(), boundary)
                     .await?;
                 Ok(None)
             }
@@ -385,6 +380,7 @@ impl SubscriptionBillingService {
         boundary: OutcomeResolutionBoundary,
     ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionBillingServiceError> {
         let evidence = ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Absent,
             None,
             None,
             None,
@@ -392,8 +388,7 @@ impl SubscriptionBillingService {
             Some(detail),
             condition,
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Absent);
+        );
         resolve_renewal_non_approved_outcome(
             &self.pool,
             self.coordinator.as_ref(),

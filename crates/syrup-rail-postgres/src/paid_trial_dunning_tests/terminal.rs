@@ -52,6 +52,7 @@ async fn indeterminate_diagnostics_keep_terminal_renewal_statuses_out_of_dunning
         let outcome = GatewayPaymentOutcome::new(
             provider_status,
             ProcessorEvidence::new(
+                syrup_rail::ProcessorApprovalEvidence::Unclassified,
                 Some(
                     GatewayTransactionId::new(format!("indeterminate_{suffix}_txn"))
                         .expect("valid transaction ID"),
@@ -163,6 +164,7 @@ async fn reconciled_renewal_outcomes_preserve_durable_identity_and_do_not_start_
     let unknown = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn_renewal_durable")?),
             None,
             Some(GatewayDiagnostic::new("3")),

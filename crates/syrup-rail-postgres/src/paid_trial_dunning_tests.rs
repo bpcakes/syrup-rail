@@ -423,6 +423,7 @@ fn approved_outcome_with_reference(
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Structured,
             Some(GatewayTransactionId::new(transaction_id).expect("valid transaction ID")),
             Some(
                 GatewayPaymentMethodReference::new(payment_method_reference)
@@ -433,8 +434,7 @@ fn approved_outcome_with_reference(
             Some(GatewayDiagnostic::new("Approved")),
             Some(GatewayDiagnostic::new("complete")),
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Structured),
+        ),
     )
 }
 
@@ -442,6 +442,7 @@ fn declined_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Declined,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Absent,
             Some(GatewayTransactionId::new(transaction_id).expect("valid transaction ID")),
             None,
             Some(GatewayDiagnostic::new("2")),
@@ -449,8 +450,7 @@ fn declined_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
             Some(GatewayDiagnostic::new("Declined")),
             Some(GatewayDiagnostic::new("declined")),
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Absent),
+        ),
     )
 }
 
@@ -458,6 +458,7 @@ fn unknown_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             None,
@@ -465,8 +466,7 @@ fn unknown_outcome() -> GatewayPaymentOutcome {
             Some(GatewayDiagnostic::new("provider outcome unknown")),
             Some(GatewayDiagnostic::new("unknown")),
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Unclassified),
+        ),
     )
 }
 
@@ -474,6 +474,7 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -481,8 +482,7 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
             Some(GatewayDiagnostic::new("Duplicate transaction")),
             None,
             GatewayPaymentDescriptor::default(),
-        )
-        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Unclassified),
+        ),
     )
     .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
 }

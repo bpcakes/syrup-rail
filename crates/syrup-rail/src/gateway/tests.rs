@@ -178,6 +178,7 @@ fn sensitive_debug_output_is_value_free() {
     assert!(!debug.contains("txn_sentinel"));
     assert!(debug.contains("redacted"));
     let evidence = ProcessorEvidence::new(
+        crate::ProcessorApprovalEvidence::Unclassified,
         Some(identifier),
         None,
         None,
@@ -199,6 +200,7 @@ fn sensitive_debug_output_is_value_free() {
 fn approval_evidence_uses_adapter_facts_without_reinterpreting_raw_fields() {
     use crate::ProcessorApprovalEvidence as Signal;
     let raw = ProcessorEvidence::new(
+        crate::ProcessorApprovalEvidence::Unclassified,
         Some(GatewayTransactionId::new("txn-evidence").unwrap()),
         None,
         None,
@@ -377,6 +379,7 @@ fn gateway_outcome_approval_policy_distinguishes_identity_from_decision_certaint
 fn gateway_outcome_quarantines_every_diagnosed_identity() {
     let evidence = || {
         ProcessorEvidence::new(
+            crate::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn-diagnosed").unwrap()),
             Some(GatewayPaymentMethodReference::new("method-diagnosed").unwrap()),
             None,
@@ -588,7 +591,8 @@ fn unclassified_review_protection_does_not_depend_on_retained_text() {
             .with_approval_evidence(Signal::Unclassified)
             .may_indicate_approval()
     );
-    let local_note = ProcessorEvidence::new(
+    let local_note = ProcessorEvidence::new(Signal::Absent,
+
         None,
         None,
         None,
@@ -598,8 +602,7 @@ fn unclassified_review_protection_does_not_depend_on_retained_text() {
         )),
         None,
         GatewayPaymentDescriptor::default(),
-    )
-    .with_approval_evidence(Signal::Absent);
+    );
     assert!(!local_note.may_indicate_approval());
 }
 
