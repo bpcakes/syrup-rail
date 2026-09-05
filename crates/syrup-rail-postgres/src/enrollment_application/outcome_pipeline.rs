@@ -572,15 +572,28 @@ async fn resolve_pool_outcome(
     Ok(application)
 }
 
-pub(crate) struct ReconciledNonApprovedEvidence {
-    pub(crate) evidence: ProcessorEvidence,
+pub(crate) struct ReconciledNonApprovedEvidence<'observation> {
+    /// Accumulated attempt state; it is not a single processor observation.
+    pub(crate) attempt_evidence: ProcessorEvidence,
+    observation: Option<&'observation ProcessorEvidence>,
     pub(crate) transaction_id_conflict: bool,
     pub(crate) payment_method_reference_conflict: bool,
     discarded_transaction_id: bool,
     discarded_payment_method_reference: bool,
 }
 
-impl ReconciledNonApprovedEvidence {
+impl ReconciledNonApprovedEvidence<'_> {
+    /// Only one original observation may supply a charge's identity and approval.
+    /// Never combine historical approval risk with a later observation's identity.
+    pub(crate) fn charge_observation(&self) -> Option<&ProcessorEvidence> {
+        self.observation
+            .filter(|observation| observation.indicates_approved_payment())
+    }
+
+    pub(crate) fn quarantine_charge_observation(&mut self) {
+        self.observation = None;
+    }
+
     pub(crate) const fn has_identity_conflict(&self) -> bool {
         self.transaction_id_conflict || self.payment_method_reference_conflict
     }

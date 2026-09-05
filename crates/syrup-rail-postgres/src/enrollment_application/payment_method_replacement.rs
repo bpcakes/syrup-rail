@@ -35,7 +35,7 @@ use super::{
     lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
     mark_attempt_approved, park_locked_attempt, payment_result_for_attempt,
     persist_approved_evidence_without_attempt_lock, reconcile_non_approved_evidence,
-    resolve_locked_outcome, resolve_pool_outcome, set_application_timeouts,
+    resolve_locked_reconciled_outcome, resolve_pool_outcome, set_application_timeouts,
     stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
@@ -408,7 +408,7 @@ async fn apply_locked_reconciled_non_approved_payment_method_replacement_outcome
         OutcomeReservation::PaymentMethodReplacement(reservation),
     )
     .await?;
-    let reconciled = reconciled_outcome_with_persisted_evidence(&attempt, observed_outcome);
+    let reconciled = reconciled_outcome_with_durable_identity(&attempt, observed_outcome);
     let diagnostics = reconciled.observation_diagnostics;
     let outcome = reconciled.outcome;
     let resolution = match outcome.status() {
@@ -431,11 +431,11 @@ async fn apply_locked_reconciled_non_approved_payment_method_replacement_outcome
             ));
         }
     };
-    let application = resolve_locked_outcome(
+    let application = resolve_locked_replacement_observation(
         &mut transaction,
         OutcomeReservation::PaymentMethodReplacement(reservation),
         attempt,
-        outcome.evidence(),
+        &outcome,
         resolution,
     )
     .await?;
@@ -462,7 +462,7 @@ async fn apply_locked_reconciled_payment_method_replacement_outcome(
         let connection = transaction.connection();
         let attempt =
             lock_payment_method_replacement_application_attempt(connection, reservation).await?;
-        let reconciled = reconciled_outcome_with_persisted_evidence(&attempt, observed_outcome);
+        let reconciled = reconciled_outcome_with_durable_identity(&attempt, observed_outcome);
         let diagnostics = reconciled.observation_diagnostics;
         if let Some(evidence) = reconciled.conflicting_approved_evidence.as_ref() {
             observe_processor_charge(
@@ -525,11 +525,11 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
             )
             .await
         }
-        GatewayPaymentStatus::Declined => resolve_locked_outcome(
+        GatewayPaymentStatus::Declined => resolve_locked_replacement_observation(
             connection,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            outcome,
             OutcomeResolutionCommand::non_approved(
                 AttemptResolutionStatus::Declined,
                 None,
@@ -539,11 +539,11 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
         )
         .await
         .map(|application| (application.into_payment(), None)),
-        GatewayPaymentStatus::Failed => resolve_locked_outcome(
+        GatewayPaymentStatus::Failed => resolve_locked_replacement_observation(
             connection,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            outcome,
             OutcomeResolutionCommand::non_approved(
                 AttemptResolutionStatus::Failed,
                 None,
@@ -553,16 +553,36 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
         )
         .await
         .map(|application| (application.into_payment(), None)),
-        GatewayPaymentStatus::Unknown => resolve_locked_outcome(
+        GatewayPaymentStatus::Unknown => resolve_locked_replacement_observation(
             connection,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            outcome,
             OutcomeResolutionCommand::unknown(None),
         )
         .await
         .map(|application| (application.into_payment(), None)),
     }
+}
+
+/// Preserve the current observation's quarantine independently of accumulated
+/// attempt risk; a durable identity cannot restore its charge authority.
+async fn resolve_locked_replacement_observation(
+    connection: &mut PgConnection,
+    reservation: OutcomeReservation<'_>,
+    attempt: PaymentAttempt,
+    outcome: &GatewayPaymentOutcome,
+    resolution: OutcomeResolutionCommand,
+) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
+    let mut reconciled = reconcile_non_approved_evidence(&attempt, outcome.evidence());
+    if outcome.has_diagnostic(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier)
+        || outcome
+            .has_diagnostic(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference)
+    {
+        reconciled.quarantine_charge_observation();
+    }
+    resolve_locked_reconciled_outcome(connection, reservation, attempt, reconciled, resolution)
+        .await
 }
 
 struct ReconciledPaymentMethodReplacementOutcome {
@@ -571,12 +591,11 @@ struct ReconciledPaymentMethodReplacementOutcome {
     conflicting_approved_evidence: Option<ProcessorEvidence>,
 }
 
-fn reconciled_outcome_with_persisted_evidence(
+fn reconciled_outcome_with_durable_identity(
     attempt: &PaymentAttempt,
     outcome: &GatewayPaymentOutcome,
 ) -> ReconciledPaymentMethodReplacementOutcome {
     let observed = outcome.evidence();
-    let persisted = attempt.state().processor_evidence();
     let is_resolvable = attempt.status().is_resolvable();
     let reconciled_evidence = reconcile_non_approved_evidence(attempt, observed);
     let reconciled_identity_diagnostics = reconciled_evidence.identity_conflict_diagnostics();
@@ -596,18 +615,9 @@ fn reconciled_outcome_with_persisted_evidence(
         && (transaction_id_conflict
             || payment_method_reference_conflict
             || diagnosed_identity_conflict);
-    let evidence = if !is_resolvable {
-        observed.clone()
-    } else if identity_conflict {
-        persisted.clone()
-    } else if outcome.status() == GatewayPaymentStatus::Approved {
-        // An approval may authorize a stored-method rebind, so every identity
-        // it needs must come from that approving observation itself. Never
-        // restore a missing or quarantined identity from older evidence.
-        observed.clone()
-    } else {
-        reconciled_evidence.evidence
-    };
+    // Keep this outcome as one actual processor observation. The locked
+    // resolution path separately merges its durable attempt risk and identity.
+    let evidence = observed.clone();
     let mut observation_diagnostics = outcome.diagnostics().to_vec();
     for diagnostic in reconciled_identity_diagnostics {
         if !observation_diagnostics.contains(&diagnostic) {
@@ -622,7 +632,8 @@ fn reconciled_outcome_with_persisted_evidence(
                 outcome.status()
             },
             evidence,
-        ),
+        )
+        .with_diagnostics(outcome.diagnostics().to_vec()),
         observation_diagnostics,
         conflicting_approved_evidence: (identity_conflict
             && outcome.status() == GatewayPaymentStatus::Approved)
@@ -785,7 +796,7 @@ async fn try_park_reconciled_payment_method_replacement_approved_outcome(
         OutcomeReservation::PaymentMethodReplacement(reservation),
     )
     .await?;
-    let reconciled = reconciled_outcome_with_persisted_evidence(&attempt, observed_outcome);
+    let reconciled = reconciled_outcome_with_durable_identity(&attempt, observed_outcome);
     let diagnostics = reconciled.observation_diagnostics;
     if let Some(evidence) = reconciled.conflicting_approved_evidence.as_ref() {
         observe_processor_charge(
@@ -814,11 +825,11 @@ async fn try_park_reconciled_payment_method_replacement_approved_outcome(
             )
             .await?
         }
-        GatewayPaymentStatus::Unknown => resolve_locked_outcome(
+        GatewayPaymentStatus::Unknown => resolve_locked_replacement_observation(
             &mut transaction,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            &outcome,
             OutcomeResolutionCommand::unknown(None),
         )
         .await?

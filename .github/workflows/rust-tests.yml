@@ -34,6 +34,7 @@ on:
       - ".github/workflows/rust-tests.yml"
   push:
     branches:
+      - "main"
       - "master"
     paths:
 

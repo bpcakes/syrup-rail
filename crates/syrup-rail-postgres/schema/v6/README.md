@@ -13,7 +13,15 @@ retained processor-charge and reversal-attestation populations. The latter two
 counts are the rows classified as `structured` from their existing durable
 financial records, supplied by constant column defaults without per-row updates.
 Use the counts to size validation scans and decide whether
-legacy operator review must be completed before cutover. When investigation is
+legacy operator review must be completed before cutover. The
+`terminal_host_attempts_with_unclassified_evidence_count` also identifies declined
+host attempts and unsubmitted failures without charges whose target admission
+changes from safe in v5 to unsafe in v6. The audit includes their target IDs,
+statuses, and resolution codes. These terminal attempts cannot be reclassified
+by ordinary reconciliation, so their targets cannot be retried or released after
+cutover. A recovery or compatibility policy for this population remains a
+**0.6.0 release blocker**; do not cut over affected targets on the assumption
+that a later empty query or manual failure can recover them. When investigation is
 required, run
 `audit_unclassified_review_attempts_from_v5.sql` through an authorized operator
 process. Its result contains internal identifiers and evidence-presence flags,
@@ -86,7 +94,10 @@ writers, including reconciliation and operator workers. Set host-appropriate
 ALTERs take ACCESS EXCLUSIVE locks on the three evidence tables until commit;
 constraint validation may scan retained rows. Budget the maintenance window
 from the rehearsal. A failed transaction rolls back to v5 and permits v5 code
-to resume. After commit, roll forward: do not restart v5 writers.
+to resume. After commit, roll forward: do not restart v5 writers. This also excludes old
+scrub workers: pre-0.6 scrub callers used a different payment-method advisory
+lock domain. The shared v6 lock preserves the old approval writer key, but
+cannot make an old scrub worker coordinate with a new writer.
 
 Start the new application, call `assert_runtime_schema_v6_compatible(&pool)`
 before accepting billing traffic, then resume work. The assertion requires

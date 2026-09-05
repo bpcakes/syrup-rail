@@ -174,7 +174,7 @@ async fn insert_host_attempt(
     .bind(amount_cents)
     .bind(fixture.gateway_account_id)
     .bind(fixture.gateway_configuration_id)
-    .bind(format!("order-{attempt_id}"))
+    .bind(format!("order-{}", attempt_id.simple()))
     .bind(transaction_id)
     .bind(resolved_at)
     .execute(pool)

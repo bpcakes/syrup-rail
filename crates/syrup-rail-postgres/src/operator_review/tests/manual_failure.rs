@@ -289,7 +289,8 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
 
     let host_subscriber_id = Uuid::now_v7();
     let host_target_id = Uuid::now_v7();
-    let host_attempt_id = Uuid::now_v7();
+    // Exercise a UUID whose digit runs trigger the untrusted card-data heuristic.
+    let host_attempt_id = Uuid::parse_str("01990ac6-0000-7000-8000-000000000000")?;
     sqlx::query(
             "INSERT INTO manual_failure_host_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'pending')",
         )
@@ -321,7 +322,13 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
     .bind(format!("fingerprint-{host_attempt_id}"))
     .bind(account.gateway_account_id)
     .bind(account.gateway_configuration_id)
-    .bind(format!("host-order-{host_attempt_id}"))
+    .bind(
+        syrup_rail::GatewayOrderId::from_generated_attempt(
+            format!("host-order-{}", host_attempt_id.simple()),
+            PaymentAttemptId::new(host_attempt_id),
+        )?
+        .into_inner(),
+    )
     .execute(&database.pool)
     .await?;
     assert!(matches!(

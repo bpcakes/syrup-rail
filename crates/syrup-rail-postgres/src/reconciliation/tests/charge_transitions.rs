@@ -356,7 +356,7 @@ async fn insert_pending_processor_charge(
 ) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
     let charge_id = Uuid::now_v7();
-    let order_id = format!("order-{attempt_id}");
+    let order_id = format!("order-{}", attempt_id.simple());
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (

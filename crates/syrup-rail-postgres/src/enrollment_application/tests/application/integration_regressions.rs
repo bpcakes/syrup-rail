@@ -314,7 +314,7 @@ async fn reconciliation_dispatch_preserves_missing_kind_and_host_charge_errors_w
     .bind(format!("host_charge:{host_target_id}:100:USD"))
     .bind(fixture.gateway_account.gateway_account_id)
     .bind(fixture.gateway_account.gateway_configuration_id)
-    .bind(format!("host_order_{}", host_attempt_id.as_uuid()))
+    .bind(format!("host_order_{}", host_attempt_id.as_uuid().simple()))
     .execute(&fixture.database.pool)
     .await?;
 

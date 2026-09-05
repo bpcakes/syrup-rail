@@ -40,7 +40,7 @@ async fn mode_filter_preserves_cross_mode_initial_attempt_guidance() -> Result<(
         .bind(format!("ent-mode-fingerprint-{attempt}"))
         .bind(account.gateway_account_id)
         .bind(account.gateway_configuration_id)
-        .bind(format!("ent-mode-order-{attempt}"))
+        .bind(format!("ent-mode-order-{}", attempt.simple()))
         .execute(&database.pool)
         .await?;
 

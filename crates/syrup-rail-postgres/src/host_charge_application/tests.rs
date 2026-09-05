@@ -1,5 +1,6 @@
 mod admission;
 mod foreground;
+mod observations;
 mod resilience;
 
 use std::{

@@ -618,7 +618,7 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
         } else {
             resolution
         };
-        let evidence = &reconciled.evidence;
+        let evidence = &reconciled.attempt_evidence;
         let may_resolve = resolution.may_resolve(
             attempt.status(),
             attempt.state().timestamps().submitted_at().is_some(),

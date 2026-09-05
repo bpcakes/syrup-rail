@@ -14,6 +14,7 @@ on:
       - ".github/workflows/agent-map-check.yml"
   push:
     branches:
+      - "main"
       - "master"
     paths:
       - "AGENTS.md"

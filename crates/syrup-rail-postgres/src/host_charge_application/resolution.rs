@@ -176,7 +176,7 @@ async fn resolve_host_charge_non_approved(
         canonical.payment = append_host_observation_diagnostics(canonical.payment, &diagnostics);
         return Ok(canonical);
     }
-    let evidence = &reconciled.evidence;
+    let evidence = &reconciled.attempt_evidence;
     persist_attempt_transition(
         &mut transaction,
         &attempt,
@@ -188,11 +188,11 @@ async fn resolve_host_charge_non_approved(
     )
     .await
     .map_err(map_attempt_transition_error)?;
-    if evidence.indicates_approved_payment() {
+    if let Some(observation) = reconciled.charge_observation() {
         observe_processor_charge(
             &mut transaction,
             &attempt,
-            evidence,
+            observation,
             ProcessorChargeProgression::Pending,
         )
         .await?;
@@ -322,7 +322,7 @@ async fn resolve_host_charge_unknown(
     let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
     let diagnostics = reconciled.identity_conflict_diagnostics();
     if !attempt.status().is_terminal() {
-        let evidence = &reconciled.evidence;
+        let evidence = &reconciled.attempt_evidence;
         persist_attempt_transition(
             &mut transaction,
             &attempt,
@@ -334,11 +334,11 @@ async fn resolve_host_charge_unknown(
         )
         .await
         .map_err(map_attempt_transition_error)?;
-        if evidence.indicates_approved_payment() {
+        if let Some(observation) = reconciled.charge_observation() {
             observe_processor_charge(
                 &mut transaction,
                 &attempt,
-                evidence,
+                observation,
                 ProcessorChargeProgression::Pending,
             )
             .await?;

@@ -178,10 +178,10 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     sqlx::query("SET TRANSACTION READ ONLY")
         .execute(&mut *preflight)
         .await?;
-    let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(V5_TO_V6_PREFLIGHT_SQL)
+    let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(V5_TO_V6_PREFLIGHT_SQL)
         .fetch_one(&mut *preflight)
         .await?;
-    assert_eq!(counts, (4, 1, 3, 1, 1));
+    assert_eq!(counts, (4, 1, 3, 0, 1, 1));
     let audited = sqlx::query(V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL)
         .fetch_all(&mut *preflight)
         .await?;
@@ -343,6 +343,80 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     crate::assert_runtime_schema_v6_compatible(&database.pool).await?;
         Ok::<(), Box<dyn Error>>(())
     }.await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn v5_preflight_inventories_terminal_host_targets() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start_v5("sr_v6_terminal").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let subscriber = Uuid::now_v7();
+        let declined = Uuid::now_v7();
+        let unsubmitted = Uuid::now_v7();
+        for (id, status, submitted, response, detail) in [
+            (
+                declined,
+                "declined",
+                true,
+                Some("2"),
+                "Declined by processor",
+            ),
+            (
+                unsubmitted,
+                "failed",
+                false,
+                None,
+                "Invalid gateway configuration",
+            ),
+        ] {
+            sqlx::query(
+                r#"
+                INSERT INTO billing_payment_attempts (
+                    id, billing_scope_id, subscriber_id, host_charge_target_id,
+                    attempt_kind, status, idempotency_key, request_fingerprint,
+                    amount_cents, gateway_account_id, gateway_configuration_id,
+                    gateway_order_id, required_gateway_account_mode,
+                    submitted_at, resolved_at, gateway_response, gateway_response_text
+                ) VALUES ($1, $2, $3, $1, 'host_charge', $4, $1::text,
+                    'legacy-terminal-fingerprint', 100, $5, $6,
+                    'legacy_' || replace($1::text, '-', ''), 'live',
+                    CASE WHEN $7 THEN clock_timestamp() END, clock_timestamp(), $8, $9)
+            "#,
+            )
+            .bind(id)
+            .bind(account.billing_scope_id)
+            .bind(subscriber)
+            .bind(status)
+            .bind(account.gateway_account_id)
+            .bind(account.gateway_configuration_id)
+            .bind(submitted)
+            .bind(response)
+            .bind(detail)
+            .execute(&database.pool)
+            .await?;
+        }
+        let count: i64 = sqlx::query(V5_TO_V6_PREFLIGHT_SQL)
+            .fetch_one(&database.pool)
+            .await?
+            .try_get("terminal_host_attempts_with_unclassified_evidence_count")?;
+        assert_eq!(count, 2);
+        let audited = sqlx::query(V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL)
+            .fetch_all(&database.pool)
+            .await?;
+        let mut ids = audited
+            .iter()
+            .map(|row| row.try_get::<Uuid, _>("attempt_id"))
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.sort_unstable();
+        let mut expected = vec![declined, unsubmitted];
+        expected.sort_unstable();
+        assert_eq!(ids, expected);
+        Ok::<(), Box<dyn Error>>(())
+    }
+    .await;
     let cleanup = database.cleanup().await;
     result?;
     cleanup

@@ -55,10 +55,10 @@ pub(crate) async fn stop_conflicting_subscription_approval(
 /// observation owns the complete decision and descriptor bundles. Missing
 /// identity fields may retain established values, but an unanchored partial
 /// identity cannot delete or replace an existing durable bundle.
-pub(crate) fn reconcile_non_approved_evidence(
+pub(crate) fn reconcile_non_approved_evidence<'observation>(
     attempt: &PaymentAttempt,
-    observed: &ProcessorEvidence,
-) -> ReconciledNonApprovedEvidence {
+    observed: &'observation ProcessorEvidence,
+) -> ReconciledNonApprovedEvidence<'observation> {
     let persisted = attempt.state().processor_evidence();
     let transaction_id_conflict =
         identifiers_conflict(persisted.transaction_id(), observed.transaction_id());
@@ -68,7 +68,8 @@ pub(crate) fn reconcile_non_approved_evidence(
     );
     if !attempt.status().is_resolvable() {
         return ReconciledNonApprovedEvidence {
-            evidence: observed.clone(),
+            observation: Some(observed),
+            attempt_evidence: observed.clone(),
             transaction_id_conflict,
             payment_method_reference_conflict,
             discarded_transaction_id: false,
@@ -77,7 +78,8 @@ pub(crate) fn reconcile_non_approved_evidence(
     }
     if transaction_id_conflict || payment_method_reference_conflict {
         return ReconciledNonApprovedEvidence {
-            evidence: persisted.clone(),
+            observation: Some(observed),
+            attempt_evidence: persisted.clone(),
             transaction_id_conflict,
             payment_method_reference_conflict,
             discarded_transaction_id: false,
@@ -141,7 +143,8 @@ pub(crate) fn reconcile_non_approved_evidence(
         .approval_evidence()
         .merge(observed.approval_evidence());
     ReconciledNonApprovedEvidence {
-        evidence: ProcessorEvidence::new(
+        observation: Some(observed),
+        attempt_evidence: ProcessorEvidence::new(
             approval_evidence,
             transaction_id,
             payment_method_reference,
@@ -167,14 +170,25 @@ async fn resolve_locked_outcome(
     reservation: OutcomeReservation<'_>,
     attempt: PaymentAttempt,
     evidence: &ProcessorEvidence,
-    mut resolution: OutcomeResolutionCommand,
+    resolution: OutcomeResolutionCommand,
 ) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
+    resolve_locked_reconciled_outcome(connection, reservation, attempt, reconciled, resolution)
+        .await
+}
+
+async fn resolve_locked_reconciled_outcome(
+    connection: &mut PgConnection,
+    reservation: OutcomeReservation<'_>,
+    attempt: PaymentAttempt,
+    reconciled: ReconciledNonApprovedEvidence<'_>,
+    mut resolution: OutcomeResolutionCommand,
+) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     let diagnostics = reconciled.identity_conflict_diagnostics();
     if reconciled.has_identity_conflict() {
         resolution = OutcomeResolutionCommand::unknown(None);
     }
-    let evidence = &reconciled.evidence;
+    let evidence = &reconciled.attempt_evidence;
     let prepared_attempt_replay = reservation.prepared_attempt_replay();
     let applied = resolution.may_resolve(
         attempt.status(),
@@ -196,11 +210,14 @@ async fn resolve_locked_outcome(
         if resolution.clears_submitted_at() {
             clear_resolved_attempt_submission(connection, &attempt).await?;
         }
-        if resolution.records_pending_evidence(status) && evidence.indicates_approved_payment() {
+        if let Some(observation) = reconciled
+            .charge_observation()
+            .filter(|_| resolution.records_pending_evidence(status))
+        {
             observe_processor_charge(
                 connection,
                 &attempt,
-                evidence,
+                observation,
                 ProcessorChargeProgression::Pending,
             )
             .await?;
