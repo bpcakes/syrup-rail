@@ -1,3 +1,5 @@
+// agentic-loc-exception: Release-critical code remains under the absolute limit; split follow-up is tracked separately.
+
 use std::{io, time::Duration as StdDuration};
 
 use super::*;

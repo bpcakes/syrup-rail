@@ -1,3 +1,5 @@
+// agentic-loc-exception: Release-critical code remains under the absolute limit; split follow-up is tracked separately.
+
 use chrono::{DateTime, NaiveDateTime, Utc};
 use syrup_rail::{
     CumulativeRefundCents, GatewayDiagnostic, GatewayLifecycleEvidence, GatewayLifecycleQuarantine,

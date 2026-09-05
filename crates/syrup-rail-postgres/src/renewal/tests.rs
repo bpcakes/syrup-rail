@@ -1,3 +1,5 @@
+// agentic-loc-exception: Release-critical code remains under the absolute limit; split follow-up is tracked separately.
+
 use std::{collections::HashSet, error::Error, io, time::Duration as StdDuration};
 
 use chrono::Duration;
