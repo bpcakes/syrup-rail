@@ -161,7 +161,7 @@ Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
 Use `assert_runtime_schema_v6_compatible` after host migrations and before
-serving billing traffic. The unreleased workspace supports PostgreSQL 18 and schema v6 only;
+serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v6 only;
 the assertion is read-only and does not install or upgrade a schema. It
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is
@@ -389,15 +389,19 @@ debt snapshot or parse human compiler output. Add meaningful documentation at
 an owning abstraction, and expand `warn(missing_docs)` to another module only after that module is
 ready to stay clean.
 
-The unreleased workspace requires schema v6; the schema-v5 0.6.0 release uses schema v5.
+Version 0.6.0 requires schema v6; schema v5 is the intermediate cutover from v4.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
 raw client derives it from all decision/text occurrences before reducing fields.
 `Structured` preserves a possible processor charge even when the payment decision
-is unknown; `TextOnly` blocks manual failure without identifying a charge;
+is unknown; `TextOnly` blocks manual failure of payment-bearing attempts without
+identifying a charge;
 `Absent` means no approval signal was found, not that no payment occurred.
-`Unclassified` always protects manual review, even when raw fields were discarded.
+`Unclassified` protects payment-bearing manual review even when raw fields were discarded.
 Empty observations and new reservations start `Absent`; local notes do not change
-classification. Mutation errors derive their evidence from certainty: proven
+classification. Zero-value payment-method updates may be closed against their
+retained subscription snapshot without applying the new method; closure keeps
+their evidence available for audit and reconciliation. Mutation errors derive
+their evidence from certainty: proven
 non-submission is `Absent`, while indeterminate details stay `Unclassified`.
 Raw response strings are retained as evidence and are never interpreted by core
 financial policy. See the [schema-v6 cutover guide](../crates/syrup-rail-postgres/schema/v6/README.md)

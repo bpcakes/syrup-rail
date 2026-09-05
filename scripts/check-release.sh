@@ -84,6 +84,16 @@ for crate in "${publishable_crates[@]}"; do
   fi
 done
 
+unreleased_body="$(awk '
+  $0 == "## [Unreleased]" { in_unreleased = 1; next }
+  in_unreleased && /^## \[/ { exit }
+  in_unreleased && NF { print }
+' CHANGELOG.md)"
+if [[ "$unreleased_body" != "_No unreleased changes._" ]]; then
+  echo "CHANGELOG.md must have no unreleased changes before publishing v$version." >&2
+  exit 1
+fi
+
 if ! grep -Fq "## [$version] -" CHANGELOG.md; then
   echo "CHANGELOG.md has no dated $version release heading." >&2
   exit 1

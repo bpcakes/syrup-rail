@@ -21,7 +21,13 @@ syrup-rail-nmi-client = { version = "=0.3.0", path = "crates/syrup-rail-nmi-clie
 syrup-rail-postgres = { version = "=0.3.0", path = "crates/syrup-rail-postgres" }
 syrup-rail-nmi = { version = "=0.3.0", path = "crates/syrup-rail-nmi" }
 EOF
-printf '## [0.3.0] - 2026-08-23\n' >"$fixture_root/CHANGELOG.md"
+cat >"$fixture_root/CHANGELOG.md" <<'EOF'
+## [Unreleased]
+
+_No unreleased changes._
+
+## [0.3.0] - 2026-08-23
+EOF
 
 for crate in syrup-rail syrup-rail-nmi-client syrup-rail-postgres syrup-rail-nmi; do
   mkdir -p "$fixture_root/crates/$crate"
@@ -130,6 +136,31 @@ for crate in syrup-rail syrup-rail-nmi-client syrup-rail-postgres syrup-rail-nmi
   fi
 done
 cp "$test_root/exact-Cargo.toml" "$fixture_root/Cargo.toml"
+
+cp "$fixture_root/CHANGELOG.md" "$test_root/release-CHANGELOG.md"
+cat >"$fixture_root/CHANGELOG.md" <<'EOF'
+## [Unreleased]
+
+### Changed
+
+- This change has not been assigned to the release.
+
+## [0.3.0] - 2026-08-23
+EOF
+calls="$test_root/unreleased-invalid-cargo-calls"
+if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+  RELEASE_TEST_CARGO_CALLS="$calls" \
+  PATH="$test_root/bin:$PATH" \
+  "$modern_bash" "$subject" 0.3.0 >"$test_root/unreleased-rejection" 2>&1; then
+  printf 'release checker accepted unreleased changes\n' >&2
+  exit 1
+fi
+if ! grep -Fqx "CHANGELOG.md must have no unreleased changes before publishing v0.3.0." "$test_root/unreleased-rejection" || [[ -e "$calls" ]]; then
+  printf 'unexpected unreleased-change rejection\n' >&2
+  cat "$test_root/unreleased-rejection" >&2
+  exit 1
+fi
+cp "$test_root/release-CHANGELOG.md" "$fixture_root/CHANGELOG.md"
 
 if [[ -x /bin/bash ]] && /bin/bash -c '[[ ${BASH_VERSINFO[0]} -eq 3 && ${BASH_VERSINFO[1]} -eq 2 ]]'; then
   run_case "bash-3.2-clean" /bin/bash false ""

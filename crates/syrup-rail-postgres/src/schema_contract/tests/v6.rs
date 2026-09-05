@@ -44,6 +44,8 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     let result = async {
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let attempt_id = Uuid::now_v7();
+    let subscriber_id = Uuid::now_v7();
+    let target_id = Uuid::now_v7();
     sqlx::query(
         r#"
         INSERT INTO billing_payment_attempts (
@@ -58,8 +60,8 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     )
     .bind(attempt_id)
     .bind(account.billing_scope_id)
-    .bind(Uuid::now_v7())
-    .bind(Uuid::now_v7())
+    .bind(subscriber_id)
+    .bind(target_id)
     .bind(account.gateway_account_id)
     .bind(account.gateway_configuration_id)
     .execute(&database.pool)
@@ -163,6 +165,53 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(attestation_classification, "structured");
+    sqlx::query(
+        r#"
+        UPDATE billing_processor_charges
+        SET progression_state = 'externally_reversed',
+            state_code = 'processor_charge_external_reversal_required',
+            externally_reversed_at = clock_timestamp()
+        WHERE id = $1
+        "#,
+    )
+    .bind(charge_id)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE billing_payment_attempts SET status = 'failed', resolved_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(attempt_id)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE billing_external_reversal_attestations SET gateway_response_code = '0100' WHERE processor_charge_id = $1",
+    )
+    .bind(charge_id)
+    .execute(&database.pool)
+    .await?;
+    let admission = || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT billing_host_charge_ledger_admission($1, $2, $3, 'release', NULL, NULL)",
+        )
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .bind(target_id)
+        .fetch_one(&database.pool)
+    };
+    assert_eq!(admission().await?, "safe");
+    sqlx::query(
+        "UPDATE billing_external_reversal_attestations SET gateway_approval_evidence = 'unclassified' WHERE processor_charge_id = $1",
+    )
+    .bind(charge_id)
+    .execute(&database.pool)
+    .await?;
+    assert_eq!(admission().await?, "unsafe");
+    sqlx::query(
+        "UPDATE billing_external_reversal_attestations SET gateway_approval_evidence = 'structured' WHERE processor_charge_id = $1",
+    )
+    .bind(charge_id)
+    .execute(&database.pool)
+    .await?;
     let replay_evidence = syrup_rail::ProcessorEvidence::new(
         syrup_rail::ProcessorApprovalEvidence::Structured,
         Some(syrup_rail::GatewayTransactionId::new(charge_transaction_id)?),

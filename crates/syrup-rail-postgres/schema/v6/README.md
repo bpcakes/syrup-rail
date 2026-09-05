@@ -37,9 +37,13 @@ become `structured`: v5 created a charge only from an authoritative approved
 outcome or a structured approval field, so the durable charge record supplies
 this fact without reparsing provider strings. Raw fields are never rewritten.
 
-`Unclassified` always blocks the manual no-financial-effect exit, even if a
-parser discarded the original fields. Local notes and redaction cannot change
-this classification. Existing transaction references retain their separate guard.
+For payment-bearing attempts, `Unclassified` always blocks the manual
+no-financial-effect exit, even if a parser discarded the original fields. Local
+notes and redaction cannot change this classification. Existing transaction
+references retain their separate guard. A subscription payment-method update is
+a zero-value vault operation: an operator may close it against its retained
+subscription snapshot without applying the new method, while preserving its
+processor evidence and any zero-value charge observation for reconciliation.
 An exact provider query that returns a matching transaction can add a newly
 classified observation to an unresolved attempt, but approval evidence remains
 monotonic across observations. Empty or malformed query results do not prove

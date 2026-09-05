@@ -246,15 +246,19 @@ Private Cargo consumers pin one exact Git revision with
 `git = "ssh://git@github.com/bpcakes/syrup-rail.git"` and set
 `CARGO_NET_GIT_FETCH_WITH_CLI=true` so authentication uses the system Git client.
 
-The unreleased workspace requires schema v6; the schema-v5 0.6.0 release uses schema v5.
+Version 0.6.0 requires schema v6; schema v5 is the intermediate cutover from v4.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
 raw client derives it from all decision/text occurrences before reducing fields.
 `Structured` preserves a possible processor charge even when the payment decision
-is unknown; `TextOnly` blocks manual failure without identifying a charge;
+is unknown; `TextOnly` blocks manual failure of payment-bearing attempts without
+identifying a charge;
 `Absent` means no approval signal was found, not that no payment occurred.
-`Unclassified` always protects manual review, even when raw fields were discarded.
+`Unclassified` protects payment-bearing manual review even when raw fields were discarded.
 Empty observations and new reservations start `Absent`; local notes do not change
-classification. Mutation errors derive their evidence from certainty: proven
+classification. Zero-value payment-method updates may be closed against their
+retained subscription snapshot without applying the new method; closure keeps
+their evidence available for audit and reconciliation. Mutation errors derive
+their evidence from certainty: proven
 non-submission is `Absent`, while indeterminate details stay `Unclassified`.
 Raw response strings are retained as evidence and are never interpreted by core
 financial policy. See the [schema-v6 cutover guide](crates/syrup-rail-postgres/schema/v6/README.md)

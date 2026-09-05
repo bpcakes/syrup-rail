@@ -10,7 +10,8 @@ pub enum PaymentApprovalEvidence {
     Absent,
     /// Missing, malformed, or indeterminate decisions prevent certifying absence.
     Unclassified,
-    /// At least one free-form text occurrence suggests approval.
+    /// At least one free-form text occurrence contains an approval token.
+    /// Negated prose remains here because free-form grammar cannot prove absence.
     TextOnly,
     /// At least one structured decision occurrence indicates approval.
     Structured,
@@ -28,6 +29,9 @@ impl PaymentApprovalEvidence {
 }
 
 static APPROVED_WORD: LazyLock<Regex> = LazyLock::new(|| {
+    // This is deliberately a token detector, not a natural-language decision
+    // parser. Treating phrases such as "not-approved" as certified absence
+    // could turn unfamiliar or compound provider prose into a false negative.
     Regex::new(r"(?i)(^|[^[:alnum:]])approved([^[:alnum:]]|$)")
         .expect("static approval hint expression is valid")
 });

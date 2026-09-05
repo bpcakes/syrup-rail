@@ -2306,6 +2306,19 @@ WHERE gateway_transaction_id IS NULL
 ALTER TABLE public.billing_payment_attempts
     ALTER COLUMN gateway_approval_evidence SET DEFAULT 'absent';
 
+-- Complete the immutable v6 evidence definitions before creating policies
+-- that compare charge and attestation evidence. Each column remains physically
+-- after every v5 column on fresh and upgraded hosts.
+ALTER TABLE public.billing_processor_charges
+    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
+        CONSTRAINT billing_processor_charges_approval_evidence_check
+        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
+
+ALTER TABLE public.billing_external_reversal_attestations
+    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
+        CONSTRAINT billing_external_reversal_attestations_approval_evidence_check
+        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
+
 CREATE FUNCTION public.billing_host_charge_ledger_admission(
     p_billing_scope_id uuid,
     p_subscriber_id uuid,
@@ -2548,6 +2561,9 @@ BEGIN
                             IS NOT DISTINCT FROM charges.card_exp_month
                         AND attestations.card_exp_year
                             IS NOT DISTINCT FROM charges.card_exp_year
+                        AND attestations.gateway_approval_evidence
+                            IS NOT DISTINCT FROM
+                            charges.gateway_approval_evidence
                 )
             )
     )
@@ -2564,19 +2580,6 @@ BEGIN
     RETURN 'safe';
 END
 $$;
-
--- Complete the v6 immutable-evidence definitions. These columns remain
--- physically after every v5 column on fresh and upgraded hosts.
-
-ALTER TABLE public.billing_processor_charges
-    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
-        CONSTRAINT billing_processor_charges_approval_evidence_check
-        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
-
-ALTER TABLE public.billing_external_reversal_attestations
-    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
-        CONSTRAINT billing_external_reversal_attestations_approval_evidence_check
-        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
 
 CREATE OR REPLACE FUNCTION public.billing_guard_processor_charge_evidence_update()
 RETURNS trigger

@@ -4,43 +4,7 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
-### Changed
-
-- Derive NMI approval signals before duplicate/status reduction, and preserve
-  them through identity quarantine and text truncation. `PaymentOutcomeParts`
-  now includes `approval_evidence`; update constructed fixtures accordingly.
-- Make manual-review protection depend only on typed evidence, preserve provider
-  text during negative exact queries, and keep empty reservations recoverable.
-  Indeterminate mutation-error details remain unclassified; proven non-submission
-  carries no approval signal. Protocol-level indeterminate errors, processor
-  duplicates, missing decisions, and text-only pending states likewise remain
-  protected. Unidentified reconciliation observations cannot erase earlier
-  approval signals; payment-method timeout cleanup preserves provider evidence.
-- Preserve response-text-only payment-method-update evidence during manual closure
-  and retain its existing condition instead of fabricating a failed provider state.
-- Move conservative approval-signal interpretation into the NMI raw parser and
-  translate its summary at the adapter boundary. Numeric
-  response-code aliases such as `0100` and `+0100` now retain the same financial
-  review protection as `100`, without promoting unknown decisions to approved.
-- Add `ProcessorApprovalEvidence` and preserve it through attempt application,
-  reconciliation, processor-charge recording, and external-reversal attestations.
-  Deprecate the historical raw-string gateway approval helpers.
-
-### Migration
-
-- Require schema v6 and `assert_runtime_schema_v6_compatible` for this workspace.
-  Apply the complete install or the forward-only v5-to-v6 cutover with billing
-  writers stopped. Shipped v1-v5 artifacts are unchanged. Retained provider evidence is
-  marked `Unclassified`; only entirely empty attempt evidence is initialized as
-  `Absent`. Legacy local query notes stay protected because v5 could overwrite
-  provider evidence with those notes. No provider strings are parsed.
-- Third-party adapters must pass an explicit approval classification to
-  `ProcessorEvidence::new`. This makes omitted classification a compile error;
-  adapters must deliberately use `Absent`, `TextOnly`, `Structured`, or the
-  fail-closed `Unclassified` value.
-  Unclassified evidence always blocks manual failure and
-  cannot create a new immutable pending charge without a structured signal.
-  Raw-observation exact replay leaves already-recorded classifications unchanged.
+_No unreleased changes._
 
 ## [0.6.0] - 2026-09-01
 
@@ -76,6 +40,10 @@ All notable changes to the Syrup Rail crates are documented in this file.
   must use the fallible `ExternalReversalAttestation::from_legacy_parts` and
   handle `ExternalReversalResolutionError` instead of relying on unchecked or
   panicking construction.
+- Add an explicit `ProcessorApprovalEvidence` argument to
+  `ProcessorEvidence::new`. Third-party adapters must deliberately classify
+  observations as `Absent`, `TextOnly`, `Structured`, or fail-closed
+  `Unclassified`; omitted classification is now a compile error.
 
 ### Changed
 
@@ -111,10 +79,29 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Use `expires_at` as the sole pending lifecycle-evidence clock. Reconciliation
   no longer repeats the unactionable-candidate query or writes inert check
   counters; the existing bounded expiry cleanup behavior remains unchanged.
+- Derive NMI approval signals before duplicate/status reduction and preserve
+  them through identity quarantine, bounded text, attempt application,
+  reconciliation, processor-charge recording, and reversal attestations.
+- Base payment-bearing manual-review protection on typed approval evidence.
+  Negative exact queries and payment-method cleanup preserve earlier evidence,
+  and unidentified reconciliation observations cannot erase a stronger
+  approval signal.
+- Preserve response-text-only payment-method-update evidence during manual
+  closure while keeping the closure annotation inside the bounded diagnostic.
+- Interpret conservative approval signals in the NMI raw parser and translate
+  the typed summary at the adapter boundary. Numeric response-code aliases such
+  as `0100` and `+0100` receive the same review protection as `100` without
+  promoting an unknown decision to approved.
+- Replace raw-string approval helpers with the closed
+  `ProcessorApprovalEvidence` classification. Text-only and unclassified
+  observations fail closed for payment-bearing manual closure but cannot create
+  an immutable pending charge. Zero-value payment-method updates retain their
+  separate snapshot-guarded closure path without applying the new method.
 
 ### Migration
 
-- Version 0.6.0 requires PostgreSQL schema v5. Before scheduling downtime, run
+- Version 0.6.0 requires PostgreSQL schema v6. Existing hosts must first reach
+  schema v5: before scheduling downtime, run
   `schema/v5/preflight_from_v4.sql` to measure retained external-reversal
   attestations and count incompatible resolution tuples. When blockers exist,
   run `schema/v5/audit_incompatible_attestations_from_v4.sql` through an
@@ -126,9 +113,16 @@ All notable changes to the Syrup Rail crates are documented in this file.
   table under `ACCESS EXCLUSIVE`; size the maintenance window and configure
   deployment timeouts from the rehearsal rather than an assumed universal row
   limit. Investigate blockers through an audited host process, never by
-  bypassing the constraint or silently rewriting financial evidence. After
-  commit, start 0.6.0 with `assert_runtime_schema_v5_compatible`; do not restart
-  a v4 writer.
+  bypassing the constraint or silently rewriting financial evidence.
+- After reaching v5, keep billing writers stopped and run
+  `schema/v6/preflight_from_v5.sql`. Audit protected legacy review rows with
+  `schema/v6/audit_unclassified_review_attempts_from_v5.sql`, then apply
+  `schema/v6/upgrade_from_v5.sql` in one host-owned transaction. The cutover
+  classifies retained charges and reversal attestations from their durable v5
+  provenance, marks only entirely empty attempt evidence as `Absent`, and keeps
+  every other retained attempt fail-closed as `Unclassified` without parsing
+  provider strings. After commit, start 0.6.0 with
+  `assert_runtime_schema_v6_compatible`; do not restart a v4 or v5 writer.
 
 ### Developer experience
 

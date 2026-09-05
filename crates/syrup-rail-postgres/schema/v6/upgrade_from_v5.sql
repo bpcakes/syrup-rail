@@ -349,6 +349,9 @@ BEGIN
                             IS NOT DISTINCT FROM charges.card_exp_month
                         AND attestations.card_exp_year
                             IS NOT DISTINCT FROM charges.card_exp_year
+                        AND attestations.gateway_approval_evidence
+                            IS NOT DISTINCT FROM
+                            charges.gateway_approval_evidence
                 )
             )
     )

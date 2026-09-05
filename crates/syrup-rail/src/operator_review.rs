@@ -550,6 +550,13 @@ pub enum ManualAttemptFailureOutcome {
     NotFound,
 }
 
+/// Whether a review attempt can be closed without applying a payment result.
+///
+/// Payment-method updates are zero-value vault operations. A matching snapshot
+/// permits closure without changing the subscription, while all retained
+/// processor evidence and any zero-value charge observation remain available
+/// for audit and reconciliation. Payment-bearing attempts require explicit
+/// absence of approval evidence and no gateway identity.
 pub fn review_required_attempt_can_be_manually_failed(attempt: &PaymentAttempt) -> bool {
     if attempt.status() != PaymentAttemptStatus::ReviewRequired {
         return false;
