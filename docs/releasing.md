@@ -47,7 +47,7 @@ unreachable SQLx-MySQL advisory described in
 [`security/dependency-advisories.md`](security/dependency-advisories.md), and
 fails if that dependency becomes reachable from a workspace build.
 
-Commit the release preparation, push `master`, wait for required CI to pass, and
+Commit the release preparation, push `main`, wait for required CI to pass, and
 rerun `scripts/check-release.sh VERSION` from the clean release commit.
 
 ## Trusted publishing
@@ -58,7 +58,7 @@ do not add a long-lived crates.io token to repository secrets.
 
 One-time setup:
 
-1. Create a GitHub environment named `release` and restrict it to the `master`
+1. Create a GitHub environment named `release` and restrict it to the `main`
    deployment branch. Require a reviewer when the repository's GitHub plan
    supports deployment reviewers.
 2. In the crates.io settings for each publishable crate, add the same GitHub
@@ -67,7 +67,7 @@ One-time setup:
    - repository: `syrup-rail`
    - workflow: `release.yml`
    - environment: `release`
-3. In GitHub Actions, run `Publish crates.io` from `master` and enter the version
+3. In GitHub Actions, run `Publish crates.io` from `main` and enter the version
    already recorded in the release commit.
 
 The workflow validates metadata and package contents, runs the repository
@@ -79,7 +79,7 @@ crates.io are skipped, and the remaining packages continue in order.
 ## Local fallback
 
 If trusted publishing is unavailable, authenticate Cargo through a configured
-credential provider and run the preflight from a clean `master`. Publish each
+credential provider and run the preflight from a clean `main`. Publish each
 crate in the order above with `cargo publish --locked -p CRATE`, checking its
 package first with `--dry-run`. Push an annotated `vVERSION` tag only after all
 four crate versions are visible on crates.io.

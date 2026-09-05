@@ -34,8 +34,8 @@ jobs:
           RELEASE_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_REF" != "refs/heads/master" ]]; then
-            echo "Run releases from master, not $RELEASE_REF." >&2
+          if [[ "$RELEASE_REF" != "refs/heads/main" ]]; then
+            echo "Run releases from main, not $RELEASE_REF." >&2
             exit 1
           fi
 
