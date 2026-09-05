@@ -54,9 +54,12 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
     ) {
         return Err(rate_limited_wire_error());
     }
-    let (response_text, invalid_response_text) = resolve_optional_scalar(
-        collect_classic_scalar(&fields, &["responsetext", "response_text"], true).finish(),
-    );
+    let text_occurrences =
+        collect_classic_scalar(&fields, &["responsetext", "response_text"], true);
+    let approval_evidence = decision
+        .approval_evidence
+        .merge(text_occurrences.approval_text_evidence());
+    let (response_text, invalid_response_text) = resolve_optional_scalar(text_occurrences.finish());
     let has_structured_evidence = decision.has_structured_evidence();
     let mut status = decision.status;
     let mut diagnostics = decision.diagnostics;
@@ -93,6 +96,7 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
     );
     Ok(PaymentOutcome {
         status,
+        approval_evidence,
         transaction_id,
         customer_vault_id,
         response: sensitive_gateway_field(decision.response),

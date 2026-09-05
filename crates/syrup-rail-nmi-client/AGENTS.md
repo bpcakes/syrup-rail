@@ -30,6 +30,9 @@ transaction queries, and report parsing.
 - Never retry a mutation internally.
 - Keep processor duplicate-check policy explicit and account-bound; do not
   select it per sale or treat it as durable idempotency.
+- Derive approval signals in the lossless scalar/decision reducer before fields
+  are discarded. Preserve them separately from authoritative payment status;
+  adapters must never need to reconstruct them from selected raw fields.
 - Preserve the distinction between known non-submission and an indeterminate
   mutation outcome.
 - Never expose credentials, provider bodies, identifiers, or free-form provider

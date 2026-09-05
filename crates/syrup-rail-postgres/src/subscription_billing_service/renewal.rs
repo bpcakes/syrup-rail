@@ -392,7 +392,8 @@ impl SubscriptionBillingService {
             Some(detail),
             condition,
             GatewayPaymentDescriptor::default(),
-        );
+        )
+        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Absent);
         resolve_renewal_non_approved_outcome(
             &self.pool,
             self.coordinator.as_ref(),

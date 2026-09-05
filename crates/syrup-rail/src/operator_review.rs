@@ -1,7 +1,6 @@
-use std::{fmt, sync::LazyLock};
+use std::fmt;
 
 use chrono::{DateTime, Utc};
-use regex::Regex;
 use thiserror::Error;
 
 use crate::{
@@ -15,13 +14,6 @@ pub const OPERATOR_REVIEW_PAGE_LIMIT: i64 = 100;
 pub const MANUAL_ATTEMPT_FAILURE_NOTE: &str = "Manual review confirmed no processor transaction.";
 pub const PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE: &str =
     "Manual review closed payment method update without changing subscription.";
-const PROCESSOR_RESPONSE_MARKER: &str = "Processor response:";
-
-static APPROVED_WORD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(^|[^[:alnum:]-])approved([^[:alnum:]]|$)")
-        .expect("approved word regex should compile")
-});
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OperatorReviewPageLimit(i64);
 
@@ -575,7 +567,7 @@ pub fn review_required_attempt_can_be_manually_failed(attempt: &PaymentAttempt) 
         return false;
     }
     let evidence = attempt.state().processor_evidence();
-    !evidence.has_gateway_reference() && !processor_evidence_indicates_approval(evidence)
+    !evidence.has_gateway_reference() && !evidence.may_indicate_approval()
 }
 
 pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> ProcessorEvidence {
@@ -605,6 +597,7 @@ pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> Proc
         condition,
         current.descriptor().clone(),
     )
+    .with_approval_evidence(current.approval_evidence())
 }
 
 fn payment_method_update_has_processor_evidence(evidence: &ProcessorEvidence) -> bool {
@@ -617,14 +610,7 @@ fn payment_method_update_has_processor_evidence(evidence: &ProcessorEvidence) ->
         || evidence.descriptor().card_last_four().is_some()
         || evidence.descriptor().card_exp_month().is_some()
         || evidence.descriptor().card_exp_year().is_some()
-        || evidence.response_text().is_some_and(|value| {
-            value
-                .expose()
-                .trim()
-                .to_ascii_lowercase()
-                .contains(&PROCESSOR_RESPONSE_MARKER.to_ascii_lowercase())
-                || gateway_text_says_approved(value.expose())
-        })
+        || evidence.response_text().is_some()
 }
 
 fn payment_method_update_manual_failure_response_text(existing: Option<&str>) -> GatewayDiagnostic {
@@ -637,23 +623,6 @@ fn payment_method_update_manual_failure_response_text(existing: Option<&str>) ->
     GatewayDiagnostic::new(&format!(
         "{existing} {PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE}"
     ))
-}
-
-fn processor_evidence_indicates_approval(evidence: &ProcessorEvidence) -> bool {
-    crate::gateway_response_is_approved(evidence.response().map(GatewayDiagnostic::expose))
-        || crate::gateway_response_is_approved(
-            evidence.response_code().map(GatewayDiagnostic::expose),
-        )
-        || evidence
-            .condition()
-            .is_some_and(|value| crate::gateway_state_is_approved(value.expose()))
-        || evidence
-            .response_text()
-            .is_some_and(|value| gateway_text_says_approved(value.expose()))
-}
-
-fn gateway_text_says_approved(value: &str) -> bool {
-    APPROVED_WORD_RE.is_match(value.trim())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

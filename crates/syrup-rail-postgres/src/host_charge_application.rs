@@ -28,9 +28,9 @@ use crate::{
         GatewayNotSubmittedPolicy, OutcomeResolutionBoundary, PreparedAttemptReplay,
         RateLimitCooldown, RateLimitCooldownCommitError, RateLimitCooldownOperation,
         SubscriptionEnrollmentApplicationError, commit_rate_limit_cooldown_for_operation,
-        map_attempt_transition_error, mutation_error_evidence, park_locked_attempt,
-        processor_identity_conflict_diagnostics, reconcile_non_approved_evidence,
-        restore_prepared_attempt_submission, same_processor_transaction, set_application_timeouts,
+        map_attempt_transition_error, park_locked_attempt, processor_identity_conflict_diagnostics,
+        reconcile_non_approved_evidence, restore_prepared_attempt_submission,
+        same_processor_transaction, set_application_timeouts,
         should_surface_not_submitted_application,
     },
     processor_charges::{
@@ -289,50 +289,51 @@ pub async fn submit_admitted_host_charge(
         )
         .await
         .map(HostChargeProviderResult::Payment),
-        Err(GatewayMutationError::NotSubmitted(error)) => {
-            let evidence = mutation_error_evidence(error.detail());
-            let policy = GatewayNotSubmittedPolicy::for_error(&error);
-            let application = if policy.restores_prepared_attempt_when_supported() {
-                restore_admitted_host_charge_for_retry(pool, &admission.reservation).await?
-            } else {
-                resolve_host_charge_non_approved(
+        Err(error) => {
+            let evidence = error.processor_evidence();
+            match error {
+                GatewayMutationError::NotSubmitted(error) => {
+                    let policy = GatewayNotSubmittedPolicy::for_error(&error);
+                    let application = if policy.restores_prepared_attempt_when_supported() {
+                        restore_admitted_host_charge_for_retry(pool, &admission.reservation).await?
+                    } else {
+                        resolve_host_charge_non_approved(
+                            pool,
+                            targets,
+                            &admission.reservation,
+                            &evidence,
+                            AttemptResolutionStatus::Failed,
+                            Some(policy.resolution_code()),
+                            HostChargeBeforeSubmissionResolution::admitted_not_submitted()
+                                .with_not_submitted_policy(policy)
+                                .with_provider(&provider_key),
+                        )
+                        .await?
+                    };
+                    if application.should_surface_not_submitted(policy) {
+                        Ok(HostChargeProviderResult::NotSubmitted {
+                            payment: application.payment,
+                            error,
+                        })
+                    } else {
+                        Ok(HostChargeProviderResult::Payment(application.payment))
+                    }
+                }
+                GatewayMutationError::RateLimitedIndeterminate(_) => resolve_host_charge_unknown(
                     pool,
-                    targets,
                     &admission.reservation,
                     &evidence,
-                    AttemptResolutionStatus::Failed,
-                    Some(policy.resolution_code()),
-                    HostChargeBeforeSubmissionResolution::admitted_not_submitted()
-                        .with_not_submitted_policy(policy)
-                        .with_provider(&provider_key),
+                    Some((&provider_key, RateLimitCooldown::Provider)),
                 )
-                .await?
-            };
-            if application.should_surface_not_submitted(policy) {
-                Ok(HostChargeProviderResult::NotSubmitted {
-                    payment: application.payment,
-                    error,
-                })
-            } else {
-                Ok(HostChargeProviderResult::Payment(application.payment))
+                .await
+                .map(HostChargeProviderResult::Payment),
+                GatewayMutationError::Indeterminate(_) => {
+                    resolve_host_charge_unknown(pool, &admission.reservation, &evidence, None)
+                        .await
+                        .map(HostChargeProviderResult::Payment)
+                }
             }
         }
-        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => resolve_host_charge_unknown(
-            pool,
-            &admission.reservation,
-            &mutation_error_evidence(&detail),
-            Some((&provider_key, RateLimitCooldown::Provider)),
-        )
-        .await
-        .map(HostChargeProviderResult::Payment),
-        Err(GatewayMutationError::Indeterminate(detail)) => resolve_host_charge_unknown(
-            pool,
-            &admission.reservation,
-            &mutation_error_evidence(&detail),
-            None,
-        )
-        .await
-        .map(HostChargeProviderResult::Payment),
     }
 }
 
@@ -464,7 +465,8 @@ pub(crate) async fn resolve_host_charge_before_submission(
         Some(detail),
         condition,
         syrup_rail::GatewayPaymentDescriptor::default(),
-    );
+    )
+    .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Absent);
     resolve_host_charge_non_approved(
         pool,
         targets,

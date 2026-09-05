@@ -1079,3 +1079,31 @@ async fn attempt_status(pool: &sqlx::PgPool, attempt_id: Uuid) -> Result<String,
         .fetch_one(pool)
         .await
 }
+
+#[tokio::test]
+async fn repeated_empty_queries_preserve_payment_method_evidence() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_pm_query").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "test_gateway").await?;
+        for (position, signal) in ["absent", "unclassified", "text_only", "structured"].into_iter().enumerate() {
+            let id = insert_stale_payment_method_replacement(&database.pool, account.billing_scope_id, account.gateway_account_id, account.gateway_configuration_id, position as i64).await?;
+            sqlx::query("UPDATE billing_payment_attempts SET status = 'unknown', created_at = clock_timestamp() - interval '31 minutes', submitted_at = clock_timestamp() - interval '31 minutes', updated_at = clock_timestamp() - interval '31 minutes', gateway_response_text = 'Retained provider detail', gateway_approval_evidence = $2 WHERE id = $1")
+                .bind(id).bind(signal).execute(&database.pool).await?;
+            let mut transaction = database.pool.begin().await?;
+            let attempt = find_payment_attempt_by_id_in_transaction(&mut transaction, BillingScopeId::new(account.billing_scope_id), syrup_rail::PaymentAttemptId::new(id)).await?.unwrap();
+            transaction.commit().await?;
+            for _ in 0..2 {
+                apply_exact_query_observation(&database.pool, &attempt, ExactQueryObservation::NoTransaction).await?;
+            }
+            let row: (String, String, String, Option<String>) = sqlx::query_as("SELECT status, gateway_response_text, gateway_approval_evidence, gateway_condition FROM billing_payment_attempts WHERE id = $1").bind(id).fetch_one(&database.pool).await?;
+            assert_eq!(row.0, if signal == "absent" { "failed" } else { "review_required" });
+            assert_eq!(row.1, "Retained provider detail");
+            assert_eq!(row.2, signal);
+            assert_eq!(row.3, None);
+        }
+        Ok::<(), Box<dyn Error>>(())
+    }.await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}

@@ -30,9 +30,9 @@ use super::{
     commit_rate_limit_cooldown, finalize_approved_application, load_applied_subscription,
     load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
     lock_subscription_aggregate, map_attempt_transition_error, mark_attempt_approved,
-    mutation_error_evidence, park_locked_attempt, payment_result_for_reservation_attempt,
-    persist_attempt_transition, reconcile_non_approved_evidence, renewal_subscription_matches,
-    resolve_pool_outcome, set_application_timeouts, stop_conflicting_subscription_approval,
+    park_locked_attempt, payment_result_for_reservation_attempt, persist_attempt_transition,
+    reconcile_non_approved_evidence, renewal_subscription_matches, resolve_pool_outcome,
+    set_application_timeouts, stop_conflicting_subscription_approval,
 };
 
 /// One committed final-admission result authorizing exactly one immediate
@@ -184,51 +184,52 @@ pub async fn submit_admitted_subscription_renewal(
         )
         .await
         .map(SubscriptionRenewalProviderResult::Payment),
-        Err(GatewayMutationError::NotSubmitted(error)) => {
-            let evidence = mutation_error_evidence(error.detail());
-            let policy = GatewayNotSubmittedPolicy::for_error(&error);
-            let application = resolve_renewal_non_approved_outcome(
-                pool,
-                coordinator,
-                &admission.reservation,
-                &evidence,
-                OutcomeResolutionCommand::non_approved(
-                    AttemptResolutionStatus::Failed,
-                    Some(policy.resolution_code()),
-                    policy.cooldown(),
-                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
-                ),
-            )
-            .await?;
-            if application.should_surface_not_submitted(policy) {
-                Ok(SubscriptionRenewalProviderResult::NotSubmitted {
-                    payment: application.payment,
-                    error,
-                })
-            } else {
-                Ok(SubscriptionRenewalProviderResult::Payment(
-                    application.payment,
-                ))
+        Err(error) => {
+            let evidence = error.processor_evidence();
+            match error {
+                GatewayMutationError::NotSubmitted(error) => {
+                    let policy = GatewayNotSubmittedPolicy::for_error(&error);
+                    let application = resolve_renewal_non_approved_outcome(
+                        pool,
+                        coordinator,
+                        &admission.reservation,
+                        &evidence,
+                        OutcomeResolutionCommand::non_approved(
+                            AttemptResolutionStatus::Failed,
+                            Some(policy.resolution_code()),
+                            policy.cooldown(),
+                            OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                        ),
+                    )
+                    .await?;
+                    if application.should_surface_not_submitted(policy) {
+                        Ok(SubscriptionRenewalProviderResult::NotSubmitted {
+                            payment: application.payment,
+                            error,
+                        })
+                    } else {
+                        Ok(SubscriptionRenewalProviderResult::Payment(
+                            application.payment,
+                        ))
+                    }
+                }
+                GatewayMutationError::RateLimitedIndeterminate(_) => {
+                    resolve_renewal_unknown_outcome(
+                        pool,
+                        &admission.reservation,
+                        &evidence,
+                        Some(RateLimitCooldown::Provider),
+                    )
+                    .await
+                    .map(SubscriptionRenewalProviderResult::Payment)
+                }
+                GatewayMutationError::Indeterminate(_) => {
+                    resolve_renewal_unknown_outcome(pool, &admission.reservation, &evidence, None)
+                        .await
+                        .map(SubscriptionRenewalProviderResult::Payment)
+                }
             }
         }
-        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => {
-            resolve_renewal_unknown_outcome(
-                pool,
-                &admission.reservation,
-                &mutation_error_evidence(&detail),
-                Some(RateLimitCooldown::Provider),
-            )
-            .await
-            .map(SubscriptionRenewalProviderResult::Payment)
-        }
-        Err(GatewayMutationError::Indeterminate(detail)) => resolve_renewal_unknown_outcome(
-            pool,
-            &admission.reservation,
-            &mutation_error_evidence(&detail),
-            None,
-        )
-        .await
-        .map(SubscriptionRenewalProviderResult::Payment),
     }
 }
 

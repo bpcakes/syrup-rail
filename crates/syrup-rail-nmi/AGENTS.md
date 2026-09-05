@@ -6,6 +6,8 @@ Adapt the raw NMI client to Syrup Rail gateway and lifecycle-evidence contracts.
 
 ## Key entrypoints
 
+- `src/approval_evidence.rs` translates the raw client approval summary without
+  reinterpreting provider strings.
 - `src/adapter.rs` maps the raw client to the five-method Syrup Rail gateway.
 - `src/lifecycle.rs` alone interprets NMI action/condition vocabulary into
   canonical evidence or quarantine.

@@ -169,7 +169,7 @@ pub(super) async fn charge_by_id(
             gateway_order_id, attempt_kind, amount_cents, currency,
             charge_role, progression_state, state_code,
             gateway_transaction_id, gateway_payment_method_reference,
-            gateway_response, gateway_response_code, gateway_response_text,
+            gateway_approval_evidence, gateway_response, gateway_response_code, gateway_response_text,
             gateway_condition, payment_type, card_brand, card_last4,
             card_exp_month, card_exp_year, observed_at
         FROM billing_processor_charges WHERE id = $1 FOR UPDATE

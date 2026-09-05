@@ -29,9 +29,8 @@ use super::{
     TERMINAL_APPROVAL_RACE_TEXT, append_subscription_observation_diagnostics,
     apply_resumable_not_submitted_policy, finalize_approved_application, load_applied_subscription,
     load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
-    lock_subscription_aggregate, mark_attempt_approved, mutation_error_evidence,
-    park_locked_attempt, resolve_pool_outcome, set_application_timeouts,
-    stop_conflicting_subscription_approval, upsert_payment_method,
+    lock_subscription_aggregate, mark_attempt_approved, park_locked_attempt, resolve_pool_outcome,
+    set_application_timeouts, stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 mod approval;
@@ -190,43 +189,44 @@ pub async fn submit_admitted_subscription_enrollment(
         )
         .await
         .map(SubscriptionEnrollmentProviderResult::Payment),
-        Err(GatewayMutationError::NotSubmitted(error)) => {
-            let evidence = mutation_error_evidence(error.detail());
-            let policy = GatewayNotSubmittedPolicy::for_error(&error);
-            let application = apply_resumable_not_submitted_policy(
-                pool,
-                OutcomeReservation::Initial(&admission.reservation),
-                &evidence,
-                policy,
-            )
-            .await?;
-            if application.should_surface_not_submitted(policy) {
-                Ok(SubscriptionEnrollmentProviderResult::NotSubmitted {
-                    payment: application.payment,
-                    error,
-                })
-            } else {
-                Ok(SubscriptionEnrollmentProviderResult::Payment(
-                    application.payment,
-                ))
+        Err(error) => {
+            let evidence = error.processor_evidence();
+            match error {
+                GatewayMutationError::NotSubmitted(error) => {
+                    let policy = GatewayNotSubmittedPolicy::for_error(&error);
+                    let application = apply_resumable_not_submitted_policy(
+                        pool,
+                        OutcomeReservation::Initial(&admission.reservation),
+                        &evidence,
+                        policy,
+                    )
+                    .await?;
+                    if application.should_surface_not_submitted(policy) {
+                        Ok(SubscriptionEnrollmentProviderResult::NotSubmitted {
+                            payment: application.payment,
+                            error,
+                        })
+                    } else {
+                        Ok(SubscriptionEnrollmentProviderResult::Payment(
+                            application.payment,
+                        ))
+                    }
+                }
+                GatewayMutationError::RateLimitedIndeterminate(_) => resolve_unknown_outcome(
+                    pool,
+                    &admission.reservation,
+                    &evidence,
+                    Some(RateLimitCooldown::Provider),
+                )
+                .await
+                .map(SubscriptionEnrollmentProviderResult::Payment),
+                GatewayMutationError::Indeterminate(_) => {
+                    resolve_unknown_outcome(pool, &admission.reservation, &evidence, None)
+                        .await
+                        .map(SubscriptionEnrollmentProviderResult::Payment)
+                }
             }
         }
-        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => resolve_unknown_outcome(
-            pool,
-            &admission.reservation,
-            &mutation_error_evidence(&detail),
-            Some(RateLimitCooldown::Provider),
-        )
-        .await
-        .map(SubscriptionEnrollmentProviderResult::Payment),
-        Err(GatewayMutationError::Indeterminate(detail)) => resolve_unknown_outcome(
-            pool,
-            &admission.reservation,
-            &mutation_error_evidence(&detail),
-            None,
-        )
-        .await
-        .map(SubscriptionEnrollmentProviderResult::Payment),
     }
 }
 

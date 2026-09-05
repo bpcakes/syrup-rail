@@ -1,8 +1,9 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.6
-supports PostgreSQL 18 only and uses schema v5.
+SQLx operations, and high-level subscription billing service. The unreleased
+workspace supports PostgreSQL 18 only and uses schema v6. Published 0.6.0 uses
+schema v5.
 
 ```toml
 [dependencies]
@@ -10,19 +11,19 @@ syrup-rail = "0.6.0"
 syrup-rail-postgres = "0.6.0"
 ```
 
-New hosts install `schema/v5/install.sql` through their normal migration
-system. Existing schema-v4 hosts run the read-only v5 preflight and audit,
-remediate incompatible retained attestations through an authorized process,
-then apply `schema/v5/upgrade_from_v4.sql` transactionally. Schemas v1 through
-v4 are immutable. The detailed versioned guides explain the required lock,
-maintenance, audit, and rehearsal boundaries.
+New hosts install `schema/v6/install.sql` through their normal migration
+system. Existing schema-v5 hosts stop billing writers, rehearse the additive
+cutover, and apply `schema/v6/upgrade_from_v5.sql` transactionally. Schemas v1
+through v5 are immutable. The [v6 guide](schema/v6/README.md) explains locking,
+historical classification, deployment, and recovery.
+
 
 After the host applies its migration and before it serves billing traffic,
 verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v5_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v6_compatible(pool).await?;
 # Ok(())
 # }
 ```
@@ -179,3 +180,17 @@ any nested savepoint before consuming that value with `commit` or `rollback`.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
+
+The unreleased workspace requires schema v6; published 0.6.0 uses schema v5.
+Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
+raw client derives it from all decision/text occurrences before reducing fields.
+`Structured` preserves a possible processor charge even when the payment decision
+is unknown; `TextOnly` blocks manual failure without identifying a charge;
+`Absent` means no approval signal was found, not that no payment occurred.
+`Unclassified` always protects manual review, even when raw fields were discarded.
+Empty observations and new reservations start `Absent`; local notes do not change
+classification. Mutation errors derive their evidence from certainty: proven
+non-submission is `Absent`, while indeterminate details stay `Unclassified`.
+Raw response strings are retained as evidence and are never interpreted by core
+financial policy. See the [schema-v6 cutover guide](schema/v6/README.md)
+for deployment and historical-evidence handling.

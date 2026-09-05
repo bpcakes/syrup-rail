@@ -4,6 +4,43 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- Derive NMI approval signals before duplicate/status reduction, and preserve
+  them through identity quarantine and text truncation. `PaymentOutcomeParts`
+  now includes `approval_evidence`; update constructed fixtures accordingly.
+- Make manual-review protection depend only on typed evidence, preserve provider
+  text during negative exact queries, and keep empty reservations recoverable.
+  Indeterminate mutation-error details remain unclassified; proven non-submission
+  carries no approval signal. Protocol-level indeterminate errors, processor
+  duplicates, missing decisions, and text-only pending states likewise remain
+  protected. Unidentified reconciliation observations cannot erase earlier
+  approval signals; payment-method timeout cleanup preserves provider evidence.
+- Preserve response-text-only payment-method-update evidence during manual closure
+  and retain its existing condition instead of fabricating a failed provider state.
+- Move conservative approval-signal interpretation into the NMI raw parser and
+  translate its summary at the adapter boundary. Numeric
+  response-code aliases such as `0100` and `+0100` now retain the same financial
+  review protection as `100`, without promoting unknown decisions to approved.
+- Add `ProcessorApprovalEvidence` and preserve it through attempt application,
+  reconciliation, processor-charge recording, and external-reversal attestations.
+  Deprecate the historical raw-string gateway approval helpers.
+
+### Migration
+
+- Require schema v6 and `assert_runtime_schema_v6_compatible` for this workspace.
+  Apply the complete install or the forward-only v5-to-v6 cutover with billing
+  writers stopped. Shipped v1-v5 artifacts are unchanged. Retained provider evidence is
+  marked `Unclassified`; only entirely empty attempt evidence is initialized as
+  `Absent`. Legacy local query notes stay protected because v5 could overwrite
+  provider evidence with those notes. No provider strings are parsed.
+- Third-party adapters must attach explicit approval signals using
+  `ProcessorEvidence::with_approval_evidence`. The compatibility constructor
+  marks empty observations `Absent` and nonempty observations `Unclassified`.
+  Unclassified evidence always blocks manual failure and
+  cannot create a new immutable pending charge without a structured signal.
+  Raw-observation exact replay leaves already-recorded classifications unchanged.
+
 ## [0.6.0] - 2026-09-01
 
 ### Fixed

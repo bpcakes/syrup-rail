@@ -134,7 +134,8 @@ impl SubscriptionBillingService {
             Some(detail),
             condition,
             GatewayPaymentDescriptor::default(),
-        );
+        )
+        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Absent);
         let payment = reservation
             .resolve_non_approved(&self.pool, &evidence, code, cooldown, boundary)
             .await

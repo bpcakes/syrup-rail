@@ -12,7 +12,7 @@ async fn runtime_schema_v5_accepts_fresh_install_and_v4_upgrade() -> Result<(), 
     {
         return Err(io::Error::other("schema-v5 artifacts must not be empty").into());
     }
-    let fresh = TestDatabase::start("sr_fresh_v5").await?;
+    let fresh = TestDatabase::start_v5("sr_fresh_v5").await?;
     let upgraded = TestDatabase::start_v4("sr_upgrade_v5").await?;
     let result = async {
         upgraded.upgrade_v4_to_v5().await?;
@@ -37,7 +37,7 @@ async fn runtime_schema_v5_accepts_fresh_install_and_v4_upgrade() -> Result<(), 
 async fn runtime_schema_v5_rejects_v4_and_canonical_column_drift() -> Result<(), Box<dyn Error>> {
     assert_ne!(V4_CATALOG_FINGERPRINT, V5_CATALOG_FINGERPRINT);
     let v4 = TestDatabase::start_v4("sr_v5_reject_v4").await?;
-    let drifted = TestDatabase::start("sr_v5_drift").await?;
+    let drifted = TestDatabase::start_v5("sr_v5_drift").await?;
     let result = async {
         assert!(matches!(
             crate::assert_runtime_schema_v5_compatible(&v4.pool).await,
@@ -65,7 +65,7 @@ async fn runtime_schema_v5_rejects_v4_and_canonical_column_drift() -> Result<(),
 async fn v5_preflight_and_constraint_cover_complete_v4_tuple_matrix() -> Result<(), Box<dyn Error>>
 {
     let v4 = TestDatabase::start_v4("sr_v5_matrix_v4").await?;
-    let v5 = TestDatabase::start("sr_v5_matrix_v5").await?;
+    let v5 = TestDatabase::start_v5("sr_v5_matrix_v5").await?;
     let result = async {
         let v4_account = create_gateway_account(&v4.pool, "nmi").await?;
         let v5_account = create_gateway_account(&v5.pool, "nmi").await?;
@@ -339,7 +339,7 @@ async fn run_v4_to_v5_incompatible_attestation_audit_read_only(
 
 #[tokio::test]
 async fn runtime_schema_v5_does_not_read_retained_attestations() -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v5_no_scan").await?;
+    let database = TestDatabase::start_v5("sr_v5_no_scan").await?;
     let role = format!("schema_v5_validator_{}", Uuid::now_v7().simple());
     let result = async {
         sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))

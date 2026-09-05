@@ -63,6 +63,13 @@ pub const V4_TO_V5_INCOMPATIBLE_ATTESTATION_AUDIT_SQL: &str =
 /// The forward-only version-4-to-version-5 upgrade artifact.
 pub const V4_TO_V5_UPGRADE_SQL: &str = include_str!("../schema/v5/upgrade_from_v4.sql");
 
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Complete current install artifact, for host migration packaging and tests.
+pub const V6_INSTALL_SQL: &str = include_str!("../schema/v6/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Forward-only v5-to-v6 upgrade; host applications own migration execution.
+pub const V5_TO_V6_UPGRADE_SQL: &str = include_str!("../schema/v6/upgrade_from_v5.sql");
+
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -74,6 +81,7 @@ const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
 const V5_CATALOG_FINGERPRINT: u64 = 0xa565_eddd_a93b_3368;
+const V6_CATALOG_FINGERPRINT: u64 = 0x37fe_b100_42e9_893a;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 pub(crate) const INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL: &str =
@@ -470,12 +478,26 @@ pub async fn assert_runtime_schema_v4_compatible(
     .await
 }
 
-/// Asserts that a host database is compatible with canonical schema v5 before
-/// the host accepts billing work.
+/// Asserts the complete canonical schema-v6 catalog before accepting billing work.
+/// The host must first apply its immutable install or v5-to-v6 upgrade. Read-only;
+/// requires PostgreSQL 18 and never installs or migrates a database.
+pub async fn assert_runtime_schema_v6_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        6,
+        V5_CURRENT_SUBSCRIPTION_COLUMNS,
+        V6_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
+/// Checks the historical schema-v5 catalog while preparing a v6 cutover.
 ///
-/// Call this after the host has applied its immutable install or forward-only
-/// upgrade through its normal migration deployment. This function is read-only
-/// and requires PostgreSQL major version 18.
+/// This is read-only and requires PostgreSQL 18. Success validates the old side
+/// of the migration only; current billing queries require schema v6 and
+/// [`assert_runtime_schema_v6_compatible`].
 pub async fn assert_runtime_schema_v5_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {

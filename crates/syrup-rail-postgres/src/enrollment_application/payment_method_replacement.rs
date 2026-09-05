@@ -34,10 +34,10 @@ use super::{
     disable_payment_method_if_unreferenced, finalize_approved_application,
     is_retryable_evidence_error, load_applied_subscription, load_subscription,
     lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
-    mark_attempt_approved, mutation_error_evidence, park_locked_attempt,
-    payment_result_for_attempt, persist_approved_evidence_without_attempt_lock,
-    reconcile_non_approved_evidence, resolve_locked_outcome, resolve_pool_outcome,
-    set_application_timeouts, stop_conflicting_subscription_approval, upsert_payment_method,
+    mark_attempt_approved, park_locked_attempt, payment_result_for_attempt,
+    persist_approved_evidence_without_attempt_lock, reconcile_non_approved_evidence,
+    resolve_locked_outcome, resolve_pool_outcome, set_application_timeouts,
+    stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 mod approval;
@@ -185,48 +185,52 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
         )
         .await
         .map(SubscriptionPaymentMethodReplacementProviderResult::Payment),
-        Err(GatewayMutationError::NotSubmitted(error)) => {
-            let evidence = mutation_error_evidence(error.detail());
-            let policy = GatewayNotSubmittedPolicy::for_error(&error);
-            let application = apply_resumable_not_submitted_policy(
-                pool,
-                OutcomeReservation::PaymentMethodReplacement(&admission.reservation),
-                &evidence,
-                policy,
-            )
-            .await?;
-            if application.should_surface_not_submitted(policy) {
-                Ok(
-                    SubscriptionPaymentMethodReplacementProviderResult::NotSubmitted {
-                        payment: application.payment,
-                        error,
-                    },
-                )
-            } else {
-                Ok(SubscriptionPaymentMethodReplacementProviderResult::Payment(
-                    application.payment,
-                ))
+        Err(error) => {
+            let evidence = error.processor_evidence();
+            match error {
+                GatewayMutationError::NotSubmitted(error) => {
+                    let policy = GatewayNotSubmittedPolicy::for_error(&error);
+                    let application = apply_resumable_not_submitted_policy(
+                        pool,
+                        OutcomeReservation::PaymentMethodReplacement(&admission.reservation),
+                        &evidence,
+                        policy,
+                    )
+                    .await?;
+                    if application.should_surface_not_submitted(policy) {
+                        Ok(
+                            SubscriptionPaymentMethodReplacementProviderResult::NotSubmitted {
+                                payment: application.payment,
+                                error,
+                            },
+                        )
+                    } else {
+                        Ok(SubscriptionPaymentMethodReplacementProviderResult::Payment(
+                            application.payment,
+                        ))
+                    }
+                }
+                GatewayMutationError::RateLimitedIndeterminate(_) => {
+                    resolve_payment_method_replacement_unknown_outcome(
+                        pool,
+                        &admission.reservation,
+                        &evidence,
+                        Some(RateLimitCooldown::Provider),
+                    )
+                    .await
+                    .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
+                }
+                GatewayMutationError::Indeterminate(_) => {
+                    resolve_payment_method_replacement_unknown_outcome(
+                        pool,
+                        &admission.reservation,
+                        &evidence,
+                        None,
+                    )
+                    .await
+                    .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
+                }
             }
-        }
-        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => {
-            resolve_payment_method_replacement_unknown_outcome(
-                pool,
-                &admission.reservation,
-                &mutation_error_evidence(&detail),
-                Some(RateLimitCooldown::Provider),
-            )
-            .await
-            .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
-        }
-        Err(GatewayMutationError::Indeterminate(detail)) => {
-            resolve_payment_method_replacement_unknown_outcome(
-                pool,
-                &admission.reservation,
-                &mutation_error_evidence(&detail),
-                None,
-            )
-            .await
-            .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
         }
     }
 }

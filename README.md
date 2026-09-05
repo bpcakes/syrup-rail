@@ -105,13 +105,13 @@ entitlement changes from `AllowedDuringDunning` to `Suspended`. Hosts that
 mirror access outside Syrup Rail must consume the outcome's access projection
 from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v5 is the
+PostgreSQL 18 is the only supported database major, and schema v6 is the
 current contract. New hosts install
-[`schema/v5/install.sql`](crates/syrup-rail-postgres/schema/v5/install.sql).
-Existing schema-v4 hosts follow the checked-in
-[`v4` to `v5` cutover guide](crates/syrup-rail-postgres/schema/v5/README.md).
+[`schema/v6/install.sql`](crates/syrup-rail-postgres/schema/v6/install.sql).
+Existing schema-v5 hosts follow the checked-in
+[`v5` to `v6` cutover guide](crates/syrup-rail-postgres/schema/v6/README.md).
 Hosts on an older schema must first follow the immutable versioned artifacts
-to reach schema v4, then perform the v4-to-v5 cutover.
+to reach schema v5, then perform the v5-to-v6 cutover.
 
 ## PostgreSQL host integration
 
@@ -133,10 +133,10 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its v5 install or forward-only v4-to-v5 upgrade,
-call `assert_runtime_schema_v5_compatible(&pool).await` during process startup and
+After the host has applied its v6 install or forward-only v5-to-v6 upgrade,
+call `assert_runtime_schema_v6_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v5 catalog and fingerprint inside one repeatable-read, read-only transaction.
+v6 catalog and fingerprint inside one repeatable-read, read-only transaction.
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even
@@ -245,3 +245,17 @@ manual, trusted-publishing workflow.
 Private Cargo consumers pin one exact Git revision with
 `git = "ssh://git@github.com/bpcakes/syrup-rail.git"` and set
 `CARGO_NET_GIT_FETCH_WITH_CLI=true` so authentication uses the system Git client.
+
+The unreleased workspace requires schema v6; published 0.6.0 uses schema v5.
+Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
+raw client derives it from all decision/text occurrences before reducing fields.
+`Structured` preserves a possible processor charge even when the payment decision
+is unknown; `TextOnly` blocks manual failure without identifying a charge;
+`Absent` means no approval signal was found, not that no payment occurred.
+`Unclassified` always protects manual review, even when raw fields were discarded.
+Empty observations and new reservations start `Absent`; local notes do not change
+classification. Mutation errors derive their evidence from certainty: proven
+non-submission is `Absent`, while indeterminate details stay `Unclassified`.
+Raw response strings are retained as evidence and are never interpreted by core
+financial policy. See the [schema-v6 cutover guide](crates/syrup-rail-postgres/schema/v6/README.md)
+for deployment and historical-evidence handling.

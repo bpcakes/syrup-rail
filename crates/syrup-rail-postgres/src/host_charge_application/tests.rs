@@ -698,7 +698,8 @@ fn approved_outcome_with_reference(
             Some(GatewayDiagnostic::new("approved")),
             Some(GatewayDiagnostic::new("complete")),
             GatewayPaymentDescriptor::default(),
-        ),
+        )
+        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Structured),
     )
 }
 
@@ -713,7 +714,8 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
             Some(GatewayDiagnostic::new("Duplicate transaction")),
             None,
             GatewayPaymentDescriptor::default(),
-        ),
+        )
+        .with_approval_evidence(syrup_rail::ProcessorApprovalEvidence::Unclassified),
     )
     .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate])
 }

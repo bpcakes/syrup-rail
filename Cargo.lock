@@ -2813,6 +2813,7 @@ version = "0.6.0"
 dependencies = [
  "futures-util",
  "h2",
+ "regex",
  "reqwest",
  "roxmltree",
  "serde",

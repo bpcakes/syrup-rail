@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod admission;
+mod approval_evidence;
 mod attempt;
 mod audit_reason;
 mod billing_portal;
@@ -18,6 +19,7 @@ mod gateway;
 mod gateway_value;
 mod host_charge;
 mod identity;
+mod legacy_gateway_policy;
 mod money;
 mod operator_review;
 mod payment_method_update;
@@ -30,6 +32,10 @@ mod resolver;
 mod subscription;
 mod subscription_payment_context;
 mod terms;
+
+pub use approval_evidence::{ProcessorApprovalEvidence, ProcessorApprovalEvidenceParseError};
+#[allow(deprecated)]
+pub use legacy_gateway_policy::{gateway_response_is_approved, gateway_state_is_approved};
 
 pub use admission::{
     EndUserMutationAdmission, EndUserMutationAdmissionResult, EndUserMutationCommand,
@@ -137,10 +143,7 @@ pub use payment_method_update::{
     SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection,
 };
-pub use policy::{
-    BillingPeriodPolicyError, gateway_response_is_approved, gateway_state_is_approved,
-    next_billing_period,
-};
+pub use policy::{BillingPeriodPolicyError, next_billing_period};
 pub use reconciliation::{GatewayAccountReconciliationCandidate, GatewayLifecycleAccount};
 pub use recovery::{
     RecoverSubscriptionPayment, SubscriptionRecoveryLockedTerms,

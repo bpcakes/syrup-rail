@@ -623,8 +623,9 @@ impl fmt::Debug for GatewayPaymentDescriptor {
     }
 }
 
-#[derive(Clone, Default, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ProcessorEvidence {
+    approval_evidence: crate::ProcessorApprovalEvidence,
     transaction_id: Option<GatewayTransactionId>,
     payment_method_reference: Option<GatewayPaymentMethodReference>,
     response: Option<GatewayDiagnostic>,
@@ -634,7 +635,26 @@ pub struct ProcessorEvidence {
     descriptor: GatewayPaymentDescriptor,
 }
 
+impl Default for ProcessorEvidence {
+    fn default() -> Self {
+        Self::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            GatewayPaymentDescriptor::default(),
+        )
+    }
+}
+
 impl ProcessorEvidence {
+    /// Constructs legacy evidence without interpreting provider text. An empty
+    /// decision/reference bundle has no observed approval signal; nonempty
+    /// legacy evidence remains unclassified.
+    /// Provider adapters must attach their review classification with
+    /// [`Self::with_approval_evidence`]; persistence must restore its stored value.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         transaction_id: Option<GatewayTransactionId>,
@@ -646,6 +666,17 @@ impl ProcessorEvidence {
         descriptor: GatewayPaymentDescriptor,
     ) -> Self {
         Self {
+            approval_evidence: if transaction_id.is_none()
+                && payment_method_reference.is_none()
+                && response.is_none()
+                && response_code.is_none()
+                && response_text.is_none()
+                && condition.is_none()
+            {
+                crate::ProcessorApprovalEvidence::Absent
+            } else {
+                crate::ProcessorApprovalEvidence::Unclassified
+            },
             transaction_id,
             payment_method_reference,
             response,
@@ -688,22 +719,42 @@ impl ProcessorEvidence {
         self.transaction_id.is_some() || self.payment_method_reference.is_some()
     }
 
-    /// Returns whether the evidence conservatively identifies an approved
-    /// payment at the processor.
-    ///
-    /// A transaction identity is required in addition to an approved response,
-    /// response code, or lifecycle condition. Free-form response text is not
-    /// treated as authoritative approval evidence.
-    pub fn indicates_approved_payment(&self) -> bool {
+    /// Attaches the provider adapter's conservative approval-signal classification.
+    /// This is independent of the authoritative payment decision. Persistence
+    /// and evidence-copying code must retain it alongside the raw observation.
+    pub const fn with_approval_evidence(
+        mut self,
+        evidence: crate::ProcessorApprovalEvidence,
+    ) -> Self {
+        self.approval_evidence = evidence;
+        self
+    }
+
+    /// Returns the adapter's classification, or `Unclassified` for legacy input.
+    pub const fn approval_evidence(&self) -> crate::ProcessorApprovalEvidence {
+        self.approval_evidence
+    }
+
+    /// Whether a located observation needs a pending processor-charge record.
+    /// Unclassified legacy observations remain on the attempt for reconciliation;
+    /// they cannot create a new immutable charge solely from uninterpreted text.
+    /// This never authorizes applying a payment as approved.
+    pub const fn indicates_approved_payment(&self) -> bool {
         self.transaction_id.is_some()
-            && (crate::gateway_response_is_approved(
-                self.response.as_ref().map(GatewayDiagnostic::expose),
-            ) || crate::gateway_response_is_approved(
-                self.response_code.as_ref().map(GatewayDiagnostic::expose),
-            ) || self
-                .condition
-                .as_ref()
-                .is_some_and(|value| crate::gateway_state_is_approved(value.expose())))
+            && matches!(
+                self.approval_evidence,
+                crate::ProcessorApprovalEvidence::Structured
+            )
+    }
+
+    /// Whether approval signals prevent an operator's no-financial-effect exit.
+    /// This depends only on the durable classification. Local notes, redaction,
+    /// and discarded raw fields cannot strengthen or weaken the decision.
+    pub const fn may_indicate_approval(&self) -> bool {
+        !matches!(
+            self.approval_evidence,
+            crate::ProcessorApprovalEvidence::Absent
+        )
     }
 }
 
@@ -730,6 +781,7 @@ impl fmt::Debug for ProcessorEvidence {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProcessorEvidence")
+            .field("approval_evidence", &self.approval_evidence)
             .field("has_transaction_id", &self.transaction_id.is_some())
             .field(
                 "has_payment_method_reference",

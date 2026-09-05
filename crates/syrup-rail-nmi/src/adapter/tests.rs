@@ -17,6 +17,11 @@ fn text(value: &str) -> SensitiveText {
 fn empty_outcome(status: PaymentStatus) -> PaymentOutcomeParts {
     PaymentOutcomeParts {
         status,
+        approval_evidence: if status == PaymentStatus::Approved {
+            syrup_rail_nmi_client::PaymentApprovalEvidence::Structured
+        } else {
+            syrup_rail_nmi_client::PaymentApprovalEvidence::Absent
+        },
         transaction_id: None,
         customer_vault_id: None,
         response: None,
@@ -550,4 +555,114 @@ fn descriptor_carries_current_nmi_query_envelope() {
     assert_eq!(policy.ordinary_page_limit().get(), 20);
     assert_eq!(policy.max_window_splits().get(), 12);
     assert_eq!(policy.narrow_window_drain_page_limit().get(), 2_000);
+}
+
+#[tokio::test]
+async fn numeric_approval_aliases_survive_conflicting_payment_decisions() {
+    for body in [
+        r#"{"response":"2","response_code":"100","id":"txn_alias"}"#,
+        r#"{"response":"2","response_code":"0100","id":"txn_alias"}"#,
+        r#"{"response":"2","response_code":"+0100","id":"txn_alias"}"#,
+    ] {
+        let (gateway, server) = gateway_with_response(body).await;
+        let request = GatewaySaleRequest::new(
+            ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap(),
+            GatewayOrderId::from_correlation("approval-alias").unwrap(),
+            GatewaySaleIntent::OneTime {
+                payment_token: PaymentToken::new("tok_alias").unwrap(),
+            },
+            None,
+        );
+        let outcome = gateway.sale(request).await.unwrap();
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+        assert_eq!(
+            outcome.evidence().approval_evidence(),
+            syrup_rail::ProcessorApprovalEvidence::Structured
+        );
+        assert!(outcome.evidence().indicates_approved_payment());
+        assert!(outcome.evidence().may_indicate_approval());
+        assert!(body.contains(outcome.response_code().unwrap().expose()));
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn approval_text_is_a_review_hint_and_never_a_payment_decision() {
+    for (body, expected) in [
+        (
+            r#"{"response":"3","response_text":"Approved by processor","id":"txn_text_hint"}"#,
+            syrup_rail::ProcessorApprovalEvidence::TextOnly,
+        ),
+        (
+            r#"{"response":"3","response_text":"not-approved","id":"txn_text_hint"}"#,
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
+        ),
+        (
+            r#"{"response":"3","response_text":"Processor error","id":"txn_text_hint"}"#,
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
+        ),
+    ] {
+        let (gateway, server) = gateway_with_response(body).await;
+        let outcome = gateway.sale(approval_signal_sale_request()).await.unwrap();
+        assert_eq!(outcome.evidence().approval_evidence(), expected);
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+        assert!(!outcome.evidence().indicates_approved_payment());
+        server.await.unwrap();
+    }
+}
+
+fn approval_signal_sale_request() -> GatewaySaleRequest {
+    GatewaySaleRequest::new(
+        ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap(),
+        GatewayOrderId::from_correlation("approval-signal").unwrap(),
+        GatewaySaleIntent::OneTime {
+            payment_token: PaymentToken::new("tok_signal").unwrap(),
+        },
+        None,
+    )
+}
+
+#[tokio::test]
+async fn discarded_and_status_only_decisions_retain_approval_signals() {
+    use syrup_rail::ProcessorApprovalEvidence as Signal;
+    for (body, expected) in [
+        (
+            r#"{"status":"approved","condition":"declined","id":"txn_signal"}"#,
+            Signal::Structured,
+        ),
+        (
+            r#"{"response":"1","response":"2","id":"txn_signal"}"#,
+            Signal::Structured,
+        ),
+        (
+            r#"{"response":"2","response":"1","id":"txn_signal"}"#,
+            Signal::Structured,
+        ),
+        (
+            r#"{"status":"approved","id":"invalid identity"}"#,
+            Signal::Structured,
+        ),
+        (r#"{"response":"3"}"#, Signal::Unclassified),
+        (r#"{"condition":"error"}"#, Signal::Unclassified),
+        (r#"{"status":"pending"}"#, Signal::Unclassified),
+        (r#"{"response_code":"400"}"#, Signal::Unclassified),
+        (r#"{"response_code":"420"}"#, Signal::Unclassified),
+        (r#"{"response_code":"430"}"#, Signal::Unclassified),
+        (r#"{"response":{},"id":null}"#, Signal::Unclassified),
+        (
+            r#"{"response_code":"provider-extension","id":null}"#,
+            Signal::Unclassified,
+        ),
+        (
+            r#"{"response_text":"Approved","response_text":"Processor error","id":null}"#,
+            Signal::TextOnly,
+        ),
+    ] {
+        let (gateway, server) = gateway_with_response(body).await;
+        let outcome = gateway.sale(approval_signal_sale_request()).await.unwrap();
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown, "{body}");
+        assert_eq!(outcome.evidence().approval_evidence(), expected, "{body}");
+        assert!(outcome.evidence().may_indicate_approval(), "{body}");
+        server.await.unwrap();
+    }
 }

@@ -277,7 +277,8 @@ pub async fn apply_exact_query_observation(
                 )
                 && current.state().timestamps().submitted_at().is_some()
                 && evidence.transaction_id().is_none()
-                && evidence.condition().is_none() =>
+                && evidence.condition().is_none()
+                && !evidence.may_indicate_approval() =>
         {
             (
                 PaymentAttemptStatus::Failed,
@@ -308,8 +309,8 @@ pub async fn apply_exact_query_observation(
         sqlx::query(
             r#"
             UPDATE billing_payment_attempts
-            SET status = 'failed', gateway_response_text = $2,
-                gateway_condition = COALESCE(gateway_condition, 'failed'),
+            SET status = 'failed',
+                gateway_response_text = CASE WHEN NULLIF(BTRIM(gateway_response_text), '') IS NULL THEN $2 ELSE gateway_response_text END,
                 resolved_at = clock_timestamp(), updated_at = clock_timestamp()
             WHERE id = $1 AND status IN ('pending', 'review_required')
             "#,
@@ -324,8 +325,7 @@ pub async fn apply_exact_query_observation(
             UPDATE billing_payment_attempts
             SET status = 'review_required',
                 gateway_response_text = CASE
-                    WHEN status = 'review_required'
-                        AND NULLIF(BTRIM(gateway_response_text), '') IS NOT NULL
+                    WHEN NULLIF(BTRIM(gateway_response_text), '') IS NOT NULL
                     THEN gateway_response_text ELSE $2
                 END,
                 updated_at = clock_timestamp()
@@ -340,7 +340,7 @@ pub async fn apply_exact_query_observation(
         sqlx::query(
             r#"
             UPDATE billing_payment_attempts
-            SET gateway_response_text = $2, updated_at = clock_timestamp()
+            SET gateway_response_text = CASE WHEN NULLIF(BTRIM(gateway_response_text), '') IS NULL THEN $2 ELSE gateway_response_text END, updated_at = clock_timestamp()
             WHERE id = $1 AND status = $3
             "#,
         )

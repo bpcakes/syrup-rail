@@ -9,7 +9,7 @@ pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = r#"
         gateway_configuration_id, required_gateway_account_mode,
         gateway_order_id,
         gateway_transaction_id, gateway_payment_method_reference,
-        gateway_response, gateway_response_code, gateway_response_text,
+        gateway_approval_evidence, gateway_response, gateway_response_code, gateway_response_text,
         gateway_condition, payment_type, card_brand, card_last4,
         card_exp_month, card_exp_year, submitted_at, resolved_at,
         created_at, updated_at, gateway_lifecycle_status,
@@ -702,6 +702,11 @@ pub(crate) fn processor_evidence_from_row(
         diagnostic(row, "gateway_response_text")?,
         diagnostic(row, "gateway_condition")?,
         descriptor,
+    )
+    .with_approval_evidence(
+        row.try_get::<String, _>("gateway_approval_evidence")?
+            .parse()
+            .map_err(|_| invalid_state())?,
     ))
 }
 

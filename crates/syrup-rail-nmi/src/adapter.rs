@@ -185,6 +185,7 @@ fn map_payment_outcome(outcome: syrup_rail_nmi_client::PaymentOutcome) -> Gatewa
 }
 
 fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcome {
+    let approval_evidence = crate::approval_evidence::classify(&parts);
     for diagnostic in &parts.diagnostics {
         match diagnostic {
             PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
@@ -233,7 +234,8 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
         sanitized_text(parts.response_text),
         sanitized_text(parts.condition),
         map_payment_descriptor_parts(parts.descriptor.into_parts()),
-    );
+    )
+    .with_approval_evidence(approval_evidence);
     GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics)
 }
 

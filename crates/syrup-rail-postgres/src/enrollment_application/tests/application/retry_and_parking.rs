@@ -95,7 +95,7 @@ async fn payment_method_admission_rejects_changed_idempotency_key_before_provide
     let restored = apply_resumable_not_submitted_policy(
         &fixture.database.pool,
         OutcomeReservation::PaymentMethodReplacement(&reservation),
-        &mutation_error_evidence(not_transmitted.detail()),
+        &GatewayMutationError::NotSubmitted(not_transmitted).processor_evidence(),
         policy,
     )
     .await?;

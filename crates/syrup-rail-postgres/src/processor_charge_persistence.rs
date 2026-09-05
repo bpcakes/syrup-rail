@@ -72,7 +72,7 @@ pub(crate) async fn attestation_by_charge(
             prior_resolution_code, final_resolution_code,
             gateway_account_id, gateway_configuration_id, gateway_order_id,
             amount_cents, currency, gateway_transaction_id,
-            gateway_payment_method_reference, gateway_response, gateway_response_code,
+            gateway_payment_method_reference, gateway_approval_evidence, gateway_response, gateway_response_code,
             gateway_response_text, gateway_condition, payment_type, card_brand,
             card_last4, card_exp_month, card_exp_year, attested_at
         FROM billing_external_reversal_attestations

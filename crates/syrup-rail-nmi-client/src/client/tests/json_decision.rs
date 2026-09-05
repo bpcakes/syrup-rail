@@ -729,3 +729,87 @@ fn missing_decision_evidence_emits_a_payload_free_diagnostic() {
         vec![PaymentOutcomeDiagnostic::MissingDecisionEvidence]
     );
 }
+
+#[test]
+fn approval_signals_survive_lossless_json_reduction() {
+    use crate::PaymentApprovalEvidence as Signal;
+    for (members, expected) in [
+        (
+            r#""status":"approved","condition":"declined""#,
+            Signal::Structured,
+        ),
+        (r#""response":"1","response":"2""#, Signal::Structured),
+        (r#""response":"2","response":"1""#, Signal::Structured),
+        (
+            r#""condition":"complete","condition":"pending_settlement""#,
+            Signal::Structured,
+        ),
+        (r#""response":{},"response":"1""#, Signal::Structured),
+        (r#""response":{}"#, Signal::Unclassified),
+        (
+            r#""response_text":"Approved","response_text":"Error""#,
+            Signal::TextOnly,
+        ),
+        (
+            r#""response":"3","response_text":"not-approved""#,
+            Signal::Unclassified,
+        ),
+    ] {
+        let outcome =
+            payment_outcome_from_json_text(&format!(r#"{{{members},"id":null}}"#)).unwrap();
+        assert_eq!(outcome.approval_evidence, expected, "{members}");
+    }
+    let text = format!("{} Approved", "x".repeat(600));
+    let outcome =
+        payment_outcome_from_json_text(&format!(r#"{{"response":"3","response_text":"{text}"}}"#))
+            .unwrap();
+    assert_eq!(outcome.approval_evidence, Signal::TextOnly);
+    assert!(!outcome.response_text.unwrap().expose().contains("Approved"));
+}
+
+#[test]
+fn decision_certainty_controls_absence_without_overriding_approval() {
+    use crate::PaymentApprovalEvidence as Signal;
+    for (body, status, signal) in [
+        (r#"{}"#, PaymentStatus::Unknown, Signal::Unclassified),
+        (
+            r#"{"response":"2"}"#,
+            PaymentStatus::Declined,
+            Signal::Absent,
+        ),
+        (
+            r#"{"response":"3","response_code":"300"}"#,
+            PaymentStatus::Failed,
+            Signal::Absent,
+        ),
+        (
+            r#"{"response":"3"}"#,
+            PaymentStatus::Unknown,
+            Signal::Unclassified,
+        ),
+        (
+            r#"{"status":"pending"}"#,
+            PaymentStatus::Unknown,
+            Signal::Unclassified,
+        ),
+        (
+            r#"{"condition":"error"}"#,
+            PaymentStatus::Unknown,
+            Signal::Unclassified,
+        ),
+        (
+            r#"{"response":"1","response_code":"430"}"#,
+            PaymentStatus::Unknown,
+            Signal::Structured,
+        ),
+    ] {
+        let outcome = payment_outcome_from_json_text(body).unwrap();
+        assert_eq!(outcome.status, status, "{body}");
+        assert_eq!(outcome.approval_evidence, signal, "{body}");
+    }
+    for code in [400, 420, 421, 430, 440, 441] {
+        let outcome = payment_outcome_from_json(&json!({"response_code": code})).unwrap();
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{code}");
+        assert_eq!(outcome.approval_evidence, Signal::Unclassified, "{code}");
+    }
+}

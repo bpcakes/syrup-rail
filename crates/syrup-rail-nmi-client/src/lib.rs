@@ -8,6 +8,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod approval_evidence;
 mod client;
 mod configuration;
 mod errors;
@@ -15,6 +16,7 @@ mod lossless_json;
 mod requests;
 mod responses;
 
+pub use approval_evidence::PaymentApprovalEvidence;
 pub use client::{Client, ClientFactory};
 pub use configuration::{
     ConfigurationError, Credentials, DuplicateCheck, DuplicateCheckWindow, Endpoint,

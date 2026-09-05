@@ -1,6 +1,8 @@
 use std::borrow::Cow;
 
-use crate::{PaymentOutcome, PaymentOutcomeDiagnostic, PaymentStatus, SensitiveText};
+use crate::{
+    PaymentApprovalEvidence, PaymentOutcome, PaymentOutcomeDiagnostic, PaymentStatus, SensitiveText,
+};
 
 use super::super::{
     MAX_NMI_FIELD_CHARS, WireError,
@@ -52,6 +54,20 @@ pub(in crate::client) struct ScalarOccurrenceCollector {
 }
 
 impl ScalarOccurrenceCollector {
+    pub(super) fn approval_text_evidence(&self) -> PaymentApprovalEvidence {
+        if self
+            .comparison_values
+            .iter()
+            .any(|value| crate::approval_evidence::text_suggests_approval(value))
+        {
+            PaymentApprovalEvidence::TextOnly
+        } else if self.invalid {
+            PaymentApprovalEvidence::Unclassified
+        } else {
+            PaymentApprovalEvidence::Absent
+        }
+    }
+
     pub(in crate::client) fn record(&mut self, occurrence: ScalarOccurrence<'_>) {
         self.record_with(occurrence, parse_provider_scalar);
     }
@@ -400,6 +416,7 @@ pub(super) struct PaymentDecisionFields {
 
 pub(super) struct ResolvedPaymentDecision {
     pub(super) status: PaymentStatus,
+    pub(super) approval_evidence: PaymentApprovalEvidence,
     pub(super) diagnostics: Vec<PaymentOutcomeDiagnostic>,
     pub(super) response: Option<String>,
     pub(super) response_code: Option<String>,
@@ -506,6 +523,18 @@ impl PaymentDecisionFields {
         if saw_provider_error && status != PaymentStatus::Failed && !has_specific_error_diagnostic {
             diagnostics.push(PaymentOutcomeDiagnostic::IndeterminatePaymentOutcome);
         }
+        // Unknown or missing decisions (including provider errors, duplicates,
+        // and text-only pending responses) cannot certify absence. Reuse the full decision
+        // reduction so new indeterminate variants cannot fall through as absent.
+        let approval_evidence = if fields.iter().any(|field| {
+            field.observed_evidence(DecisionEvidence::PaymentStatus(PaymentStatus::Approved))
+        }) {
+            PaymentApprovalEvidence::Structured
+        } else if status == PaymentStatus::Unknown {
+            PaymentApprovalEvidence::Unclassified
+        } else {
+            PaymentApprovalEvidence::Absent
+        };
         let has_structured_evidence = self.response.saw_occurrence
             || self.response_code.saw_occurrence
             || self.status.saw_occurrence
@@ -524,6 +553,7 @@ impl PaymentDecisionFields {
             && !self.condition.saw_occurrence;
         ResolvedPaymentDecision {
             status,
+            approval_evidence,
             diagnostics,
             response: self.response.raw,
             response_code: self.response_code.raw,

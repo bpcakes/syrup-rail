@@ -81,3 +81,14 @@ the host and the matching `syrup-rail-postgres` integration.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
+
+The adapter attaches `ProcessorApprovalEvidence` independently of the payment
+decision. Numeric approval response codes use the raw client's numeric semantics
+(including `0100`); the original spelling remains in the evidence. Structured
+approval signals on unknown outcomes require financial review. Text-only hints
+block manual failure but never identify or approve a payment.
+
+Approval signals come from the raw client's complete decision/text observation,
+including discarded duplicate fields and raw `status`. The adapter translates
+`PaymentApprovalEvidence` without repeating the response-code or lifecycle-state
+vocabulary. Payment certainty remains independent of this conservative summary.

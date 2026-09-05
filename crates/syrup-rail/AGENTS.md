@@ -65,8 +65,12 @@ command/outcome types for application-independent subscription billing.
 ## Invariants
 
 - No SQLx, Axum, Runledger, or application-specific crate dependencies.
+- `ProcessorApprovalEvidence` carries adapter-derived review signals; preserve it
+  through observation copies and persistence. Never derive it from raw strings.
 - No provider request, response, or lifecycle protocol vocabulary in this
-  crate. `PaymentCardBrand` may recognize common card-scheme presentation
+  crate, except isolated deprecated `legacy_gateway_policy` predicates retained
+  for shipped callers. Financial policy must never call those predicates.
+  `PaymentCardBrand` may recognize common card-scheme presentation
   aliases; each provider adapter must conformance-test its documented labels.
 - Subscription offers explicitly choose immediate recurring or a positive paid
   trial; accepted cadence, recurring economics, dunning, and access terms are

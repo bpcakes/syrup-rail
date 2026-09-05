@@ -88,7 +88,7 @@ pub(crate) async fn persist_attempt_transition(
                     WHEN $6 IS NULL THEN $14
                     ELSE left($14 || ' ' || $6, 512)
                 END,
-                gateway_condition = $7,
+                gateway_condition = $7, gateway_approval_evidence = $15,
                 payment_type = $8, card_brand = $9, card_last4 = $10,
                 card_exp_month = $11, card_exp_year = $12,
                 resolution_code = $13,
@@ -116,6 +116,7 @@ pub(crate) async fn persist_attempt_transition(
         .bind(descriptor.card_exp_year())
         .bind(resolution_code.map(PaymentResolutionCode::as_str))
         .bind(message)
+        .bind(evidence.approval_evidence().as_str())
         .execute(&mut *connection)
         .await?;
         if result.rows_affected() != 1 {
@@ -156,6 +157,7 @@ pub(crate) async fn persist_attempt_transition(
             gateway_payment_method_reference = $6,
             gateway_response = $7, gateway_response_code = $8,
             gateway_response_text = $9, gateway_condition = $10,
+            gateway_approval_evidence = $17,
             payment_type = $11, card_brand = $12, card_last4 = $13,
             card_exp_month = $14, card_exp_year = $15,
             resolution_code = $16,
@@ -187,6 +189,7 @@ pub(crate) async fn persist_attempt_transition(
     .bind(descriptor.card_exp_month())
     .bind(descriptor.card_exp_year())
     .bind(resolution_code.map(PaymentResolutionCode::as_str))
+    .bind(evidence.approval_evidence().as_str())
     .execute(connection)
     .await?;
     if result.rows_affected() != 1 {
