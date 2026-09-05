@@ -26,17 +26,16 @@ the typed summary; they never authorize an approved payment.
 Raw provider fields remain unchanged. The processor-charge immutability trigger
 protects classification with the rest of that observation.
 
-Retained charge and attestation rows stay `unclassified`; their fresh-install
-column defaults are also `unclassified` so omitted evidence fails closed.
-Retained attempts become `absent` only when all decision/reference fields and
-response text are NULL. New empty reservations default to `absent`. Every other
-retained attempt stays `unclassified`, including local query notes: v5 could
-have overwritten provider evidence with those notes, so their apparent local
-origin cannot establish the history's safety. Retained processor charges and
-their reversal attestations become `structured`: v5 created a charge only from
-an authoritative approved outcome or a structured approval field, so the
-durable charge record supplies this fact without reparsing provider strings.
-Raw fields are never rewritten.
+Fresh-install charge and attestation columns default to `unclassified` so an
+omitted classification fails closed. Retained attempts become `absent` only
+when all decision/reference fields and response text are NULL. New empty
+reservations default to `absent`. Every other retained attempt stays
+`unclassified`, including local query notes: v5 could have overwritten provider
+evidence with those notes, so their apparent local origin cannot establish the
+history's safety. Retained processor charges and their reversal attestations
+become `structured`: v5 created a charge only from an authoritative approved
+outcome or a structured approval field, so the durable charge record supplies
+this fact without reparsing provider strings. Raw fields are never rewritten.
 
 `Unclassified` always blocks the manual no-financial-effect exit, even if a
 parser discarded the original fields. Local notes and redaction cannot change

@@ -289,4 +289,45 @@
             .expose();
         assert!(response_text.contains("Processor response: Approved"));
         assert!(response_text.contains(PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE));
+
+        let local_note = ProcessorEvidence::new(
+            crate::ProcessorApprovalEvidence::Absent,
+            None,
+            None,
+            None,
+            None,
+            Some(GatewayDiagnostic::new(
+                "Exact gateway query found no transaction.",
+            )),
+            None,
+            crate::GatewayPaymentDescriptor::default(),
+        );
+        let update_with_local_note = review_attempt(
+            crate::PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
+                plan_key: crate::PlanKey::new("test_plan").unwrap(),
+                payment_method_id: crate::PaymentMethodId::new(Uuid::from_u128(9)),
+                expected_state: crate::PaymentMethodUpdateSnapshot::new(
+                    crate::SubscriptionId::new(Uuid::from_u128(10)),
+                    crate::PaymentMethodId::new(Uuid::from_u128(9)),
+                    GatewayTransactionId::new("txn-current-method").unwrap(),
+                ),
+            },
+            0,
+            true,
+            local_note,
+        );
+        assert!(review_required_attempt_can_be_manually_failed(
+            &update_with_local_note
+        ));
+        let preserved = review_required_manual_failure_evidence(&update_with_local_note);
+        assert_eq!(
+            preserved.approval_evidence(),
+            crate::ProcessorApprovalEvidence::Absent
+        );
+        let response_text = preserved
+            .response_text()
+            .expect("retained local note and closure note")
+            .expose();
+        assert!(response_text.contains("Exact gateway query found no transaction."));
+        assert!(response_text.contains(PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE));
     }

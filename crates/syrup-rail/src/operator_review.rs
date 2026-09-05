@@ -573,7 +573,7 @@ pub fn review_required_attempt_can_be_manually_failed(attempt: &PaymentAttempt) 
 pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> ProcessorEvidence {
     let current = attempt.state().processor_evidence();
     let response_text = if attempt.kind() == PaymentAttemptKind::SubscriptionPaymentMethodUpdate
-        && payment_method_update_has_processor_evidence(current)
+        && payment_method_update_has_retained_evidence(current)
     {
         payment_method_update_manual_failure_response_text(
             current.response_text().map(GatewayDiagnostic::expose),
@@ -582,7 +582,7 @@ pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> Proc
         GatewayDiagnostic::new(MANUAL_ATTEMPT_FAILURE_NOTE)
     };
     let condition = if attempt.kind() == PaymentAttemptKind::SubscriptionPaymentMethodUpdate
-        && payment_method_update_has_processor_evidence(current)
+        && payment_method_update_has_retained_evidence(current)
     {
         current.condition().cloned()
     } else {
@@ -600,7 +600,7 @@ pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> Proc
     )
 }
 
-fn payment_method_update_has_processor_evidence(evidence: &ProcessorEvidence) -> bool {
+fn payment_method_update_has_retained_evidence(evidence: &ProcessorEvidence) -> bool {
     evidence.has_gateway_reference()
         || evidence.response().is_some()
         || evidence.response_code().is_some()

@@ -1,5 +1,6 @@
 -- Forward-only schema v5 to v6. Apply once in a host-owned transaction
--- after stopping every billing writer. Retained observations stay unclassified.
+-- after stopping every billing writer. Retained attempts fail closed unless
+-- empty; retained charges and reversal attestations carry approval provenance.
 
 ALTER TABLE public.billing_payment_attempts
     ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
