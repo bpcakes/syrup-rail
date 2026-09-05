@@ -20,8 +20,11 @@ changes from safe in v5 to unsafe in v6. The audit includes their target IDs,
 statuses, and resolution codes. These terminal attempts cannot be reclassified
 by ordinary reconciliation, so their targets cannot be retried or released after
 cutover. A recovery or compatibility policy for this population remains a
-**0.6.0 release blocker**; do not cut over affected targets on the assumption
-that a later empty query or manual failure can recover them. When investigation is
+**0.6.0 release blocker**. The upgrade takes the cutover table locks and aborts
+with SQLSTATE `23514` before changing schema when this population is nonempty.
+Roll back the host transaction and remain on v5; do not clear evidence or remove
+retained attempts to bypass the guard. A later empty query or manual failure
+cannot recover these targets. When investigation is
 required, run
 `audit_unclassified_review_attempts_from_v5.sql` through an authorized operator
 process. Its result contains internal identifiers and evidence-presence flags,

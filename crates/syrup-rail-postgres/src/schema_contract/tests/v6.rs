@@ -349,7 +349,8 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
 }
 
 #[tokio::test]
-async fn v5_preflight_inventories_terminal_host_targets() -> Result<(), Box<dyn Error>> {
+async fn v5_cutover_rejects_unsupported_terminal_hosts_without_changing_admission()
+-> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start_v5("sr_v6_terminal").await?;
     let result = async {
         let account = create_gateway_account(&database.pool, "nmi").await?;
@@ -414,6 +415,54 @@ async fn v5_preflight_inventories_terminal_host_targets() -> Result<(), Box<dyn 
         let mut expected = vec![declined, unsubmitted];
         expected.sort_unstable();
         assert_eq!(ids, expected);
+        // Exercise each terminal population independently so one cannot mask a
+        // missing predicate for the other. These are synthetic fixture rows.
+        for blocking_attempt in [declined, unsubmitted] {
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET gateway_response = NULL, \
+                 gateway_response_text = CASE WHEN id = $1 THEN 'retained diagnostic' END",
+            )
+            .bind(blocking_attempt)
+            .execute(&database.pool)
+            .await?;
+            for after_rejected_upgrade in [false, true] {
+                if after_rejected_upgrade {
+                    let error = database
+                        .upgrade_v5_to_v6()
+                        .await
+                        .expect_err("unsupported terminal history must reject the entire cutover");
+                    let database_error = error.as_database_error().expect("SQL guard error");
+                    assert_eq!(database_error.code().as_deref(), Some("23514"));
+                    assert_eq!(
+                        database_error.message(),
+                        "v6 cutover would strand terminal host-charge targets"
+                    );
+                    crate::assert_runtime_schema_v5_compatible(&database.pool).await?;
+                }
+                for id in [declined, unsubmitted] {
+                    for mode in ["reserve", "release"] {
+                        let admission: String = sqlx::query_scalar(
+                            "SELECT billing_host_charge_ledger_admission($1, $2, $3, $4, $5, NULL)",
+                        )
+                        .bind(account.billing_scope_id)
+                        .bind(subscriber)
+                        .bind(id)
+                        .bind(mode)
+                        .bind((mode == "reserve").then_some("new-retry-key"))
+                        .fetch_one(&database.pool)
+                        .await?;
+                        assert_eq!(admission, "safe");
+                    }
+                }
+            }
+        }
+        // Empty terminal fixture evidence remains eligible for the supported
+        // upgrade. This is not a remediation procedure for retained real rows.
+        sqlx::query("UPDATE billing_payment_attempts SET gateway_response_text = NULL")
+            .execute(&database.pool)
+            .await?;
+        database.upgrade_v5_to_v6().await?;
+        crate::assert_runtime_schema_v6_compatible(&database.pool).await?;
         Ok::<(), Box<dyn Error>>(())
     }
     .await;

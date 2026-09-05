@@ -2,6 +2,44 @@
 -- after stopping every billing writer. Retained attempts fail closed unless
 -- empty; retained charges and reversal attestations carry approval provenance.
 
+-- Hold the same cutover lock order as the ALTERs before inspecting eligibility.
+-- A read-only preflight is advisory; only this locked check can prevent an
+-- unsupported cutover from stranding previously retryable host targets.
+LOCK TABLE public.billing_payment_attempts,
+    public.billing_processor_charges,
+    public.billing_external_reversal_attestations IN ACCESS EXCLUSIVE MODE;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM public.billing_payment_attempts AS attempts
+        WHERE attempts.attempt_kind = 'host_charge'
+            AND (attempts.status = 'declined'
+                OR (attempts.status = 'failed' AND attempts.submitted_at IS NULL))
+            AND attempts.gateway_lifecycle_status = 'unknown'
+            AND attempts.refunded_amount_cents = 0
+            AND NOT EXISTS (
+                SELECT 1 FROM public.billing_processor_charges AS charges
+                WHERE charges.attempt_id = attempts.id
+            )
+            AND NOT (
+                attempts.gateway_transaction_id IS NULL
+                AND attempts.gateway_payment_method_reference IS NULL
+                AND attempts.gateway_response IS NULL
+                AND attempts.gateway_response_code IS NULL
+                AND attempts.gateway_condition IS NULL
+                AND attempts.gateway_response_text IS NULL
+            )
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'v6 cutover would strand terminal host-charge targets',
+            HINT = 'Roll back and remain on v5. Run the v6 preflight and audit; a supported recovery or compatibility policy is required before retrying.';
+    END IF;
+END
+$$;
+
 ALTER TABLE public.billing_payment_attempts
     ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
         CONSTRAINT billing_payment_attempts_approval_evidence_check
