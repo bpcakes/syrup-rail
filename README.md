@@ -246,7 +246,7 @@ Private Cargo consumers pin one exact Git revision with
 `git = "ssh://git@github.com/bpcakes/syrup-rail.git"` and set
 `CARGO_NET_GIT_FETCH_WITH_CLI=true` so authentication uses the system Git client.
 
-The unreleased workspace requires schema v6; published 0.6.0 uses schema v5.
+The unreleased workspace requires schema v6; the schema-v5 0.6.0 release uses schema v5.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
 raw client derives it from all decision/text occurrences before reducing fields.
 `Structured` preserves a possible processor charge even when the payment decision

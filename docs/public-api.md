@@ -389,7 +389,7 @@ debt snapshot or parse human compiler output. Add meaningful documentation at
 an owning abstraction, and expand `warn(missing_docs)` to another module only after that module is
 ready to stay clean.
 
-The unreleased workspace requires schema v6; published 0.6.0 uses schema v5.
+The unreleased workspace requires schema v6; the schema-v5 0.6.0 release uses schema v5.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
 raw client derives it from all decision/text occurrences before reducing fields.
 `Structured` preserves a possible processor charge even when the payment decision

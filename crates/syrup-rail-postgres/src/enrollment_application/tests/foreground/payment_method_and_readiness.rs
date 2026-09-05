@@ -312,6 +312,113 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(stale_result.status(), PaymentAttemptStatus::Failed);
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
 
+
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET initial_transaction_id = 'txn_method_new', updated_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+    let review_outcome =
+        approved_outcome_with_reference(Some("txn_method_review"), "vault_method_review");
+    let review_command = ReplaceSubscriptionPaymentMethod::new(
+        syrup_rail::SubscriptionPaymentContext::new(
+            PaymentAttemptId::new(Uuid::now_v7()),
+            fixture.command.billing_scope_id(),
+            fixture.command.subscriber_id(),
+            fixture.command.gateway_configuration_id(),
+            IdempotencyKey::new("review-replace-method-key")?,
+            PaymentToken::new("opaque-review-replacement-token")?,
+            fixture.command.billing_contact().clone(),
+        ),
+        fixture.command.plan_key().clone(),
+    );
+    let mut transaction = fixture.database.pool.begin().await?;
+    let review_reservation = match reserve_subscription_payment_method_replacement_in_transaction(
+        &mut transaction,
+        &review_command,
+        &resolved_gateway,
+        GatewayAccountMode::Test,
+    )
+    .await?
+    {
+        SubscriptionPaymentMethodReplacementReservationOutcome::Reserved(reservation, _) => {
+            *reservation
+        }
+        other => return Err(format!("unexpected review replacement reservation: {other:?}").into()),
+    };
+    transaction.commit().await?;
+    assert!(matches!(
+        admit_subscription_payment_method_replacement(
+            &fixture.database.pool,
+            &review_reservation
+        )
+        .await?,
+        SubscriptionPaymentMethodReplacementAdmissionOutcome::Admitted(_)
+    ));
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET initial_transaction_id = 'txn_external_before_review', updated_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+    let review = apply_subscription_payment_method_replacement_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &review_reservation,
+        &review_outcome,
+    )
+    .await?;
+    assert_eq!(review.attempt().status(), PaymentAttemptStatus::ReviewRequired);
+    let preserved_review_identity: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT gateway_transaction_id, gateway_payment_method_reference \
+         FROM billing_payment_attempts WHERE id = $1",
+    )
+    .bind(review.attempt().identity().attempt_id().as_uuid())
+    .fetch_one(&fixture.database.pool)
+    .await?;
+    assert_eq!(
+        preserved_review_identity,
+        (
+            Some("txn_method_review".to_owned()),
+            Some("vault_method_review".to_owned())
+        )
+    );
+    let current_method_reference: String = sqlx::query_scalar(
+        r#"
+        SELECT method.gateway_payment_method_reference
+        FROM billing_subscriptions AS subscription
+        INNER JOIN billing_payment_methods AS method
+            ON method.id = subscription.payment_method_id
+        WHERE subscription.id = $1
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .fetch_one(&fixture.database.pool)
+    .await?;
+    assert_eq!(current_method_reference, "vault_method_new");
+    sqlx::query("DELETE FROM billing_processor_charges WHERE attempt_id = $1")
+        .bind(review.attempt().identity().attempt_id().as_uuid())
+        .execute(&fixture.database.pool)
+        .await?;
+    sqlx::query("DELETE FROM billing_payment_attempts WHERE id = $1")
+        .bind(review.attempt().identity().attempt_id().as_uuid())
+        .execute(&fixture.database.pool)
+        .await?;
+    sqlx::query(
+        "UPDATE billing_subscriptions \
+         SET initial_transaction_id = 'txn_method_new', updated_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(subscription_id.as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+
+
     let parked_outcome =
         approved_outcome_with_reference(Some("txn_method_parked"), "vault_method_parked")
             .with_diagnostics(vec![GatewayPaymentDiagnostic::ProcessorReportedDuplicate]);
@@ -402,6 +509,28 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(parked_gateway.store_calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
+    let charge_transaction_id = "txn_method_additional_charge";
+    let charge_outcome = approved_outcome_with_reference(
+        Some(charge_transaction_id),
+        "vault_method_additional_charge",
+    );
+    let charged = service
+        .apply_reconciled_outcome(
+            result.attempt().identity().billing_scope_id(),
+            result.attempt().identity().attempt_id(),
+            &charge_outcome,
+        )
+        .await?;
+    assert_eq!(charged.attempt().status(), PaymentAttemptStatus::Approved);
+    let additional_progression: String = sqlx::query_scalar(
+        "SELECT progression_state FROM billing_processor_charges \
+         WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+    )
+    .bind(result.attempt().identity().attempt_id().as_uuid())
+    .bind(charge_transaction_id)
+    .fetch_one(&fixture.database.pool)
+    .await?;
+    assert_eq!(additional_progression, "reconciliation_required");
 
     let additional_transaction_id = "txn_method_unexpected_additional";
     let reconciled_outcome = approved_outcome_with_reference(

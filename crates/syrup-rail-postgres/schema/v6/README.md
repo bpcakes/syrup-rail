@@ -9,9 +9,11 @@ cutover to reach v5. Never run a fresh install over an existing ledger.
 Before scheduling the cutover, run `preflight_from_v5.sql` through a read-only
 role. It reports the retained attempt population, the rows rewritten to
 `absent`, the `review_required` rows that remain `unclassified`, and the
-retained processor-charge and reversal-attestation populations. Use those
-counts to size the transaction and decide whether legacy operator review must
-be completed before cutover. When investigation is required, run
+retained processor-charge and reversal-attestation populations. The latter two
+counts are the rows classified as `structured` from their existing durable
+financial records. Use those counts to size the transaction and decide whether
+legacy operator review must be completed before cutover. When investigation is
+required, run
 `audit_unclassified_review_attempts_from_v5.sql` through an authorized operator
 process. Its result contains internal identifiers and evidence-presence flags,
 but no raw provider strings.
@@ -30,7 +32,11 @@ Retained attempts become `absent` only when all decision/reference fields and
 response text are NULL. New empty reservations default to `absent`. Every other
 retained attempt stays `unclassified`, including local query notes: v5 could
 have overwritten provider evidence with those notes, so their apparent local
-origin cannot establish the history's safety. Raw fields are never rewritten.
+origin cannot establish the history's safety. Retained processor charges and
+their reversal attestations become `structured`: v5 created a charge only from
+an authoritative approved outcome or a structured approval field, so the
+durable charge record supplies this fact without reparsing provider strings.
+Raw fields are never rewritten.
 
 `Unclassified` always blocks the manual no-financial-effect exit, even if a
 parser discarded the original fields. Local notes and redaction cannot change
@@ -42,17 +48,22 @@ absence and never downgrade retained evidence. If
 queries keep returning no record, an unclassified submitted attempt remains open
 for investigation; this cutover does not provide a manual override. Resolve such
 legacy cases before cutover if that restriction is operationally unacceptable.
+Schema v5 itself wrote local reconciliation notes into `gateway_response_text`;
+those rows deliberately remain unclassified because local text cannot prove the
+absence of earlier provider evidence. The audit identifies them without exposing
+the text so authorized operators can resolve them while still running v5.
 The existing independently authorized reversal workflow remains available when
-there is charge evidence. Terminal replay and immutable historical
-charge/attestation classifications are not rewritten. This includes
-transactionless historical charges that later acquire a transaction identity: their original classification remains immutable. Old adapters that omit
-the classification retain these conservative semantics; they must adopt explicit
-classification before relying on pending-charge recording for unknown outcomes.
+there is charge evidence. After the cutover, charge and attestation
+classifications are immutable. This includes transactionless historical charges
+that later acquire a transaction identity: their migrated `structured`
+classification remains immutable. Third-party adapters must supply an explicit
+classification when constructing processor evidence.
 
 Before cutover, prebuild and test the v6-aware application, rehearse the exact
 upgrade on a representative copy, and drain billing traffic. The preflight's
-`attempts_classified_absent_count` is the row count for the migration's
-in-transaction `UPDATE`; include its write and bloat cost in the rehearsal.
+attempt, processor-charge, and reversal-attestation counts are the row counts
+for the migration's in-transaction `UPDATE` statements; include their write and
+bloat cost in the rehearsal.
 Stop **all** billing
 writers, including reconciliation and operator workers. Set host-appropriate
 `lock_timeout` and `statement_timeout`, then run the upgrade transaction. The

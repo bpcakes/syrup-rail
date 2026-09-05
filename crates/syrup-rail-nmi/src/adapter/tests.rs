@@ -587,6 +587,20 @@ async fn numeric_approval_aliases_survive_conflicting_payment_decisions() {
 }
 
 #[tokio::test]
+async fn lifecycle_condition_alone_supplies_structured_approval_evidence() {
+    let body = r#"{"response":"2","condition":"complete","id":"txn_condition"}"#;
+    let (gateway, server) = gateway_with_response(body).await;
+    let outcome = gateway.sale(approval_signal_sale_request()).await.unwrap();
+    assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
+    assert_eq!(
+        outcome.evidence().approval_evidence(),
+        syrup_rail::ProcessorApprovalEvidence::Structured
+    );
+    assert!(outcome.evidence().indicates_approved_payment());
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn approval_text_is_a_review_hint_and_never_a_payment_decision() {
     for (body, expected) in [
         (
@@ -595,7 +609,11 @@ async fn approval_text_is_a_review_hint_and_never_a_payment_decision() {
         ),
         (
             r#"{"response":"3","response_text":"not-approved","id":"txn_text_hint"}"#,
-            syrup_rail::ProcessorApprovalEvidence::Unclassified,
+            syrup_rail::ProcessorApprovalEvidence::TextOnly,
+        ),
+        (
+            r#"{"response":"3","response_text":"Not approved","id":"txn_text_hint"}"#,
+            syrup_rail::ProcessorApprovalEvidence::TextOnly,
         ),
         (
             r#"{"response":"3","response_text":"Processor error","id":"txn_text_hint"}"#,

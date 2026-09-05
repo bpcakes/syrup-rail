@@ -28,7 +28,7 @@ impl PaymentApprovalEvidence {
 }
 
 static APPROVED_WORD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(^|[^[:alnum:]-])approved([^[:alnum:]]|$)")
+    Regex::new(r"(?i)(^|[^[:alnum:]])approved([^[:alnum:]]|$)")
         .expect("static approval hint expression is valid")
 });
 

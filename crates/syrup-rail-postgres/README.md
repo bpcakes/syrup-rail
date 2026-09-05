@@ -2,7 +2,7 @@
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
 SQLx operations, and high-level subscription billing service. The unreleased
-workspace supports PostgreSQL 18 only and uses schema v6. Published 0.6.0 uses
+workspace supports PostgreSQL 18 only and uses schema v6. The schema-v5 0.6.0 release uses
 schema v5.
 
 ```toml
@@ -186,7 +186,7 @@ any nested savepoint before consuming that value with `commit` or `rollback`.
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
 
-The unreleased workspace requires schema v6; published 0.6.0 uses schema v5.
+The unreleased workspace requires schema v6; the schema-v5 0.6.0 release uses schema v5.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
 raw client derives it from all decision/text occurrences before reducing fields.
 `Structured` preserves a possible processor charge even when the payment decision

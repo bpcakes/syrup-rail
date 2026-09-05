@@ -64,6 +64,46 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     .bind(account.gateway_configuration_id)
     .execute(&database.pool)
     .await?;
+    let charge_id = Uuid::now_v7();
+    let charge_transaction_id = "txn_legacy_structured_charge";
+    sqlx::query(
+        r#"
+        INSERT INTO billing_processor_charges (
+            id, attempt_id, billing_scope_id, gateway_account_id,
+            gateway_order_id, gateway_transaction_id, gateway_response_code,
+            attempt_kind, amount_cents, currency
+        ) VALUES ($1, $2, $3, $4, 'legacy-signal-order', $5, '0100',
+            'host_charge', 100, 'USD')
+        "#,
+    )
+    .bind(charge_id)
+    .bind(attempt_id)
+    .bind(account.billing_scope_id)
+    .bind(account.gateway_account_id)
+    .bind(charge_transaction_id)
+    .execute(&database.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO billing_external_reversal_attestations (
+            attempt_id, processor_charge_id, actor_id, reversal_kind, reason,
+            prior_resolution_code, final_resolution_code, gateway_account_id,
+            gateway_configuration_id, gateway_order_id, amount_cents, currency,
+            gateway_transaction_id, attested_at
+        ) VALUES ($1, $2, $3, 'refund', 'legacy reversal confirmation',
+            'processor_charge_external_reversal_required',
+            'processor_charge_externally_refunded', $4, $5,
+            'legacy-signal-order', 100, 'USD', $6, clock_timestamp())
+        "#,
+    )
+    .bind(attempt_id)
+    .bind(charge_id)
+    .bind(Uuid::now_v7())
+    .bind(account.gateway_account_id)
+    .bind(account.gateway_configuration_id)
+    .bind(charge_transaction_id)
+    .execute(&database.pool)
+    .await?;
     let empty_id = Uuid::now_v7();
     let local_id = Uuid::now_v7();
     let error_id = Uuid::now_v7();
@@ -94,7 +134,7 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     let counts: (i64, i64, i64, i64, i64) = sqlx::query_as(V5_TO_V6_PREFLIGHT_SQL)
         .fetch_one(&mut *preflight)
         .await?;
-    assert_eq!(counts, (4, 1, 3, 0, 0));
+    assert_eq!(counts, (4, 1, 3, 1, 1));
     let audited = sqlx::query(V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL)
         .fetch_all(&mut *preflight)
         .await?;
@@ -109,6 +149,44 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     preflight.rollback().await?;
 
     database.upgrade_v5_to_v6().await?;
+    let charge_classification: String = sqlx::query_scalar(
+        "SELECT gateway_approval_evidence FROM billing_processor_charges WHERE id = $1",
+    )
+    .bind(charge_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(charge_classification, "structured");
+    let attestation_classification: String = sqlx::query_scalar(
+        "SELECT gateway_approval_evidence FROM billing_external_reversal_attestations WHERE processor_charge_id = $1",
+    )
+    .bind(charge_id)
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(attestation_classification, "structured");
+    let replay_evidence = syrup_rail::ProcessorEvidence::new(
+        syrup_rail::ProcessorApprovalEvidence::Structured,
+        Some(syrup_rail::GatewayTransactionId::new(charge_transaction_id)?),
+        None,
+        None,
+        Some(syrup_rail::GatewayDiagnostic::new("0100")),
+        None,
+        None,
+        syrup_rail::GatewayPaymentDescriptor::default(),
+    );
+    let mut replay_transaction = database.pool.begin().await?;
+    let replay = crate::observe_processor_charge_in_transaction(
+        &mut replay_transaction,
+        syrup_rail::PaymentAttemptId::new(attempt_id),
+        &syrup_rail::GatewayOrderId::from_correlation("legacy-signal-order")?,
+        &replay_evidence,
+        syrup_rail::ProcessorChargeProgression::Pending,
+    )
+    .await?;
+    assert!(matches!(
+        replay,
+        crate::ProcessorChargeObservationOutcome::ExactReplay(_)
+    ));
+    replay_transaction.rollback().await?;
     for (id, expected) in [
         (empty_id, "absent"),
         (local_id, "unclassified"),

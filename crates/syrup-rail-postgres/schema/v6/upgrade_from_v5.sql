@@ -16,6 +16,16 @@ ALTER TABLE public.billing_external_reversal_attestations
         CONSTRAINT billing_external_reversal_attestations_approval_evidence_check
         CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
 
+-- The existence of a retained processor-charge row is itself durable proof
+-- that v5 observed an authoritative approval or a structured approval field.
+-- Reconstruct that fact without reparsing provider strings, and keep existing
+-- reversal attestations aligned with their source charges.
+UPDATE public.billing_processor_charges
+SET gateway_approval_evidence = 'structured';
+
+UPDATE public.billing_external_reversal_attestations
+SET gateway_approval_evidence = 'structured';
+
 -- Only genuinely empty retained observations establish absence. Old local
 -- query notes may have overwritten provider text and cannot prove its absence.
 UPDATE public.billing_payment_attempts
@@ -93,4 +103,3 @@ BEFORE UPDATE OF
 ON public.billing_processor_charges
 FOR EACH ROW
 EXECUTE FUNCTION public.billing_guard_processor_charge_evidence_update();
-

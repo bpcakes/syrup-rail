@@ -754,7 +754,7 @@ fn approval_signals_survive_lossless_json_reduction() {
         ),
         (
             r#""response":"3","response_text":"not-approved""#,
-            Signal::Unclassified,
+            Signal::TextOnly,
         ),
     ] {
         let outcome =
