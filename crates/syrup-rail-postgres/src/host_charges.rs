@@ -812,6 +812,34 @@ mod tests {
                 host_charge_ledger_admission(&mut connection, &submit).await?,
                 HostChargeLedgerAdmission::Safe
             );
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET gateway_approval_evidence = 'text_only' WHERE id = $1",
+            )
+            .bind(attempt_id.as_uuid())
+            .execute(&mut *connection)
+            .await?;
+            assert_eq!(
+                host_charge_ledger_admission(&mut connection, &submit).await?,
+                HostChargeLedgerAdmission::Unsafe
+            );
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET status = 'failed', resolved_at = clock_timestamp() WHERE id = $1",
+            )
+            .bind(attempt_id.as_uuid())
+            .execute(&mut *connection)
+            .await?;
+            let new_reserve = HostChargeLedgerAdmissionQuery::new(
+                BillingScopeId::new(gateway.billing_scope_id),
+                subscriber_id,
+                target_id,
+                HostChargeLedgerAdmissionMode::Reserve {
+                    idempotency_key: IdempotencyKey::new("host-charge-new")?,
+                },
+            );
+            assert_eq!(
+                host_charge_ledger_admission(&mut connection, &new_reserve).await?,
+                HostChargeLedgerAdmission::Unsafe
+            );
             let release = HostChargeLedgerAdmissionQuery::new(
                 BillingScopeId::new(gateway.billing_scope_id),
                 subscriber_id,

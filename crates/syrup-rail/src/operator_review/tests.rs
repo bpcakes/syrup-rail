@@ -331,3 +331,17 @@
         assert!(response_text.contains("Exact gateway query found no transaction."));
         assert!(response_text.contains(PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE));
     }
+
+    #[test]
+    fn payment_method_update_closure_marker_survives_bounded_retained_evidence() {
+        for existing in ["x".repeat(crate::MAX_GATEWAY_TEXT_BYTES), "é".repeat(256)] {
+            let response = payment_method_update_manual_failure_response_text(Some(&existing));
+            assert!(
+                response
+                    .expose()
+                    .starts_with(PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE)
+            );
+            assert!(response.expose().len() <= crate::MAX_GATEWAY_TEXT_BYTES);
+            assert!(response.expose().is_char_boundary(response.expose().len()));
+        }
+    }

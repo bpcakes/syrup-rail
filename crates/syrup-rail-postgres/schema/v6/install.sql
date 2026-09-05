@@ -2283,6 +2283,29 @@ SELECT
 FROM public.billing_subscription_discount_codes
 WHERE status = 'active';
 
+-- Complete the v6 attempt-evidence definition before creating policies that
+-- use the classification. The column remains physically after every v5 column.
+ALTER TABLE public.billing_payment_attempts
+    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
+        CONSTRAINT billing_payment_attempts_approval_evidence_check
+        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
+
+-- Only genuinely empty retained observations establish absence. Old local
+-- query notes may have overwritten provider text and cannot prove its absence.
+UPDATE public.billing_payment_attempts
+SET gateway_approval_evidence = 'absent'
+WHERE gateway_transaction_id IS NULL
+    AND gateway_payment_method_reference IS NULL
+    AND gateway_response IS NULL
+    AND gateway_response_code IS NULL
+    AND gateway_condition IS NULL
+    AND gateway_response_text IS NULL;
+
+-- New reservations have no observation yet. All provider/error writes must
+-- explicitly persist their classification with the evidence bundle.
+ALTER TABLE public.billing_payment_attempts
+    ALTER COLUMN gateway_approval_evidence SET DEFAULT 'absent';
+
 CREATE FUNCTION public.billing_host_charge_ledger_admission(
     p_billing_scope_id uuid,
     p_subscriber_id uuid,
@@ -2343,6 +2366,7 @@ BEGIN
                 AND attempts.resolved_at IS NULL
                 AND attempts.gateway_lifecycle_status = 'unknown'
                 AND attempts.refunded_amount_cents = 0
+                AND attempts.gateway_approval_evidence = 'absent'
                 AND attempts.gateway_transaction_id IS NULL
                 AND attempts.gateway_payment_method_reference IS NULL
                 AND attempts.gateway_response IS NULL
@@ -2368,10 +2392,15 @@ BEGIN
                 attempts.gateway_lifecycle_status = 'unknown'
                 AND attempts.refunded_amount_cents = 0
                 AND (
-                    attempts.status = 'declined'
-                    OR (
-                        attempts.status = 'failed'
-                        AND attempts.submitted_at IS NULL
+                    (
+                        attempts.gateway_approval_evidence = 'absent'
+                        AND (
+                            attempts.status = 'declined'
+                            OR (
+                                attempts.status = 'failed'
+                                AND attempts.submitted_at IS NULL
+                            )
+                        )
                     )
                     OR (
                         attempts.status IN ('declined', 'failed')
@@ -2413,6 +2442,7 @@ BEGIN
             AND attempts.resolved_at IS NULL
             AND attempts.gateway_lifecycle_status = 'unknown'
             AND attempts.refunded_amount_cents = 0
+            AND attempts.gateway_approval_evidence = 'absent'
             AND attempts.gateway_transaction_id IS NULL
             AND attempts.gateway_payment_method_reference IS NULL
             AND attempts.gateway_response IS NULL
@@ -2535,14 +2565,8 @@ BEGIN
 END
 $$;
 
--- Complete v6 evidence definitions. Keep these columns after the v5 columns
--- so fresh installs and upgraded hosts have the same physical catalog layout.
-
-
-ALTER TABLE public.billing_payment_attempts
-    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
-        CONSTRAINT billing_payment_attempts_approval_evidence_check
-        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
+-- Complete the v6 immutable-evidence definitions. These columns remain
+-- physically after every v5 column on fresh and upgraded hosts.
 
 ALTER TABLE public.billing_processor_charges
     ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
@@ -2553,22 +2577,6 @@ ALTER TABLE public.billing_external_reversal_attestations
     ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
         CONSTRAINT billing_external_reversal_attestations_approval_evidence_check
         CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
-
--- Only genuinely empty retained observations establish absence. Old local
--- query notes may have overwritten provider text and cannot prove its absence.
-UPDATE public.billing_payment_attempts
-SET gateway_approval_evidence = 'absent'
-WHERE gateway_transaction_id IS NULL
-    AND gateway_payment_method_reference IS NULL
-    AND gateway_response IS NULL
-    AND gateway_response_code IS NULL
-    AND gateway_condition IS NULL
-    AND gateway_response_text IS NULL;
-
--- New reservations have no observation yet. All provider/error writes must
--- explicitly persist their classification with the evidence bundle.
-ALTER TABLE public.billing_payment_attempts
-    ALTER COLUMN gateway_approval_evidence SET DEFAULT 'absent';
 
 CREATE OR REPLACE FUNCTION public.billing_guard_processor_charge_evidence_update()
 RETURNS trigger

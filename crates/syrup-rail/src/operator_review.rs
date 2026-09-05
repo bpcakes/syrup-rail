@@ -620,8 +620,10 @@ fn payment_method_update_manual_failure_response_text(existing: Option<&str>) ->
     if existing.contains(PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE) {
         return GatewayDiagnostic::new(existing);
     }
+    // Put the durable closure marker first so GatewayDiagnostic's bounded,
+    // UTF-8-safe sanitizer can truncate retained detail without erasing it.
     GatewayDiagnostic::new(&format!(
-        "{existing} {PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE}"
+        "{PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE} {existing}"
     ))
 }
 
