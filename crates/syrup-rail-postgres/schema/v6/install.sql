@@ -2642,4 +2642,3 @@ BEFORE UPDATE OF
 ON public.billing_processor_charges
 FOR EACH ROW
 EXECUTE FUNCTION public.billing_guard_processor_charge_evidence_update();
-

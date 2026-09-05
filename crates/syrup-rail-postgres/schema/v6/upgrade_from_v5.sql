@@ -8,12 +8,12 @@ ALTER TABLE public.billing_payment_attempts
         CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
 
 ALTER TABLE public.billing_processor_charges
-    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
+    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'structured'
         CONSTRAINT billing_processor_charges_approval_evidence_check
         CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
 
 ALTER TABLE public.billing_external_reversal_attestations
-    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
+    ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'structured'
         CONSTRAINT billing_external_reversal_attestations_approval_evidence_check
         CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured'));
 
@@ -21,11 +21,14 @@ ALTER TABLE public.billing_external_reversal_attestations
 -- that v5 observed an authoritative approval or a structured approval field.
 -- Reconstruct that fact without reparsing provider strings, and keep existing
 -- reversal attestations aligned with their source charges.
-UPDATE public.billing_processor_charges
-SET gateway_approval_evidence = 'structured';
+-- PostgreSQL's constant ADD COLUMN default supplies the retained value without
+-- updating every tuple. Changing the INSERT default does not change old rows.
+-- New writers must still classify explicitly; omissions remain fail-closed.
+ALTER TABLE public.billing_processor_charges
+    ALTER COLUMN gateway_approval_evidence SET DEFAULT 'unclassified';
 
-UPDATE public.billing_external_reversal_attestations
-SET gateway_approval_evidence = 'structured';
+ALTER TABLE public.billing_external_reversal_attestations
+    ALTER COLUMN gateway_approval_evidence SET DEFAULT 'unclassified';
 
 -- Only genuinely empty retained observations establish absence. Old local
 -- query notes may have overwritten provider text and cannot prove its absence.

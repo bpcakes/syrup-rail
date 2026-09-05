@@ -25,6 +25,8 @@ on:
       - "scripts/check-release.sh"
       - "scripts/tests/check-release.sh"
       - "scripts/check-public-api.sh"
+      - "scripts/check-rustfmt.sh"
+      - "scripts/tests/check-rustfmt.sh"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
       - ".cargo/**"
@@ -56,6 +58,8 @@ on:
       - "scripts/check-release.sh"
       - "scripts/tests/check-release.sh"
       - "scripts/check-public-api.sh"
+      - "scripts/check-rustfmt.sh"
+      - "scripts/tests/check-rustfmt.sh"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
       - ".cargo/**"
@@ -177,6 +181,8 @@ jobs:
           cache: false
           rustflags: ""
           components: rustfmt
+      - name: Test Rust source discovery
+        run: scripts/tests/check-rustfmt.sh
       - name: Run rustfmt check
         run: scripts/jig check fmt
 

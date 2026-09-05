@@ -11,7 +11,8 @@ role. It reports the retained attempt population, the rows rewritten to
 `absent`, the `review_required` rows that remain `unclassified`, and the
 retained processor-charge and reversal-attestation populations. The latter two
 counts are the rows classified as `structured` from their existing durable
-financial records. Use those counts to size the transaction and decide whether
+financial records, supplied by constant column defaults without per-row updates.
+Use the counts to size validation scans and decide whether
 legacy operator review must be completed before cutover. When investigation is
 required, run
 `audit_unclassified_review_attempts_from_v5.sql` through an authorized operator
@@ -49,8 +50,17 @@ classified observation to an unresolved attempt, but approval evidence remains
 monotonic across observations. Empty or malformed query results do not prove
 absence and never downgrade retained evidence. If
 queries keep returning no record, an unclassified submitted attempt remains open
-for investigation; this cutover does not provide a manual override. Resolve such
-legacy cases before cutover if that restriction is operationally unacceptable.
+for investigation; this cutover does not provide a manual override. This also
+applies to new v6 indeterminate mutation errors, including an empty transport
+diagnostic. Until authoritative transaction or reversal evidence resolves the
+attempt, the in-flight uniqueness rules prevent another enrollment for the same
+subscriber/plan or another renewal/recovery for the same subscription. This hold
+has no automatic time limit when the provider cannot establish the outcome.
+Repeated empty queries are not proof of non-submission and do not authorize
+resubmission. Hosts must alert on aged review items and investigate with the
+provider; changing the classification or bypassing the unique index is not a
+supported recovery path. Resolve legacy cases before cutover if that restriction
+is operationally unacceptable.
 Schema v5 itself wrote local reconciliation notes into `gateway_response_text`;
 those rows deliberately remain unclassified because local text cannot prove the
 absence of earlier provider evidence. The audit identifies them without exposing
@@ -64,9 +74,12 @@ classification when constructing processor evidence.
 
 Before cutover, prebuild and test the v6-aware application, rehearse the exact
 upgrade on a representative copy, and drain billing traffic. The preflight's
-attempt, processor-charge, and reversal-attestation counts are the row counts
-for the migration's in-transaction `UPDATE` statements; include their write and
-bloat cost in the rehearsal.
+empty-attempt count is the row count for the migration's in-transaction
+`UPDATE`; include its write and bloat cost in the rehearsal. Retained charges
+and attestations use PostgreSQL's constant-default column addition, followed by
+a default change for future inserts, so they require no per-row update.
+Constraint validation can still scan those tables under the cutover locks. See
+[PostgreSQL 18's column-default semantics](https://www.postgresql.org/docs/18/ddl-alter.html).
 Stop **all** billing
 writers, including reconciliation and operator workers. Set host-appropriate
 `lock_timeout` and `statement_timeout`, then run the upgrade transaction. The

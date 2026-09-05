@@ -721,7 +721,7 @@ impl ProcessorEvidence {
         self
     }
 
-    /// Returns the classification supplied when the evidence was constructed.
+    /// Returns the conservative classification retained by this observation.
     pub const fn approval_evidence(&self) -> crate::ProcessorApprovalEvidence {
         self.approval_evidence
     }

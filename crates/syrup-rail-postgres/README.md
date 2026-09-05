@@ -72,7 +72,13 @@ safety check structural for supported low-level submitters; it cannot make two
 NMI requests atomic. Initial enrollments and prepared host-charge replays change
 from `query → mutation` to `query → query → mutation`, roughly 50% more provider
 requests for those flows. Renewals check before reservation, after reservation,
-and at submission, so their successful path uses three mode queries. Recoveries,
+and at submission, so their successful path uses three mode queries. With NMI,
+these are Query API requests and count toward its
+[system-wide rate limit](https://docs.nmi.com/reference/rate-limiting), shared
+with payment traffic. A page of 100 successful renewals therefore adds 300 mode
+queries and 100 sale requests. The page bound is not a concurrency recommendation;
+hosts must size dispatch concurrency for their provider limits and honor persisted
+provider cooldowns. NMI does not publish a universal numeric rate threshold. Recoveries,
 payment-method replacements, and fresh host charges retain their existing
 readiness boundaries. A transient failure of the final query
 occurs after durable admission, but the provider mutation endpoint was not

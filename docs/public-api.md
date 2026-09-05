@@ -155,7 +155,14 @@ operators, or provide an operator interface.
 who has independently established that an attempt with no gateway reference
 and no approval evidence had no financial effect. Attempts with either kind of
 evidence remain open for stronger reconciliation or reversal evidence rather
-than being expired automatically.
+than being expired automatically. This includes new indeterminate mutation errors,
+even when their diagnostic is empty. While such a payment-bearing attempt is
+unresolved, in-flight uniqueness prevents another enrollment for that
+subscriber/plan or another renewal/recovery for that subscription. The hold can
+last indefinitely if the provider cannot establish the outcome; repeated empty
+queries cannot certify non-submission. Hosts must alert on aged review items
+and investigate with the provider. Neither overwriting the classification nor
+bypassing the in-flight index is a supported manual exit.
 
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.

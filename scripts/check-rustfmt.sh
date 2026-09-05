@@ -10,8 +10,9 @@ fi
 cargo fmt --all -- --check
 
 # rustfmt does not traverse source fragments referenced through include!.
-# Check each tracked Rust source independently so future splits cannot escape
-# the repository formatting gate.
-while IFS= read -r -d '' source_file; do
+# Check tracked and new non-ignored sources, including include! fragments,
+# without walking generated output or other ignored files.
+git ls-files -z --cached --others --exclude-standard -- \
+  'crates/**/*.rs' 'tools/**/*.rs' | while IFS= read -r -d '' source_file; do
   rustfmt --check --edition 2024 "$source_file"
-done < <(find crates tools -type f -name '*.rs' -print0)
+done

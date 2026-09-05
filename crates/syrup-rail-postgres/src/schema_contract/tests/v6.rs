@@ -195,7 +195,18 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     assert_eq!(audited_ids, expected_ids);
     preflight.rollback().await?;
 
+    let retained_tuples_sql = "SELECT tableoid::regclass::text, xmin::text, ctid::text
+        FROM billing_processor_charges
+        UNION ALL
+        SELECT tableoid::regclass::text, xmin::text, ctid::text
+        FROM billing_external_reversal_attestations
+        ORDER BY 1, 3";
+    let retained_tuples: Vec<(String, String, String)> = sqlx::query_as(retained_tuples_sql)
+        .fetch_all(&database.pool).await?;
     database.upgrade_v5_to_v6().await?;
+    let upgraded_tuples: Vec<(String, String, String)> = sqlx::query_as(retained_tuples_sql)
+        .fetch_all(&database.pool).await?;
+    assert_eq!(retained_tuples, upgraded_tuples, "charge and attestation backfill must not update retained tuples");
     let charge_classification: String = sqlx::query_scalar(
         "SELECT gateway_approval_evidence FROM billing_processor_charges WHERE id = $1",
     )
