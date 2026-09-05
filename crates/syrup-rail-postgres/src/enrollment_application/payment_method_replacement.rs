@@ -6,12 +6,11 @@ use sqlx::{PgConnection, PgPool, Row};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentDiagnostic,
-    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewayStorePaymentMethodRequest, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
-    PaymentCardDisplay, PaymentMethodId, PaymentResolutionCode, ProcessorChargeProgression,
-    ProcessorChargeRole, ProcessorEvidence, ReplaceSubscriptionPaymentMethod,
-    SubscriptionEnrollmentPaymentResult, SubscriptionPaymentMethodReplacement,
-    SubscriptionPaymentMethodReplacementSubmissionOutcome,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayStorePaymentMethodRequest, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptStatus, PaymentCardDisplay, PaymentMethodId,
+    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
+    ReplaceSubscriptionPaymentMethod, SubscriptionEnrollmentPaymentResult,
+    SubscriptionPaymentMethodReplacement, SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection,
 };
 
@@ -339,43 +338,30 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
     attempt_id: PaymentAttemptId,
     outcome: &GatewayPaymentOutcome,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let mut transaction = pool.begin().await?;
-    let attempt = crate::find_payment_attempt_by_id_in_transaction(
-        &mut transaction,
+    super::apply_reconciled_gateway_outcome_for(
+        pool,
+        coordinator,
         billing_scope_id,
         attempt_id,
+        outcome,
+        super::ReconciledApplicationEntry::Exact(
+            super::ReservationOperation::PaymentMethodReplacement,
+        ),
     )
-    .await?
-    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-        "payment method replacement attempt was not found",
-    ))?;
-    let provider_key = sqlx::query_scalar::<_, String>(
-        "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
-    )
-    .bind(billing_scope_id.as_uuid())
-    .bind(attempt.identity().gateway_account_id().as_uuid())
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-        "payment method replacement gateway account was not found",
-    ))?;
-    transaction.commit().await?;
-    let provider_key = GatewayProviderKey::new(provider_key).map_err(|_| {
-        SubscriptionEnrollmentApplicationError::InvalidState(
-            "payment method replacement gateway provider key is invalid",
-        )
-    })?;
-    let reservation = SubscriptionPaymentMethodReplacement::from_attempt(&attempt, provider_key)
-        .map_err(|_| {
-            SubscriptionEnrollmentApplicationError::InvalidState(
-                "reconciled attempt is not a valid payment method replacement",
-            )
-        })?;
+    .await
+}
+
+pub(super) async fn apply_reconciled_replacement_outcome(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionPaymentMethodReplacement,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     if outcome.status() == GatewayPaymentStatus::Approved {
         for attempt_index in 0..APPROVED_APPLICATION_ATTEMPTS {
             match apply_locked_reconciled_payment_method_replacement_outcome(
                 coordinator,
-                &reservation,
+                reservation,
                 outcome,
             )
             .await
@@ -389,7 +375,7 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
         }
         return park_reconciled_payment_method_replacement_approved_outcome(
             pool,
-            &reservation,
+            reservation,
             outcome,
             PAYMENT_METHOD_REPLACEMENT_STORAGE_FAILURE_TEXT,
         )
@@ -397,7 +383,7 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
     }
     apply_locked_reconciled_non_approved_payment_method_replacement_outcome(
         pool,
-        &reservation,
+        reservation,
         outcome,
     )
     .await

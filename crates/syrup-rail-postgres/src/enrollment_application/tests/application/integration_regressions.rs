@@ -476,3 +476,67 @@ async fn exhausted_attempt_lock_retries_use_the_lock_free_approved_evidence_fall
     blocker.rollback().await?;
     fixture.cleanup().await
 }
+
+#[tokio::test]
+async fn reconciled_replacement_entries_share_gateway_identity_errors() -> Result<(), Box<dyn Error>>
+{
+    let (fixture, replacement) =
+        reconciled_payment_method_replacement_fixture("rec_pm_identity").await?;
+    let scope = replacement.identity().billing_scope_id();
+    let attempt_id = replacement.identity().attempt_id();
+    sqlx::query("ALTER TABLE billing_payment_attempts DROP CONSTRAINT billing_payment_attempts_account_scope_fk, DROP CONSTRAINT billing_payment_attempts_payment_method_owner_fk, DROP CONSTRAINT billing_payment_attempts_subscription_owner_fk")
+        .execute(&fixture.database.pool).await?;
+    sqlx::query("UPDATE billing_payment_attempts SET gateway_account_id = $2 WHERE id = $1")
+        .bind(attempt_id.as_uuid())
+        .bind(Uuid::now_v7())
+        .execute(&fixture.database.pool)
+        .await?;
+    let outcome = approved_outcome("txn_replacement_identity_error");
+    for missing_account in [true, false] {
+        if !missing_account {
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET gateway_account_id = $2 WHERE id = $1",
+            )
+            .bind(attempt_id.as_uuid())
+            .bind(fixture.gateway_account.gateway_account_id)
+            .execute(&fixture.database.pool)
+            .await?;
+            sqlx::query("ALTER TABLE billing_gateway_accounts DROP CONSTRAINT billing_gateway_accounts_provider_fk")
+                .execute(&fixture.database.pool).await?;
+            sqlx::query(
+                "UPDATE billing_gateway_accounts SET provider_key = 'INVALID!' WHERE id = $1",
+            )
+            .bind(fixture.gateway_account.gateway_account_id)
+            .execute(&fixture.database.pool)
+            .await?;
+        }
+        let message = if missing_account {
+            "payment method replacement gateway account was not found"
+        } else {
+            "payment method replacement gateway provider key is invalid"
+        };
+        let direct = apply_reconciled_subscription_payment_method_replacement_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            scope,
+            attempt_id,
+            &outcome,
+        )
+        .await;
+        let dispatched = apply_reconciled_subscription_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            scope,
+            attempt_id,
+            &outcome,
+        )
+        .await;
+        for result in [direct, dispatched] {
+            assert_application_invalid_state(
+                result.expect_err("invalid durable gateway identity must prevent application"),
+                message,
+            );
+        }
+    }
+    fixture.cleanup().await
+}

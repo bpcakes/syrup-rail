@@ -89,11 +89,17 @@ async fn apply_reconciled_gateway_outcome_for(
                 .await
         }
         ReservationOperation::PaymentMethodReplacement => {
-            apply_reconciled_subscription_payment_method_replacement_gateway_outcome(
+            let reservation =
+                SubscriptionPaymentMethodReplacement::from_attempt(&attempt, provider_key)
+                    .map_err(|_| {
+                        SubscriptionEnrollmentApplicationError::InvalidState(
+                            operation.invalid_attempt_message(),
+                        )
+                    })?;
+            payment_method_replacement::apply_reconciled_replacement_outcome(
                 pool,
                 coordinator,
-                billing_scope_id,
-                attempt_id,
+                &reservation,
                 outcome,
             )
             .await
