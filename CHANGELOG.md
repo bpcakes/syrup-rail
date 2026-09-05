@@ -8,6 +8,10 @@ _No unreleased changes._
 
 ## [0.6.0] - 2026-09-01
 
+This section records the prepared 0.6.0 changes; publication remains blocked
+pending a recovery or compatibility policy for legacy terminal host attempts.
+See the v6 Migration requirements below before planning a host cutover.
+
 ### Fixed
 
 - Make the retained schema-v4 runtime assertion reject incompatible live
@@ -116,8 +120,17 @@ _No unreleased changes._
   limit. Investigate blockers through an audited host process, never by
   bypassing the constraint or silently rewriting financial evidence.
 - After reaching v5, keep billing writers stopped and run
-  `schema/v6/preflight_from_v5.sql`. Audit protected legacy review rows with
-  `schema/v6/audit_unclassified_review_attempts_from_v5.sql`, then apply
+  `schema/v6/preflight_from_v5.sql`. The
+  `terminal_host_attempts_with_unclassified_evidence_count` must be zero:
+  nonempty evidence on declined host attempts or unsubmitted failures without
+  charges cannot preserve their v5 retry/release eligibility under v6. The
+  upgrade aborts with SQLSTATE `23514` before schema changes if this population
+  exists. Roll back and remain on v5; clearing, rewriting, or deleting retained
+  evidence to bypass this guard is not supported. These cases still require a
+  recovery or compatibility policy and remain a 0.6.0 release blocker.
+  Audit these terminal attempts and protected legacy review rows with
+  `schema/v6/audit_unclassified_review_attempts_from_v5.sql`. For an eligible
+  cutover, apply
   `schema/v6/upgrade_from_v5.sql` in one host-owned transaction. The cutover
   classifies retained charges and reversal attestations from their durable v5
   provenance, marks only entirely empty attempt evidence as `Absent`, and keeps

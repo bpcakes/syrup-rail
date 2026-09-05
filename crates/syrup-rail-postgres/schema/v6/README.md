@@ -6,6 +6,10 @@ through a host migration. Existing schema-v5 hosts apply `upgrade_from_v5.sql`
 once in a single host-owned transaction. Older hosts first follow each shipped
 cutover to reach v5. Never run a fresh install over an existing ledger.
 
+The immutable `schema/v5/install.sql` has a stale opening comment that says
+version 4. It is the v5 artifact; preserve its bytes and use
+`assert_runtime_schema_v5_compatible` to validate the installed v5 catalog.
+
 Before scheduling the cutover, run `preflight_from_v5.sql` through a read-only
 role. It reports the retained attempt population, the rows rewritten to
 `absent`, the `review_required` rows that remain `unclassified`, and the
