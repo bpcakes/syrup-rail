@@ -257,7 +257,7 @@ async fn apply_subscription_renewal_gateway_decision(
             if outcome.transaction_id().is_none() {
                 return super::park_approved_outcome(
                     pool,
-                    OutcomeReservation::Renewal(reservation),
+                    super::ApprovedParkingReservation::Renewal(reservation),
                     &approved_evidence,
                     RENEWAL_INCOMPLETE_APPROVAL_TEXT,
                 )
@@ -276,7 +276,7 @@ async fn apply_subscription_renewal_gateway_decision(
             }
             super::park_approved_outcome(
                 pool,
-                OutcomeReservation::Renewal(reservation),
+                super::ApprovedParkingReservation::Renewal(reservation),
                 &approved_evidence,
                 RENEWAL_APPROVED_STORAGE_FAILURE_TEXT,
             )

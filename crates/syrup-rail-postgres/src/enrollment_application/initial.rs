@@ -261,7 +261,7 @@ async fn apply_subscription_enrollment_gateway_decision(
             if outcome.transaction_id().is_none() || outcome.payment_method_reference().is_none() {
                 return super::park_approved_outcome(
                     pool,
-                    OutcomeReservation::Initial(reservation),
+                    super::ApprovedParkingReservation::Initial(reservation),
                     &approved_evidence,
                     INCOMPLETE_APPROVAL_TEXT,
                 )
@@ -279,7 +279,7 @@ async fn apply_subscription_enrollment_gateway_decision(
             }
             super::park_approved_outcome(
                 pool,
-                OutcomeReservation::Initial(reservation),
+                super::ApprovedParkingReservation::Initial(reservation),
                 &approved_evidence,
                 APPROVED_STORAGE_FAILURE_TEXT,
             )

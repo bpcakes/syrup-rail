@@ -14,6 +14,9 @@ and transaction orchestration.
   `audit_incompatible_attestations_from_v4.sql`, and `upgrade_from_v4.sql`
   are the read-only preflight, minimized blocker audit, and forward-only v4
   cutover artifacts.
+- `schema/current.rs` — shared current install selection for integration
+  fixtures and the independent SQLx gate. Update it on each schema cutover;
+  the fresh-install runtime conformance test validates the selected artifact.
 - `schema/v4/install.sql` — immutable shipped version-4 fresh-install DDL;
   `schema/v4/prepare_from_v3.sql`, `validate_from_v3.sql`, the
   non-transactional concurrent `index_from_v3.sql`, and `upgrade_from_v3.sql`
@@ -71,6 +74,9 @@ and transaction orchestration.
 - `src/host_charge_reconciliation.rs` — bounded stale-unsubmitted host-charge
   claiming, host-target release, and atomic local attempt failure without
   gateway I/O.
+- `src/transaction_support.rs` — private SQLSTATE recognition and transaction-local
+  two-timeout execution. Workflow owners retain retry authorization, error
+  extraction, timeout policy values, and transaction ownership.
 - `src/transactions.rs` — host-prepared billing transaction and typed event
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
@@ -313,8 +319,8 @@ and transaction orchestration.
   causal-history boundary in `renewal_failure.rs`; it owns admission of the
   first v2 automatic result and access timing for cancellation and terminal
   events.
-- `SubscriptionPaymentFailed.access` is the canonical post-failure access
-  projection. Build it only from the locked subscription's snapshotted policy
+- `SubscriptionPaymentFailed.outcome.access()` is the canonical post-failure
+  access projection. Build it only from the locked subscription's snapshotted policy
   and causal failure history, and reuse the same projection for any matching
   terminal event boundary.
 - Discount-code list and disable operations administer durable records without
@@ -357,7 +363,7 @@ and transaction orchestration.
 - Keep `src/lib.rs` exports explicit. The high-level service and host
   transaction/event boundary enable the missing-rustdoc warning, and
   `scripts/check-public-api.sh` elevates that warning to an error and enforces
-  the facade and all-feature workspace documentation gates.
+  the facade and default-feature and all-feature workspace documentation gates.
 
 ## Common commands
 

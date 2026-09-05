@@ -209,13 +209,17 @@ fn provider_free_transaction_retry_policy_is_explicit_and_conservative() {
     ));
     for sqlstate in ["40001", "40P01", "55P03", "57014"] {
         assert!(
-            is_retryable_provider_free_transaction_sqlstate(sqlstate),
+            is_retryable_provider_free_transaction_error(&crate::test_support::sqlstate_error(
+                sqlstate
+            )),
             "expected {sqlstate} to be retryable"
         );
     }
-    for sqlstate in ["00000", "23505", "23514", "42P01", "XX000"] {
+    for sqlstate in ["00000", "08006", "23505", "23514", "42P01", "XX000"] {
         assert!(
-            !is_retryable_provider_free_transaction_sqlstate(sqlstate),
+            !is_retryable_provider_free_transaction_error(&crate::test_support::sqlstate_error(
+                sqlstate
+            )),
             "expected {sqlstate} to remain internal"
         );
     }
@@ -464,4 +468,44 @@ fn gateway_account_identity_requires_every_resolved_component() {
             gateway_configuration_id,
         )
     );
+}
+
+#[test]
+fn renewal_admission_retry_policy_excludes_pool_and_non_database_errors() {
+    for (codes, expected) in [
+        (&["40001", "40P01", "55P03", "57014"][..], true),
+        (
+            &["00000", "08006", "23505", "23514", "42P01", "XX000"][..],
+            false,
+        ),
+    ] {
+        for &code in codes {
+            assert_eq!(
+                is_retryable_renewal_admission_error(&SubscriptionEnrollmentApplicationError::Sql(
+                    crate::test_support::sqlstate_error(code)
+                )),
+                expected,
+                "direct {code}"
+            );
+            assert_eq!(
+                is_retryable_renewal_admission_error(
+                    &SubscriptionEnrollmentApplicationError::Attempt(
+                        PaymentAttemptStoreError::Sql(crate::test_support::sqlstate_error(code))
+                    )
+                ),
+                expected,
+                "nested {code}"
+            );
+        }
+    }
+    for error in [sqlx::Error::PoolTimedOut, sqlx::Error::RowNotFound] {
+        assert!(!is_retryable_renewal_admission_error(
+            &SubscriptionEnrollmentApplicationError::Sql(error),
+        ));
+    }
+    assert!(!is_retryable_renewal_admission_error(
+        &SubscriptionEnrollmentApplicationError::Attempt(PaymentAttemptStoreError::Sql(
+            sqlx::Error::PoolTimedOut
+        ),),
+    ));
 }

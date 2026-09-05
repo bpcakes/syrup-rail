@@ -27,6 +27,9 @@ command/outcome types for application-independent subscription billing.
 - `src/{gateway,gateway_value,resolver}.rs` own the five-method provider port,
   typed evidence, sensitive values, provider-I/O-free host resolver contract,
   and diagnostic boundary.
+- `src/audit_reason.rs` owns private normalization, Unicode length bounds, and
+  card-data rejection shared by the distinct public audit-reason types. Their
+  errors, accessors, and formatting remain with their domain owners.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure
   payment/calendar policy.
 - `src/billing_portal.rs` owns the provider-neutral customer billing portal,

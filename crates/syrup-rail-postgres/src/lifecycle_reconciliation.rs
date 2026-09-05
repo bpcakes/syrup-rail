@@ -48,7 +48,11 @@ impl GatewayLifecycleApplyOutcome {
         if matches!(self, Self::Applied) { 1 } else { 0 }
     }
 
-    /// Returns one when this outcome left evidence staged for a later match.
+    /// Returns one for a no-match or ambiguous-match staging outcome, including
+    /// redelivery of an already pending row. This classifies the outcome; it does
+    /// not count newly inserted pending rows as
+    /// [`GatewayLifecycleReconciliationSummary::staged`] does. Host-target
+    /// refusals are classified separately by [`Self::skipped_count`].
     pub const fn staged_count(self) -> u64 {
         if matches!(self, Self::StagedAmbiguous | Self::StagedNoMatch) {
             1
@@ -86,10 +90,13 @@ impl From<GatewayLifecycleApplyOutcome> for GatewayLifecycleSummaryOutcome {
 
 /// Per-call accounting for lifecycle report reconciliation.
 ///
-/// Evidence increments exactly one of `applied`, `staged`, or `quarantined`,
-/// except superseded evidence, which increments none. Explicit quarantine
-/// reports increment `quarantined`. During staged draining, `cleaned` counts
-/// expired pending rows removed independently of evidence outcomes.
+/// Applied evidence increments `applied`; invalid or conflicting evidence and
+/// explicit quarantine reports increment `quarantined`. Only newly inserted
+/// pending rows increment `staged`. Redelivery of an existing pending row does
+/// not increment `staged`; superseded evidence adds no counts. A refused
+/// host-target transition increments `skipped` and also `staged` if it inserts
+/// a pending row. During staged draining, `cleaned` counts expired pending
+/// rows removed independently of evidence outcomes.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct GatewayLifecycleReconciliationSummary {
     applied: u64,
@@ -105,7 +112,8 @@ impl GatewayLifecycleReconciliationSummary {
         self.applied
     }
 
-    /// Evidence outcomes left pending because no unique candidate remained.
+    /// Newly inserted pending evidence rows, including refused host-target
+    /// transitions. Redelivery of an existing pending row adds nothing.
     pub const fn staged(self) -> u64 {
         self.staged
     }
@@ -1211,14 +1219,8 @@ pub(crate) async fn ensure_account(
 pub(crate) async fn set_timeouts(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
-    )
-    .bind(ROW_LOCK_TIMEOUT)
-    .bind(OPERATION_TIMEOUT)
-    .execute(&mut **transaction)
-    .await?;
-    Ok(())
+    crate::transaction_support::set_local_timeouts(transaction, ROW_LOCK_TIMEOUT, OPERATION_TIMEOUT)
+        .await
 }
 
 fn latest_time(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {

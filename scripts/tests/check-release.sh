@@ -16,10 +16,10 @@ cat >"$fixture_root/Cargo.toml" <<'EOF'
 version = "0.3.0"
 
 [workspace.dependencies]
-syrup-rail = { version = "0.3.0", path = "crates/syrup-rail" }
-syrup-rail-nmi-client = { version = "0.3.0", path = "crates/syrup-rail-nmi-client" }
-syrup-rail-postgres = { version = "0.3.0", path = "crates/syrup-rail-postgres" }
-syrup-rail-nmi = { version = "0.3.0", path = "crates/syrup-rail-nmi" }
+syrup-rail = { version = "=0.3.0", path = "crates/syrup-rail" }
+syrup-rail-nmi-client = { version = "=0.3.0", path = "crates/syrup-rail-nmi-client" }
+syrup-rail-postgres = { version = "=0.3.0", path = "crates/syrup-rail-postgres" }
+syrup-rail-nmi = { version = "=0.3.0", path = "crates/syrup-rail-nmi" }
 EOF
 printf '## [0.3.0] - 2026-08-23\n' >"$fixture_root/CHANGELOG.md"
 
@@ -109,6 +109,27 @@ run_case() {
 
 run_case "modern-clean" "$modern_bash" false ""
 run_case "modern-dirty" "$modern_bash" true " --allow-dirty" --allow-dirty
+
+# Reject each non-exact dependency before reaching Cargo, independently of the
+# successful packaging cases above.
+cp "$fixture_root/Cargo.toml" "$test_root/exact-Cargo.toml"
+for crate in syrup-rail syrup-rail-nmi-client syrup-rail-postgres syrup-rail-nmi; do
+  sed "/^$crate = /s/\"=0.3.0\"/\"0.3.0\"/" "$test_root/exact-Cargo.toml" >"$fixture_root/Cargo.toml"
+  calls="$test_root/$crate-invalid-cargo-calls"
+  if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+    RELEASE_TEST_CARGO_CALLS="$calls" \
+    PATH="$test_root/bin:$PATH" \
+    "$modern_bash" "$subject" 0.3.0 >"$test_root/rejection" 2>&1; then
+    printf 'release checker accepted a non-exact dependency: %s\n' "$crate" >&2
+    exit 1
+  fi
+  if ! grep -Fqx "Workspace dependency $crate is not pinned exactly to version 0.3.0." "$test_root/rejection" || [[ -e "$calls" ]]; then
+    printf 'unexpected dependency rejection for %s\n' "$crate" >&2
+    cat "$test_root/rejection" >&2
+    exit 1
+  fi
+done
+cp "$test_root/exact-Cargo.toml" "$fixture_root/Cargo.toml"
 
 if [[ -x /bin/bash ]] && /bin/bash -c '[[ ${BASH_VERSINFO[0]} -eq 3 && ${BASH_VERSINFO[1]} -eq 2 ]]'; then
   run_case "bash-3.2-clean" /bin/bash false ""

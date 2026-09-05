@@ -252,14 +252,12 @@ impl ExpectedGatewayIdentity {
 pub(crate) async fn set_enrollment_timeouts(
     connection: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    crate::transaction_support::set_local_timeouts(
+        connection,
+        BILLING_ROW_LOCK_TIMEOUT,
+        BILLING_OPERATION_TIMEOUT,
     )
-    .bind(BILLING_ROW_LOCK_TIMEOUT)
-    .bind(BILLING_OPERATION_TIMEOUT)
-    .execute(&mut *connection)
-    .await?;
-    Ok(())
+    .await
 }
 
 pub(crate) async fn lock_subscription_aggregate(
@@ -289,8 +287,21 @@ pub(crate) async fn try_lock_subscription_aggregate(
     .await
 }
 
+/// Transaction-typed entrypoint for callers that own their transaction.
 pub(crate) async fn lock_initial_attempt_rows(
     transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    plan_key: &PlanKey,
+) -> Result<(), sqlx::Error> {
+    lock_initial_attempt_rows_on_connection(transaction, billing_scope_id, subscriber_id, plan_key)
+        .await
+}
+
+/// Locks the complete initial-attempt history in deterministic row order.
+/// The caller must already own the aggregate lock and surrounding transaction.
+pub(crate) async fn lock_initial_attempt_rows_on_connection(
+    connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
@@ -306,7 +317,7 @@ pub(crate) async fn lock_initial_attempt_rows(
     .bind(billing_scope_id.as_uuid())
     .bind(subscriber_id.as_uuid())
     .bind(plan_key.as_str())
-    .fetch_all(&mut **transaction)
+    .fetch_all(connection)
     .await?;
     Ok(())
 }

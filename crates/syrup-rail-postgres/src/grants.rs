@@ -10,7 +10,7 @@ use syrup_rail::{
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::attempts::lock_subscription_aggregate;
+use crate::attempts::{lock_initial_attempt_rows, lock_subscription_aggregate};
 
 const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
 const INVALID_GRANT_STATE: &str = "canonical subscription grant state is invalid";
@@ -36,11 +36,11 @@ pub async fn create_subscription_grant(
 ) -> Result<SubscriptionGrantCreationOutcome, SubscriptionGrantMutationError> {
     set_lock_timeout(transaction).await?;
     lock_subscription_aggregate(transaction, creation.subscriber_id(), creation.plan_key()).await?;
-    lock_initial_attempts(
+    lock_initial_attempt_rows(
         transaction,
-        creation.billing_scope_id().as_uuid(),
-        creation.subscriber_id().as_uuid(),
-        creation.plan_key().as_str(),
+        creation.billing_scope_id(),
+        creation.subscriber_id(),
+        creation.plan_key(),
     )
     .await?;
 
@@ -235,32 +235,6 @@ async fn set_lock_timeout(transaction: &mut Transaction<'_, Postgres>) -> Result
         .bind(BILLING_ROW_LOCK_TIMEOUT)
         .execute(&mut **transaction)
         .await?;
-    Ok(())
-}
-
-async fn lock_initial_attempts(
-    transaction: &mut Transaction<'_, Postgres>,
-    billing_scope_id: &Uuid,
-    subscriber_id: &Uuid,
-    plan_key: &str,
-) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT id
-        FROM billing_payment_attempts
-        WHERE billing_scope_id = $1
-            AND subscriber_id = $2
-            AND plan_key = $3
-            AND attempt_kind = 'subscription_initial'
-        ORDER BY created_at, id
-        FOR UPDATE
-        "#,
-    )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .fetch_all(&mut **transaction)
-    .await?;
     Ok(())
 }
 

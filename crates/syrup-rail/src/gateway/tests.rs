@@ -469,6 +469,20 @@ fn gateway_diagnostic_certainty_policy_applies_to_every_status() {
 
 #[test]
 fn quarantine_resolution_reason_is_normalized_bounded_and_card_safe() {
+    assert!(
+        GatewayLifecycleQuarantineResolutionReason::new(format!("  {}  ", "é".repeat(500))).is_ok()
+    );
+    assert_eq!(
+        GatewayLifecycleQuarantineResolutionReason::new("é".repeat(501)),
+        Err(GatewayLifecycleQuarantineResolutionReasonError::TooLong)
+    );
+    assert_eq!(
+        GatewayLifecycleQuarantineResolutionReason::new(format!(
+            "{}4111111111111111",
+            "x".repeat(500)
+        )),
+        Err(GatewayLifecycleQuarantineResolutionReasonError::TooLong)
+    );
     let reason = GatewayLifecycleQuarantineResolutionReason::new("  reviewed evidence  ").unwrap();
     assert_eq!(reason.expose(), "reviewed evidence");
     assert!(!format!("{reason:?}").contains("reviewed evidence"));

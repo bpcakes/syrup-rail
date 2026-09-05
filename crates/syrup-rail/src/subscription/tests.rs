@@ -299,6 +299,15 @@ fn grant_revocation_is_one_validated_audit_state() {
 
 #[test]
 fn grant_reason_is_trimmed_bounded_and_card_safe() {
+    assert!(SubscriptionGrantReason::new(format!("  {}  ", "é".repeat(500))).is_ok());
+    assert_eq!(
+        SubscriptionGrantReason::new("é".repeat(501)),
+        Err(SubscriptionGrantReasonError::TooLong)
+    );
+    assert_eq!(
+        SubscriptionGrantReason::new(format!("{}4111111111111111", "x".repeat(500))),
+        Err(SubscriptionGrantReasonError::TooLong)
+    );
     assert_eq!(
         SubscriptionGrantReason::new("  launch partner  ")
             .unwrap()

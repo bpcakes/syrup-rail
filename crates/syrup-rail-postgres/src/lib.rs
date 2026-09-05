@@ -43,6 +43,7 @@ mod subscription_billing_service;
 mod subscription_persistence;
 #[cfg(test)]
 mod test_support;
+mod transaction_support;
 mod transactions;
 
 pub use attempts::{

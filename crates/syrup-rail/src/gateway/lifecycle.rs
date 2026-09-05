@@ -126,18 +126,19 @@ impl GatewayLifecycleQuarantineResolutionReason {
     pub fn new(
         value: impl Into<String>,
     ) -> Result<Self, GatewayLifecycleQuarantineResolutionReasonError> {
-        let value = value.into();
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(GatewayLifecycleQuarantineResolutionReasonError::Empty);
-        }
-        if value.chars().count() > 500 {
-            return Err(GatewayLifecycleQuarantineResolutionReasonError::TooLong);
-        }
-        if crate::string_contains_raw_card_data(value) {
-            return Err(GatewayLifecycleQuarantineResolutionReasonError::ContainsRawCardData);
-        }
-        Ok(Self(value.to_owned()))
+        crate::audit_reason::normalize_audit_reason(value)
+            .map(Self)
+            .map_err(|error| match error {
+                crate::audit_reason::ReasonValidationError::Empty => {
+                    GatewayLifecycleQuarantineResolutionReasonError::Empty
+                }
+                crate::audit_reason::ReasonValidationError::TooLong => {
+                    GatewayLifecycleQuarantineResolutionReasonError::TooLong
+                }
+                crate::audit_reason::ReasonValidationError::ContainsRawCardData => {
+                    GatewayLifecycleQuarantineResolutionReasonError::ContainsRawCardData
+                }
+            })
     }
 
     pub fn expose(&self) -> &str {

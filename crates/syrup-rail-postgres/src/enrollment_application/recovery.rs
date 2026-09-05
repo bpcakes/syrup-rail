@@ -237,7 +237,7 @@ async fn apply_subscription_recovery_gateway_decision(
             if outcome.transaction_id().is_none() || outcome.payment_method_reference().is_none() {
                 return super::park_approved_outcome(
                     pool,
-                    OutcomeReservation::Recovery(reservation),
+                    super::ApprovedParkingReservation::Recovery(reservation),
                     &approved_evidence,
                     RECOVERY_INCOMPLETE_APPROVAL_TEXT,
                 )
@@ -256,7 +256,7 @@ async fn apply_subscription_recovery_gateway_decision(
             }
             super::park_approved_outcome(
                 pool,
-                OutcomeReservation::Recovery(reservation),
+                super::ApprovedParkingReservation::Recovery(reservation),
                 &approved_evidence,
                 RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
             )

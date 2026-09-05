@@ -279,18 +279,19 @@ pub struct ExternalReversalReason(String);
 
 impl ExternalReversalReason {
     pub fn new(value: impl Into<String>) -> Result<Self, ExternalReversalReasonError> {
-        let value = value.into();
-        let value = value.trim();
-        if value.is_empty() {
-            return Err(ExternalReversalReasonError::Empty);
-        }
-        if value.chars().count() > 500 {
-            return Err(ExternalReversalReasonError::TooLong);
-        }
-        if crate::string_contains_raw_card_data(value) {
-            return Err(ExternalReversalReasonError::ContainsRawCardData);
-        }
-        Ok(Self(value.to_owned()))
+        crate::audit_reason::normalize_audit_reason(value)
+            .map(Self)
+            .map_err(|error| match error {
+                crate::audit_reason::ReasonValidationError::Empty => {
+                    ExternalReversalReasonError::Empty
+                }
+                crate::audit_reason::ReasonValidationError::TooLong => {
+                    ExternalReversalReasonError::TooLong
+                }
+                crate::audit_reason::ReasonValidationError::ContainsRawCardData => {
+                    ExternalReversalReasonError::ContainsRawCardData
+                }
+            })
     }
 
     pub fn expose(&self) -> &str {
@@ -878,6 +879,15 @@ mod tests {
 
     #[test]
     fn external_reversal_reason_is_normalized_bounded_and_card_safe() {
+        assert!(ExternalReversalReason::new(format!("  {}  ", "é".repeat(500))).is_ok());
+        assert_eq!(
+            ExternalReversalReason::new("é".repeat(501)),
+            Err(ExternalReversalReasonError::TooLong)
+        );
+        assert_eq!(
+            ExternalReversalReason::new(format!("{}4111111111111111", "x".repeat(500))),
+            Err(ExternalReversalReasonError::TooLong)
+        );
         let reason = ExternalReversalReason::new("  processor refund verified  ").unwrap();
         assert_eq!(reason.expose(), "processor refund verified");
         assert!(!format!("{reason:?}").contains("processor refund verified"));

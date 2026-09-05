@@ -237,16 +237,21 @@ pub(crate) fn parse_kind(
         .map_err(|_| ProcessorChargePersistenceError::InvalidState(INVALID_PROCESSOR_CHARGE_STATE))
 }
 
+/// Canonical durable labels; callers retain their own error context.
+pub(crate) fn decode_processor_charge_role(value: &str) -> Option<ProcessorChargeRole> {
+    match value {
+        "primary" => Some(ProcessorChargeRole::Primary),
+        "additional" => Some(ProcessorChargeRole::Additional),
+        _ => None,
+    }
+}
+
 pub(crate) fn parse_role(
     value: &str,
 ) -> Result<ProcessorChargeRole, ProcessorChargePersistenceError> {
-    match value {
-        "primary" => Ok(ProcessorChargeRole::Primary),
-        "additional" => Ok(ProcessorChargeRole::Additional),
-        _ => Err(ProcessorChargePersistenceError::InvalidState(
-            INVALID_PROCESSOR_CHARGE_STATE,
-        )),
-    }
+    decode_processor_charge_role(value).ok_or(ProcessorChargePersistenceError::InvalidState(
+        INVALID_PROCESSOR_CHARGE_STATE,
+    ))
 }
 
 pub(crate) fn parse_progression(

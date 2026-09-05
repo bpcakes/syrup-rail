@@ -269,13 +269,9 @@ pub(super) fn initial_charge_state_code(
 }
 
 pub(super) fn parse_role(value: &str) -> Result<ProcessorChargeRole, ProcessorChargeStoreError> {
-    match value {
-        "primary" => Ok(ProcessorChargeRole::Primary),
-        "additional" => Ok(ProcessorChargeRole::Additional),
-        _ => Err(ProcessorChargeStoreError::InvalidState(
-            INVALID_CHARGE_STATE,
-        )),
-    }
+    crate::processor_charge_persistence::decode_processor_charge_role(value).ok_or(
+        ProcessorChargeStoreError::InvalidState(INVALID_CHARGE_STATE),
+    )
 }
 
 pub(super) fn is_transient(error: &ProcessorChargeStoreError) -> bool {
@@ -286,8 +282,8 @@ pub(super) fn is_transient(error: &ProcessorChargeStoreError) -> bool {
         )) => error,
         _ => return false,
     };
-    matches!(
-        database_error.code().as_deref(),
-        Some("40001" | "40P01" | "55P03" | "57014")
-    )
+    database_error
+        .code()
+        .as_deref()
+        .is_some_and(crate::transaction_support::is_transient_sqlstate)
 }

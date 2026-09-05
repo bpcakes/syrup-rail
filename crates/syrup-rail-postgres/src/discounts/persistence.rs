@@ -29,14 +29,12 @@ pub(super) fn validate_discount_cadence(
 }
 
 pub(super) async fn set_lock_timeout(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    crate::transaction_support::set_local_timeouts(
+        connection,
+        BILLING_ROW_LOCK_TIMEOUT,
+        BILLING_OPERATION_TIMEOUT,
     )
-    .bind(BILLING_ROW_LOCK_TIMEOUT)
-    .bind(BILLING_OPERATION_TIMEOUT)
-    .execute(connection)
-    .await?;
-    Ok(())
+    .await
 }
 
 pub(super) async fn current_subscription_exists(
@@ -181,41 +179,6 @@ pub(super) async fn saved_subscription_discount_claim_on_connection(
     .fetch_optional(&mut *connection)
     .await?;
     row.as_ref().map(claim_from_row).transpose()
-}
-
-pub(super) async fn lock_initial_attempts(
-    connection: &mut PgConnection,
-    claim: &SubscriptionDiscountClaim,
-) -> Result<(), sqlx::Error> {
-    lock_initial_attempt_rows(
-        connection,
-        claim.billing_scope_id(),
-        claim.subscriber_id(),
-        claim.plan_key(),
-    )
-    .await
-}
-
-pub(super) async fn lock_initial_attempt_rows(
-    connection: &mut PgConnection,
-    billing_scope_id: BillingScopeId,
-    subscriber_id: SubscriberId,
-    plan_key: &PlanKey,
-) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT id FROM billing_payment_attempts
-        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
-            AND attempt_kind = 'subscription_initial'
-        ORDER BY created_at, id FOR UPDATE
-        "#,
-    )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
-    .fetch_all(&mut *connection)
-    .await?;
-    Ok(())
 }
 
 pub(super) async fn blocking_initial_attempt_exists(

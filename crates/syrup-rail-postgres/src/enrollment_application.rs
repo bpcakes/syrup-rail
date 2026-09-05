@@ -563,38 +563,6 @@ impl ReservationOperation {
         matches!(self, Self::PaymentMethodReplacement)
     }
 
-    const fn approved_parking_lock_scope(self) -> ApprovedParkingLockScope {
-        match self {
-            Self::Initial | Self::Recovery | Self::Renewal => {
-                ApprovedParkingLockScope::SubscriptionAggregate
-            }
-            Self::PaymentMethodReplacement => ApprovedParkingLockScope::AttemptOnly,
-        }
-    }
-
-    const fn has_lock_free_approved_evidence_fallback(self) -> bool {
-        !matches!(self, Self::Renewal)
-    }
-
-    fn terminal_approved_progression(
-        self,
-        attempt: &PaymentAttempt,
-        evidence: &ProcessorEvidence,
-    ) -> ProcessorChargeProgression {
-        match self {
-            Self::Initial | Self::Recovery | Self::Renewal
-                if evidence.transaction_id().is_some()
-                    && attempt.request().amount().cents() > 0 =>
-            {
-                ProcessorChargeProgression::ExternalReversalRequired
-            }
-            Self::Initial | Self::Recovery | Self::Renewal => {
-                ProcessorChargeProgression::ReconciliationRequired
-            }
-            Self::PaymentMethodReplacement => ProcessorChargeProgression::ReconciliationRequired,
-        }
-    }
-
     const fn attempt_not_found_message(self) -> &'static str {
         match self {
             Self::Initial => "subscription enrollment attempt was not found",
@@ -777,12 +745,6 @@ pub(crate) enum OutcomeReservation<'a> {
     PaymentMethodReplacement(&'a SubscriptionPaymentMethodReplacement),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ApprovedParkingLockScope {
-    SubscriptionAggregate,
-    AttemptOnly,
-}
-
 impl<'a> OutcomeReservation<'a> {
     const fn operation(self) -> ReservationOperation {
         match self {
@@ -861,40 +823,51 @@ impl<'a> OutcomeReservation<'a> {
     fn matches_attempt(self, attempt: &PaymentAttempt) -> bool {
         self.expected_attempt().matches(attempt)
     }
+}
 
-    const fn approved_parking_lock_scope(self) -> ApprovedParkingLockScope {
-        self.operation().approved_parking_lock_scope()
-    }
+/// Only charged subscription workflows share aggregate-locked approval parking.
+/// Payment-method replacement owns a separate zero-value approval path.
+#[derive(Clone, Copy)]
+enum ApprovedParkingReservation<'a> {
+    Initial(&'a SubscriptionEnrollmentReservation),
+    Recovery(&'a SubscriptionRecoveryReservation),
+    Renewal(&'a SubscriptionRenewalReservation),
+}
 
-    fn terminal_approved_progression(
-        self,
-        attempt: &PaymentAttempt,
-        evidence: &ProcessorEvidence,
-    ) -> ProcessorChargeProgression {
-        self.operation()
-            .terminal_approved_progression(attempt, evidence)
+impl<'a> ApprovedParkingReservation<'a> {
+    const fn outcome_reservation(self) -> OutcomeReservation<'a> {
+        match self {
+            Self::Initial(reservation) => OutcomeReservation::Initial(reservation),
+            Self::Recovery(reservation) => OutcomeReservation::Recovery(reservation),
+            Self::Renewal(reservation) => OutcomeReservation::Renewal(reservation),
+        }
     }
 
     fn lock_free_approved_evidence_terms(self) -> Option<LockFreeApprovedEvidenceTerms<'a>> {
-        if !self.operation().has_lock_free_approved_evidence_fallback() {
-            return None;
-        }
         match self {
             Self::Initial(reservation) => Some(LockFreeApprovedEvidenceTerms::initial(reservation)),
             Self::Recovery(reservation) => {
                 Some(LockFreeApprovedEvidenceTerms::recovery(reservation))
             }
             Self::Renewal(_) => None,
-            Self::PaymentMethodReplacement(reservation) => Some(
-                LockFreeApprovedEvidenceTerms::payment_method_replacement(reservation),
-            ),
         }
+    }
+}
+
+fn terminal_approved_progression(
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+) -> ProcessorChargeProgression {
+    if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
+        ProcessorChargeProgression::ExternalReversalRequired
+    } else {
+        ProcessorChargeProgression::ReconciliationRequired
     }
 }
 
 async fn park_approved_outcome(
     pool: &PgPool,
-    reservation: OutcomeReservation<'_>,
+    reservation: ApprovedParkingReservation<'_>,
     approved_evidence: &ApprovedProcessorEvidence,
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
@@ -904,7 +877,7 @@ async fn park_approved_outcome(
         Err(_) => {
             observe_approved_evidence_with_retry(pool, reservation, evidence).await?;
             let mut transaction = pool.begin().await?;
-            let identity = reservation.identity();
+            let identity = reservation.outcome_reservation().identity();
             let attempt = find_payment_attempt_by_id_on_connection(
                 &mut transaction,
                 identity.billing_scope_id(),
@@ -930,22 +903,20 @@ async fn park_approved_outcome(
 
 async fn try_park_approved_outcome(
     pool: &PgPool,
-    reservation: OutcomeReservation<'_>,
+    reservation: ApprovedParkingReservation<'_>,
     evidence: &ProcessorEvidence,
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
-    if reservation.approved_parking_lock_scope() == ApprovedParkingLockScope::SubscriptionAggregate
-    {
-        let identity = reservation.identity();
-        lock_subscription_aggregate(
-            &mut transaction,
-            identity.subscriber_id(),
-            reservation.plan_key(),
-        )
-        .await?;
-    }
+    let reservation = reservation.outcome_reservation();
+    let identity = reservation.identity();
+    lock_subscription_aggregate(
+        &mut transaction,
+        identity.subscriber_id(),
+        reservation.plan_key(),
+    )
+    .await?;
     let attempt = lock_expected_reservation_attempt(&mut transaction, reservation).await?;
     let attempt = if attempt.status() == PaymentAttemptStatus::Approved {
         observe_processor_charge(
@@ -957,7 +928,7 @@ async fn try_park_approved_outcome(
         .await?;
         attempt
     } else if attempt.status().is_terminal() {
-        let progression = reservation.terminal_approved_progression(&attempt, evidence);
+        let progression = terminal_approved_progression(&attempt, evidence);
         observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
         attempt
     } else {
@@ -977,14 +948,18 @@ async fn try_park_approved_outcome(
 
 async fn observe_approved_evidence_with_retry(
     pool: &PgPool,
-    reservation: OutcomeReservation<'_>,
+    reservation: ApprovedParkingReservation<'_>,
     evidence: &ProcessorEvidence,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
     for attempt_index in 0..APPROVED_EVIDENCE_WRITE_ATTEMPTS {
         let result = async {
             let mut transaction = pool.begin().await?;
             set_application_timeouts(&mut transaction).await?;
-            let attempt = lock_expected_reservation_attempt(&mut transaction, reservation).await?;
+            let attempt = lock_expected_reservation_attempt(
+                &mut transaction,
+                reservation.outcome_reservation(),
+            )
+            .await?;
             observe_processor_charge(
                 &mut transaction,
                 &attempt,
@@ -1650,23 +1625,20 @@ fn is_retryable_evidence_error(error: &SubscriptionEnrollmentApplicationError) -
         )) => error.code(),
         _ => None,
     };
-    matches!(
-        sqlstate.as_deref(),
-        Some("40001" | "40P01" | "55P03" | "57014")
-    )
+    sqlstate
+        .as_deref()
+        .is_some_and(crate::transaction_support::is_transient_sqlstate)
 }
 
 pub(crate) async fn set_application_timeouts(
     connection: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    crate::transaction_support::set_local_timeouts(
+        connection,
+        BILLING_ROW_LOCK_TIMEOUT,
+        BILLING_OPERATION_TIMEOUT,
     )
-    .bind(BILLING_ROW_LOCK_TIMEOUT)
-    .bind(BILLING_OPERATION_TIMEOUT)
-    .execute(connection)
-    .await?;
-    Ok(())
+    .await
 }
 
 async fn upsert_payment_method(

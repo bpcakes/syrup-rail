@@ -494,3 +494,67 @@ async fn transaction_observation_preserves_exact_replay_and_rejects_drift()
     result?;
     cleanup
 }
+
+#[test]
+fn charge_retry_policy_excludes_pool_and_non_database_errors() {
+    for (codes, expected) in [
+        (&["40001", "40P01", "55P03", "57014"][..], true),
+        (
+            &["00000", "08006", "23505", "23514", "42P01", "XX000"][..],
+            false,
+        ),
+    ] {
+        for &code in codes {
+            assert_eq!(
+                is_transient(&ProcessorChargeStoreError::Sql(
+                    crate::test_support::sqlstate_error(code)
+                )),
+                expected,
+                "direct {code}"
+            );
+            assert_eq!(
+                is_transient(&ProcessorChargeStoreError::Attempt(
+                    PaymentAttemptStoreError::Sql(crate::test_support::sqlstate_error(code))
+                )),
+                expected,
+                "nested {code}"
+            );
+        }
+    }
+    for error in [sqlx::Error::PoolTimedOut, sqlx::Error::RowNotFound] {
+        assert!(!is_transient(&ProcessorChargeStoreError::Sql(error)));
+    }
+    assert!(!is_transient(&ProcessorChargeStoreError::Attempt(
+        PaymentAttemptStoreError::Sql(sqlx::Error::PoolTimedOut),
+    )));
+}
+
+#[test]
+fn role_decoders_share_labels_and_preserve_error_context() {
+    use crate::processor_charge_persistence::{self, ProcessorChargePersistenceError};
+
+    for (label, role) in [
+        ("primary", ProcessorChargeRole::Primary),
+        ("additional", ProcessorChargeRole::Additional),
+    ] {
+        assert_eq!(parse_role(label).unwrap(), role);
+        assert_eq!(
+            processor_charge_persistence::parse_role(label).unwrap(),
+            role
+        );
+    }
+    for label in ["", "Primary", " primary", "unknown"] {
+        assert!(matches!(
+            parse_role(label),
+            Err(ProcessorChargeStoreError::InvalidState(
+                "canonical processor charge state is invalid"
+            ))
+        ));
+        assert!(matches!(
+            processor_charge_persistence::parse_role(label),
+            Err(ProcessorChargePersistenceError::InvalidState(
+                "canonical operator review state is invalid"
+            ))
+        ));
+    }
+}

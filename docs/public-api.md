@@ -383,8 +383,8 @@ The older low-level surface predates that policy and is too broad for
 mechanical one-line comments to improve it. For this small project, the gate is
 intentionally simple: `scripts/check-public-api.sh` verifies that every
 expected root facade exists and is readable, rejects wildcard public
-re-exports, builds warning-free all-feature documentation, and runs all-feature
-doctests. It does not maintain a compiler-diagnostic debt snapshot or parse
-human compiler output. Add meaningful documentation at an owning abstraction,
-and expand `warn(missing_docs)` to another module only after that module is
+re-exports, and builds warning-free documentation and runs doctests with both
+default features and all features. It does not maintain a compiler-diagnostic
+debt snapshot or parse human compiler output. Add meaningful documentation at
+an owning abstraction, and expand `warn(missing_docs)` to another module only after that module is
 ready to stay clean.

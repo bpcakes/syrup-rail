@@ -321,3 +321,4 @@ fn discounted_expected(plan_key: &str) -> syrup_rail::SubscriptionEnrollmentExpe
 
 mod boundaries;
 mod enrollment;
+mod row_locks;

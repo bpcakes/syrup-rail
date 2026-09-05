@@ -87,8 +87,8 @@ pub(crate) use shared::{
     STALE_UNSUBMITTED_RENEWAL_TEXT, attempt_replay_disposition,
     blocking_payment_method_update_exists, expire_stale_initial_attempts,
     fail_stale_unsubmitted_payment_method_updates, fail_stale_unsubmitted_subscription_charges,
-    lock_initial_attempt_rows, lock_initial_charge_rows, lock_subscription_aggregate,
-    prepared_replay_required_mode_changed, set_enrollment_timeouts,
+    lock_initial_attempt_rows, lock_initial_attempt_rows_on_connection, lock_initial_charge_rows,
+    lock_subscription_aggregate, prepared_replay_required_mode_changed, set_enrollment_timeouts,
     try_lock_subscription_aggregate,
 };
 use transitions::reject_prepared_attempt;

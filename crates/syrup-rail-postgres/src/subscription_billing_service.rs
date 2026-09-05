@@ -1,5 +1,7 @@
 #![warn(missing_docs)]
 
+use crate::transaction_support::is_transient_sqlstate;
+
 use std::{fmt, sync::Arc, time::Duration};
 
 use sqlx::PgPool;
@@ -406,11 +408,7 @@ fn is_retryable_provider_free_transaction_error(error: &sqlx::Error) -> bool {
     };
     error
         .code()
-        .is_some_and(|code| is_retryable_provider_free_transaction_sqlstate(code.as_ref()))
-}
-
-fn is_retryable_provider_free_transaction_sqlstate(code: &str) -> bool {
-    matches!(code, "40001" | "40P01" | "55P03" | "57014")
+        .is_some_and(|code| is_transient_sqlstate(code.as_ref()))
 }
 
 /// High-level provider-neutral billing facade for authorized host commands.
@@ -688,10 +686,7 @@ fn is_retryable_renewal_admission_error(error: &SubscriptionEnrollmentApplicatio
         )) => error.code(),
         _ => None,
     };
-    matches!(
-        sqlstate.as_deref(),
-        Some("40001" | "40P01" | "55P03" | "57014")
-    )
+    sqlstate.as_deref().is_some_and(is_transient_sqlstate)
 }
 
 struct GatewayAccountSnapshot {

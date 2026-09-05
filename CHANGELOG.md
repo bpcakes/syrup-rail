@@ -10,14 +10,18 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 - Make the retained schema-v4 runtime assertion reject incompatible live
   external-reversal resolution tuples in the same read-only snapshot as its
-  catalog check. This remains available to hosts validating v4 while staging
-  the required schema-v5 cutover.
+  catalog check. Hosts validating v4 while staging the required schema-v5
+  cutover can enable the `schema-contract-test-support` feature to use it.
 - Coordinate subscriber billing-data scrubbing with approved payment-method
   writers through the deployed payment-method advisory-lock identity. A
   concurrent approval can no longer restore mutable attempt or payment-method
   data while the scrub runs.
 
 ### Breaking
+
+- Gate `assert_runtime_schema_v4_compatible` behind
+  `schema-contract-test-support`. Production startup now uses
+  `assert_runtime_schema_v5_compatible` after the required v5 cutover.
 
 - Replace the NMI client's independent sale source, vault action, stored-
   credential, and currency fields with the closed `SaleIntent` contract.
@@ -90,9 +94,26 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Developer experience
 
+- Consolidate initial-attempt row locks, transient SQLSTATE recognition, local
+  timeout execution, audit-reason validation, and processor-charge role decoding
+  behind private helpers while preserving public contracts and workflow policy.
+- Keep release-wrapper fixtures aligned with exact internal dependency pins
+  and verify that non-exact pins are rejected before packaging.
+- Check documentation and doctests with default features as well as all
+  features, and correct renewal documentation to require the schema-v5 startup
+  assertion.
+- Share the current schema install selection between integration fixtures and
+  the independent SQLx metadata gate so both validate schema v5.
 - Make clean release preflight work under Bash 3.2 through 4.3 by avoiding
   nounset expansion of an empty optional-argument array. CI now exercises clean
   and `--allow-dirty` packaging under both current Bash and macOS Bash 3.2.
+
+### Internal refactoring
+
+- Narrow shared approval parking to initial enrollment, recovery, and renewal;
+  payment-method replacement retains its separate zero-value workflow.
+- Clarify lifecycle outcome counts versus newly staged reconciliation rows and
+  the feature required to validate schema v4 while preparing the v5 cutover.
 
 ## [0.5.2] - 2026-09-04
 

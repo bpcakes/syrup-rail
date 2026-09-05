@@ -8,6 +8,7 @@
 
 mod admission;
 mod attempt;
+mod audit_reason;
 mod billing_portal;
 mod card_data;
 mod discount;

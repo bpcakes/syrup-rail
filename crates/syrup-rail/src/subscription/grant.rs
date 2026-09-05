@@ -62,19 +62,19 @@ pub struct SubscriptionGrantReason(String);
 
 impl SubscriptionGrantReason {
     pub fn new(value: impl Into<String>) -> Result<Self, SubscriptionGrantReasonError> {
-        let value = value.into();
-        let value = value.trim();
-        let length = value.chars().count();
-        if length == 0 {
-            return Err(SubscriptionGrantReasonError::Empty);
-        }
-        if length > 500 {
-            return Err(SubscriptionGrantReasonError::TooLong);
-        }
-        if crate::string_contains_raw_card_data(value) {
-            return Err(SubscriptionGrantReasonError::ContainsRawCardData);
-        }
-        Ok(Self(value.to_owned()))
+        crate::audit_reason::normalize_audit_reason(value)
+            .map(Self)
+            .map_err(|error| match error {
+                crate::audit_reason::ReasonValidationError::Empty => {
+                    SubscriptionGrantReasonError::Empty
+                }
+                crate::audit_reason::ReasonValidationError::TooLong => {
+                    SubscriptionGrantReasonError::TooLong
+                }
+                crate::audit_reason::ReasonValidationError::ContainsRawCardData => {
+                    SubscriptionGrantReasonError::ContainsRawCardData
+                }
+            })
     }
 
     pub fn as_str(&self) -> &str {

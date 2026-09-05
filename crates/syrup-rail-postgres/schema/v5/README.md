@@ -66,3 +66,9 @@ schema-contract test-support feature;
 `V4_TO_V5_PREFLIGHT_SQL` exposes the read-only sizing query and
 `V4_TO_V5_INCOMPATIBLE_ATTESTATION_AUDIT_SQL` exposes the minimized blocker
 audit. Once released, all four artifacts and this guide are immutable.
+
+The retained pending-evidence columns `check_count` and `last_checked_at`, and
+`billing_gateway_lifecycle_pending_check_idx`, preserve the v4 catalog contract.
+The v5 application no longer updates or uses them; `expires_at` controls pending
+retention. Removing these legacy objects requires a future versioned schema
+cutover with matching runtime assertions, rather than editing shipped artifacts.

@@ -1,6 +1,7 @@
 use super::*;
 
 mod integration_regressions;
+mod renewal_parking;
 mod retry_and_parking;
 
 #[tokio::test]

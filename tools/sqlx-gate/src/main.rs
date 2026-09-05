@@ -14,14 +14,13 @@ use std::{
 use postgres_test_harness::{HarnessConfig, PostgresHarness};
 use sqlx::postgres::PgPoolOptions;
 
-const CURRENT_INSTALL_SQL: &str =
-    include_str!("../../../crates/syrup-rail-postgres/schema/v4/install.sql");
+#[path = "../../../crates/syrup-rail-postgres/schema/current.rs"]
+mod current_schema;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = parse_mode()?;
     let crate_root = postgres_crate_root()?;
-    let install_sql = load_install_sql(&crate_root)?;
 
     let harness =
         PostgresHarness::start(HarnessConfig::new("syrup_sqlx_gate")?.with_connection_budget(2)?)
@@ -29,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let lease = harness.empty_database().await?;
     let database_url = lease.database_url().to_owned();
 
-    let gate_result = run_gate(&crate_root, &database_url, install_sql, mode).await;
+    let gate_result = run_gate(&crate_root, &database_url, mode).await;
     let lease_cleanup = lease.cleanup().await;
     let harness_shutdown = harness.shutdown().await;
 
@@ -75,25 +74,9 @@ fn postgres_crate_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "tools/sqlx-gate must live two levels below the workspace root".into())
 }
 
-fn load_install_sql(crate_root: &Path) -> Result<&'static str, String> {
-    let install_path = crate_root.join("schema/v4/install.sql");
-    match std::fs::read_to_string(&install_path) {
-        Ok(on_disk) if on_disk == CURRENT_INSTALL_SQL => Ok(CURRENT_INSTALL_SQL),
-        Ok(_) => Err(format!(
-            "{} differs from the SQLx gate's embedded current schema artifact",
-            install_path.display()
-        )),
-        Err(error) => Err(format!(
-            "failed to read {}: {error}",
-            install_path.display()
-        )),
-    }
-}
-
 async fn run_gate(
     crate_root: &Path,
     database_url: &str,
-    install_sql: &str,
     mode: PrepareMode,
 ) -> Result<ExitStatus, String> {
     let pool = PgPoolOptions::new()
@@ -102,11 +85,11 @@ async fn run_gate(
         .await
         .map_err(|error| format!("failed to connect to disposable database: {error}"))?;
 
-    let install_result = sqlx::raw_sql(install_sql)
+    let install_result = sqlx::raw_sql(current_schema::INSTALL_SQL)
         .execute(&pool)
         .await
         .map(|_| ())
-        .map_err(|error| format!("failed to apply schema/v4/install.sql: {error}"));
+        .map_err(|error| format!("failed to apply the current schema install artifact: {error}"));
     pool.close().await;
     install_result?;
 

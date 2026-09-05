@@ -263,29 +263,7 @@ fn resolution_command_keeps_boundaries_and_replacement_review_typed() {
 }
 
 #[test]
-fn approved_parking_policies_cover_every_operation_without_drift() {
-    let aggregate_operations = [
-        ReservationOperation::Initial,
-        ReservationOperation::Recovery,
-        ReservationOperation::Renewal,
-    ];
-    for operation in aggregate_operations {
-        assert_eq!(
-            operation.approved_parking_lock_scope(),
-            ApprovedParkingLockScope::SubscriptionAggregate,
-        );
-    }
-    assert_eq!(
-        ReservationOperation::PaymentMethodReplacement.approved_parking_lock_scope(),
-        ApprovedParkingLockScope::AttemptOnly,
-    );
-    assert!(ReservationOperation::Initial.has_lock_free_approved_evidence_fallback());
-    assert!(ReservationOperation::Recovery.has_lock_free_approved_evidence_fallback());
-    assert!(!ReservationOperation::Renewal.has_lock_free_approved_evidence_fallback());
-    assert!(
-        ReservationOperation::PaymentMethodReplacement.has_lock_free_approved_evidence_fallback()
-    );
-
+fn terminal_approval_requires_reversal_only_with_charged_transaction() {
     let attempt = initial_attempt_for_matching(
         PaymentAttemptIdentity::new(
             PaymentAttemptId::new(Uuid::from_u128(10)),
@@ -308,19 +286,12 @@ fn approved_parking_policies_cover_every_operation_without_drift() {
         None,
         GatewayPaymentDescriptor::default(),
     );
-    for operation in aggregate_operations {
-        assert_eq!(
-            operation.terminal_approved_progression(&attempt, &charged),
-            ProcessorChargeProgression::ExternalReversalRequired,
-        );
-        assert_eq!(
-            operation.terminal_approved_progression(&attempt, &ProcessorEvidence::default()),
-            ProcessorChargeProgression::ReconciliationRequired,
-        );
-    }
     assert_eq!(
-        ReservationOperation::PaymentMethodReplacement
-            .terminal_approved_progression(&attempt, &charged),
+        terminal_approved_progression(&attempt, &charged),
+        ProcessorChargeProgression::ExternalReversalRequired,
+    );
+    assert_eq!(
+        terminal_approved_progression(&attempt, &ProcessorEvidence::default()),
         ProcessorChargeProgression::ReconciliationRequired,
     );
 }
@@ -459,5 +430,43 @@ fn not_submitted_surface_requires_a_flow_with_prepared_replay() {
         &attempt,
         policy,
         PreparedAttemptReplay::Unsupported,
+    ));
+}
+
+#[test]
+fn evidence_retry_policy_excludes_pool_and_non_database_errors() {
+    for (codes, expected) in [
+        (&["40001", "40P01", "55P03", "57014"][..], true),
+        (
+            &["00000", "08006", "23505", "23514", "42P01", "XX000"][..],
+            false,
+        ),
+    ] {
+        for &code in codes {
+            assert_eq!(
+                is_retryable_evidence_error(&SubscriptionEnrollmentApplicationError::Sql(
+                    crate::test_support::sqlstate_error(code)
+                )),
+                expected,
+                "direct {code}"
+            );
+            assert_eq!(
+                is_retryable_evidence_error(&SubscriptionEnrollmentApplicationError::Attempt(
+                    PaymentAttemptStoreError::Sql(crate::test_support::sqlstate_error(code))
+                )),
+                expected,
+                "nested {code}"
+            );
+        }
+    }
+    for error in [sqlx::Error::PoolTimedOut, sqlx::Error::RowNotFound] {
+        assert!(!is_retryable_evidence_error(
+            &SubscriptionEnrollmentApplicationError::Sql(error),
+        ));
+    }
+    assert!(!is_retryable_evidence_error(
+        &SubscriptionEnrollmentApplicationError::Attempt(PaymentAttemptStoreError::Sql(
+            sqlx::Error::PoolTimedOut
+        ),),
     ));
 }
