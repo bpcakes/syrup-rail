@@ -65,42 +65,65 @@ pub(crate) async fn commit_rate_limit_cooldown_for_operation(
     match commit_rate_limit_cooldown_for_identity(pool, identity, provider_key, cooldown).await? {
         RateLimitCooldownCommitDisposition::Applied => Ok(()),
         RateLimitCooldownCommitDisposition::IdentityNotDurable => {
-            tracing::warn!(
-                target: "syrup_rail::gateway_cooldown",
-                billing_scope_id = %identity.billing_scope_id().as_uuid(),
-                gateway_account_id = %identity.gateway_account_id().as_uuid(),
-                provider_key = provider_key.as_str(),
-                ?cooldown,
-                "{}",
-                operation.identity_not_durable_message()
+            log_rate_limit_cooldown_warning(
+                identity,
+                provider_key,
+                cooldown,
+                operation.identity_not_durable_message(),
             );
             Ok(())
         }
         RateLimitCooldownCommitDisposition::IdentityChanged => {
-            tracing::warn!(
-                target: "syrup_rail::gateway_cooldown",
-                billing_scope_id = %identity.billing_scope_id().as_uuid(),
-                gateway_account_id = %identity.gateway_account_id().as_uuid(),
-                provider_key = provider_key.as_str(),
-                ?cooldown,
-                "{}",
-                operation.identity_changed_message()
+            log_rate_limit_cooldown_warning(
+                identity,
+                provider_key,
+                cooldown,
+                operation.identity_changed_message(),
             );
             Ok(())
         }
         RateLimitCooldownCommitDisposition::MissingProviderCooldown => {
-            tracing::error!(
-                target: "syrup_rail::gateway_cooldown",
-                billing_scope_id = %identity.billing_scope_id().as_uuid(),
-                gateway_account_id = %identity.gateway_account_id().as_uuid(),
-                provider_key = provider_key.as_str(),
-                ?cooldown,
-                "{}",
-                operation.missing_provider_message()
+            log_missing_provider_cooldown(
+                identity,
+                provider_key,
+                cooldown,
+                operation.missing_provider_message(),
             );
             Err(RateLimitCooldownCommitError::MissingProviderCooldown)
         }
     }
+}
+
+fn log_rate_limit_cooldown_warning(
+    identity: PaymentAttemptIdentity,
+    provider_key: &GatewayProviderKey,
+    cooldown: RateLimitCooldown,
+    message: &'static str,
+) {
+    tracing::warn!(
+        target: "syrup_rail::gateway_cooldown",
+        billing_scope_id = %identity.billing_scope_id().as_uuid(),
+        gateway_account_id = %identity.gateway_account_id().as_uuid(),
+        provider_key = provider_key.as_str(),
+        ?cooldown,
+        "{message}"
+    );
+}
+
+fn log_missing_provider_cooldown(
+    identity: PaymentAttemptIdentity,
+    provider_key: &GatewayProviderKey,
+    cooldown: RateLimitCooldown,
+    message: &'static str,
+) {
+    tracing::error!(
+        target: "syrup_rail::gateway_cooldown",
+        billing_scope_id = %identity.billing_scope_id().as_uuid(),
+        gateway_account_id = %identity.gateway_account_id().as_uuid(),
+        provider_key = provider_key.as_str(),
+        ?cooldown,
+        "{message}"
+    );
 }
 
 pub(crate) async fn rate_limit_cooldown_identity_is_durable(

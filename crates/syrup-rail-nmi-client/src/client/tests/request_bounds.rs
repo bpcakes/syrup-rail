@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
+fn sale_payment_token_enforces_inclusive_byte_limit() {
     let mut sale = test_sale_request(PaymentSource::PaymentToken(
         "t".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES),
     ));
@@ -11,7 +11,10 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
         validate_sale_request(&sale, "private_key"),
         Err(MutationError::InvalidRequest(_))
     ));
+}
 
+#[test]
+fn sale_customer_vault_id_enforces_inclusive_byte_limit() {
     let mut sale = test_sale_request(PaymentSource::CustomerVault(
         "v".repeat(MAX_NMI_IDENTIFIER_BYTES),
     ));
@@ -21,7 +24,10 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
         validate_sale_request(&sale, "private_key"),
         Err(MutationError::InvalidRequest(_))
     ));
+}
 
+#[test]
+fn sale_order_id_enforces_inclusive_byte_limit() {
     let mut sale = test_sale_request(PaymentSource::PaymentToken("tok_test".to_owned()));
     sale.order_id = "o".repeat(MAX_NMI_ORDER_ID_BYTES);
     assert!(validate_sale_request(&sale, "private_key").is_ok());
@@ -30,7 +36,10 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
         validate_sale_request(&sale, "private_key"),
         Err(MutationError::InvalidRequest(_))
     ));
+}
 
+#[test]
+fn recurring_initial_transaction_id_enforces_inclusive_byte_limit() {
     let mut sale = test_sale_request(PaymentSource::CustomerVault("vault_test".to_owned()));
     sale.intent = SaleIntent::RecurringStoredCredential {
         customer_vault_id: "vault_test".to_owned(),
@@ -45,7 +54,10 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
         validate_sale_request(&sale, "private_key"),
         Err(MutationError::InvalidRequest(_))
     ));
+}
 
+#[test]
+fn transaction_query_fields_enforce_inclusive_byte_limits() {
     let query = TransactionQuery {
         transaction_id: Some("q".repeat(MAX_NMI_IDENTIFIER_BYTES)),
         order_id: Some("o".repeat(MAX_NMI_ORDER_ID_BYTES)),
@@ -67,7 +79,10 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
         validate_transaction_query(&query, "query_key"),
         Err(QueryError::InvalidRequest(_))
     ));
+}
 
+#[test]
+fn report_query_dates_enforce_inclusive_byte_limits() {
     let report = ReportQuery {
         start_date: "s".repeat(MAX_NMI_REPORT_DATE_BYTES),
         end_date: "e".repeat(MAX_NMI_REPORT_DATE_BYTES),

@@ -98,6 +98,11 @@ pub trait BillingTransactionCoordinator: Send + Sync {
 ///
 /// The returned connection is the same transaction on which `append_event`
 /// and `commit` operate. Implementations must not acquire another connection.
+/// Dropping a value that has not completed `commit` or `rollback` must make all
+/// of its writes non-durable and release its locks. This rollback-on-drop
+/// guarantee is required because an async caller can be canceled while the
+/// transaction is borrowed; completed error paths still request an explicit
+/// rollback before returning.
 #[async_trait]
 pub trait BillingTransaction: Send {
     /// Returns the connection owned by this exact host transaction.

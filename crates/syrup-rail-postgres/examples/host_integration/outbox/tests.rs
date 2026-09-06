@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, time::Duration};
 
-use chrono::TimeZone;
+use chrono::{DateTime, TimeZone};
 use postgres_test_harness::{HarnessConfig, PostgresHarness};
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use syrup_rail::{
@@ -21,6 +21,90 @@ fn attempt(value: u128) -> PaymentAttemptId {
 
 fn subscription(value: u128) -> SubscriptionId {
     SubscriptionId::new(id(value))
+}
+
+fn assert_host_event_envelope(
+    envelope: &HostBillingEventEnvelopeV1,
+    value: &serde_json::Value,
+    index: usize,
+    occurred_at: DateTime<Utc>,
+    expected_semantic_id: Uuid,
+    expected_payload: &serde_json::Value,
+) {
+    assert_host_event_wire_contract(envelope, value, expected_semantic_id, expected_payload);
+    assert_host_event_replay_and_redaction(envelope, value, index, occurred_at);
+}
+
+fn assert_host_event_wire_contract(
+    envelope: &HostBillingEventEnvelopeV1,
+    value: &serde_json::Value,
+    expected_semantic_id: Uuid,
+    expected_payload: &serde_json::Value,
+) {
+    let object = value.as_object().unwrap();
+    assert_eq!(
+        object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            "billing_scope_id",
+            "event_id",
+            "kind",
+            "occurred_at",
+            "payload",
+            "schema_version",
+            "semantic_key",
+            "subscriber_id",
+        ])
+    );
+    assert_eq!(
+        value["payload"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["data", "type"])
+    );
+    assert_eq!(value["kind"], envelope.kind());
+    assert_eq!(value["semantic_key"]["kind"], envelope.semantic_kind());
+    assert_eq!(
+        value["semantic_key"]["identity"],
+        expected_semantic_id.to_string()
+    );
+    assert_eq!(value["payload"]["type"], envelope.kind());
+    assert_eq!(&value["payload"], expected_payload);
+}
+
+fn assert_host_event_replay_and_redaction(
+    envelope: &HostBillingEventEnvelopeV1,
+    value: &serde_json::Value,
+    index: usize,
+    occurred_at: DateTime<Utc>,
+) {
+    let reconstructed = HostBillingEventEnvelopeV1::from_persisted_parts(
+        id(200 + index as u128),
+        occurred_at,
+        envelope.event_version(),
+        envelope.billing_scope_id(),
+        envelope.subscriber_id(),
+        envelope.kind(),
+        envelope.semantic_kind(),
+        envelope.semantic_id(),
+        value["payload"].clone(),
+    )
+    .unwrap();
+    assert!(envelope.replay_matches(&reconstructed));
+    let json = serde_json::to_string(value).unwrap();
+    assert_eq!(envelope.schema_version(), 1);
+    assert_eq!(envelope.billing_scope_id(), id(1));
+    assert_eq!(envelope.subscriber_id(), id(2));
+    assert_eq!(envelope.kind(), envelope.semantic_kind());
+    assert_eq!(envelope.event_id(), id(100 + index as u128));
+    assert_eq!(envelope.occurred_at(), occurred_at);
+    assert!(!json.contains("payment_token"));
+    assert!(!json.contains("billing_contact"));
+    assert!(!json.contains("gateway_transaction"));
+    assert!(!json.contains("idempotency"));
+    assert!(!json.contains("super-secret"));
 }
 
 #[test]
@@ -164,62 +248,14 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             event,
         );
         let value = serde_json::to_value(&envelope).unwrap();
-        let object = value.as_object().unwrap();
-        assert_eq!(
-            object.keys().map(String::as_str).collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                "billing_scope_id",
-                "event_id",
-                "kind",
-                "occurred_at",
-                "payload",
-                "schema_version",
-                "semantic_key",
-                "subscriber_id",
-            ])
-        );
-        assert_eq!(
-            value["payload"]
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["data", "type"])
-        );
-        assert_eq!(value["kind"], envelope.kind());
-        assert_eq!(value["semantic_key"]["kind"], envelope.semantic_kind());
-        assert_eq!(
-            value["semantic_key"]["identity"],
-            expected_semantic_ids[index].to_string()
-        );
-        assert_eq!(value["payload"]["type"], envelope.kind());
-        assert_eq!(value["payload"], expected_payloads[index]);
-        let reconstructed = HostBillingEventEnvelopeV1::from_persisted_parts(
-            id(200 + index as u128),
+        assert_host_event_envelope(
+            &envelope,
+            &value,
+            index,
             started_at,
-            envelope.event_version(),
-            envelope.billing_scope_id(),
-            envelope.subscriber_id(),
-            envelope.kind(),
-            envelope.semantic_kind(),
-            envelope.semantic_id(),
-            value["payload"].clone(),
-        )
-        .unwrap();
-        assert!(envelope.replay_matches(&reconstructed));
-        let json = serde_json::to_string(&value).unwrap();
-        assert_eq!(envelope.schema_version(), 1);
-        assert_eq!(envelope.billing_scope_id(), id(1));
-        assert_eq!(envelope.subscriber_id(), id(2));
-        assert_eq!(envelope.kind(), envelope.semantic_kind());
-        assert_eq!(envelope.event_id(), id(100 + index as u128));
-        assert_eq!(envelope.occurred_at(), started_at);
-        assert!(!json.contains("payment_token"));
-        assert!(!json.contains("billing_contact"));
-        assert!(!json.contains("gateway_transaction"));
-        assert!(!json.contains("idempotency"));
-        assert!(!json.contains("super-secret"));
+            expected_semantic_ids[index],
+            &expected_payloads[index],
+        );
         kinds.push(envelope.replay.kind);
     }
 
@@ -313,8 +349,7 @@ fn version_one_failure_payloads_preserve_all_legacy_projection_matrices() {
     }
 }
 
-#[test]
-fn replay_contract_excludes_first_write_facts_and_rejects_every_stable_mismatch() {
+fn replay_contract_fixture() -> HostBillingEventEnvelopeV1 {
     let subject = BillingEventSubject::new(BillingScopeId::new(id(1)), SubscriberId::new(id(2)));
     let event = BillingEvent::PaymentMethodChanged {
         attempt_id: attempt(13),
@@ -326,7 +361,12 @@ fn replay_contract_excludes_first_write_facts_and_rejects_every_stable_mismatch(
         )),
     };
     let occurred_at = Utc.with_ymd_and_hms(2026, 8, 11, 12, 0, 0).unwrap();
-    let original = HostBillingEventEnvelopeV1::from_domain(id(100), occurred_at, subject, &event);
+    HostBillingEventEnvelopeV1::from_domain(id(100), occurred_at, subject, &event)
+}
+
+#[test]
+fn replay_contract_excludes_first_write_facts() {
+    let original = replay_contract_fixture();
 
     let mut same_replay = original.clone();
     same_replay.event_id = id(101);
@@ -369,7 +409,11 @@ fn replay_contract_excludes_first_write_facts_and_rejects_every_stable_mismatch(
     assert!(original.replay_matches(&reconstructed));
     assert_eq!(reconstructed.event_id(), id(101));
     assert_ne!(reconstructed.occurred_at(), original.occurred_at());
+}
 
+#[test]
+fn replay_decode_rejects_invalid_version_kinds_and_payloads() {
+    let original = replay_contract_fixture();
     let decode_parts = |version, event_kind: &str, semantic_kind: &str, payload| {
         HostBillingEventReplayV1::from_persisted_parts(
             version,
@@ -476,7 +520,11 @@ fn replay_contract_excludes_first_write_facts_and_rejects_every_stable_mismatch(
         .unwrap_err(),
         HostBillingEventReplayDecodeErrorV1::InvalidPayload
     );
+}
 
+#[test]
+fn replay_contract_rejects_every_stable_mismatch() {
+    let original = replay_contract_fixture();
     let mut changed = original.clone();
     changed.replay.schema_version += 1;
     assert!(!original.replay_matches(&changed));
@@ -508,7 +556,11 @@ fn replay_contract_excludes_first_write_facts_and_rejects_every_stable_mismatch(
     };
     card.as_mut().unwrap().last_four = "1111".to_owned();
     assert!(!original.replay_matches(&changed));
+}
 
+#[test]
+fn replay_contract_debug_is_redacted() {
+    let original = replay_contract_fixture();
     let debug = format!("{original:?} {:?}", original.replay_contract());
     assert!(debug.contains("PaymentMethodChanged"));
     for sensitive in [

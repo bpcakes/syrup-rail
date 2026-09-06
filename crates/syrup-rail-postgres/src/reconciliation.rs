@@ -74,6 +74,12 @@ struct PendingChargeCandidate {
     observed_at: DateTime<Utc>,
 }
 
+enum PendingChargeClassificationOutcome {
+    Transitioned,
+    SkippedLocked,
+    Missing,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AttemptLocator {
     id: Uuid,
@@ -609,56 +615,13 @@ pub async fn classify_pending_processor_charges(
             if transitioned >= transition_limit {
                 break;
             }
-            let mut transaction = pool.begin().await?;
-            set_enrollment_timeouts(&mut transaction).await?;
-            let Some(locator) = attempt_locator(&mut transaction, candidate.attempt_id).await?
-            else {
-                transaction.rollback().await?;
-                continue;
-            };
-            if locator.gateway_account_id != gateway_account_id {
-                return Err(invalid_reconciliation_state());
-            }
-            if let Some(plan_key) = locator.plan_key.as_ref()
-                && !try_lock_subscription_aggregate(
-                    &mut transaction,
-                    locator.subscriber_id,
-                    plan_key,
-                )
+            match classify_pending_processor_charge_candidate(pool, gateway_account_id, candidate)
                 .await?
             {
-                skipped_locked += 1;
-                transaction.rollback().await?;
-                continue;
+                PendingChargeClassificationOutcome::Transitioned => transitioned += 1,
+                PendingChargeClassificationOutcome::SkippedLocked => skipped_locked += 1,
+                PendingChargeClassificationOutcome::Missing => {}
             }
-            let Some(attempt) = lock_attempt_for_classification(&mut transaction, locator).await?
-            else {
-                skipped_locked += 1;
-                transaction.rollback().await?;
-                continue;
-            };
-            let Some(charge) = lock_pending_charge_for_classification(
-                &mut transaction,
-                candidate.id,
-                candidate.attempt_id,
-            )
-            .await?
-            else {
-                skipped_locked += 1;
-                transaction.rollback().await?;
-                continue;
-            };
-            if !charge.dimensions_match || charge.transaction_id != candidate.transaction_id {
-                return Err(invalid_reconciliation_state());
-            }
-
-            let attestation =
-                lock_external_reversal_attestation(&mut transaction, &attempt, &charge).await?;
-            let transition = classify_pending_charge(&attempt, &charge, attestation.as_ref())
-                .map_err(|_| invalid_reconciliation_state())?;
-            transition_pending_charge(&mut transaction, charge.id, transition).await?;
-            transaction.commit().await?;
-            transitioned += 1;
         }
     }
 
@@ -667,6 +630,54 @@ pub async fn classify_pending_processor_charges(
         skipped_locked,
         remaining_pending: count_pending_processor_charges(pool, gateway_account_id).await?,
     })
+}
+
+async fn classify_pending_processor_charge_candidate(
+    pool: &PgPool,
+    gateway_account_id: GatewayAccountId,
+    candidate: PendingChargeCandidate,
+) -> Result<PendingChargeClassificationOutcome, sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    set_enrollment_timeouts(&mut transaction).await?;
+    let Some(locator) = attempt_locator(&mut transaction, candidate.attempt_id).await? else {
+        transaction.rollback().await?;
+        return Ok(PendingChargeClassificationOutcome::Missing);
+    };
+    if locator.gateway_account_id != gateway_account_id {
+        return Err(invalid_reconciliation_state());
+    }
+    if let Some(plan_key) = locator.plan_key.as_ref()
+        && !try_lock_subscription_aggregate(&mut transaction, locator.subscriber_id, plan_key)
+            .await?
+    {
+        transaction.rollback().await?;
+        return Ok(PendingChargeClassificationOutcome::SkippedLocked);
+    }
+    let Some(attempt) = lock_attempt_for_classification(&mut transaction, locator).await? else {
+        transaction.rollback().await?;
+        return Ok(PendingChargeClassificationOutcome::SkippedLocked);
+    };
+    let Some(charge) = lock_pending_charge_for_classification(
+        &mut transaction,
+        candidate.id,
+        candidate.attempt_id,
+    )
+    .await?
+    else {
+        transaction.rollback().await?;
+        return Ok(PendingChargeClassificationOutcome::SkippedLocked);
+    };
+    if !charge.dimensions_match || charge.transaction_id != candidate.transaction_id {
+        return Err(invalid_reconciliation_state());
+    }
+
+    let attestation =
+        lock_external_reversal_attestation(&mut transaction, &attempt, &charge).await?;
+    let transition = classify_pending_charge(&attempt, &charge, attestation.as_ref())
+        .map_err(|_| invalid_reconciliation_state())?;
+    transition_pending_charge(&mut transaction, charge.id, transition).await?;
+    transaction.commit().await?;
+    Ok(PendingChargeClassificationOutcome::Transitioned)
 }
 
 #[cfg(test)]

@@ -1,87 +1,93 @@
 use super::*;
 use std::{error::Error as _, io};
 
+fn assert_service_error_contract(
+    error: SubscriptionBillingServiceError,
+    message: &str,
+    debug_name: &str,
+    has_source: Option<bool>,
+) {
+    assert_eq!(error.to_string(), message);
+    assert_eq!(format!("{error:?}"), debug_name);
+    if let Some(has_source) = has_source {
+        assert_eq!(error.source().is_some(), has_source);
+    }
+}
+
 #[test]
 fn billing_service_error_name_and_generic_messages_cover_the_whole_facade() {
-    let sql = SubscriptionBillingServiceError::Sql(sqlx::Error::RowNotFound);
-    assert_eq!(sql.to_string(), "subscription billing storage failed");
-    assert_eq!(format!("{sql:?}"), "SubscriptionBillingServiceError::Sql");
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::Sql(sqlx::Error::RowNotFound),
+        "subscription billing storage failed",
+        "SubscriptionBillingServiceError::Sql",
+        None,
+    );
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::StorageTemporarilyUnavailable(sqlx::Error::PoolTimedOut),
+        "subscription billing storage is temporarily unavailable",
+        "SubscriptionBillingServiceError::StorageTemporarilyUnavailable",
+        Some(true),
+    );
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::Attempt(PaymentAttemptStoreError::InvalidState(
+            "test payment attempt state",
+        )),
+        "payment attempt storage failed",
+        "SubscriptionBillingServiceError::Attempt",
+        None,
+    );
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::Application(
+            SubscriptionEnrollmentApplicationError::InvalidState("test application state"),
+        ),
+        "subscription payment application failed",
+        "SubscriptionBillingServiceError::Application",
+        None,
+    );
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::Cancellation(
+            crate::SubscriptionCancellationError::InvalidState("test cancellation state"),
+        ),
+        "subscription cancellation failed",
+        "SubscriptionBillingServiceError::Cancellation",
+        Some(true),
+    );
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::Discount(
+            crate::SubscriptionDiscountOperationError::InvalidState("test discount state"),
+        ),
+        "subscription discount operation failed",
+        "SubscriptionBillingServiceError::Discount",
+        Some(true),
+    );
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::BillingTransaction(crate::BillingTransactionError::new(
+            io::Error::other("test transaction failure"),
+        )),
+        "host billing transaction failed",
+        "SubscriptionBillingServiceError::BillingTransaction",
+        Some(true),
+    );
+    assert_service_error_contract(
+        SubscriptionBillingServiceError::BillingEvent(crate::BillingEventWriteError::new(
+            io::Error::other("test event failure"),
+        )),
+        "host billing event append failed",
+        "SubscriptionBillingServiceError::BillingEvent",
+        Some(true),
+    );
+}
 
-    let transient =
-        SubscriptionBillingServiceError::StorageTemporarilyUnavailable(sqlx::Error::PoolTimedOut);
+fn assert_service_error_disposition(
+    error: SubscriptionBillingServiceError,
+    expected: SubscriptionBillingServiceErrorDisposition,
+    case: &str,
+) {
     assert_eq!(
-        transient.to_string(),
-        "subscription billing storage is temporarily unavailable"
+        error.disposition(),
+        expected,
+        "unexpected disposition for {case}",
     );
-    assert_eq!(
-        format!("{transient:?}"),
-        "SubscriptionBillingServiceError::StorageTemporarilyUnavailable"
-    );
-    assert!(transient.source().is_some());
-
-    let attempt = SubscriptionBillingServiceError::Attempt(PaymentAttemptStoreError::InvalidState(
-        "test payment attempt state",
-    ));
-    assert_eq!(attempt.to_string(), "payment attempt storage failed");
-    assert_eq!(
-        format!("{attempt:?}"),
-        "SubscriptionBillingServiceError::Attempt"
-    );
-
-    let application = SubscriptionBillingServiceError::Application(
-        SubscriptionEnrollmentApplicationError::InvalidState("test application state"),
-    );
-    assert_eq!(
-        application.to_string(),
-        "subscription payment application failed"
-    );
-    assert_eq!(
-        format!("{application:?}"),
-        "SubscriptionBillingServiceError::Application"
-    );
-
-    let cancellation = SubscriptionBillingServiceError::Cancellation(
-        crate::SubscriptionCancellationError::InvalidState("test cancellation state"),
-    );
-    assert_eq!(cancellation.to_string(), "subscription cancellation failed");
-    assert_eq!(
-        format!("{cancellation:?}"),
-        "SubscriptionBillingServiceError::Cancellation"
-    );
-    assert!(cancellation.source().is_some());
-
-    let discount = SubscriptionBillingServiceError::Discount(
-        crate::SubscriptionDiscountOperationError::InvalidState("test discount state"),
-    );
-    assert_eq!(
-        discount.to_string(),
-        "subscription discount operation failed"
-    );
-    assert_eq!(
-        format!("{discount:?}"),
-        "SubscriptionBillingServiceError::Discount"
-    );
-    assert!(discount.source().is_some());
-
-    let transaction = SubscriptionBillingServiceError::BillingTransaction(
-        crate::BillingTransactionError::new(io::Error::other("test transaction failure")),
-    );
-    assert_eq!(transaction.to_string(), "host billing transaction failed");
-    assert_eq!(
-        format!("{transaction:?}"),
-        "SubscriptionBillingServiceError::BillingTransaction"
-    );
-    assert!(transaction.source().is_some());
-
-    let event = SubscriptionBillingServiceError::BillingEvent(crate::BillingEventWriteError::new(
-        io::Error::other("test event failure"),
-    ));
-    assert_eq!(event.to_string(), "host billing event append failed");
-    assert_eq!(
-        format!("{event:?}"),
-        "SubscriptionBillingServiceError::BillingEvent"
-    );
-    assert!(event.source().is_some());
 }
 
 #[test]
@@ -89,13 +95,7 @@ fn service_error_disposition_matrix_covers_each_current_variant() {
     macro_rules! assert_disposition_matrix {
         ($($error:expr => $expected:expr),+ $(,)?) => {
             $(
-                let error = $error;
-                assert_eq!(
-                    error.disposition(),
-                    $expected,
-                    "unexpected disposition for {}",
-                    stringify!($error),
-                );
+                assert_service_error_disposition($error, $expected, stringify!($error));
             )+
         };
     }
@@ -306,7 +306,7 @@ fn subscriber_admission_mapping_preserves_each_error_variant() {
 }
 
 #[test]
-fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
+fn readiness_cooldowns_preserve_codes_scopes_and_diagnostics() {
     for (scope, code, detail) in [
         (
             GatewayMutationCooldownScope::Account,
@@ -326,7 +326,10 @@ fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         assert_eq!(policy.cooldown_error_scope(), Some(scope));
         assert_eq!(failure.into_detail().expose(), detail);
     }
+}
 
+#[test]
+fn provider_rate_limit_readiness_preserves_cooldown_and_diagnostics() {
     let provider = SubscriberReadinessFailure::Gateway(GatewayError::RateLimited(
         GatewayDiagnostic::new("provider asked to retry later"),
     ));
@@ -347,7 +350,10 @@ fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         provider.into_detail().expose(),
         "provider asked to retry later"
     );
+}
 
+#[test]
+fn ordinary_gateway_readiness_failures_preserve_codes_and_diagnostics() {
     for (error, code) in [
         (
             GatewayError::RequestRejected(GatewayDiagnostic::new("request rejected")),
@@ -387,7 +393,10 @@ fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
         );
         assert_eq!(failure.into_detail().expose(), detail.expose());
     }
+}
 
+#[test]
+fn account_mode_readiness_failures_preserve_codes_and_diagnostics() {
     for (required, code, detail) in [
         (
             GatewayAccountMode::Live,

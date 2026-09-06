@@ -145,14 +145,51 @@ pub async fn attest_external_reversal(
         return Ok(ExternalReversalAttestationOutcome::Ineligible);
     }
 
-    let resolution = expected_reversal_resolution(&attempt, &charge, kind);
-    let attested_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-        .fetch_one(&mut *transaction)
-        .await?;
-    insert_attestation(
+    persist_external_reversal(
         &mut transaction,
+        host,
         &attempt,
         &charge,
+        actor_id,
+        kind,
+        reason,
+    )
+    .await?;
+    let attempt = load_attempt(
+        &mut transaction,
+        locator.billing_scope_id,
+        locator.attempt_id,
+    )
+    .await?;
+    let attestation = attestation_by_charge(&mut transaction, processor_charge_id.into_uuid())
+        .await?
+        .ok_or(OperatorReviewError::InvalidState(
+            "external reversal attestation disappeared while locked",
+        ))?;
+    transaction.commit().await?;
+    Ok(ExternalReversalAttestationOutcome::Attested {
+        attempt,
+        attestation,
+    })
+}
+
+async fn persist_external_reversal(
+    transaction: &mut Transaction<'_, Postgres>,
+    host: &dyn ExternalReversalHostStore,
+    attempt: &PaymentAttempt,
+    charge: &ProcessorCharge,
+    actor_id: ActorId,
+    kind: ExternalReversalKind,
+    reason: &ExternalReversalReason,
+) -> Result<(), OperatorReviewError> {
+    let resolution = expected_reversal_resolution(attempt, charge, kind);
+    let attested_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut **transaction)
+        .await?;
+    insert_attestation(
+        transaction,
+        attempt,
+        charge,
         actor_id,
         reason,
         resolution,
@@ -169,9 +206,9 @@ pub async fn attest_external_reversal(
         WHERE id = $1 AND progression_state = 'external_reversal_required'
         "#,
     )
-    .bind(processor_charge_id.as_uuid())
+    .bind(charge.id().as_uuid())
     .bind(resolution.prior_resolution_code())
-    .execute(&mut *transaction)
+    .execute(&mut **transaction)
     .await?;
     if updated.rows_affected() != 1 {
         return Err(OperatorReviewError::InvalidState(
@@ -191,7 +228,7 @@ pub async fn attest_external_reversal(
         .bind(resolution.final_resolution_code().as_str())
         .bind(attested_at)
         .bind(attempt.status().as_str())
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?;
         if updated.rows_affected() != 1 {
             return Err(OperatorReviewError::InvalidState(
@@ -199,25 +236,10 @@ pub async fn attest_external_reversal(
             ));
         }
     }
-    if can_release_host_target(&attempt, &charge) {
-        release_host_target(host, &mut transaction, &attempt).await?;
+    if can_release_host_target(attempt, charge) {
+        release_host_target(host, transaction, attempt).await?;
     }
-    let attempt = load_attempt(
-        &mut transaction,
-        locator.billing_scope_id,
-        locator.attempt_id,
-    )
-    .await?;
-    let attestation = attestation_by_charge(&mut transaction, processor_charge_id.into_uuid())
-        .await?
-        .ok_or(OperatorReviewError::InvalidState(
-            "external reversal attestation disappeared while locked",
-        ))?;
-    transaction.commit().await?;
-    Ok(ExternalReversalAttestationOutcome::Attested {
-        attempt,
-        attestation,
-    })
+    Ok(())
 }
 
 pub(super) async fn charge_locator(

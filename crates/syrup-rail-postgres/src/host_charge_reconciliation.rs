@@ -50,6 +50,11 @@ struct StaleHostChargeCandidate {
     target_id: Uuid,
 }
 
+enum StaleHostChargeCleanupOutcome {
+    Failed,
+    Skipped,
+}
+
 /// Fails one bounded account-scoped batch of stale local host charges.
 ///
 /// Candidate selection first makes a durable scheduling claim with
@@ -71,84 +76,96 @@ pub async fn fail_stale_unsubmitted_host_charges(
 
     let mut summary = StaleHostChargeCleanupSummary::default();
     for candidate in candidates {
-        let mut transaction = pool.begin().await?;
-        set_application_timeouts(&mut transaction).await?;
-        let effective_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
-            .fetch_one(&mut *transaction)
-            .await?;
-        let target_outcome = targets
-            .apply_transition(
-                &mut transaction,
-                HostChargeTargetTransition::new(
-                    BillingScopeId::new(candidate.billing_scope_id),
-                    SubscriberId::new(candidate.subscriber_id),
-                    PaymentAttemptId::new(candidate.attempt_id),
-                    HostChargeTargetId::new(candidate.target_id),
-                    HostChargeTargetTransitionKind::ReleasedBeforeSubmission,
-                    effective_at,
-                ),
-            )
-            .await?;
-        if !target_outcome.is_applied() {
-            tracing::warn!(
-                target: "syrup_rail::host_charge_reconciliation",
-                billing_scope_id = %candidate.billing_scope_id,
-                subscriber_id = %candidate.subscriber_id,
-                attempt_id = %candidate.attempt_id,
-                target_id = %candidate.target_id,
-                ?target_outcome,
-                "host target refused stale unsubmitted charge release; leaving attempt unresolved"
-            );
-            transaction.rollback().await?;
-            summary.skipped += 1;
-            continue;
+        match fail_stale_host_charge_candidate(pool, targets, gateway_account_id, policy, candidate)
+            .await?
+        {
+            StaleHostChargeCleanupOutcome::Failed => summary.failed += 1,
+            StaleHostChargeCleanupOutcome::Skipped => summary.skipped += 1,
         }
-
-        let result = sqlx::query(
-            r#"
-            UPDATE billing_payment_attempts
-            SET status = 'failed',
-                gateway_response_text = $6,
-                gateway_condition = COALESCE(gateway_condition, 'failed'),
-                resolved_at = COALESCE(resolved_at, clock_timestamp()),
-                updated_at = clock_timestamp()
-            WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
-                AND host_charge_target_id = $4 AND gateway_account_id = $5
-                AND attempt_kind = 'host_charge'
-                AND status = ANY($7::text[])
-                AND submitted_at IS NULL
-                AND created_at <= clock_timestamp()
-                    - ($8::bigint * interval '1 second')
-            "#,
-        )
-        .bind(candidate.attempt_id)
-        .bind(candidate.billing_scope_id)
-        .bind(candidate.subscriber_id)
-        .bind(candidate.target_id)
-        .bind(gateway_account_id.as_uuid())
-        .bind(STALE_UNSUBMITTED_HOST_CHARGE_TEXT)
-        .bind(LocalAttemptPolicy::expirable_status_values())
-        .bind(policy.stale_after_seconds())
-        .execute(&mut *transaction)
-        .await;
-        let result = match result {
-            Ok(result) => result,
-            Err(error) if is_lock_not_available(&error) => {
-                transaction.rollback().await?;
-                summary.skipped += 1;
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        if result.rows_affected() == 0 {
-            transaction.rollback().await?;
-            summary.skipped += 1;
-            continue;
-        }
-        transaction.commit().await?;
-        summary.failed += 1;
     }
     Ok(summary)
+}
+
+async fn fail_stale_host_charge_candidate(
+    pool: &PgPool,
+    targets: &dyn HostChargeTargetStore,
+    gateway_account_id: GatewayAccountId,
+    policy: LocalAttemptPolicy,
+    candidate: StaleHostChargeCandidate,
+) -> Result<StaleHostChargeCleanupOutcome, HostChargeApplicationError> {
+    let mut transaction = pool.begin().await?;
+    set_application_timeouts(&mut transaction).await?;
+    let effective_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *transaction)
+        .await?;
+    let target_outcome = targets
+        .apply_transition(
+            &mut transaction,
+            HostChargeTargetTransition::new(
+                BillingScopeId::new(candidate.billing_scope_id),
+                SubscriberId::new(candidate.subscriber_id),
+                PaymentAttemptId::new(candidate.attempt_id),
+                HostChargeTargetId::new(candidate.target_id),
+                HostChargeTargetTransitionKind::ReleasedBeforeSubmission,
+                effective_at,
+            ),
+        )
+        .await?;
+    if !target_outcome.is_applied() {
+        tracing::warn!(
+            target: "syrup_rail::host_charge_reconciliation",
+            billing_scope_id = %candidate.billing_scope_id,
+            subscriber_id = %candidate.subscriber_id,
+            attempt_id = %candidate.attempt_id,
+            target_id = %candidate.target_id,
+            ?target_outcome,
+            "host target refused stale unsubmitted charge release; leaving attempt unresolved"
+        );
+        transaction.rollback().await?;
+        return Ok(StaleHostChargeCleanupOutcome::Skipped);
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET status = 'failed',
+            gateway_response_text = $6,
+            gateway_condition = COALESCE(gateway_condition, 'failed'),
+            resolved_at = COALESCE(resolved_at, clock_timestamp()),
+            updated_at = clock_timestamp()
+        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+            AND host_charge_target_id = $4 AND gateway_account_id = $5
+            AND attempt_kind = 'host_charge'
+            AND status = ANY($7::text[])
+            AND submitted_at IS NULL
+            AND created_at <= clock_timestamp()
+                - ($8::bigint * interval '1 second')
+        "#,
+    )
+    .bind(candidate.attempt_id)
+    .bind(candidate.billing_scope_id)
+    .bind(candidate.subscriber_id)
+    .bind(candidate.target_id)
+    .bind(gateway_account_id.as_uuid())
+    .bind(STALE_UNSUBMITTED_HOST_CHARGE_TEXT)
+    .bind(LocalAttemptPolicy::expirable_status_values())
+    .bind(policy.stale_after_seconds())
+    .execute(&mut *transaction)
+    .await;
+    let result = match result {
+        Ok(result) => result,
+        Err(error) if is_lock_not_available(&error) => {
+            transaction.rollback().await?;
+            return Ok(StaleHostChargeCleanupOutcome::Skipped);
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if result.rows_affected() == 0 {
+        transaction.rollback().await?;
+        return Ok(StaleHostChargeCleanupOutcome::Skipped);
+    }
+    transaction.commit().await?;
+    Ok(StaleHostChargeCleanupOutcome::Failed)
 }
 
 async fn claim_stale_host_charge_candidates(

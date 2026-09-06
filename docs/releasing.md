@@ -22,7 +22,7 @@ and `CHANGELOG.md`. Install the exact additional release tools when they are
 not already available:
 
 ```console
-rustup toolchain install 1.88.0 --profile minimal
+rustup toolchain install 1.88.0 --profile minimal --component clippy
 cargo install cargo-audit --version 0.22.2 --locked
 ```
 
@@ -36,7 +36,7 @@ scripts/check-public-api.sh
 cargo +1.88.0 check --workspace --all-targets --locked
 scripts/jig check contract
 scripts/jig check fmt
-scripts/jig check clippy
+RUSTUP_TOOLCHAIN=1.88.0 scripts/jig check clippy
 scripts/jig check test-locked
 scripts/jig check sqlx
 ```
@@ -46,6 +46,10 @@ workspace, such as `0.3.0`. The advisory check permits only the documented,
 unreachable SQLx-MySQL advisory described in
 [`security/dependency-advisories.md`](security/dependency-advisories.md), and
 fails if that dependency becomes reachable from a workspace build.
+
+The cognitive-complexity threshold is calibrated against Clippy 1.88.0, so the
+release gate deliberately uses that exact evaluator. Newer Clippy versions may
+change the heuristic independently of the code.
 
 Commit the release preparation, push `main`, wait for required CI to pass, and
 rerun `scripts/check-release.sh VERSION` from the clean release commit.

@@ -259,7 +259,7 @@ fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
 }
 
 #[test]
-fn query_forms_share_borrowing_serializer_and_wire_contract() {
+fn account_mode_query_form_borrows_fields_and_preserves_wire_contract() {
     let query_key = Zeroizing::new("query_key_sentinel".to_owned());
     let params = query_account_mode_params(query_key.as_str());
     for key in ["security_key", "report_type"] {
@@ -274,7 +274,11 @@ fn query_forms_share_borrowing_serializer_and_wire_contract() {
         wire.get("report_type").map(String::as_str),
         Some("test_mode_status")
     );
+}
 
+#[test]
+fn transaction_query_form_borrows_fields_and_preserves_wire_contract() {
+    let query_key = Zeroizing::new("query_key_sentinel".to_owned());
     let query = TransactionQuery {
         transaction_id: Some("txn_query".to_owned()),
         order_id: Some("ck_query".to_owned()),
@@ -290,7 +294,11 @@ fn query_forms_share_borrowing_serializer_and_wire_contract() {
     );
     assert_eq!(wire.get("order_id").map(String::as_str), Some("ck_query"));
     assert!(!wire.contains_key("dup_seconds"));
+}
 
+#[test]
+fn report_query_form_borrows_fields_and_preserves_wire_contract() {
+    let query_key = Zeroizing::new("query_key_sentinel".to_owned());
     let report = ReportQuery {
         start_date: "20260701000000".to_owned(),
         end_date: "20260702000000".to_owned(),

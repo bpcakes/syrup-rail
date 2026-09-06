@@ -688,6 +688,21 @@ async fn assert_schema_conforms(
     require_validated_constraints(connection, version).await?;
     require_ready_canonical_indexes(version, &billing_indexes)?;
     require_index_contract(connection, version, GATEWAY_ORDER_INDEX_CONTRACT).await?;
+    require_versioned_index_contracts(connection, version).await?;
+    require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
+        .await?;
+    // Shipped v3 and v4 cannot express the typed tuple matrix in their
+    // constraints, so their compatibility APIs retain the live-row preflight.
+    // V5 validates the invariant during cutover and fingerprints the
+    // replacement constraint.
+    require_versioned_external_reversal_contract(connection, version).await?;
+    require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await
+}
+
+async fn require_versioned_index_contracts(
+    connection: &mut PgConnection,
+    version: u16,
+) -> Result<(), SchemaConformanceError> {
     if version >= 2 {
         let renewal_dispatch_contract = if version >= 4 {
             V4_RENEWAL_DISPATCH_INDEX_CONTRACT
@@ -700,16 +715,17 @@ async fn assert_schema_conforms(
     if version >= 4 {
         require_index_contract(connection, version, MODE_RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
     }
-    require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
-        .await?;
-    // Shipped v3 and v4 cannot express the typed tuple matrix in their
-    // constraints, so their compatibility APIs retain the live-row preflight.
-    // V5 validates the invariant during cutover and fingerprints the
-    // replacement constraint.
+    Ok(())
+}
+
+async fn require_versioned_external_reversal_contract(
+    connection: &mut PgConnection,
+    version: u16,
+) -> Result<(), SchemaConformanceError> {
     if matches!(version, 3 | 4) {
         require_compatible_external_reversal_attestations(connection, version).await?;
     }
-    require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await
+    Ok(())
 }
 
 async fn require_compatible_external_reversal_attestations(

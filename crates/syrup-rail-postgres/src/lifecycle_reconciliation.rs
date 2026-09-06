@@ -485,79 +485,16 @@ async fn apply_or_stage_evidence(
         LifecycleTransition::Apply {
             refunded_amount_cents,
         } => {
-            let result = sqlx::query(
-                r#"
-                UPDATE billing_payment_attempts
-                SET gateway_condition = COALESCE($2, gateway_condition),
-                    gateway_lifecycle_status = $3,
-                    gateway_lifecycle_action = $4,
-                    gateway_lifecycle_at = GREATEST(gateway_lifecycle_at, $5),
-                    refunded_amount_cents = $6,
-                    gateway_lifecycle_reconciled_at = $7,
-                    updated_at = $7
-                WHERE id = $1
-                    AND billing_scope_id = $8
-                    AND gateway_account_id = $9
-                "#,
+            apply_lifecycle_change(
+                &mut transaction,
+                host_charge_targets,
+                account,
+                &evidence,
+                &candidate,
+                refunded_amount_cents,
+                reconciled_at,
             )
-            .bind(candidate.id)
-            .bind(evidence.condition.as_deref())
-            .bind(lifecycle_status(&evidence.state))
-            .bind(evidence.action.as_deref())
-            .bind(evidence.effective_at)
-            .bind(refunded_amount_cents)
-            .bind(reconciled_at)
-            .bind(account.billing_scope_id().as_uuid())
-            .bind(account.gateway_account_id().as_uuid())
-            .execute(&mut *transaction)
-            .await?;
-            if result.rows_affected() != 1 {
-                return Err(GatewayLifecycleReconciliationError::InvalidState(
-                    INVALID_STORED_STATE,
-                ));
-            }
-            let target_transition_applied = if let Some(kind) = evidence.state.full_reversal_kind()
-                && candidate.kind == PaymentAttemptKind::HostCharge
-            {
-                let target_id = candidate.host_charge_target_id.ok_or(
-                    GatewayLifecycleReconciliationError::InvalidState(INVALID_STORED_STATE),
-                )?;
-                let reversed_at =
-                    latest_time(candidate.current_lifecycle_at, evidence.effective_at)
-                        .unwrap_or(reconciled_at);
-                let target_outcome = host_charge_targets
-                    .apply_transition(
-                        &mut transaction,
-                        HostChargeTargetTransition::new(
-                            candidate.billing_scope_id,
-                            candidate.subscriber_id,
-                            PaymentAttemptId::new(candidate.id),
-                            target_id,
-                            HostChargeTargetTransitionKind::Reversed { kind },
-                            reversed_at,
-                        ),
-                    )
-                    .await?;
-                if !target_outcome.is_applied() {
-                    tracing::warn!(
-                        target: "syrup_rail::gateway_lifecycle_reconciliation",
-                        billing_scope_id = %candidate.billing_scope_id.as_uuid(),
-                        subscriber_id = %candidate.subscriber_id.as_uuid(),
-                        attempt_id = %candidate.id,
-                        target_id = %target_id.as_uuid(),
-                        ?target_outcome,
-                        "host target refused a full-reversal transition; leaving lifecycle evidence unapplied"
-                    );
-                }
-                target_outcome.is_applied()
-            } else {
-                true
-            };
-            if target_transition_applied {
-                GatewayLifecycleApplyOutcome::Applied
-            } else {
-                GatewayLifecycleApplyOutcome::HostTargetTransitionSkipped
-            }
+            .await?
         }
         LifecycleTransition::AlreadySuperseded => GatewayLifecycleApplyOutcome::AlreadySuperseded,
         LifecycleTransition::InvalidRefundEconomics => {
@@ -568,9 +505,120 @@ async fn apply_or_stage_evidence(
         }
     };
 
+    finalize_evidence_application(transaction, pool, account, &evidence, pending_id, outcome).await
+}
+
+async fn apply_lifecycle_change(
+    transaction: &mut Transaction<'_, Postgres>,
+    host_charge_targets: &dyn HostChargeTargetStore,
+    account: &GatewayLifecycleAccount,
+    evidence: &StoredEvidence,
+    candidate: &AttemptCandidate,
+    refunded_amount_cents: i32,
+    reconciled_at: DateTime<Utc>,
+) -> Result<GatewayLifecycleApplyOutcome, GatewayLifecycleReconciliationError> {
+    let result = sqlx::query(
+        r#"
+        UPDATE billing_payment_attempts
+        SET gateway_condition = COALESCE($2, gateway_condition),
+            gateway_lifecycle_status = $3,
+            gateway_lifecycle_action = $4,
+            gateway_lifecycle_at = GREATEST(gateway_lifecycle_at, $5),
+            refunded_amount_cents = $6,
+            gateway_lifecycle_reconciled_at = $7,
+            updated_at = $7
+        WHERE id = $1
+            AND billing_scope_id = $8
+            AND gateway_account_id = $9
+        "#,
+    )
+    .bind(candidate.id)
+    .bind(evidence.condition.as_deref())
+    .bind(lifecycle_status(&evidence.state))
+    .bind(evidence.action.as_deref())
+    .bind(evidence.effective_at)
+    .bind(refunded_amount_cents)
+    .bind(reconciled_at)
+    .bind(account.billing_scope_id().as_uuid())
+    .bind(account.gateway_account_id().as_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(GatewayLifecycleReconciliationError::InvalidState(
+            INVALID_STORED_STATE,
+        ));
+    }
+    let target_transition_applied = apply_host_charge_reversal(
+        transaction,
+        host_charge_targets,
+        evidence,
+        candidate,
+        reconciled_at,
+    )
+    .await?;
+    Ok(if target_transition_applied {
+        GatewayLifecycleApplyOutcome::Applied
+    } else {
+        GatewayLifecycleApplyOutcome::HostTargetTransitionSkipped
+    })
+}
+
+async fn apply_host_charge_reversal(
+    transaction: &mut Transaction<'_, Postgres>,
+    host_charge_targets: &dyn HostChargeTargetStore,
+    evidence: &StoredEvidence,
+    candidate: &AttemptCandidate,
+    reconciled_at: DateTime<Utc>,
+) -> Result<bool, GatewayLifecycleReconciliationError> {
+    let Some(kind) = evidence.state.full_reversal_kind() else {
+        return Ok(true);
+    };
+    if candidate.kind != PaymentAttemptKind::HostCharge {
+        return Ok(true);
+    }
+    let target_id = candidate.host_charge_target_id.ok_or(
+        GatewayLifecycleReconciliationError::InvalidState(INVALID_STORED_STATE),
+    )?;
+    let reversed_at =
+        latest_time(candidate.current_lifecycle_at, evidence.effective_at).unwrap_or(reconciled_at);
+    let target_outcome = host_charge_targets
+        .apply_transition(
+            transaction,
+            HostChargeTargetTransition::new(
+                candidate.billing_scope_id,
+                candidate.subscriber_id,
+                PaymentAttemptId::new(candidate.id),
+                target_id,
+                HostChargeTargetTransitionKind::Reversed { kind },
+                reversed_at,
+            ),
+        )
+        .await?;
+    if !target_outcome.is_applied() {
+        tracing::warn!(
+            target: "syrup_rail::gateway_lifecycle_reconciliation",
+            billing_scope_id = %candidate.billing_scope_id.as_uuid(),
+            subscriber_id = %candidate.subscriber_id.as_uuid(),
+            attempt_id = %candidate.id,
+            target_id = %target_id.as_uuid(),
+            ?target_outcome,
+            "host target refused a full-reversal transition; leaving lifecycle evidence unapplied"
+        );
+    }
+    Ok(target_outcome.is_applied())
+}
+
+async fn finalize_evidence_application(
+    mut transaction: Transaction<'_, Postgres>,
+    pool: &PgPool,
+    account: &GatewayLifecycleAccount,
+    evidence: &StoredEvidence,
+    pending_id: Option<Uuid>,
+    outcome: GatewayLifecycleApplyOutcome,
+) -> Result<EvidenceApplication, GatewayLifecycleReconciliationError> {
     match outcome {
         GatewayLifecycleApplyOutcome::Applied | GatewayLifecycleApplyOutcome::AlreadySuperseded => {
-            resolve_matching_quarantines(&mut transaction, account, &evidence).await?;
+            resolve_matching_quarantines(&mut transaction, account, evidence).await?;
         }
         GatewayLifecycleApplyOutcome::InvalidRefundEconomics
         | GatewayLifecycleApplyOutcome::ConflictingLifecycleEvidence => {
@@ -592,7 +640,7 @@ async fn apply_or_stage_evidence(
                 let mut staging = pool.begin().await?;
                 set_timeouts(&mut staging).await?;
                 ensure_account(&mut staging, account).await?;
-                let newly_staged = stage_evidence(&mut staging, account, &evidence).await?;
+                let newly_staged = stage_evidence(&mut staging, account, evidence).await?;
                 staging.commit().await?;
                 newly_staged
             } else {

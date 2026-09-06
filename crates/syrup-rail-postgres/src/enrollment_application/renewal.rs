@@ -5,9 +5,10 @@ use std::fmt;
 use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
-    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
-    GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
-    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentDiagnostic,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewaySaleIntent, GatewaySaleRequest,
+    PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentResolutionCode,
+    ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
     SubscriptionEnrollmentPaymentResult, SubscriptionRenewalReservation,
     SubscriptionRenewalSubmissionOutcome, SubscriptionRenewalSubmissionRejection,
 };
@@ -387,52 +388,16 @@ async fn apply_renewal_approved_on_connection(
     if let Some(payment) = conflicting_payment {
         return Ok((payment, None));
     }
-    if attempt.status() == PaymentAttemptStatus::Approved {
-        let subscription = load_applied_subscription(connection, &attempt)
-            .await?
-            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-                INVALID_APPLICATION_STATE,
-            ))?;
-        observe_processor_charge(
-            connection,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::Applied,
-        )
-        .await?;
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
-            None,
-        ));
-    }
-    if subject_state != BillingTransactionSubjectState::LiveRecipient {
-        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-            "a subscription renewal event requires a live recipient",
-        ));
-    }
-    if attempt.status().is_terminal() {
-        let observation = observe_processor_charge(
-            connection,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::ExternalReversalRequired,
-        )
-        .await?;
-        if let ObservedCharge::Owned(charge) = observation {
-            transition_charge(
-                connection,
-                charge.id,
-                ProcessorChargeProgression::ExternalReversalRequired,
-                None,
-            )
-            .await?;
-        }
-        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
-            attempt,
-            approved_evidence.clone(),
-        )?
-        .with_observation_diagnostics(conflict_diagnostics);
-        return Ok((payment, None));
+    if let Some(result) = resolve_existing_renewal_approval(
+        connection,
+        subject_state,
+        &attempt,
+        approved_evidence,
+        conflict_diagnostics,
+    )
+    .await?
+    {
+        return Ok(result);
     }
     let observation = observe_processor_charge(
         connection,
@@ -584,6 +549,67 @@ async fn apply_renewal_approved_on_connection(
         SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
         Some(event),
     ))
+}
+
+async fn resolve_existing_renewal_approval(
+    connection: &mut PgConnection,
+    subject_state: BillingTransactionSubjectState,
+    attempt: &PaymentAttempt,
+    approved_evidence: &ApprovedProcessorEvidence,
+    conflict_diagnostics: Vec<GatewayPaymentDiagnostic>,
+) -> Result<
+    Option<(SubscriptionEnrollmentPaymentResult, Option<BillingEvent>)>,
+    SubscriptionEnrollmentApplicationError,
+> {
+    let evidence = approved_evidence.evidence();
+    if attempt.status() == PaymentAttemptStatus::Approved {
+        let subscription = load_applied_subscription(connection, attempt)
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+        observe_processor_charge(
+            connection,
+            attempt,
+            evidence,
+            ProcessorChargeProgression::Applied,
+        )
+        .await?;
+        return Ok(Some((
+            SubscriptionEnrollmentPaymentResult::applied(attempt.clone(), subscription)?,
+            None,
+        )));
+    }
+    if subject_state != BillingTransactionSubjectState::LiveRecipient {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            "a subscription renewal event requires a live recipient",
+        ));
+    }
+    if attempt.status().is_terminal() {
+        let observation = observe_processor_charge(
+            connection,
+            attempt,
+            evidence,
+            ProcessorChargeProgression::ExternalReversalRequired,
+        )
+        .await?;
+        if let ObservedCharge::Owned(charge) = observation {
+            transition_charge(
+                connection,
+                charge.id,
+                ProcessorChargeProgression::ExternalReversalRequired,
+                None,
+            )
+            .await?;
+        }
+        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
+            attempt.clone(),
+            approved_evidence.clone(),
+        )?
+        .with_observation_diagnostics(conflict_diagnostics);
+        return Ok(Some((payment, None)));
+    }
+    Ok(None)
 }
 
 pub(crate) async fn resolve_renewal_non_approved_outcome(

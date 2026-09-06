@@ -206,6 +206,7 @@ jobs:
         with:
           cache: false
           rustflags: ""
+          toolchain: 1.88.0
           components: clippy
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2

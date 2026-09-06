@@ -1,0 +1,1 @@
+Refactor every function reported above the workspace cognitive-complexity threshold of 20 while preserving behavior. Keep the workspace lint configuration active in every package. Validate with focused crate tests, scripts/jig check clippy, scripts/jig check test-locked, SQLx, formatting, contract, public API, and release preflight.

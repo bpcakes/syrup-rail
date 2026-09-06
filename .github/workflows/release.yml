@@ -57,7 +57,7 @@ jobs:
           tool: cargo-audit@0.22.2
 
       - name: Install Rust 1.88
-        run: rustup toolchain install 1.88.0 --profile minimal
+        run: rustup toolchain install 1.88.0 --profile minimal --component clippy
 
       - name: Check every workspace target at the MSRV
         env:
@@ -87,6 +87,7 @@ jobs:
 
       - name: Run Clippy
         env:
+          RUSTUP_TOOLCHAIN: 1.88.0
           SQLX_OFFLINE: "true"
           SQLX_OFFLINE_DIR: ${{ github.workspace }}/crates/syrup-rail-postgres/.sqlx
         run: scripts/jig check clippy

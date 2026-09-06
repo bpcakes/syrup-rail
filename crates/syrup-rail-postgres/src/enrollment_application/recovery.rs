@@ -3,18 +3,20 @@ use std::fmt;
 use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
-    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
-    GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
-    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
-    RecoverSubscriptionPayment, SubscriptionEnrollmentPaymentResult,
-    SubscriptionRecoveryReservation, SubscriptionRecoverySubmissionOutcome,
-    SubscriptionRecoverySubmissionRejection,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentDiagnostic,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewaySaleIntent, GatewaySaleRequest,
+    PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentResolutionCode,
+    ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence, RecoverSubscriptionPayment,
+    SubscriptionEnrollmentPaymentResult, SubscriptionRecoveryReservation,
+    SubscriptionRecoverySubmissionOutcome, SubscriptionRecoverySubmissionRejection,
 };
 
 use crate::{
     BillingTransactionCoordinator, BillingTransactionSubjectState,
     attempts::find_payment_attempt_by_id_on_connection,
-    processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
+    processor_charges::{
+        ChargeRecord, ObservedCharge, observe_processor_charge, transition_charge,
+    },
 };
 
 use super::{
@@ -365,52 +367,16 @@ async fn apply_recovery_approved_on_connection(
         return Ok((payment, None));
     }
 
-    if attempt.status() == PaymentAttemptStatus::Approved {
-        let subscription = load_applied_subscription(connection, &attempt)
-            .await?
-            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-                INVALID_APPLICATION_STATE,
-            ))?;
-        observe_processor_charge(
-            connection,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::Applied,
-        )
-        .await?;
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
-            None,
-        ));
-    }
-    if subject_state != BillingTransactionSubjectState::LiveRecipient {
-        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-            "a subscription recovery event requires a live recipient",
-        ));
-    }
-    if attempt.status().is_terminal() {
-        let observation = observe_processor_charge(
-            connection,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::ExternalReversalRequired,
-        )
-        .await?;
-        if let ObservedCharge::Owned(charge) = observation {
-            transition_charge(
-                connection,
-                charge.id,
-                ProcessorChargeProgression::ExternalReversalRequired,
-                None,
-            )
-            .await?;
-        }
-        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
-            attempt,
-            approved_evidence.clone(),
-        )?
-        .with_observation_diagnostics(conflict_diagnostics);
-        return Ok((payment, None));
+    if let Some(result) = resolve_existing_recovery_approval(
+        connection,
+        subject_state,
+        &attempt,
+        approved_evidence,
+        conflict_diagnostics,
+    )
+    .await?
+    {
+        return Ok(result);
     }
 
     let observation = observe_processor_charge(
@@ -455,26 +421,10 @@ async fn apply_recovery_approved_on_connection(
             None,
         ));
     }
-    if !recovery_subscription_matches(connection, reservation).await? {
-        transition_charge(
-            connection,
-            charge.id,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            Some(PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState),
-        )
-        .await?;
-        let parked = park_locked_attempt(
-            connection,
-            &attempt,
-            evidence,
-            Some(PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState),
-            RECOVERY_STALE_STATE_TEXT,
-        )
-        .await?;
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
-            None,
-        ));
+    if let Some(payment) =
+        park_stale_recovery_approval(connection, reservation, &attempt, evidence, &charge).await?
+    {
+        return Ok((payment, None));
     }
 
     let transaction_id =
@@ -581,6 +531,97 @@ async fn apply_recovery_approved_on_connection(
         SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
         Some(event),
     ))
+}
+
+async fn resolve_existing_recovery_approval(
+    connection: &mut PgConnection,
+    subject_state: BillingTransactionSubjectState,
+    attempt: &PaymentAttempt,
+    approved_evidence: &ApprovedProcessorEvidence,
+    conflict_diagnostics: Vec<GatewayPaymentDiagnostic>,
+) -> Result<
+    Option<(SubscriptionEnrollmentPaymentResult, Option<BillingEvent>)>,
+    SubscriptionEnrollmentApplicationError,
+> {
+    let evidence = approved_evidence.evidence();
+    if attempt.status() == PaymentAttemptStatus::Approved {
+        let subscription = load_applied_subscription(connection, attempt)
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+        observe_processor_charge(
+            connection,
+            attempt,
+            evidence,
+            ProcessorChargeProgression::Applied,
+        )
+        .await?;
+        return Ok(Some((
+            SubscriptionEnrollmentPaymentResult::applied(attempt.clone(), subscription)?,
+            None,
+        )));
+    }
+    if subject_state != BillingTransactionSubjectState::LiveRecipient {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            "a subscription recovery event requires a live recipient",
+        ));
+    }
+    if attempt.status().is_terminal() {
+        let observation = observe_processor_charge(
+            connection,
+            attempt,
+            evidence,
+            ProcessorChargeProgression::ExternalReversalRequired,
+        )
+        .await?;
+        if let ObservedCharge::Owned(charge) = observation {
+            transition_charge(
+                connection,
+                charge.id,
+                ProcessorChargeProgression::ExternalReversalRequired,
+                None,
+            )
+            .await?;
+        }
+        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
+            attempt.clone(),
+            approved_evidence.clone(),
+        )?
+        .with_observation_diagnostics(conflict_diagnostics);
+        return Ok(Some((payment, None)));
+    }
+    Ok(None)
+}
+
+async fn park_stale_recovery_approval(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionRecoveryReservation,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    charge: &ChargeRecord,
+) -> Result<Option<SubscriptionEnrollmentPaymentResult>, SubscriptionEnrollmentApplicationError> {
+    if recovery_subscription_matches(connection, reservation).await? {
+        return Ok(None);
+    }
+    transition_charge(
+        connection,
+        charge.id,
+        ProcessorChargeProgression::ExternalReversalRequired,
+        Some(PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState),
+    )
+    .await?;
+    let parked = park_locked_attempt(
+        connection,
+        attempt,
+        evidence,
+        Some(PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState),
+        RECOVERY_STALE_STATE_TEXT,
+    )
+    .await?;
+    Ok(Some(SubscriptionEnrollmentPaymentResult::not_applied(
+        parked,
+    )?))
 }
 
 pub(crate) async fn resolve_recovery_non_approved_outcome(

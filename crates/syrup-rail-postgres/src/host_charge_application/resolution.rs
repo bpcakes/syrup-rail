@@ -10,21 +10,36 @@ async fn observe_conflicting_host_charge_approval(
             BILLING_LOCK_TIMEOUT,
         )
         .await?;
-    let connection = transaction.connection();
+    let observation = observe_conflicting_host_charge_approval_on_connection(
+        transaction.connection(),
+        reservation,
+        evidence,
+    )
+    .await;
+    finalize_host_charge_observation(transaction, observation).await
+}
+
+async fn observe_conflicting_host_charge_approval_on_connection(
+    connection: &mut PgConnection,
+    reservation: &HostChargeReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<HostChargeObservation, HostChargeApplicationError> {
     set_application_timeouts(connection).await?;
     let attempt = lock_expected_host_charge(connection, reservation).await?;
     let diagnostics = processor_identity_conflict_diagnostics(&attempt, evidence);
     if diagnostics.is_empty() {
-        transaction.rollback().await?;
-        return Ok(HostChargePaymentResult::new(attempt)?);
+        return Ok(HostChargeObservation::rollback(
+            HostChargePaymentResult::new(attempt)?,
+        ));
     }
     if attempt.status() == PaymentAttemptStatus::Approved
         && same_processor_transaction(&attempt, evidence)
     {
-        transaction.commit().await?;
-        return Ok(append_host_observation_diagnostics(
-            HostChargePaymentResult::new(attempt)?,
-            &diagnostics,
+        return Ok(HostChargeObservation::commit(
+            append_host_observation_diagnostics(
+                HostChargePaymentResult::new(attempt)?,
+                &diagnostics,
+            ),
         ));
     }
     let progression = if attempt.status().is_resolvable() {
@@ -38,10 +53,8 @@ async fn observe_conflicting_host_charge_approval(
     {
         promote_conflicting_charge_to_external_reversal(connection, observation).await?;
     }
-    transaction.commit().await?;
-    Ok(append_host_observation_diagnostics(
-        HostChargePaymentResult::new(attempt)?,
-        &diagnostics,
+    Ok(HostChargeObservation::commit(
+        append_host_observation_diagnostics(HostChargePaymentResult::new(attempt)?, &diagnostics),
     ))
 }
 
@@ -51,7 +64,6 @@ async fn observe_terminal_host_charge_approval(
     terminal_attempt: &PaymentAttempt,
     approved_evidence: &ApprovedProcessorEvidence,
 ) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
-    let evidence = approved_evidence.evidence();
     let identity = reservation.identity();
     let mut transaction = coordinator
         .begin(
@@ -59,7 +71,23 @@ async fn observe_terminal_host_charge_approval(
             BILLING_LOCK_TIMEOUT,
         )
         .await?;
-    let connection = transaction.connection();
+    let observation = observe_terminal_host_charge_approval_on_connection(
+        transaction.connection(),
+        reservation,
+        terminal_attempt,
+        approved_evidence,
+    )
+    .await;
+    finalize_host_charge_observation(transaction, observation).await
+}
+
+async fn observe_terminal_host_charge_approval_on_connection(
+    connection: &mut PgConnection,
+    reservation: &HostChargeReservation,
+    terminal_attempt: &PaymentAttempt,
+    approved_evidence: &ApprovedProcessorEvidence,
+) -> Result<HostChargeObservation, HostChargeApplicationError> {
+    let evidence = approved_evidence.evidence();
     set_application_timeouts(connection).await?;
     if matches!(
         observe_processor_charge(
@@ -71,23 +99,38 @@ async fn observe_terminal_host_charge_approval(
         .await?,
         ObservedCharge::OwnedByOtherAttempt
     ) {
-        let _ = transaction.rollback().await;
         return Err(HostChargeApplicationError::InvalidState(
             "the approved gateway transaction belongs to another payment attempt",
         ));
     }
     let locked = lock_expected_host_charge(connection, reservation).await?;
     if !locked.status().is_terminal() || locked.status() == PaymentAttemptStatus::Approved {
-        let _ = transaction.rollback().await;
         return Err(HostChargeApplicationError::InvalidState(
             INVALID_HOST_CHARGE_STATE,
         ));
     }
-    transaction.commit().await?;
-    Ok(HostChargePaymentResult::confirmation_pending(
-        locked,
-        approved_evidence.clone(),
-    )?)
+    Ok(HostChargeObservation::commit(
+        HostChargePaymentResult::confirmation_pending(locked, approved_evidence.clone())?,
+    ))
+}
+
+async fn finalize_host_charge_observation(
+    transaction: Box<dyn crate::BillingTransaction>,
+    observation: Result<HostChargeObservation, HostChargeApplicationError>,
+) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
+    match observation {
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+        Ok(observation) => {
+            match observation.disposition {
+                HostChargeObservationDisposition::Commit => transaction.commit().await?,
+                HostChargeObservationDisposition::Rollback => transaction.rollback().await?,
+            }
+            Ok(observation.payment)
+        }
+    }
 }
 
 async fn resolve_host_charge_non_approved(
@@ -122,95 +165,35 @@ async fn resolve_host_charge_non_approved(
                 identity.subscriber_id(),
                 identity.attempt_id(),
                 reservation.snapshot().target_id(),
-                match resolution.boundary {
-                    OutcomeResolutionBoundary::Prepared
-                    | OutcomeResolutionBoundary::AdmittedNotSubmitted => {
-                        HostChargeTargetTransitionKind::ReleasedBeforeSubmission
-                    }
-                    OutcomeResolutionBoundary::Submitted => {
-                        HostChargeTargetTransitionKind::PaymentFailed
-                    }
-                },
+                host_charge_target_transition_kind(resolution.boundary),
                 effective_at,
             ),
         )
         .await?;
     if !target_outcome.is_applied() {
-        tracing::warn!(
-            target: "syrup_rail::host_charge_target",
-            billing_scope_id = %identity.billing_scope_id().as_uuid(),
-            subscriber_id = %identity.subscriber_id().as_uuid(),
-            attempt_id = %identity.attempt_id().as_uuid(),
-            target_id = %reservation.snapshot().target_id().as_uuid(),
-            boundary = ?resolution.boundary,
-            ?target_outcome,
-            "host target refused a payment outcome; leaving the canonical attempt unresolved"
-        );
+        log_refused_host_charge_target(reservation, resolution.boundary, target_outcome);
         transaction.rollback().await?;
-        let mut application =
-            canonical_host_charge_resolution_application(pool, reservation).await?;
-        let diagnostics =
-            processor_identity_conflict_diagnostics(application.payment.attempt(), evidence);
-        application.payment =
-            append_host_observation_diagnostics(application.payment, &diagnostics);
-        if !host_charge_attempt_may_resolve(application.payment.attempt(), resolution.boundary) {
-            return Ok(application);
-        }
-        return Err(HostChargeApplicationError::InvalidState(
-            INVALID_HOST_CHARGE_STATE,
-        ));
+        return refused_host_charge_resolution(pool, reservation, evidence, resolution.boundary)
+            .await;
     }
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
     let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
     let diagnostics = reconciled.identity_conflict_diagnostics();
     let may_resolve = host_charge_attempt_may_resolve(&attempt, resolution.boundary);
-    if !may_resolve {
+    if !may_resolve || reconciled.has_identity_conflict() {
         transaction.rollback().await?;
-        let mut canonical = canonical_host_charge_resolution_application(pool, reservation).await?;
-        canonical.payment = append_host_observation_diagnostics(canonical.payment, &diagnostics);
-        return Ok(canonical);
+        return canonical_host_charge_resolution_with_diagnostics(pool, reservation, &diagnostics)
+            .await;
     }
-    if reconciled.has_identity_conflict() {
-        transaction.rollback().await?;
-        let mut canonical = canonical_host_charge_resolution_application(pool, reservation).await?;
-        canonical.payment = append_host_observation_diagnostics(canonical.payment, &diagnostics);
-        return Ok(canonical);
-    }
-    let evidence = &reconciled.attempt_evidence;
-    persist_attempt_transition(
+    persist_non_approved_host_charge_details(
         &mut transaction,
         &attempt,
-        evidence,
-        AttemptTransition::Resolved {
-            status,
-            resolution_code,
-        },
+        &reconciled,
+        status,
+        resolution_code,
+        resolution.boundary,
     )
-    .await
-    .map_err(map_attempt_transition_error)?;
-    if let Some(observation) = reconciled.charge_observation() {
-        observe_processor_charge(
-            &mut transaction,
-            &attempt,
-            observation,
-            ProcessorChargeProgression::Pending,
-        )
-        .await?;
-    }
-    if resolution.boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
-        let cleared = sqlx::query(
-            "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2",
-        )
-        .bind(identity.attempt_id().as_uuid())
-        .bind(status.as_str())
-        .execute(&mut *transaction)
-        .await?;
-        if cleared.rows_affected() != 1 {
-            return Err(HostChargeApplicationError::InvalidState(
-                INVALID_HOST_CHARGE_STATE,
-            ));
-        }
-    }
+    .await?;
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,
         identity.billing_scope_id(),
@@ -225,6 +208,98 @@ async fn resolve_host_charge_non_approved(
         payment: HostChargePaymentResult::new(attempt)?,
         applied: true,
     })
+}
+
+fn host_charge_target_transition_kind(
+    boundary: OutcomeResolutionBoundary,
+) -> HostChargeTargetTransitionKind {
+    match boundary {
+        OutcomeResolutionBoundary::Prepared | OutcomeResolutionBoundary::AdmittedNotSubmitted => {
+            HostChargeTargetTransitionKind::ReleasedBeforeSubmission
+        }
+        OutcomeResolutionBoundary::Submitted => HostChargeTargetTransitionKind::PaymentFailed,
+    }
+}
+
+fn log_refused_host_charge_target(
+    reservation: &HostChargeReservation,
+    boundary: OutcomeResolutionBoundary,
+    target_outcome: HostChargeTargetTransitionOutcome,
+) {
+    let identity = reservation.identity();
+    tracing::warn!(
+        target: "syrup_rail::host_charge_target",
+        billing_scope_id = %identity.billing_scope_id().as_uuid(),
+        subscriber_id = %identity.subscriber_id().as_uuid(),
+        attempt_id = %identity.attempt_id().as_uuid(),
+        target_id = %reservation.snapshot().target_id().as_uuid(),
+        ?boundary,
+        ?target_outcome,
+        "host target refused a payment outcome; leaving the canonical attempt unresolved"
+    );
+}
+
+async fn refused_host_charge_resolution(
+    pool: &PgPool,
+    reservation: &HostChargeReservation,
+    evidence: &ProcessorEvidence,
+    boundary: OutcomeResolutionBoundary,
+) -> Result<HostChargeResolutionApplication, HostChargeApplicationError> {
+    let mut application = canonical_host_charge_resolution_application(pool, reservation).await?;
+    let diagnostics =
+        processor_identity_conflict_diagnostics(application.payment.attempt(), evidence);
+    application.payment = append_host_observation_diagnostics(application.payment, &diagnostics);
+    if !host_charge_attempt_may_resolve(application.payment.attempt(), boundary) {
+        return Ok(application);
+    }
+    Err(HostChargeApplicationError::InvalidState(
+        INVALID_HOST_CHARGE_STATE,
+    ))
+}
+
+async fn persist_non_approved_host_charge_details(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    attempt: &PaymentAttempt,
+    reconciled: &crate::enrollment_application::ReconciledNonApprovedEvidence<'_>,
+    status: AttemptResolutionStatus,
+    resolution_code: Option<PaymentResolutionCode>,
+    boundary: OutcomeResolutionBoundary,
+) -> Result<(), HostChargeApplicationError> {
+    persist_attempt_transition(
+        transaction,
+        attempt,
+        &reconciled.attempt_evidence,
+        AttemptTransition::Resolved {
+            status,
+            resolution_code,
+        },
+    )
+    .await
+    .map_err(map_attempt_transition_error)?;
+    if let Some(observation) = reconciled.charge_observation() {
+        observe_processor_charge(
+            transaction,
+            attempt,
+            observation,
+            ProcessorChargeProgression::Pending,
+        )
+        .await?;
+    }
+    if boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
+        let cleared = sqlx::query(
+            "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2",
+        )
+        .bind(attempt.identity().attempt_id().as_uuid())
+        .bind(status.as_str())
+        .execute(&mut **transaction)
+        .await?;
+        if cleared.rows_affected() != 1 {
+            return Err(HostChargeApplicationError::InvalidState(
+                INVALID_HOST_CHARGE_STATE,
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn host_charge_attempt_may_resolve(
@@ -263,6 +338,16 @@ async fn canonical_host_charge_resolution_application(
         payment: HostChargePaymentResult::new(attempt)?,
         applied: false,
     })
+}
+
+async fn canonical_host_charge_resolution_with_diagnostics(
+    pool: &PgPool,
+    reservation: &HostChargeReservation,
+    diagnostics: &[GatewayPaymentDiagnostic],
+) -> Result<HostChargeResolutionApplication, HostChargeApplicationError> {
+    let mut application = canonical_host_charge_resolution_application(pool, reservation).await?;
+    application.payment = append_host_observation_diagnostics(application.payment, diagnostics);
+    Ok(application)
 }
 
 async fn restore_admitted_host_charge_for_retry(

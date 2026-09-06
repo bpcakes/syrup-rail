@@ -5,6 +5,9 @@ edition.workspace = true
 license-file.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 postgres-test-harness.workspace = true
 sqlx.workspace = true

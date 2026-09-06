@@ -31,64 +31,8 @@ pub async fn reserve_subscription_enrollment_in_transaction(
     )
     .await?;
 
-    if let Some(existing) = find_payment_attempt_by_idempotency(
-        transaction,
-        identity.billing_scope_id(),
-        identity.subscriber_id(),
-        reservation.idempotency_key(),
-    )
-    .await?
-    {
-        if !replay_matches_reservation_without_required_mode(&existing, reservation) {
-            return Ok(SubscriptionEnrollmentReservationOutcome::IdempotencyConflict);
-        }
-        if initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
-            lock_initial_attempt_rows(
-                transaction,
-                identity.billing_scope_id(),
-                identity.subscriber_id(),
-                reservation.plan_key(),
-            )
-            .await?;
-            lock_initial_charge_rows(
-                transaction,
-                identity.billing_scope_id(),
-                identity.subscriber_id(),
-                reservation.plan_key(),
-            )
-            .await?;
-            expire_stale_initial_attempts(
-                transaction,
-                identity.billing_scope_id(),
-                identity.subscriber_id(),
-                reservation.plan_key(),
-            )
-            .await?;
-            let expired = lock_payment_attempt_by_idempotency(
-                transaction,
-                identity.billing_scope_id(),
-                identity.subscriber_id(),
-                reservation.idempotency_key(),
-            )
-            .await?
-            .ok_or_else(invalid_state)?;
-            return Ok(SubscriptionEnrollmentReservationOutcome::Replay(expired));
-        }
-        if prepared_replay_required_mode_changed(
-            &existing,
-            identity.required_gateway_account_mode(),
-        ) {
-            return Ok(SubscriptionEnrollmentReservationOutcome::Rejected(
-                SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged,
-            ));
-        }
-        if matches!(
-            attempt_replay_disposition(&existing),
-            AttemptReplayDisposition::RepairUnsubmittedReview
-                | AttemptReplayDisposition::ReturnCanonical
-        ) {
-            return Ok(SubscriptionEnrollmentReservationOutcome::Replay(existing));
-        }
+    if let Some(outcome) = existing_reservation_outcome(transaction, reservation, identity).await? {
+        return Ok(outcome);
     }
 
     let Some(offer) = offers
@@ -259,6 +203,77 @@ pub async fn reserve_subscription_enrollment_in_transaction(
     Ok(pending_attempt_reservation_outcome(
         existing, identity, &request,
     ))
+}
+
+async fn existing_reservation_outcome(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionEnrollmentReservation,
+    identity: PaymentAttemptIdentity,
+) -> Result<Option<SubscriptionEnrollmentReservationOutcome>, PaymentAttemptStoreError> {
+    let Some(existing) = find_payment_attempt_by_idempotency(
+        transaction,
+        identity.billing_scope_id(),
+        identity.subscriber_id(),
+        reservation.idempotency_key(),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if !replay_matches_reservation_without_required_mode(&existing, reservation) {
+        return Ok(Some(
+            SubscriptionEnrollmentReservationOutcome::IdempotencyConflict,
+        ));
+    }
+    if initial_attempt_is_stale(transaction, existing.identity().attempt_id()).await? {
+        lock_initial_attempt_rows(
+            transaction,
+            identity.billing_scope_id(),
+            identity.subscriber_id(),
+            reservation.plan_key(),
+        )
+        .await?;
+        lock_initial_charge_rows(
+            transaction,
+            identity.billing_scope_id(),
+            identity.subscriber_id(),
+            reservation.plan_key(),
+        )
+        .await?;
+        expire_stale_initial_attempts(
+            transaction,
+            identity.billing_scope_id(),
+            identity.subscriber_id(),
+            reservation.plan_key(),
+        )
+        .await?;
+        let expired = lock_payment_attempt_by_idempotency(
+            transaction,
+            identity.billing_scope_id(),
+            identity.subscriber_id(),
+            reservation.idempotency_key(),
+        )
+        .await?
+        .ok_or_else(invalid_state)?;
+        return Ok(Some(SubscriptionEnrollmentReservationOutcome::Replay(
+            expired,
+        )));
+    }
+    if prepared_replay_required_mode_changed(&existing, identity.required_gateway_account_mode()) {
+        return Ok(Some(SubscriptionEnrollmentReservationOutcome::Rejected(
+            SubscriptionEnrollmentReservationRejection::GatewayAccountModeChanged,
+        )));
+    }
+    if matches!(
+        attempt_replay_disposition(&existing),
+        AttemptReplayDisposition::RepairUnsubmittedReview
+            | AttemptReplayDisposition::ReturnCanonical
+    ) {
+        return Ok(Some(SubscriptionEnrollmentReservationOutcome::Replay(
+            existing,
+        )));
+    }
+    Ok(None)
 }
 
 fn pending_attempt_reservation_outcome(

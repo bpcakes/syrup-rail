@@ -34,8 +34,8 @@ use crate::{
         should_surface_not_submitted_application,
     },
     processor_charges::{
-        ObservedCharge, observe_processor_charge, promote_conflicting_charge_to_external_reversal,
-        transition_charge,
+        ChargeRecord, ObservedCharge, observe_processor_charge,
+        promote_conflicting_charge_to_external_reversal, transition_charge,
     },
 };
 
@@ -47,6 +47,73 @@ const APPROVED_STALE_TARGET_TEXT: &str =
     "Approved host charge could not update its target because the target changed.";
 const APPROVED_STORAGE_FAILURE_TEXT: &str =
     "Approved host charge could not be applied; manual review is required.";
+
+enum LockedHostChargeApproval {
+    ConflictingIdentity(PaymentAttempt),
+    AlreadyApplied(PaymentAttempt),
+    Terminal(PaymentAttempt),
+    Ready(PaymentAttempt, ChargeRecord),
+}
+
+enum HostChargeApprovedDisposition {
+    Commit(Option<Box<BillingEvent>>),
+    ObserveConflictAfterRollback,
+    ObserveTerminalAfterRollback,
+}
+
+struct HostChargeApprovedApplication {
+    attempt: PaymentAttempt,
+    disposition: HostChargeApprovedDisposition,
+}
+
+impl HostChargeApprovedApplication {
+    fn commit(attempt: PaymentAttempt, event: Option<BillingEvent>) -> Self {
+        Self {
+            attempt,
+            disposition: HostChargeApprovedDisposition::Commit(event.map(Box::new)),
+        }
+    }
+
+    const fn observe_conflict_after_rollback(attempt: PaymentAttempt) -> Self {
+        Self {
+            attempt,
+            disposition: HostChargeApprovedDisposition::ObserveConflictAfterRollback,
+        }
+    }
+
+    const fn observe_terminal_after_rollback(attempt: PaymentAttempt) -> Self {
+        Self {
+            attempt,
+            disposition: HostChargeApprovedDisposition::ObserveTerminalAfterRollback,
+        }
+    }
+}
+
+enum HostChargeObservationDisposition {
+    Commit,
+    Rollback,
+}
+
+struct HostChargeObservation {
+    payment: HostChargePaymentResult,
+    disposition: HostChargeObservationDisposition,
+}
+
+impl HostChargeObservation {
+    const fn commit(payment: HostChargePaymentResult) -> Self {
+        Self {
+            payment,
+            disposition: HostChargeObservationDisposition::Commit,
+        }
+    }
+
+    const fn rollback(payment: HostChargePaymentResult) -> Self {
+        Self {
+            payment,
+            disposition: HostChargeObservationDisposition::Rollback,
+        }
+    }
+}
 
 fn append_host_observation_diagnostics(
     result: HostChargePaymentResult,
@@ -494,14 +561,39 @@ async fn apply_host_charge_approved(
             BILLING_LOCK_TIMEOUT,
         )
         .await?;
-    if transaction.subject_state() != BillingTransactionSubjectState::LiveRecipient {
-        let _ = transaction.rollback().await;
+    let subject_state = transaction.subject_state();
+    let application = apply_host_charge_approved_on_connection(
+        transaction.connection(),
+        subject_state,
+        targets,
+        reservation,
+        evidence,
+    )
+    .await;
+    finalize_host_charge_approved_application(
+        transaction,
+        coordinator,
+        reservation,
+        approved_evidence,
+        application,
+    )
+    .await
+}
+
+async fn apply_host_charge_approved_on_connection(
+    connection: &mut PgConnection,
+    subject_state: BillingTransactionSubjectState,
+    targets: &dyn HostChargeTargetStore,
+    reservation: &HostChargeReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<HostChargeApprovedApplication, HostChargeApplicationError> {
+    if subject_state != BillingTransactionSubjectState::LiveRecipient {
         return Err(HostChargeApplicationError::InvalidState(
             "a host charge payment event requires a live recipient",
         ));
     }
-    let connection = transaction.connection();
     set_application_timeouts(connection).await?;
+    let identity = reservation.identity();
     let effective_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *connection)
         .await?;
@@ -518,55 +610,19 @@ async fn apply_host_charge_approved(
             ),
         )
         .await?;
-    let attempt = lock_expected_host_charge(connection, reservation).await?;
-    if !processor_identity_conflict_diagnostics(&attempt, evidence).is_empty() {
-        transaction.rollback().await?;
-        return observe_conflicting_host_charge_approval(coordinator, reservation, evidence).await;
-    }
-    if attempt.status() == PaymentAttemptStatus::Approved {
-        // Host target callbacks establish the repository-wide target -> attempt
-        // lock order. Once this lock proves approval already committed, a
-        // refused Paid replay is harmless: lifecycle reconciliation may have
-        // legitimately advanced the target to a reversed state.
-        observe_processor_charge(
-            connection,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::Applied,
-        )
-        .await?;
-        transaction.commit().await?;
-        return Ok(HostChargePaymentResult::new(attempt)?);
-    }
-    if attempt.status().is_terminal() {
-        transaction.rollback().await?;
-        return observe_terminal_host_charge_approval(
-            coordinator,
-            reservation,
-            &attempt,
-            approved_evidence,
-        )
-        .await;
-    }
-    let observation = observe_processor_charge(
-        connection,
-        &attempt,
-        evidence,
-        ProcessorChargeProgression::Pending,
-    )
-    .await?;
-    let ObservedCharge::Owned(charge) = observation else {
-        let _ = transaction.rollback().await;
-        return Err(HostChargeApplicationError::InvalidState(
-            "the approved gateway transaction belongs to another payment attempt",
-        ));
-    };
-    if charge.role == ProcessorChargeRole::Additional {
-        let _ = transaction.rollback().await;
-        return Err(HostChargeApplicationError::InvalidState(
-            "an additional approved host charge requires external reversal",
-        ));
-    }
+    let (attempt, charge) =
+        match classify_locked_host_charge_approval(connection, reservation, evidence).await? {
+            LockedHostChargeApproval::ConflictingIdentity(attempt) => {
+                return Ok(HostChargeApprovedApplication::observe_conflict_after_rollback(attempt));
+            }
+            LockedHostChargeApproval::AlreadyApplied(attempt) => {
+                return Ok(HostChargeApprovedApplication::commit(attempt, None));
+            }
+            LockedHostChargeApproval::Terminal(attempt) => {
+                return Ok(HostChargeApprovedApplication::observe_terminal_after_rollback(attempt));
+            }
+            LockedHostChargeApproval::Ready(attempt, charge) => (attempt, charge),
+        };
     match target_outcome {
         HostChargeTargetTransitionOutcome::Applied
         | HostChargeTargetTransitionOutcome::ExactReplay => {
@@ -599,9 +655,7 @@ async fn apply_host_charge_approved(
                 target_id: reservation.snapshot().target_id(),
                 charge: reservation.snapshot().charge(),
             };
-            transaction.append_event(&event).await?;
-            transaction.commit().await?;
-            Ok(HostChargePaymentResult::new(applied)?)
+            Ok(HostChargeApprovedApplication::commit(applied, Some(event)))
         }
         HostChargeTargetTransitionOutcome::StaleTarget => {
             transition_charge(
@@ -619,16 +673,111 @@ async fn apply_host_charge_approved(
                 APPROVED_STALE_TARGET_TEXT,
             )
             .await?;
-            transaction.commit().await?;
-            Ok(HostChargePaymentResult::new(parked)?)
+            Ok(HostChargeApprovedApplication::commit(parked, None))
         }
-        HostChargeTargetTransitionOutcome::Unchanged { .. } => {
-            let _ = transaction.rollback().await;
-            Err(HostChargeApplicationError::InvalidState(
-                INVALID_HOST_CHARGE_STATE,
-            ))
-        }
+        HostChargeTargetTransitionOutcome::Unchanged { .. } => Err(
+            HostChargeApplicationError::InvalidState(INVALID_HOST_CHARGE_STATE),
+        ),
     }
+}
+
+async fn finalize_host_charge_approved_application(
+    mut transaction: Box<dyn crate::BillingTransaction>,
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &HostChargeReservation,
+    approved_evidence: &ApprovedProcessorEvidence,
+    application: Result<HostChargeApprovedApplication, HostChargeApplicationError>,
+) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
+    match application {
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+        Ok(application) => match application.disposition {
+            HostChargeApprovedDisposition::ObserveConflictAfterRollback => {
+                transaction.rollback().await?;
+                observe_conflicting_host_charge_approval(
+                    coordinator,
+                    reservation,
+                    approved_evidence.evidence(),
+                )
+                .await
+            }
+            HostChargeApprovedDisposition::ObserveTerminalAfterRollback => {
+                transaction.rollback().await?;
+                observe_terminal_host_charge_approval(
+                    coordinator,
+                    reservation,
+                    &application.attempt,
+                    approved_evidence,
+                )
+                .await
+            }
+            HostChargeApprovedDisposition::Commit(event) => {
+                let payment = match HostChargePaymentResult::new(application.attempt) {
+                    Ok(payment) => payment,
+                    Err(error) => {
+                        let _ = transaction.rollback().await;
+                        return Err(error.into());
+                    }
+                };
+                if let Some(event) = event.as_deref()
+                    && let Err(error) = transaction.append_event(event).await
+                {
+                    let _ = transaction.rollback().await;
+                    return Err(error.into());
+                }
+                transaction.commit().await?;
+                Ok(payment)
+            }
+        },
+    }
+}
+
+async fn classify_locked_host_charge_approval(
+    connection: &mut PgConnection,
+    reservation: &HostChargeReservation,
+    evidence: &ProcessorEvidence,
+) -> Result<LockedHostChargeApproval, HostChargeApplicationError> {
+    let attempt = lock_expected_host_charge(connection, reservation).await?;
+    if !processor_identity_conflict_diagnostics(&attempt, evidence).is_empty() {
+        return Ok(LockedHostChargeApproval::ConflictingIdentity(attempt));
+    }
+    if attempt.status() == PaymentAttemptStatus::Approved {
+        // Host target callbacks establish the repository-wide target -> attempt
+        // lock order. Once this lock proves approval already committed, a
+        // refused Paid replay is harmless: lifecycle reconciliation may have
+        // legitimately advanced the target to a reversed state.
+        observe_processor_charge(
+            connection,
+            &attempt,
+            evidence,
+            ProcessorChargeProgression::Applied,
+        )
+        .await?;
+        return Ok(LockedHostChargeApproval::AlreadyApplied(attempt));
+    }
+    if attempt.status().is_terminal() {
+        return Ok(LockedHostChargeApproval::Terminal(attempt));
+    }
+    let observation = observe_processor_charge(
+        connection,
+        &attempt,
+        evidence,
+        ProcessorChargeProgression::Pending,
+    )
+    .await?;
+    let ObservedCharge::Owned(charge) = observation else {
+        return Err(HostChargeApplicationError::InvalidState(
+            "the approved gateway transaction belongs to another payment attempt",
+        ));
+    };
+    if charge.role == ProcessorChargeRole::Additional {
+        return Err(HostChargeApplicationError::InvalidState(
+            "an additional approved host charge requires external reversal",
+        ));
+    }
+    Ok(LockedHostChargeApproval::Ready(attempt, charge))
 }
 
 include!("host_charge_application/resolution.rs");

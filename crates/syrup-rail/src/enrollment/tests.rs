@@ -133,10 +133,8 @@ fn approved_result_confirmation(transaction_id: &str) -> ApprovedProcessorEviden
 
 #[test]
 #[allow(deprecated)]
-fn payment_result_constructors_reject_crossed_state_invariants() {
-    let approved = result_test_attempt(PaymentAttemptStatus::Approved);
+fn host_charge_payment_results_reject_crossed_state_invariants() {
     let pending = result_test_attempt(PaymentAttemptStatus::Pending);
-    let subscription = result_test_subscription();
     let confirmation_evidence = approved_result_confirmation("pending-confirmation");
     let host_attempt = result_test_attempt_with_target(
         PaymentAttemptStatus::Pending,
@@ -191,6 +189,20 @@ fn payment_result_constructors_reject_crossed_state_invariants() {
         )
         .unwrap_err(),
         HostChargePaymentResultBuildError::ConfirmationPendingAttemptApproved,
+    );
+}
+
+#[test]
+fn subscription_payment_results_reject_crossed_state_invariants() {
+    let approved = result_test_attempt(PaymentAttemptStatus::Approved);
+    let pending = result_test_attempt(PaymentAttemptStatus::Pending);
+    let subscription = result_test_subscription();
+    let confirmation_evidence = approved_result_confirmation("pending-confirmation");
+    let host_attempt = result_test_attempt_with_target(
+        PaymentAttemptStatus::Pending,
+        PaymentAttemptTarget::HostCharge {
+            target_id: HostChargeTargetId::new(Uuid::from_u128(8)),
+        },
     );
 
     assert_eq!(
@@ -252,6 +264,15 @@ fn payment_result_constructors_reject_crossed_state_invariants() {
         .unwrap_err(),
         SubscriptionEnrollmentPaymentResultBuildError::AppliedSubscriptionPlanMismatch,
     );
+}
+
+#[test]
+#[allow(deprecated)]
+fn subscription_payment_results_preserve_applied_pending_and_diagnostic_states() {
+    let approved = result_test_attempt(PaymentAttemptStatus::Approved);
+    let pending = result_test_attempt(PaymentAttemptStatus::Pending);
+    let subscription = result_test_subscription();
+    let confirmation_evidence = approved_result_confirmation("pending-confirmation");
 
     let applied =
         SubscriptionEnrollmentPaymentResult::applied(approved, subscription.clone()).unwrap();

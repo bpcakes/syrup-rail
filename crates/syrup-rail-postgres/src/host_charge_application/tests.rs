@@ -2,6 +2,7 @@ mod admission;
 mod foreground;
 mod observations;
 mod resilience;
+mod rollback;
 
 use std::{
     error::Error,

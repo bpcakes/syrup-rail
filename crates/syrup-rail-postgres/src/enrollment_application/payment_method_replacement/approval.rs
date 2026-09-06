@@ -1,4 +1,5 @@
 use super::*;
+use syrup_rail::GatewayTransactionId;
 
 pub(super) async fn apply_payment_method_replacement_approved_outcome(
     coordinator: &dyn BillingTransactionCoordinator,
@@ -83,43 +84,16 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
     if let Some(payment) = conflicting_payment {
         return Ok((payment, None));
     }
-    if attempt.status() == PaymentAttemptStatus::Approved {
-        let subscription = load_applied_subscription(connection, &attempt)
-            .await?
-            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-                INVALID_APPLICATION_STATE,
-            ))?;
-        let progression =
-            if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
-                ProcessorChargeProgression::Applied
-            } else {
-                ProcessorChargeProgression::ReconciliationRequired
-            };
-        observe_processor_charge(connection, &attempt, evidence, progression).await?;
-        return Ok((
-            SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
-            None,
-        ));
-    }
-    if subject_state != BillingTransactionSubjectState::LiveRecipient {
-        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-            "a payment method replacement event requires a live recipient",
-        ));
-    }
-    if attempt.status().is_terminal() {
-        observe_processor_charge(
-            connection,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::ReconciliationRequired,
-        )
-        .await?;
-        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
-            attempt,
-            approved_evidence.clone(),
-        )?
-        .with_observation_diagnostics(conflict_diagnostics);
-        return Ok((payment, None));
+    if let Some(result) = resolve_existing_payment_method_replacement_approval(
+        connection,
+        subject_state,
+        &attempt,
+        approved_evidence,
+        conflict_diagnostics,
+    )
+    .await?
+    {
+        return Ok(result);
     }
     let observation = observe_processor_charge(
         connection,
@@ -219,12 +193,9 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
         && current_transaction_id == expected.expected_initial_transaction_id().expose();
     let exact_replay =
         current_method_id == method_id && current_transaction_id == transaction_id.expose();
-    if !expected_state || (!baseline_matches && !exact_replay) {
-        let code = if expected_state {
-            PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateStaleState
-        } else {
-            PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateSubscriptionIneligible
-        };
+    if let Some(code) =
+        payment_method_replacement_conflict_code(expected_state, baseline_matches, exact_replay)
+    {
         transition_charge(
             connection,
             charge.id,
@@ -245,37 +216,14 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
             None,
         ));
     }
-    if baseline_matches {
-        let updated = sqlx::query(
-            r#"
-            UPDATE billing_subscriptions
-            SET payment_method_id = $2, initial_transaction_id = $3,
-                updated_at = clock_timestamp()
-            WHERE id = $1 AND billing_scope_id = $4 AND subscriber_id = $5
-                AND gateway_account_id = $6 AND plan_key = $7
-                AND status IN ('active', 'past_due')
-                AND payment_method_id = $8 AND initial_transaction_id = $9
-                AND required_gateway_account_mode = $10
-            "#,
-        )
-        .bind(reservation.subscription_id().as_uuid())
-        .bind(method_id.as_uuid())
-        .bind(transaction_id.expose())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.subscriber_id().as_uuid())
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(reservation.plan_key().as_str())
-        .bind(expected.payment_method_id().as_uuid())
-        .bind(expected.expected_initial_transaction_id().expose())
-        .bind(identity.required_gateway_account_mode().as_str())
-        .execute(&mut *connection)
-        .await?;
-        if updated.rows_affected() != 1 {
-            return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-                INVALID_APPLICATION_STATE,
-            ));
-        }
-    }
+    update_payment_method_replacement_subscription(
+        connection,
+        reservation,
+        method_id,
+        transaction_id,
+        baseline_matches,
+    )
+    .await?;
     mark_attempt_approved(
         connection,
         &attempt,
@@ -325,4 +273,114 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
         SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
         Some(event),
     ))
+}
+
+fn payment_method_replacement_conflict_code(
+    expected_state: bool,
+    baseline_matches: bool,
+    exact_replay: bool,
+) -> Option<PaymentResolutionCode> {
+    if !expected_state {
+        Some(PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateSubscriptionIneligible)
+    } else if !baseline_matches && !exact_replay {
+        Some(PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateStaleState)
+    } else {
+        None
+    }
+}
+
+async fn resolve_existing_payment_method_replacement_approval(
+    connection: &mut PgConnection,
+    subject_state: BillingTransactionSubjectState,
+    attempt: &PaymentAttempt,
+    approved_evidence: &ApprovedProcessorEvidence,
+    conflict_diagnostics: Vec<GatewayPaymentDiagnostic>,
+) -> Result<
+    Option<(SubscriptionEnrollmentPaymentResult, Option<BillingEvent>)>,
+    SubscriptionEnrollmentApplicationError,
+> {
+    let evidence = approved_evidence.evidence();
+    if attempt.status() == PaymentAttemptStatus::Approved {
+        let subscription = load_applied_subscription(connection, attempt)
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?;
+        let progression =
+            if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
+                ProcessorChargeProgression::Applied
+            } else {
+                ProcessorChargeProgression::ReconciliationRequired
+            };
+        observe_processor_charge(connection, attempt, evidence, progression).await?;
+        return Ok(Some((
+            SubscriptionEnrollmentPaymentResult::applied(attempt.clone(), subscription)?,
+            None,
+        )));
+    }
+    if subject_state != BillingTransactionSubjectState::LiveRecipient {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            "a payment method replacement event requires a live recipient",
+        ));
+    }
+    if attempt.status().is_terminal() {
+        observe_processor_charge(
+            connection,
+            attempt,
+            evidence,
+            ProcessorChargeProgression::ReconciliationRequired,
+        )
+        .await?;
+        let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
+            attempt.clone(),
+            approved_evidence.clone(),
+        )?
+        .with_observation_diagnostics(conflict_diagnostics);
+        return Ok(Some((payment, None)));
+    }
+    Ok(None)
+}
+
+async fn update_payment_method_replacement_subscription(
+    connection: &mut PgConnection,
+    reservation: &SubscriptionPaymentMethodReplacement,
+    method_id: PaymentMethodId,
+    transaction_id: &GatewayTransactionId,
+    baseline_matches: bool,
+) -> Result<(), SubscriptionEnrollmentApplicationError> {
+    if !baseline_matches {
+        return Ok(());
+    }
+    let identity = reservation.identity();
+    let expected = reservation.expected_state();
+    let updated = sqlx::query(
+        r#"
+        UPDATE billing_subscriptions
+        SET payment_method_id = $2, initial_transaction_id = $3,
+            updated_at = clock_timestamp()
+        WHERE id = $1 AND billing_scope_id = $4 AND subscriber_id = $5
+            AND gateway_account_id = $6 AND plan_key = $7
+            AND status IN ('active', 'past_due')
+            AND payment_method_id = $8 AND initial_transaction_id = $9
+            AND required_gateway_account_mode = $10
+        "#,
+    )
+    .bind(reservation.subscription_id().as_uuid())
+    .bind(method_id.as_uuid())
+    .bind(transaction_id.expose())
+    .bind(identity.billing_scope_id().as_uuid())
+    .bind(identity.subscriber_id().as_uuid())
+    .bind(identity.gateway_account_id().as_uuid())
+    .bind(reservation.plan_key().as_str())
+    .bind(expected.payment_method_id().as_uuid())
+    .bind(expected.expected_initial_transaction_id().expose())
+    .bind(identity.required_gateway_account_mode().as_str())
+    .execute(&mut *connection)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            INVALID_APPLICATION_STATE,
+        ));
+    }
+    Ok(())
 }

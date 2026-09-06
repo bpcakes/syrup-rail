@@ -9,6 +9,9 @@ description = "Canonical provider-neutral PostgreSQL schema contract and SQLx or
 readme = "README.md"
 publish = true
 
+[lints]
+workspace = true
+
 [[example]]
 name = "host_integration"
 path = "examples/host_integration.rs"
