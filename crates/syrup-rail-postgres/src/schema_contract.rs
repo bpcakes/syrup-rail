@@ -25,6 +25,9 @@ pub const V3_INSTALL_SQL: &str = include_str!("../schema/v3/install.sql");
 /// The immutable version-4 fresh-install artifact.
 pub const V4_INSTALL_SQL: &str = include_str!("../schema/v4/install.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The version-5 fresh-install artifact.
+pub const V5_INSTALL_SQL: &str = include_str!("../schema/v5/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The read-only version-1-to-version-2 upgrade preflight.
 pub const V1_TO_V2_PREFLIGHT_SQL: &str = include_str!("../schema/v2/preflight_from_v1.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -49,6 +52,30 @@ pub const V3_TO_V4_INDEX_SQL: &str = include_str!("../schema/v4/index_from_v3.sq
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The final version-3-to-version-4 cutover artifact.
 pub const V3_TO_V4_UPGRADE_SQL: &str = include_str!("../schema/v4/upgrade_from_v3.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The read-only version-4-to-version-5 upgrade preflight.
+pub const V4_TO_V5_PREFLIGHT_SQL: &str = include_str!("../schema/v5/preflight_from_v4.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The read-only audit of incompatible v4 external-reversal attestations.
+pub const V4_TO_V5_INCOMPATIBLE_ATTESTATION_AUDIT_SQL: &str =
+    include_str!("../schema/v5/audit_incompatible_attestations_from_v4.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The forward-only version-4-to-version-5 upgrade artifact.
+pub const V4_TO_V5_UPGRADE_SQL: &str = include_str!("../schema/v5/upgrade_from_v4.sql");
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Complete current install artifact, for host migration packaging and tests.
+pub const V6_INSTALL_SQL: &str = include_str!("../schema/v6/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Read-only v5-to-v6 preflight for sizing retained evidence classification.
+pub const V5_TO_V6_PREFLIGHT_SQL: &str = include_str!("../schema/v6/preflight_from_v5.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Read-only audit of review-required v5 attempts that remain unclassified.
+pub const V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL: &str =
+    include_str!("../schema/v6/audit_unclassified_review_attempts_from_v5.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Forward-only v5-to-v6 upgrade; host applications own migration execution.
+pub const V5_TO_V6_UPGRADE_SQL: &str = include_str!("../schema/v6/upgrade_from_v5.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
@@ -58,9 +85,14 @@ const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
 const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
+const V5_CATALOG_FINGERPRINT: u64 = 0xa565_eddd_a93b_3368;
+const V6_CATALOG_FINGERPRINT: u64 = 0x0a99_7a70_f2ff_0659;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
+pub(crate) const INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL: &str =
+    "external reversal attestations contain an incompatible resolution tuple";
 const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
 
 const REQUIRED_TABLES: &[&str] = &[
@@ -356,10 +388,11 @@ const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "unpaid_at",
     "required_gateway_account_mode",
 ];
+const V5_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V4_CURRENT_SUBSCRIPTION_COLUMNS;
 
 /// Why a host database does not satisfy a canonical schema contract.
 ///
-/// [`crate::assert_runtime_schema_v4_compatible`] reports version `4` in its
+/// Runtime compatibility assertions report their schema version in the
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
 /// or commit the read-only catalog snapshot.
 #[non_exhaustive]
@@ -396,16 +429,20 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
     }
 }
 
-/// Asserts that a historical host database matches the canonical schema-v3
-/// contract in tests or migration tooling built with the
-/// `schema-contract-test-support` feature.
+/// Asserts that a host database still on schema v3 is compatible while the host
+/// stages its forward-only cutovers.
 ///
-/// This function is not part of the ordinary production facade because the
-/// 0.4 runtime requires schema v4. It does not install, upgrade, preflight,
-/// audit, or otherwise mutate the schema. It runs the full canonical v3 catalog conformance
-/// and fingerprint check used by the schema-contract tests in one
-/// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
-/// 18 is required; other majors are rejected before catalog comparison.
+/// This retained v3 assertion supports only migration tooling built with the
+/// `schema-contract-test-support` feature.
+/// Call it after the host has applied its immutable schema-v3 install or
+/// forward-only upgrade migration through its normal migration deployment.
+/// This function does not install, upgrade, audit, or otherwise mutate the
+/// database. It runs the same full canonical v3 catalog conformance and
+/// fingerprint check used by the schema-contract tests, then verifies that
+/// every live external-reversal attestation can be represented by the typed
+/// runtime model. Both checks share one `REPEATABLE READ READ ONLY` PostgreSQL
+/// transaction. PostgreSQL major version 18 is required; other majors are
+/// rejected before catalog comparison.
 /// A concurrent-reindex transition mismatch is retried once in a fresh
 /// transaction so a reindex that commits between catalog and live-operation
 /// observations cannot cause a stale result. Other contract failures are not
@@ -429,12 +466,13 @@ pub async fn assert_runtime_schema_v3_compatible(
     .await
 }
 
-/// Asserts that a host database is compatible with the canonical schema-v4
-/// contract before the host accepts billing work.
+/// Asserts that a historical host database matches the canonical schema-v4
+/// contract in tests or migration tooling.
 ///
 /// Call this after the host has applied its immutable Syrup Rail install or
 /// forward-only upgrade migration through its normal migration deployment.
 /// This function is read-only and requires PostgreSQL major version 18.
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 pub async fn assert_runtime_schema_v4_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -443,6 +481,38 @@ pub async fn assert_runtime_schema_v4_compatible(
         4,
         V4_CURRENT_SUBSCRIPTION_COLUMNS,
         V4_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
+/// Asserts the complete canonical schema-v6 catalog before accepting billing work.
+/// The host must first apply its immutable install or v5-to-v6 upgrade. Read-only;
+/// requires PostgreSQL 18 and never installs or migrates a database.
+pub async fn assert_runtime_schema_v6_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        6,
+        V5_CURRENT_SUBSCRIPTION_COLUMNS,
+        V6_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
+/// Checks the historical schema-v5 catalog while preparing a v6 cutover.
+///
+/// This is read-only and requires PostgreSQL 18. Success validates the old side
+/// of the migration only; current billing queries require schema v6 and
+/// [`assert_runtime_schema_v6_compatible`].
+pub async fn assert_runtime_schema_v5_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        5,
+        V5_CURRENT_SUBSCRIPTION_COLUMNS,
+        V5_CATALOG_FINGERPRINT,
     )
     .await
 }
@@ -477,6 +547,13 @@ pub async fn assert_v3_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
 /// objects without exposing a production runtime migrator.
 pub async fn assert_v4_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
     assert_runtime_schema_v4_compatible(pool).await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v5
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v5_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v5_compatible(pool).await
 }
 
 #[cfg(any(test, feature = "schema-contract-test-support"))]
@@ -625,7 +702,74 @@ async fn assert_schema_conforms(
     }
     require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
         .await?;
+    // Shipped v3 and v4 cannot express the typed tuple matrix in their
+    // constraints, so their compatibility APIs retain the live-row preflight.
+    // V5 validates the invariant during cutover and fingerprints the
+    // replacement constraint.
+    if matches!(version, 3 | 4) {
+        require_compatible_external_reversal_attestations(connection, version).await?;
+    }
     require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await
+}
+
+async fn require_compatible_external_reversal_attestations(
+    connection: &mut PgConnection,
+    version: u16,
+) -> Result<(), SchemaConformanceError> {
+    let incompatible_tuple_exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM billing_external_reversal_attestations
+            WHERE NOT (
+                (
+                    prior_resolution_code = 'subscription_initial_current_grant_conflict'
+                    AND (
+                        (
+                            reversal_kind = 'refund'
+                            AND final_resolution_code =
+                                'subscription_initial_externally_refunded'
+                        )
+                        OR (
+                            reversal_kind = 'void'
+                            AND final_resolution_code =
+                                'subscription_initial_externally_voided'
+                        )
+                    )
+                )
+                OR (
+                    prior_resolution_code = 'processor_charge_external_reversal_required'
+                    AND (
+                        (
+                            reversal_kind = 'refund'
+                            AND final_resolution_code IN (
+                                'subscription_initial_externally_refunded',
+                                'processor_charge_externally_refunded'
+                            )
+                        )
+                        OR (
+                            reversal_kind = 'void'
+                            AND final_resolution_code IN (
+                                'subscription_initial_externally_voided',
+                                'processor_charge_externally_voided'
+                            )
+                        )
+                    )
+                )
+            )
+        )
+        "#,
+    )
+    .fetch_one(&mut *connection)
+    .await?;
+    if incompatible_tuple_exists {
+        Err(contract_error(
+            version,
+            INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL,
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 async fn require_unchanged_active_reindex_shadows(
@@ -647,878 +791,5 @@ async fn require_unchanged_active_reindex_shadows(
     }
 }
 
-async fn require_relations(
-    connection: &mut PgConnection,
-    version: u16,
-    relation_kind: char,
-    expected: &[&str],
-) -> Result<(), SchemaConformanceError> {
-    let expected_names = expected
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let actual = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT relation.relname
-        FROM pg_catalog.pg_class AS relation
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND relation.relkind = $1
-            AND relation.relname = ANY($2)
-        ORDER BY relation.relname
-        "#,
-    )
-    .bind(relation_kind.to_string())
-    .bind(&expected_names)
-    .fetch_all(&mut *connection)
-    .await?;
-    require_exact_set(version, "relations", expected, actual)
-}
-
-async fn require_functions(
-    connection: &mut PgConnection,
-    version: u16,
-) -> Result<(), SchemaConformanceError> {
-    let expected = REQUIRED_FUNCTIONS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let actual = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT function.proname
-        FROM pg_catalog.pg_proc AS function
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = function.pronamespace
-        WHERE namespace.nspname = 'public'
-            AND function.prokind = 'f'
-            AND function.proname = ANY($1)
-        ORDER BY function.proname
-        "#,
-    )
-    .bind(&expected)
-    .fetch_all(&mut *connection)
-    .await?;
-    require_exact_set(version, "functions", REQUIRED_FUNCTIONS, actual)
-}
-
-async fn require_triggers(
-    connection: &mut PgConnection,
-    version: u16,
-) -> Result<(), SchemaConformanceError> {
-    let expected = REQUIRED_TRIGGERS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let actual = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT trigger.tgname
-        FROM pg_catalog.pg_trigger AS trigger
-        INNER JOIN pg_catalog.pg_class AS relation
-            ON relation.oid = trigger.tgrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND NOT trigger.tgisinternal
-            AND trigger.tgenabled = 'O'
-            AND trigger.tgname = ANY($1)
-        ORDER BY trigger.tgname
-        "#,
-    )
-    .bind(&expected)
-    .fetch_all(&mut *connection)
-    .await?;
-    require_exact_set(version, "triggers", REQUIRED_TRIGGERS, actual)
-}
-
-async fn require_view_columns(
-    connection: &mut PgConnection,
-    version: u16,
-    view: &str,
-    expected_columns: &[&str],
-) -> Result<(), SchemaConformanceError> {
-    let actual = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-            AND table_name = $1
-        ORDER BY ordinal_position
-        "#,
-    )
-    .bind(view)
-    .fetch_all(&mut *connection)
-    .await?;
-    let expected = expected_columns
-        .iter()
-        .map(|column| (*column).to_owned())
-        .collect::<Vec<_>>();
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(contract_error(
-            version,
-            format!("{view} columns differ: expected {expected:?}, found {actual:?}"),
-        ))
-    }
-}
-
-async fn reject_legacy_columns(
-    connection: &mut PgConnection,
-    version: u16,
-) -> Result<(), SchemaConformanceError> {
-    let tables = REQUIRED_TABLES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let legacy = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT table_name, column_name
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-            AND table_name = ANY($1)
-            AND (
-                column_name IN (
-                    'tenant_id',
-                    'user_id',
-                    'product',
-                    'admin_user_id',
-                    'granted_by_admin_user_id',
-                    'revoked_by_admin_user_id',
-                    'app_resolution_code',
-                    'acquisition_channel'
-                )
-                OR column_name LIKE 'nmi\_%' ESCAPE '\'
-                OR column_name LIKE 'base\_subscription\_%' ESCAPE '\'
-                OR column_name LIKE 'google\_ads\_%' ESCAPE '\'
-            )
-        ORDER BY table_name, column_name
-        "#,
-    )
-    .bind(&tables)
-    .fetch_all(&mut *connection)
-    .await?;
-    if legacy.is_empty() {
-        Ok(())
-    } else {
-        Err(contract_error(
-            version,
-            format!("legacy columns remain on canonical relations: {legacy:?}"),
-        ))
-    }
-}
-
-async fn require_validated_constraints(
-    connection: &mut PgConnection,
-    version: u16,
-) -> Result<(), SchemaConformanceError> {
-    let tables = REQUIRED_TABLES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let invalid = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT relation.relname, catalog_constraint.conname
-        FROM pg_catalog.pg_constraint AS catalog_constraint
-        INNER JOIN pg_catalog.pg_class AS relation
-            ON relation.oid = catalog_constraint.conrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND relation.relname = ANY($1)
-            AND catalog_constraint.conname LIKE 'billing\_%' ESCAPE '\'
-            AND NOT catalog_constraint.convalidated
-        ORDER BY relation.relname, catalog_constraint.conname
-        "#,
-    )
-    .bind(&tables)
-    .fetch_all(&mut *connection)
-    .await?;
-    if invalid.is_empty() {
-        Ok(())
-    } else {
-        Err(contract_error(
-            version,
-            format!("canonical constraints are not validated: {invalid:?}"),
-        ))
-    }
-}
-
-fn require_ready_canonical_indexes(
-    version: u16,
-    billing_indexes: &[BillingIndexCatalogEntry],
-) -> Result<(), SchemaConformanceAttemptError> {
-    let unavailable = billing_indexes
-        .iter()
-        .filter(|index| {
-            index.active_concurrent_reindex_pid.is_none()
-                && !(index.is_valid && index.is_ready && index.is_live)
-        })
-        .collect::<Vec<_>>();
-    if unavailable.is_empty() {
-        return Ok(());
-    }
-    let retryable_reindex_transition = unavailable
-        .iter()
-        .all(|index| !index.is_valid && has_concurrent_reindex_shadow_suffix(&index.index_name));
-    let unavailable_detail = unavailable
-        .iter()
-        .map(|index| {
-            (
-                index.table_name.clone(),
-                index.index_name.clone(),
-                index.is_valid,
-                index.is_ready,
-                index.is_live,
-            )
-        })
-        .collect::<Vec<_>>();
-    let fallback = contract_error(
-        version,
-        format!(
-            "canonical indexes are not planner/write ready (table, index, valid, ready, live): {unavailable_detail:?}; invalid _ccnew/_ccold indexes are tolerated only while matching REINDEX CONCURRENTLY progress is visible to the validating role, and stale shadows left by failed maintenance must be dropped"
-        ),
-    );
-    if retryable_reindex_transition {
-        Err(SchemaConformanceAttemptError::RetryableReindexTransition { fallback })
-    } else {
-        Err(fallback.into())
-    }
-}
-
-fn has_concurrent_reindex_shadow_suffix(index_name: &str) -> bool {
-    ["_ccnew", "_ccold"].iter().any(|marker| {
-        index_name
-            .rsplit_once(marker)
-            .is_some_and(|(base, counter)| {
-                !base.is_empty() && counter.bytes().all(|byte| byte.is_ascii_digit())
-            })
-    })
-}
-
-#[derive(Clone, Debug, sqlx::FromRow)]
-struct BillingIndexCatalogEntry {
-    table_name: String,
-    index_name: String,
-    definition: String,
-    is_valid: bool,
-    is_ready: bool,
-    is_live: bool,
-    active_concurrent_reindex_pid: Option<i32>,
-}
-
-fn active_reindex_shadows(indexes: &[BillingIndexCatalogEntry]) -> Vec<(&str, &str, i32)> {
-    indexes
-        .iter()
-        .filter_map(|index| {
-            index
-                .active_concurrent_reindex_pid
-                .map(|pid| (index.table_name.as_str(), index.index_name.as_str(), pid))
-        })
-        .collect()
-}
-
-async fn load_billing_index_catalog(
-    connection: &mut PgConnection,
-) -> Result<Vec<BillingIndexCatalogEntry>, sqlx::Error> {
-    let tables = REQUIRED_TABLES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    sqlx::query_as::<_, BillingIndexCatalogEntry>(
-        r#"
-        SELECT
-            table_relation.relname AS table_name,
-            index_relation.relname AS index_name,
-            concat_ws(
-                '|',
-                table_relation.relname,
-                index_relation.relname,
-                pg_catalog.pg_get_indexdef(index_relation.oid)
-            ) AS definition,
-            catalog_index.indisvalid AS is_valid,
-            catalog_index.indisready AS is_ready,
-            catalog_index.indislive AS is_live,
-            CASE
-                WHEN NOT catalog_index.indisvalid
-                    AND index_relation.relname ~ $2
-                THEN (
-                    SELECT shadow_lock.pid
-                    FROM pg_catalog.pg_class AS canonical_index_relation
-                    INNER JOIN pg_catalog.pg_index AS canonical_index
-                        ON canonical_index.indexrelid = canonical_index_relation.oid
-                    INNER JOIN pg_catalog.pg_locks AS shadow_lock
-                        ON shadow_lock.locktype = 'relation'
-                        AND shadow_lock.relation = index_relation.oid
-                        AND shadow_lock.database = (
-                            SELECT database.oid
-                            FROM pg_catalog.pg_database AS database
-                            WHERE database.datname = current_database()
-                        )
-                        AND shadow_lock.mode = 'ShareUpdateExclusiveLock'
-                        AND shadow_lock.granted
-                    INNER JOIN pg_catalog.pg_stat_progress_create_index AS progress
-                        ON progress.pid = shadow_lock.pid
-                        AND progress.datid = shadow_lock.database
-                        AND progress.relid = table_relation.oid
-                        AND (
-                            -- PostgreSQL 18 reports the transient index before
-                            -- the swap and the new canonical index afterward.
-                            progress.index_relid IN (
-                                index_relation.oid,
-                                canonical_index_relation.oid
-                            )
-                            -- Table-wide reindex reports only its current
-                            -- index while retaining session locks for every
-                            -- index it is rebuilding on this table.
-                            OR 1 < (
-                                SELECT count(*)
-                                FROM pg_catalog.pg_index AS scope_index
-                                INNER JOIN pg_catalog.pg_locks AS scope_lock
-                                    ON scope_lock.pid = shadow_lock.pid
-                                    AND scope_lock.locktype = 'relation'
-                                    AND scope_lock.database = shadow_lock.database
-                                    AND scope_lock.relation = scope_index.indexrelid
-                                    AND scope_lock.mode = 'ShareUpdateExclusiveLock'
-                                    AND scope_lock.granted
-                                WHERE scope_index.indrelid = table_relation.oid
-                                    AND scope_index.indisvalid
-                                    AND scope_index.indisready
-                                    AND scope_index.indislive
-                            )
-                        )
-                        AND progress.command = 'REINDEX CONCURRENTLY'
-                        -- Table-wide reindex gathering locks skipped invalid
-                        -- indexes only before progress leaves initialization.
-                        AND progress.phase <> 'initializing'
-                    INNER JOIN pg_catalog.pg_locks AS canonical_index_lock
-                        ON canonical_index_lock.pid = shadow_lock.pid
-                        AND canonical_index_lock.locktype = 'relation'
-                        AND canonical_index_lock.database = shadow_lock.database
-                        AND canonical_index_lock.relation = canonical_index_relation.oid
-                        AND canonical_index_lock.mode = 'ShareUpdateExclusiveLock'
-                        AND canonical_index_lock.granted
-                    INNER JOIN pg_catalog.pg_locks AS table_lock
-                        ON table_lock.pid = shadow_lock.pid
-                        AND table_lock.locktype = 'relation'
-                        AND table_lock.database = shadow_lock.database
-                        AND table_lock.relation = table_relation.oid
-                        AND table_lock.mode = 'ShareUpdateExclusiveLock'
-                        AND table_lock.granted
-                    WHERE canonical_index.indrelid = table_relation.oid
-                        AND canonical_index.indisvalid
-                        AND canonical_index.indisready
-                        AND canonical_index.indislive
-                        AND canonical_index_relation.relname !~ $2
-                        AND pg_catalog.starts_with(
-                            canonical_index_relation.relname,
-                            pg_catalog.regexp_replace(
-                                index_relation.relname,
-                                $2,
-                                ''
-                            )
-                        )
-                    ORDER BY canonical_index_relation.oid
-                    LIMIT 1
-                )
-            END AS active_concurrent_reindex_pid
-        FROM pg_catalog.pg_index AS catalog_index
-        INNER JOIN pg_catalog.pg_class AS table_relation
-            ON table_relation.oid = catalog_index.indrelid
-        INNER JOIN pg_catalog.pg_class AS index_relation
-            ON index_relation.oid = catalog_index.indexrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = table_relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND table_relation.relname = ANY($1)
-            AND index_relation.relname LIKE 'billing\_%' ESCAPE '\'
-        ORDER BY table_relation.relname, index_relation.relname
-        "#,
-    )
-    .bind(&tables)
-    .bind(CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN)
-    .fetch_all(&mut *connection)
-    .await
-}
-
-async fn require_index_contract(
-    connection: &mut PgConnection,
-    version: u16,
-    contract: IndexContract,
-) -> Result<(), SchemaConformanceError> {
-    let actual = catalog_index_shape(connection, contract.name).await?;
-    validate_index_contract(version, contract, actual.as_ref())
-}
-
-fn validate_index_contract(
-    version: u16,
-    contract: IndexContract,
-    actual: Option<&CatalogIndexShape>,
-) -> Result<(), SchemaConformanceError> {
-    let Some(actual) = actual else {
-        return Err(index_contract_error(version, contract, "is missing"));
-    };
-    let expected_key_expressions = contract
-        .keys
-        .iter()
-        .map(|key| key.expression.to_owned())
-        .collect::<Vec<_>>();
-    let expected_key_orderings = contract
-        .keys
-        .iter()
-        .map(|key| key.ordering.catalog_label().to_owned())
-        .collect::<Vec<_>>();
-    let expected_key_opclasses = contract
-        .keys
-        .iter()
-        .map(|key| key.opclass.to_owned())
-        .collect::<Vec<_>>();
-    let expected_included_expressions = contract
-        .included_expressions
-        .iter()
-        .map(|expression| (*expression).to_owned())
-        .collect::<Vec<_>>();
-
-    if actual.table_name != contract.table {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "belongs to table {:?}; expected {:?}",
-                actual.table_name, contract.table
-            ),
-        ));
-    }
-    if actual.access_method != "btree" {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "uses access method {:?}; expected \"btree\"",
-                actual.access_method
-            ),
-        ));
-    }
-    if actual.is_unique != contract.unique {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "has unique={}; expected unique={}",
-                actual.is_unique, contract.unique
-            ),
-        ));
-    }
-    if actual.key_expressions != expected_key_expressions {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "has key expressions {:?}; expected {expected_key_expressions:?}",
-                actual.key_expressions
-            ),
-        ));
-    }
-    if actual.key_orderings != expected_key_orderings {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "has key ordering {:?}; expected {expected_key_orderings:?}",
-                actual.key_orderings
-            ),
-        ));
-    }
-    if actual.key_opclasses != expected_key_opclasses {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "has key operator classes {:?}; expected {expected_key_opclasses:?}",
-                actual.key_opclasses
-            ),
-        ));
-    }
-    if actual.included_expressions != expected_included_expressions {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "has included expressions {:?}; expected {expected_included_expressions:?}",
-                actual.included_expressions
-            ),
-        ));
-    }
-    if actual.predicate.as_deref() != contract.predicate {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "has predicate {:?}; expected {:?}",
-                actual.predicate, contract.predicate
-            ),
-        ));
-    }
-    if !actual.is_valid || !actual.is_ready || !actual.is_live {
-        return Err(index_contract_error(
-            version,
-            contract,
-            format!(
-                "is not planner/write ready (valid={}, ready={}, live={})",
-                actual.is_valid, actual.is_ready, actual.is_live
-            ),
-        ));
-    }
-    Ok(())
-}
-
-fn index_contract_error(
-    version: u16,
-    contract: IndexContract,
-    detail: impl std::fmt::Display,
-) -> SchemaConformanceError {
-    contract_error(
-        version,
-        format!("{} index {} {detail}", contract.purpose, contract.name),
-    )
-}
-
-#[derive(Clone, Debug, sqlx::FromRow)]
-struct CatalogIndexShape {
-    table_name: String,
-    access_method: String,
-    key_expressions: Vec<String>,
-    key_orderings: Vec<String>,
-    key_opclasses: Vec<String>,
-    included_expressions: Vec<String>,
-    predicate: Option<String>,
-    is_unique: bool,
-    is_valid: bool,
-    is_ready: bool,
-    is_live: bool,
-}
-
-async fn catalog_index_shape(
-    connection: &mut PgConnection,
-    index_name: &str,
-) -> Result<Option<CatalogIndexShape>, sqlx::Error> {
-    sqlx::query_as::<_, CatalogIndexShape>(
-        r#"
-        SELECT
-        table_relation.relname AS table_name,
-        access_method.amname AS access_method,
-        ARRAY(
-            SELECT pg_catalog.pg_get_indexdef(
-                catalog_index.indexrelid,
-                key_position.position,
-                true
-            )
-            FROM generate_series(
-                1,
-                catalog_index.indnkeyatts
-            ) AS key_position(position)
-            ORDER BY key_position.position
-        ) AS key_expressions,
-        ARRAY(
-            SELECT concat(
-                CASE WHEN pg_catalog.pg_index_column_has_property(
-                    catalog_index.indexrelid,
-                    key_position.position,
-                    'desc'
-                ) THEN 'DESC' ELSE 'ASC' END,
-                CASE WHEN pg_catalog.pg_index_column_has_property(
-                    catalog_index.indexrelid,
-                    key_position.position,
-                    'nulls_first'
-                ) THEN ' NULLS FIRST' ELSE ' NULLS LAST' END
-            )
-            FROM generate_series(
-                1,
-                catalog_index.indnkeyatts
-            ) AS key_position(position)
-            ORDER BY key_position.position
-        ) AS key_orderings,
-        ARRAY(
-            SELECT concat(operator_class_namespace.nspname, '.', operator_class.opcname)
-            FROM unnest(catalog_index.indclass::oid[]) WITH ORDINALITY
-                AS key_operator_class(operator_class_oid, position)
-            INNER JOIN pg_catalog.pg_opclass AS operator_class
-                ON operator_class.oid = key_operator_class.operator_class_oid
-            INNER JOIN pg_catalog.pg_namespace AS operator_class_namespace
-                ON operator_class_namespace.oid = operator_class.opcnamespace
-            WHERE key_operator_class.position <= catalog_index.indnkeyatts
-            ORDER BY key_operator_class.position
-        ) AS key_opclasses,
-        ARRAY(
-            SELECT pg_catalog.pg_get_indexdef(
-                catalog_index.indexrelid,
-                included_position.position,
-                true
-            )
-            FROM generate_series(
-                catalog_index.indnkeyatts::integer + 1,
-                catalog_index.indnatts::integer
-            ) AS included_position(position)
-            ORDER BY included_position.position
-        ) AS included_expressions,
-        pg_catalog.pg_get_expr(
-            catalog_index.indpred,
-            catalog_index.indrelid,
-            true
-        ) AS predicate,
-        catalog_index.indisunique AS is_unique,
-        catalog_index.indisvalid AS is_valid,
-        catalog_index.indisready AS is_ready,
-        catalog_index.indislive AS is_live
-        FROM pg_catalog.pg_class AS index_relation
-        INNER JOIN pg_catalog.pg_index AS catalog_index
-            ON catalog_index.indexrelid = index_relation.oid
-        INNER JOIN pg_catalog.pg_class AS table_relation
-            ON table_relation.oid = catalog_index.indrelid
-        INNER JOIN pg_catalog.pg_namespace AS index_namespace
-            ON index_namespace.oid = index_relation.relnamespace
-        INNER JOIN pg_catalog.pg_namespace AS table_namespace
-            ON table_namespace.oid = table_relation.relnamespace
-        INNER JOIN pg_catalog.pg_am AS access_method
-            ON access_method.oid = index_relation.relam
-        WHERE index_namespace.nspname = 'public'
-            AND table_namespace.nspname = 'public'
-            AND index_relation.relkind = 'i'
-            AND index_relation.relname = $1
-        "#,
-    )
-    .bind(index_name)
-    .fetch_optional(&mut *connection)
-    .await
-}
-
-async fn require_catalog_fingerprint(
-    connection: &mut PgConnection,
-    version: u16,
-    expected: u64,
-    billing_indexes: &[BillingIndexCatalogEntry],
-) -> Result<(), SchemaConformanceError> {
-    let actual = canonical_catalog_fingerprint(connection, billing_indexes).await?;
-    if actual == expected {
-        Ok(())
-    } else {
-        Err(contract_error(
-            version,
-            format!(
-                "canonical catalog fingerprint differs: expected {expected:#018x}, found {actual:#018x}"
-            ),
-        ))
-    }
-}
-
-async fn canonical_catalog_fingerprint(
-    connection: &mut PgConnection,
-    billing_indexes: &[BillingIndexCatalogEntry],
-) -> Result<u64, SchemaConformanceError> {
-    let tables = REQUIRED_TABLES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let views = REQUIRED_VIEWS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let functions = REQUIRED_FUNCTIONS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let triggers = REQUIRED_TRIGGERS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-
-    let columns = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            table_name,
-            ordinal_position::text,
-            column_name,
-            data_type,
-            udt_name,
-            is_nullable,
-            COALESCE(column_default, '')
-        )
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-            AND table_name = ANY($1)
-        ORDER BY table_name, ordinal_position
-        "#,
-    )
-    .bind(&tables)
-    .fetch_all(&mut *connection)
-    .await?;
-    let constraints = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            relation.relname,
-            catalog_constraint.conname,
-            catalog_constraint.contype::text,
-            pg_catalog.pg_get_constraintdef(catalog_constraint.oid, true)
-        )
-        FROM pg_catalog.pg_constraint AS catalog_constraint
-        INNER JOIN pg_catalog.pg_class AS relation
-            ON relation.oid = catalog_constraint.conrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND relation.relname = ANY($1)
-            AND catalog_constraint.contype <> 'n'
-            AND catalog_constraint.conname LIKE 'billing\_%' ESCAPE '\'
-        ORDER BY relation.relname, catalog_constraint.conname
-        "#,
-    )
-    .bind(&tables)
-    .fetch_all(&mut *connection)
-    .await?;
-    let indexes = billing_indexes
-        .iter()
-        .filter(|index| index.active_concurrent_reindex_pid.is_none())
-        .map(|index| index.definition.clone())
-        .collect::<Vec<_>>();
-    let view_definitions = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            relation.relname,
-            pg_catalog.pg_get_viewdef(relation.oid, true)
-        )
-        FROM pg_catalog.pg_class AS relation
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND relation.relkind = 'v'
-            AND relation.relname = ANY($1)
-        ORDER BY relation.relname
-        "#,
-    )
-    .bind(&views)
-    .fetch_all(&mut *connection)
-    .await?;
-    let function_definitions = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            catalog_function.proname,
-            pg_catalog.pg_get_function_identity_arguments(
-                catalog_function.oid
-            ),
-            pg_catalog.pg_get_functiondef(catalog_function.oid)
-        )
-        FROM pg_catalog.pg_proc AS catalog_function
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = catalog_function.pronamespace
-        WHERE namespace.nspname = 'public'
-            AND catalog_function.prokind = 'f'
-            AND catalog_function.proname = ANY($1)
-        ORDER BY
-            catalog_function.proname,
-            pg_catalog.pg_get_function_identity_arguments(
-                catalog_function.oid
-            )
-        "#,
-    )
-    .bind(&functions)
-    .fetch_all(&mut *connection)
-    .await?;
-    let trigger_definitions = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            relation.relname,
-            catalog_trigger.tgname,
-            catalog_trigger.tgenabled::text,
-            pg_catalog.pg_get_triggerdef(catalog_trigger.oid, true)
-        )
-        FROM pg_catalog.pg_trigger AS catalog_trigger
-        INNER JOIN pg_catalog.pg_class AS relation
-            ON relation.oid = catalog_trigger.tgrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND NOT catalog_trigger.tgisinternal
-            AND catalog_trigger.tgname = ANY($1)
-        ORDER BY relation.relname, catalog_trigger.tgname
-        "#,
-    )
-    .bind(&triggers)
-    .fetch_all(&mut *connection)
-    .await?;
-
-    Ok(catalog_fingerprint([
-        ("columns", columns.as_slice()),
-        ("constraints", constraints.as_slice()),
-        ("indexes", indexes.as_slice()),
-        ("views", view_definitions.as_slice()),
-        ("functions", function_definitions.as_slice()),
-        ("triggers", trigger_definitions.as_slice()),
-    ]))
-}
-
-#[cfg(test)]
-async fn canonical_catalog_fingerprint_for_pool(
-    pool: &PgPool,
-) -> Result<u64, SchemaConformanceError> {
-    let mut connection = pool.acquire().await?;
-    let billing_indexes = load_billing_index_catalog(&mut connection).await?;
-    canonical_catalog_fingerprint(&mut connection, &billing_indexes).await
-}
-
-fn catalog_fingerprint<'a>(categories: impl IntoIterator<Item = (&'a str, &'a [String])>) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    fn add_bytes(mut state: u64, bytes: &[u8]) -> u64 {
-        for byte in bytes {
-            state ^= u64::from(*byte);
-            state = state.wrapping_mul(PRIME);
-        }
-        state
-    }
-
-    let mut state = OFFSET_BASIS;
-    for (category, rows) in categories {
-        state = add_bytes(state, category.as_bytes());
-        state = add_bytes(state, &rows.len().to_be_bytes());
-        for row in rows {
-            state = add_bytes(state, &row.len().to_be_bytes());
-            state = add_bytes(state, row.as_bytes());
-        }
-    }
-    state
-}
-
-fn require_exact_set(
-    version: u16,
-    category: &str,
-    expected: &[&str],
-    actual: Vec<String>,
-) -> Result<(), SchemaConformanceError> {
-    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
-    let actual = actual.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    if actual == expected {
-        Ok(())
-    } else {
-        let missing = expected.difference(&actual).copied().collect::<Vec<_>>();
-        Err(contract_error(
-            version,
-            format!("missing {category}: {missing:?}"),
-        ))
-    }
-}
-
-fn contract_error(version: u16, detail: impl Into<String>) -> SchemaConformanceError {
-    SchemaConformanceError::Contract {
-        version,
-        detail: detail.into(),
-    }
-}
-
-#[cfg(test)]
-mod tests;
+include!("schema_contract/catalog_requirements.rs");
+include!("schema_contract/catalog_fingerprint.rs");

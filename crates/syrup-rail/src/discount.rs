@@ -43,6 +43,84 @@ impl SubscriptionDiscountClaimStatus {
     }
 }
 
+/// The complete lifecycle state of a persisted subscription discount claim.
+///
+/// The database persists this as a status and nullable detail columns for
+/// compatibility. This type closes those fields into the only valid shapes for
+/// domain consumers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SubscriptionDiscountClaimState {
+    /// The claim is available for a future initial subscription payment.
+    Saved,
+    /// The claim was consumed by an initial subscription payment.
+    Applied {
+        /// When the claim was applied.
+        applied_at: DateTime<Utc>,
+        /// The subscription created with the claim.
+        subscription_id: SubscriptionId,
+        /// The initial payment attempt that consumed the claim.
+        payment_attempt_id: PaymentAttemptId,
+    },
+    /// A later saved claim replaced this one.
+    Superseded {
+        /// When the claim was superseded.
+        superseded_at: DateTime<Utc>,
+    },
+    /// The saved claim was cleared or its discount code was disabled.
+    Expired,
+}
+
+impl SubscriptionDiscountClaimState {
+    /// Returns the compatibility status projection stored in the flat schema.
+    pub const fn status(&self) -> SubscriptionDiscountClaimStatus {
+        match self {
+            Self::Saved => SubscriptionDiscountClaimStatus::Saved,
+            Self::Applied { .. } => SubscriptionDiscountClaimStatus::Applied,
+            Self::Superseded { .. } => SubscriptionDiscountClaimStatus::Superseded,
+            Self::Expired => SubscriptionDiscountClaimStatus::Expired,
+        }
+    }
+
+    /// Validates historical status/detail fields and closes them into one state.
+    pub fn from_legacy_parts(
+        status: SubscriptionDiscountClaimStatus,
+        applied_at: Option<DateTime<Utc>>,
+        applied_subscription_id: Option<SubscriptionId>,
+        applied_payment_attempt_id: Option<PaymentAttemptId>,
+        superseded_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, SubscriptionDiscountError> {
+        match (
+            status,
+            applied_at,
+            applied_subscription_id,
+            applied_payment_attempt_id,
+            superseded_at,
+        ) {
+            (SubscriptionDiscountClaimStatus::Saved, None, None, None, None) => Ok(Self::Saved),
+            (
+                SubscriptionDiscountClaimStatus::Applied,
+                Some(applied_at),
+                Some(subscription_id),
+                Some(payment_attempt_id),
+                None,
+            ) => Ok(Self::Applied {
+                applied_at,
+                subscription_id,
+                payment_attempt_id,
+            }),
+            (
+                SubscriptionDiscountClaimStatus::Superseded,
+                None,
+                None,
+                None,
+                Some(superseded_at),
+            ) => Ok(Self::Superseded { superseded_at }),
+            (SubscriptionDiscountClaimStatus::Expired, None, None, None, None) => Ok(Self::Expired),
+            _ => Err(SubscriptionDiscountError::InvalidState),
+        }
+    }
+}
+
 #[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionDiscountCodeRecord {
     id: DiscountCodeId,
@@ -412,15 +490,15 @@ pub struct SubscriptionDiscountClaimRecord {
     plan_key: PlanKey,
     discount_code_id: DiscountCodeId,
     snapshot: SubscriptionDiscountSnapshot,
-    status: SubscriptionDiscountClaimStatus,
+    state: SubscriptionDiscountClaimState,
     claimed_at: DateTime<Utc>,
-    applied_at: Option<DateTime<Utc>>,
-    applied_subscription_id: Option<SubscriptionId>,
-    applied_payment_attempt_id: Option<PaymentAttemptId>,
-    superseded_at: Option<DateTime<Utc>>,
 }
 
 impl SubscriptionDiscountClaimRecord {
+    /// Compatibility constructor for the historical flat lifecycle fields.
+    ///
+    /// New code should use [`Self::from_state`]. For a named fallible
+    /// conversion from a flat representation, use [`Self::from_legacy_parts`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: DiscountClaimId,
@@ -436,30 +514,7 @@ impl SubscriptionDiscountClaimRecord {
         applied_payment_attempt_id: Option<PaymentAttemptId>,
         superseded_at: Option<DateTime<Utc>>,
     ) -> Result<Self, SubscriptionDiscountError> {
-        let valid_state = match status {
-            SubscriptionDiscountClaimStatus::Applied => {
-                applied_at.is_some()
-                    && applied_subscription_id.is_some()
-                    && applied_payment_attempt_id.is_some()
-                    && superseded_at.is_none()
-            }
-            SubscriptionDiscountClaimStatus::Superseded => {
-                applied_at.is_none()
-                    && applied_subscription_id.is_none()
-                    && applied_payment_attempt_id.is_none()
-                    && superseded_at.is_some()
-            }
-            SubscriptionDiscountClaimStatus::Saved | SubscriptionDiscountClaimStatus::Expired => {
-                applied_at.is_none()
-                    && applied_subscription_id.is_none()
-                    && applied_payment_attempt_id.is_none()
-                    && superseded_at.is_none()
-            }
-        };
-        if !valid_state {
-            return Err(SubscriptionDiscountError::InvalidState);
-        }
-        Ok(Self {
+        Self::from_legacy_parts(
             id,
             billing_scope_id,
             subscriber_id,
@@ -472,7 +527,66 @@ impl SubscriptionDiscountClaimRecord {
             applied_subscription_id,
             applied_payment_attempt_id,
             superseded_at,
-        })
+        )
+    }
+
+    /// Builds a record from a closed lifecycle state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_state(
+        id: DiscountClaimId,
+        billing_scope_id: BillingScopeId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+        discount_code_id: DiscountCodeId,
+        snapshot: SubscriptionDiscountSnapshot,
+        state: SubscriptionDiscountClaimState,
+        claimed_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id,
+            billing_scope_id,
+            subscriber_id,
+            plan_key,
+            discount_code_id,
+            snapshot,
+            state,
+            claimed_at,
+        }
+    }
+
+    /// Validates historical flat lifecycle fields before constructing the typed record.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_legacy_parts(
+        id: DiscountClaimId,
+        billing_scope_id: BillingScopeId,
+        subscriber_id: SubscriberId,
+        plan_key: PlanKey,
+        discount_code_id: DiscountCodeId,
+        snapshot: SubscriptionDiscountSnapshot,
+        status: SubscriptionDiscountClaimStatus,
+        claimed_at: DateTime<Utc>,
+        applied_at: Option<DateTime<Utc>>,
+        applied_subscription_id: Option<SubscriptionId>,
+        applied_payment_attempt_id: Option<PaymentAttemptId>,
+        superseded_at: Option<DateTime<Utc>>,
+    ) -> Result<Self, SubscriptionDiscountError> {
+        let state = SubscriptionDiscountClaimState::from_legacy_parts(
+            status,
+            applied_at,
+            applied_subscription_id,
+            applied_payment_attempt_id,
+            superseded_at,
+        )?;
+        Ok(Self::from_state(
+            id,
+            billing_scope_id,
+            subscriber_id,
+            plan_key,
+            discount_code_id,
+            snapshot,
+            state,
+            claimed_at,
+        ))
     }
 
     pub const fn id(&self) -> DiscountClaimId {
@@ -493,23 +607,42 @@ impl SubscriptionDiscountClaimRecord {
     pub const fn snapshot(&self) -> &SubscriptionDiscountSnapshot {
         &self.snapshot
     }
+    pub const fn state(&self) -> &SubscriptionDiscountClaimState {
+        &self.state
+    }
     pub const fn status(&self) -> SubscriptionDiscountClaimStatus {
-        self.status
+        self.state.status()
     }
     pub const fn claimed_at(&self) -> &DateTime<Utc> {
         &self.claimed_at
     }
     pub const fn applied_at(&self) -> Option<&DateTime<Utc>> {
-        self.applied_at.as_ref()
+        match &self.state {
+            SubscriptionDiscountClaimState::Applied { applied_at, .. } => Some(applied_at),
+            _ => None,
+        }
     }
     pub const fn applied_subscription_id(&self) -> Option<SubscriptionId> {
-        self.applied_subscription_id
+        match &self.state {
+            SubscriptionDiscountClaimState::Applied {
+                subscription_id, ..
+            } => Some(*subscription_id),
+            _ => None,
+        }
     }
     pub const fn applied_payment_attempt_id(&self) -> Option<PaymentAttemptId> {
-        self.applied_payment_attempt_id
+        match &self.state {
+            SubscriptionDiscountClaimState::Applied {
+                payment_attempt_id, ..
+            } => Some(*payment_attempt_id),
+            _ => None,
+        }
     }
     pub const fn superseded_at(&self) -> Option<&DateTime<Utc>> {
-        self.superseded_at.as_ref()
+        match &self.state {
+            SubscriptionDiscountClaimState::Superseded { superseded_at } => Some(superseded_at),
+            _ => None,
+        }
     }
 }
 
@@ -563,152 +696,5 @@ pub(crate) fn normalize_label(
 }
 
 #[cfg(test)]
-mod tests {
-    use chrono::TimeZone;
-    use uuid::Uuid;
-
-    use super::*;
-    use crate::{
-        DunningExhaustion, DunningSchedule, LimitedDiscountMonths, PaidTrialTerms,
-        PastDueAccessPolicy, PercentOffBasisPoints, PositiveDiscountCents,
-        RecurringSubscriptionTerms, RenewalFailurePolicy, SubscriptionPeriodRule,
-        SubscriptionStart,
-    };
-
-    fn code_record(duration: SubscriptionDiscountDuration) -> SubscriptionDiscountCodeRecord {
-        let now = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
-        SubscriptionDiscountCodeRecord::new(
-            DiscountCodeId::new(Uuid::from_u128(1)),
-            BillingScopeId::new(Uuid::from_u128(2)),
-            PlanKey::new("basic").unwrap(),
-            SubscriptionDiscountCode::new("SAVE10").unwrap(),
-            "SAVE10".to_owned(),
-            None,
-            SubscriptionDiscountCodeStatus::Active,
-            SubscriptionDiscountKind::AmountOffCents(PositiveDiscountCents::new(100).unwrap()),
-            CurrencyCode::new("USD").unwrap(),
-            duration,
-            now,
-            now,
-        )
-        .unwrap()
-    }
-
-    fn offer(trial_cents: i32, recurring_period: SubscriptionPeriodRule) -> SubscriptionOffer {
-        let usd = CurrencyCode::new("USD").unwrap();
-        SubscriptionOffer::new(
-            PlanKey::new("basic").unwrap(),
-            RecurringSubscriptionTerms::new(
-                ChargeAmount::new(1_000, usd).unwrap(),
-                recurring_period,
-            ),
-            SubscriptionStart::PaidTrial(PaidTrialTerms::new(
-                ChargeAmount::new(trial_cents, usd).unwrap(),
-                SubscriptionPeriodRule::fixed_days(7).unwrap(),
-            )),
-            RenewalFailurePolicy::new(
-                DunningSchedule::default(),
-                DunningExhaustion::RemainPastDue,
-                PastDueAccessPolicy::SuspendImmediately,
-            ),
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn quotes_preserve_integer_discount_behavior() {
-        let usd = CurrencyCode::new("USD").unwrap();
-        let base = ChargeAmount::new(5_900, usd).unwrap();
-        assert_eq!(
-            discounted_charge(
-                base,
-                usd,
-                SubscriptionDiscountKind::AmountOffCents(PositiveDiscountCents::new(900).unwrap(),),
-            )
-            .unwrap()
-            .cents(),
-            5_000
-        );
-        assert_eq!(
-            discounted_charge(
-                base,
-                usd,
-                SubscriptionDiscountKind::PercentOffBasisPoints(
-                    PercentOffBasisPoints::new(2_500).unwrap(),
-                ),
-            )
-            .unwrap()
-            .cents(),
-            4_425
-        );
-    }
-
-    #[test]
-    fn labels_preserve_the_existing_trim_and_truncate_contract() {
-        assert_eq!(
-            normalize_label(Some("  Launch  ".into()))
-                .unwrap()
-                .as_deref(),
-            Some("Launch")
-        );
-        assert_eq!(normalize_label(Some("  ".into())).unwrap(), None);
-        assert_eq!(
-            normalize_label(Some("x".repeat(121)))
-                .unwrap()
-                .unwrap()
-                .len(),
-            120
-        );
-    }
-
-    #[test]
-    fn limited_duration_remains_typed() {
-        let duration =
-            SubscriptionDiscountDuration::LimitedMonths(LimitedDiscountMonths::new(3).unwrap());
-        assert_eq!(duration.as_str(), "limited_months");
-    }
-
-    #[test]
-    fn clear_command_preserves_the_exact_subscriber_aggregate() {
-        let scope = BillingScopeId::new(Uuid::from_u128(11));
-        let subscriber = SubscriberId::new(Uuid::from_u128(12));
-        let plan = PlanKey::new("basic").unwrap();
-
-        let command = ClearSubscriptionDiscount::new(scope, subscriber, plan.clone());
-
-        assert_eq!(command.billing_scope_id(), scope);
-        assert_eq!(command.subscriber_id(), subscriber);
-        assert_eq!(command.plan_key(), &plan);
-    }
-
-    #[test]
-    fn discount_quote_uses_recurring_charge_not_trial_charge() {
-        let first = SubscriptionDiscountCodeQuote::new(
-            code_record(SubscriptionDiscountDuration::Indefinite),
-            &offer(100, SubscriptionPeriodRule::calendar_months(1).unwrap()),
-        )
-        .unwrap();
-        let second = SubscriptionDiscountCodeQuote::new(
-            code_record(SubscriptionDiscountDuration::Indefinite),
-            &offer(500, SubscriptionPeriodRule::calendar_months(1).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(first.base_charge(), second.base_charge());
-        assert_eq!(first.discounted_charge(), second.discounted_charge());
-        assert_eq!(first.discounted_charge().cents(), 900);
-    }
-
-    #[test]
-    fn limited_month_quote_rejects_nonmonthly_recurring_cadence() {
-        let result = SubscriptionDiscountCodeQuote::new(
-            code_record(SubscriptionDiscountDuration::LimitedMonths(
-                LimitedDiscountMonths::new(3).unwrap(),
-            )),
-            &offer(100, SubscriptionPeriodRule::fixed_days(30).unwrap()),
-        );
-        assert_eq!(
-            result,
-            Err(SubscriptionDiscountError::LimitedDiscountCadence)
-        );
-    }
-}
+#[path = "discount/tests.rs"]
+mod tests;

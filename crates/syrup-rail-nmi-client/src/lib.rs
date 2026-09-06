@@ -8,6 +8,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod approval_evidence;
 mod client;
 mod configuration;
 mod errors;
@@ -15,22 +16,18 @@ mod lossless_json;
 mod requests;
 mod responses;
 
+pub use approval_evidence::PaymentApprovalEvidence;
 pub use client::{Client, ClientFactory};
-#[cfg(test)]
-pub(crate) use configuration::MAX_CREDENTIAL_BYTES;
 pub use configuration::{
     ConfigurationError, Credentials, DuplicateCheck, DuplicateCheckWindow, Endpoint,
 };
 pub use errors::{MutationCertainty, MutationError, QueryError};
 pub use requests::{
-    BillingContact, PaymentSource, ReportQuery, SaleRequest, StorePaymentMethodRequest,
-    StoredCredential, TransactionQuery, VaultAction,
+    BillingContact, PaymentSource, ReportQuery, SaleIntent, SaleIntentBuildError, SaleRequest,
+    StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
 };
 pub use responses::{
     AccountMode, PaymentDescriptor, PaymentDescriptorParts, PaymentOutcome,
     PaymentOutcomeDiagnostic, PaymentOutcomeParts, PaymentStatus, SensitiveText, TransactionAction,
     TransactionActionParts, TransactionReport, TransactionReportDiagnostic, TransactionReportParts,
 };
-
-#[cfg(test)]
-mod public_api_tests;

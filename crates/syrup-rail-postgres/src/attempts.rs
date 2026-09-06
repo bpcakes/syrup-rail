@@ -61,7 +61,6 @@ pub use payment_method_replacement::{
     reserve_subscription_payment_method_replacement_in_transaction,
 };
 pub(crate) use persistence::find_payment_attempt_by_idempotency_in_transaction;
-use persistence::map_subscription_persistence_error;
 pub(crate) use persistence::{
     PAYMENT_ATTEMPT_SELECT, find_payment_attempt_by_id_on_connection,
     lock_payment_attempt_by_id_on_connection, payment_attempt_from_row,
@@ -69,6 +68,10 @@ pub(crate) use persistence::{
 };
 pub use persistence::{
     find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,
+};
+use persistence::{
+    find_payment_attempt_by_idempotency, insert_subscription_charge_attempt,
+    lock_payment_attempt_by_idempotency, map_subscription_persistence_error,
 };
 pub use recovery::{
     admit_subscription_recovery_submission_in_transaction,
@@ -84,8 +87,8 @@ pub(crate) use shared::{
     STALE_UNSUBMITTED_RENEWAL_TEXT, attempt_replay_disposition,
     blocking_payment_method_update_exists, expire_stale_initial_attempts,
     fail_stale_unsubmitted_payment_method_updates, fail_stale_unsubmitted_subscription_charges,
-    lock_initial_attempt_rows, lock_initial_charge_rows, lock_subscription_aggregate,
-    prepared_replay_required_mode_changed, set_enrollment_timeouts,
+    lock_initial_attempt_rows, lock_initial_attempt_rows_on_connection, lock_initial_charge_rows,
+    lock_subscription_aggregate, prepared_replay_required_mode_changed, set_enrollment_timeouts,
     try_lock_subscription_aggregate,
 };
 use transitions::reject_prepared_attempt;

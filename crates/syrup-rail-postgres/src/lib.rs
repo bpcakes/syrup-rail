@@ -6,6 +6,7 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+mod advisory_locks;
 mod attempts;
 mod billing_portal;
 mod cancellation;
@@ -42,6 +43,7 @@ mod subscription_billing_service;
 mod subscription_persistence;
 #[cfg(test)]
 mod test_support;
+mod transaction_support;
 mod transactions;
 
 pub use attempts::{
@@ -160,10 +162,13 @@ pub use renewal::{
     RenewalStoreError, due_renewals, due_renewals_for_mode, due_renewals_page,
     due_renewals_page_for_mode, renewal_attempt_state,
 };
-#[cfg(any(test, feature = "schema-contract-test-support"))]
-pub use schema_contract::assert_runtime_schema_v3_compatible;
 pub use schema_contract::{
-    SUPPORTED_POSTGRES_MAJOR_VERSION, SchemaConformanceError, assert_runtime_schema_v4_compatible,
+    SUPPORTED_POSTGRES_MAJOR_VERSION, SchemaConformanceError, assert_runtime_schema_v5_compatible,
+    assert_runtime_schema_v6_compatible,
+};
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+pub use schema_contract::{
+    assert_runtime_schema_v3_compatible, assert_runtime_schema_v4_compatible,
 };
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,

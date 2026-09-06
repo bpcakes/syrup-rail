@@ -3,11 +3,10 @@ use std::fmt;
 use crate::{
     BillingContact, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
     GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayProviderKey,
-    GatewayTransactionId, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
-    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
-    PaymentAttemptTarget, PaymentMethodId, PaymentToken, PlanKey, ResolvedGateway, SubscriberId,
-    SubscriptionId, SubscriptionPaymentContext, SubscriptionPaymentStateSnapshot,
-    SubscriptionStatus,
+    GatewayTransactionId, IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PaymentToken,
+    PlanKey, ResolvedGateway, SubscriberId, SubscriptionId, SubscriptionPaymentContext,
+    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 use thiserror::Error;
 
@@ -197,23 +196,15 @@ impl SubscriptionRecoveryReservation {
             gateway.gateway_configuration_id(),
             required_gateway_account_mode,
         );
-        let fingerprint = PaymentAttemptFingerprint::for_subscription_recovery(
-            command.plan_key(),
-            expected_state.subscription_id(),
-            expected_state.payment_method_id(),
-            *period.start_at(),
-            charge.money(),
-        );
         let target = PaymentAttemptTarget::SubscriptionRecovery {
             plan_key: command.plan_key().clone(),
             payment_method_id: expected_state.payment_method_id(),
             period,
             expected_state,
         };
-        let request = PaymentAttemptRequest::new(
+        let request = PaymentAttemptRequest::canonical(
             target,
             command.idempotency_key().clone(),
-            fingerprint,
             charge.money(),
             gateway
                 .mutation_reference_factory()

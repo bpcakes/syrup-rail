@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.2"
-syrup-rail-postgres = "0.5.2"
-syrup-rail-nmi = "0.5.2" # only for NMI-backed hosts
+syrup-rail = "0.6.0"
+syrup-rail-postgres = "0.6.0"
+syrup-rail-nmi = "0.6.0" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.5.2"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.6.0"`
 directly.
 
 ## Subscription terms
@@ -88,30 +88,30 @@ persist those provider-neutral events in its own transactional outbox and run
 product-specific cleanup asynchronously; Syrup Rail does not call host
 fulfillment integrations.
 
-Every `SubscriptionPaymentFailed` carries a
-`SubscriptionPaymentFailureAccess` outcome. Consume that field as the
-canonical product-access fact immediately after the failure; it already
-accounts for the subscription's snapshotted access policy and causal failure
-history. In particular, an immediate-suspension retry carries the original
-access boundary even though automatic dunning remains open. Hosts must not
-reconstruct this decision from the failure disposition or current offer.
+Every `SubscriptionPaymentFailed` carries one closed
+`SubscriptionPaymentFailureOutcome`. Its `access()` projection is the canonical
+product-access fact immediately after the failure; it already accounts for the
+subscription's snapshotted access policy and causal failure history. In
+particular, an immediate-suspension retry carries the original access boundary
+even though automatic dunning remains open. Hosts must not reconstruct this
+decision from current offer configuration.
 
 `RemainPastDue` instead keeps the financial lifecycle open with no further
 automatic payment scheduled. It does not emit `SubscriptionEnded`. When the
 access policy is `ContinueUntilDunningExhausted`, the final
-`SubscriptionPaymentFailed { disposition: DunningExhausted { exhausted_at } }`
-also carries `access: Ended { access_ended_at: exhausted_at }`: the
-subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
-at that boundary. Hosts that mirror access outside Syrup Rail must consume the
-event's `access` outcome from their transactional outbox.
+`SubscriptionPaymentFailed { outcome: DunningExhausted { exhausted_at,
+access_ended_at } }` records both facts at the same boundary: the subscription
+entitlement changes from `AllowedDuringDunning` to `Suspended`. Hosts that
+mirror access outside Syrup Rail must consume the outcome's access projection
+from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v4 is the
+PostgreSQL 18 is the only supported database major, and schema v6 is the
 current contract. New hosts install
-[`schema/v4/install.sql`](crates/syrup-rail-postgres/schema/v4/install.sql).
-Existing schema-v3 hosts follow the checked-in
-[`v3` to `v4` cutover guide](crates/syrup-rail-postgres/schema/v4/README.md).
-Hosts on schema v1 or v2 must first follow the immutable versioned artifacts
-to reach schema v3, then perform the staged v3-to-v4 cutover.
+[`schema/v6/install.sql`](crates/syrup-rail-postgres/schema/v6/install.sql).
+Existing schema-v5 hosts follow the checked-in
+[`v5` to `v6` cutover guide](crates/syrup-rail-postgres/schema/v6/README.md).
+Hosts on an older schema must first follow the immutable versioned artifacts
+to reach schema v5, then perform the v5-to-v6 cutover.
 
 ## PostgreSQL host integration
 
@@ -133,11 +133,10 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v4 install or completed every staged
-forward-only v3-to-v4 upgrade artifact, call
-`assert_runtime_schema_v4_compatible(&pool).await` during process startup and
+After the host has applied its v6 install or forward-only v5-to-v6 upgrade,
+call `assert_runtime_schema_v6_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v4 catalog and fingerprint inside one repeatable-read, read-only transaction.
+v6 catalog and fingerprint inside one repeatable-read, read-only transaction.
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even
@@ -246,3 +245,21 @@ manual, trusted-publishing workflow.
 Private Cargo consumers pin one exact Git revision with
 `git = "ssh://git@github.com/bpcakes/syrup-rail.git"` and set
 `CARGO_NET_GIT_FETCH_WITH_CLI=true` so authentication uses the system Git client.
+
+Version 0.6.0 requires schema v6; schema v5 is the intermediate cutover from v4.
+Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
+raw client derives it from all decision/text occurrences before reducing fields.
+`Structured` preserves a possible processor charge even when the payment decision
+is unknown; `TextOnly` blocks manual failure of payment-bearing attempts without
+identifying a charge;
+`Absent` means no approval signal was found, not that no payment occurred.
+`Unclassified` protects payment-bearing manual review even when raw fields were discarded.
+Empty observations and new reservations start `Absent`; local notes do not change
+classification. Zero-value payment-method updates may be closed against their
+retained subscription snapshot without applying the new method; closure keeps
+their evidence available for audit and reconciliation. Mutation errors derive
+their evidence from certainty: proven
+non-submission is `Absent`, while indeterminate details stay `Unclassified`.
+Raw response strings are retained as evidence and are never interpreted by core
+financial policy. See the [schema-v6 cutover guide](crates/syrup-rail-postgres/schema/v6/README.md)
+for deployment and historical-evidence handling.

@@ -111,6 +111,7 @@ fn result_test_subscription_with(subscription_id: SubscriptionId, plan_key: &str
 
 fn approved_result_evidence(transaction_id: &str) -> ProcessorEvidence {
     ProcessorEvidence::new(
+        crate::ProcessorApprovalEvidence::Structured,
         Some(GatewayTransactionId::new(transaction_id).unwrap()),
         None,
         None,

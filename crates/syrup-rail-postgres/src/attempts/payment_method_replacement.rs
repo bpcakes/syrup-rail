@@ -345,12 +345,11 @@ pub async fn preflight_subscription_payment_method_replacement_in_transaction(
         ExistingAttemptPreflight::RequiresLockedContext => {}
     }
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
-    let Some(existing) = payment_attempt_by_idempotency(
+    let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     else {
@@ -379,12 +378,11 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
 ) -> Result<SubscriptionPaymentMethodReplacementReservationOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
-    if let Some(existing) = payment_attempt_by_idempotency(
+    if let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     {
@@ -492,12 +490,11 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
     .map_err(|_| invalid_state())?;
     let inserted = insert_payment_method_replacement_attempt(transaction, &reservation).await?;
     if inserted {
-        let attempt = payment_attempt_by_idempotency(
+        let attempt = lock_payment_attempt_by_idempotency(
             transaction,
             command.billing_scope_id(),
             command.subscriber_id(),
             command.idempotency_key(),
-            true,
         )
         .await?
         .ok_or_else(invalid_state)?;
@@ -508,12 +505,11 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
             ),
         );
     }
-    if let Some(existing) = payment_attempt_by_idempotency(
+    if let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     {
@@ -551,12 +547,11 @@ pub async fn admit_subscription_payment_method_replacement_in_transaction(
     fail_stale_unsubmitted_payment_method_updates(transaction, reservation.subscription_id())
         .await?;
     fail_stale_unsubmitted_subscription_charges(transaction, reservation.subscription_id()).await?;
-    let attempt = payment_attempt_by_idempotency(
+    let attempt = lock_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.request().idempotency_key(),
-        true,
     )
     .await?
     .ok_or_else(invalid_state)?;

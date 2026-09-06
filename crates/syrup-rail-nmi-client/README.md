@@ -7,7 +7,7 @@ manage NMI plans or subscription schedules.
 
 ```toml
 [dependencies]
-syrup-rail-nmi-client = "0.5.2"
+syrup-rail-nmi-client = "0.6.0"
 ```
 
 The client never retries mutations. `MutationError::Indeterminate` and
@@ -239,3 +239,11 @@ a compromised process or memory forensics.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
+
+`PaymentOutcomeParts::approval_evidence` retains conservative approval signals
+from every structured decision and response-text occurrence before duplicate
+reduction, identity quarantine, or text truncation. `Structured` and `TextOnly`
+never upgrade the authoritative `PaymentStatus`; `Unclassified` means malformed
+or unrecognized evidence prevents certifying absence. Consumers must preserve
+this summary rather than reclassifying the selected raw fields. This added field
+requires callers constructing outcome-part fixtures to provide the summary.

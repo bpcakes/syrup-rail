@@ -1,4 +1,4 @@
-# Syrup Rail 0.5.2 public API
+# Syrup Rail 0.6.0 public API
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -45,15 +45,18 @@ serialization in one host process cannot cover out-of-process Merchant Portal
 toggles. Use separate test and production merchant accounts for hard isolation.
 The high-level service queries mode before final admission, carries the expected
 mode in a non-cloneable capability, and queries again when that capability is
-consumed immediately before provider submission. Automatic renewals and new
-host charges perform the early check before creating or admitting work; flows
-with an existing token-free reservation verify against that durable attempt.
+consumed immediately before provider submission. Automatic renewals check
+before reservation, recheck the resulting durable attempt before admission,
+and consume the capability for a final query immediately before the sale. New
+host charges perform their early check before creating or admitting work;
+flows with an existing token-free reservation verify against that durable
+attempt.
 The final check narrows the race window but does not make the separate NMI
 requests atomic. It changes the provider request shape from `query → mutation`
-to `query → query → mutation` only for initial enrollments and prepared
-host-charge replays, roughly 50% more requests for those flows. Renewals,
-recoveries, payment-method replacements, and fresh host charges already had a
-final readiness query and do not gain provider traffic. Because the new final
+to `query → query → mutation` for initial enrollments and prepared host-charge
+replays. Renewals use `query → reservation → query → admission → query → mutation`;
+recoveries, payment-method replacements, and fresh host charges retain their
+existing readiness boundaries. Because the final
 query runs after durable admission but before the mutation endpoint, a
 transient failure atomically restores resumable enrollment, recovery,
 payment-method replacement, and host-charge attempts to prepared state. Retry
@@ -152,13 +155,20 @@ operators, or provide an operator interface.
 who has independently established that an attempt with no gateway reference
 and no approval evidence had no financial effect. Attempts with either kind of
 evidence remain open for stronger reconciliation or reversal evidence rather
-than being expired automatically.
+than being expired automatically. This includes new indeterminate mutation errors,
+even when their diagnostic is empty. While such a payment-bearing attempt is
+unresolved, in-flight uniqueness prevents another enrollment for that
+subscriber/plan or another renewal/recovery for that subscription. The hold can
+last indefinitely if the provider cannot establish the outcome; repeated empty
+queries cannot certify non-submission. Hosts must alert on aged review items
+and investigate with the provider. Neither overwriting the classification nor
+bypassing the in-flight index is a supported manual exit.
 
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v4_compatible` after host migrations and before
-serving billing traffic. Version 0.5.2 supports PostgreSQL 18 and schema v4 only;
+Use `assert_runtime_schema_v6_compatible` after host migrations and before
+serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v6 only;
 the assertion is read-only and does not install or upgrade a schema. It
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is
@@ -380,8 +390,26 @@ The older low-level surface predates that policy and is too broad for
 mechanical one-line comments to improve it. For this small project, the gate is
 intentionally simple: `scripts/check-public-api.sh` verifies that every
 expected root facade exists and is readable, rejects wildcard public
-re-exports, builds warning-free all-feature documentation, and runs all-feature
-doctests. It does not maintain a compiler-diagnostic debt snapshot or parse
-human compiler output. Add meaningful documentation at an owning abstraction,
-and expand `warn(missing_docs)` to another module only after that module is
+re-exports, and builds warning-free documentation and runs doctests with both
+default features and all features. It does not maintain a compiler-diagnostic
+debt snapshot or parse human compiler output. Add meaningful documentation at
+an owning abstraction, and expand `warn(missing_docs)` to another module only after that module is
 ready to stay clean.
+
+Version 0.6.0 requires schema v6; schema v5 is the intermediate cutover from v4.
+Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
+raw client derives it from all decision/text occurrences before reducing fields.
+`Structured` preserves a possible processor charge even when the payment decision
+is unknown; `TextOnly` blocks manual failure of payment-bearing attempts without
+identifying a charge;
+`Absent` means no approval signal was found, not that no payment occurred.
+`Unclassified` protects payment-bearing manual review even when raw fields were discarded.
+Empty observations and new reservations start `Absent`; local notes do not change
+classification. Zero-value payment-method updates may be closed against their
+retained subscription snapshot without applying the new method; closure keeps
+their evidence available for audit and reconciliation. Mutation errors derive
+their evidence from certainty: proven
+non-submission is `Absent`, while indeterminate details stay `Unclassified`.
+Raw response strings are retained as evidence and are never interpreted by core
+financial policy. See the [schema-v6 cutover guide](../crates/syrup-rail-postgres/schema/v6/README.md)
+for deployment and historical-evidence handling.

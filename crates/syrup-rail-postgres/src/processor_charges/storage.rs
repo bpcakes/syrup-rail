@@ -10,16 +10,17 @@ pub(super) async fn matching_charge(
     sqlx::query(
         r#"
         SELECT id, charge_role,
-            gateway_payment_method_reference IS NOT DISTINCT FROM $3
-                AND gateway_response IS NOT DISTINCT FROM $4
-                AND gateway_response_code IS NOT DISTINCT FROM $5
-                AND gateway_response_text IS NOT DISTINCT FROM $6
-                AND gateway_condition IS NOT DISTINCT FROM $7
-                AND payment_type IS NOT DISTINCT FROM $8
-                AND card_brand IS NOT DISTINCT FROM $9
-                AND card_last4 IS NOT DISTINCT FROM $10
-                AND card_exp_month IS NOT DISTINCT FROM $11
-                AND card_exp_year IS NOT DISTINCT FROM $12 AS evidence_matches
+            gateway_approval_evidence IS NOT DISTINCT FROM $3
+                AND gateway_payment_method_reference IS NOT DISTINCT FROM $4
+                AND gateway_response IS NOT DISTINCT FROM $5
+                AND gateway_response_code IS NOT DISTINCT FROM $6
+                AND gateway_response_text IS NOT DISTINCT FROM $7
+                AND gateway_condition IS NOT DISTINCT FROM $8
+                AND payment_type IS NOT DISTINCT FROM $9
+                AND card_brand IS NOT DISTINCT FROM $10
+                AND card_last4 IS NOT DISTINCT FROM $11
+                AND card_exp_month IS NOT DISTINCT FROM $12
+                AND card_exp_year IS NOT DISTINCT FROM $13 AS evidence_matches
         FROM billing_processor_charges
         WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
         FOR UPDATE
@@ -27,6 +28,7 @@ pub(super) async fn matching_charge(
     )
     .bind(attempt.identity().attempt_id().as_uuid())
     .bind(transaction_id)
+    .bind(evidence.approval_evidence().as_str())
     .bind(
         evidence
             .payment_method_reference()
@@ -77,16 +79,17 @@ pub(super) async fn identify_transactionless(
     let row = sqlx::query(
         r#"
         SELECT id, charge_role,
-            gateway_payment_method_reference IS NOT DISTINCT FROM $2
-                AND gateway_response IS NOT DISTINCT FROM $3
-                AND gateway_response_code IS NOT DISTINCT FROM $4
-                AND gateway_response_text IS NOT DISTINCT FROM $5
-                AND gateway_condition IS NOT DISTINCT FROM $6
-                AND payment_type IS NOT DISTINCT FROM $7
-                AND card_brand IS NOT DISTINCT FROM $8
-                AND card_last4 IS NOT DISTINCT FROM $9
-                AND card_exp_month IS NOT DISTINCT FROM $10
-                AND card_exp_year IS NOT DISTINCT FROM $11 AS evidence_matches
+            gateway_approval_evidence IS NOT DISTINCT FROM $2
+                AND gateway_payment_method_reference IS NOT DISTINCT FROM $3
+                AND gateway_response IS NOT DISTINCT FROM $4
+                AND gateway_response_code IS NOT DISTINCT FROM $5
+                AND gateway_response_text IS NOT DISTINCT FROM $6
+                AND gateway_condition IS NOT DISTINCT FROM $7
+                AND payment_type IS NOT DISTINCT FROM $8
+                AND card_brand IS NOT DISTINCT FROM $9
+                AND card_last4 IS NOT DISTINCT FROM $10
+                AND card_exp_month IS NOT DISTINCT FROM $11
+                AND card_exp_year IS NOT DISTINCT FROM $12 AS evidence_matches
         FROM billing_processor_charges
         WHERE attempt_id = $1
             AND billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL
@@ -94,6 +97,7 @@ pub(super) async fn identify_transactionless(
         "#,
     )
     .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(evidence.approval_evidence().as_str())
     .bind(
         evidence
             .payment_method_reference()
@@ -169,7 +173,7 @@ pub(super) async fn charge_by_id(
             gateway_order_id, attempt_kind, amount_cents, currency,
             charge_role, progression_state, state_code,
             gateway_transaction_id, gateway_payment_method_reference,
-            gateway_response, gateway_response_code, gateway_response_text,
+            gateway_approval_evidence, gateway_response, gateway_response_code, gateway_response_text,
             gateway_condition, payment_type, card_brand, card_last4,
             card_exp_month, card_exp_year, observed_at
         FROM billing_processor_charges WHERE id = $1 FOR UPDATE
@@ -178,7 +182,7 @@ pub(super) async fn charge_by_id(
     .bind(charge_id)
     .fetch_one(connection)
     .await?;
-    processor_charge_from_row(&row).map_err(map_operator_error)
+    processor_charge_from_row(&row).map_err(ProcessorChargeStoreError::from)
 }
 
 pub(super) fn compensating_progression(
@@ -269,13 +273,9 @@ pub(super) fn initial_charge_state_code(
 }
 
 pub(super) fn parse_role(value: &str) -> Result<ProcessorChargeRole, ProcessorChargeStoreError> {
-    match value {
-        "primary" => Ok(ProcessorChargeRole::Primary),
-        "additional" => Ok(ProcessorChargeRole::Additional),
-        _ => Err(ProcessorChargeStoreError::InvalidState(
-            INVALID_CHARGE_STATE,
-        )),
-    }
+    crate::processor_charge_persistence::decode_processor_charge_role(value).ok_or(
+        ProcessorChargeStoreError::InvalidState(INVALID_CHARGE_STATE),
+    )
 }
 
 pub(super) fn is_transient(error: &ProcessorChargeStoreError) -> bool {
@@ -286,23 +286,8 @@ pub(super) fn is_transient(error: &ProcessorChargeStoreError) -> bool {
         )) => error,
         _ => return false,
     };
-    matches!(
-        database_error.code().as_deref(),
-        Some("40001" | "40P01" | "55P03" | "57014")
-    )
-}
-
-pub(super) fn map_operator_error(error: OperatorReviewError) -> ProcessorChargeStoreError {
-    match error {
-        OperatorReviewError::Sql(error) => ProcessorChargeStoreError::Sql(error),
-        OperatorReviewError::InvalidState(message) => {
-            ProcessorChargeStoreError::InvalidState(message)
-        }
-        OperatorReviewError::Host(_)
-        | OperatorReviewError::ManualFailureHost(_)
-        | OperatorReviewError::BillingTransaction(_)
-        | OperatorReviewError::BillingEvent(_) => {
-            ProcessorChargeStoreError::InvalidState(INVALID_CHARGE_STATE)
-        }
-    }
+    database_error
+        .code()
+        .as_deref()
+        .is_some_and(crate::transaction_support::is_transient_sqlstate)
 }

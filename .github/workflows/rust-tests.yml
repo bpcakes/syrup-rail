@@ -22,7 +22,11 @@ on:
       - "scripts/install-jig.sh"
       - "scripts/check-advisories.sh"
       - "scripts/tests/check-advisories.sh"
+      - "scripts/check-release.sh"
+      - "scripts/tests/check-release.sh"
       - "scripts/check-public-api.sh"
+      - "scripts/check-rustfmt.sh"
+      - "scripts/tests/check-rustfmt.sh"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
       - ".cargo/**"
@@ -31,6 +35,7 @@ on:
   push:
     branches:
       - "main"
+      - "master"
     paths:
 
       - "crates/**"
@@ -51,7 +56,11 @@ on:
       - "scripts/install-jig.sh"
       - "scripts/check-advisories.sh"
       - "scripts/tests/check-advisories.sh"
+      - "scripts/check-release.sh"
+      - "scripts/tests/check-release.sh"
       - "scripts/check-public-api.sh"
+      - "scripts/check-rustfmt.sh"
+      - "scripts/tests/check-rustfmt.sh"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
       - ".cargo/**"
@@ -70,6 +79,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  release-wrapper:
+    name: Release wrapper (${{ matrix.name }})
+    runs-on: "${{ matrix.runner }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: current Bash
+            runner: ubuntu-latest
+            require_bash_32: "false"
+          - name: Bash 3.2
+            runner: macos-15
+            require_bash_32: "true"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Test release wrapper argument handling
+        env:
+          RELEASE_TEST_REQUIRE_BASH_32: "${{ matrix.require_bash_32 }}"
+        run: scripts/tests/check-release.sh
+
   msrv:
     name: Rust 1.88 workspace check
     runs-on: "ubuntu-latest"
@@ -149,6 +182,8 @@ jobs:
           cache: false
           rustflags: ""
           components: rustfmt
+      - name: Test Rust source discovery
+        run: scripts/tests/check-rustfmt.sh
       - name: Run rustfmt check
         run: scripts/jig check fmt
 

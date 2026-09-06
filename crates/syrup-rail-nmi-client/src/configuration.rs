@@ -225,3 +225,57 @@ fn is_loopback_host(url: &Url) -> bool {
         None => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn private_api_key_header_is_sensitive_and_redacted() {
+        let private = "private-debug-sentinel";
+        let credentials = Credentials::new(private.to_owned(), "query-key".to_owned())
+            .expect("credentials should validate");
+
+        let authorization = credentials.private_api_key_header();
+
+        assert!(authorization.is_sensitive());
+        assert!(!format!("{authorization:?}").contains(private));
+    }
+
+    #[test]
+    fn credentials_accept_existing_zeroizing_owners_without_reallocation() {
+        let private = Zeroizing::new("private-key".to_owned());
+        let query = Zeroizing::new("query-key".to_owned());
+        let private_pointer = private.as_ptr();
+        let query_pointer = query.as_ptr();
+
+        let credentials =
+            Credentials::new(private, query).expect("zeroizing credentials should validate");
+
+        assert_eq!(credentials.private_api_key.as_ptr(), private_pointer);
+        assert_eq!(credentials.query_security_key.as_ptr(), query_pointer);
+    }
+
+    #[test]
+    fn credentials_reject_oversized_whitespace_before_required_checks() {
+        assert!(matches!(
+            Credentials::new(" ".repeat(MAX_CREDENTIAL_BYTES + 1), "query-key".to_owned()),
+            Err(ConfigurationError::CredentialTooLong)
+        ));
+        assert!(matches!(
+            Credentials::new(
+                "private-key".to_owned(),
+                " ".repeat(MAX_CREDENTIAL_BYTES + 1)
+            ),
+            Err(ConfigurationError::CredentialTooLong)
+        ));
+        assert!(matches!(
+            Credentials::new(" ".repeat(MAX_CREDENTIAL_BYTES), "query-key".to_owned()),
+            Err(ConfigurationError::PrivateApiKeyRequired)
+        ));
+        assert!(matches!(
+            Credentials::new("private-key".to_owned(), " ".repeat(MAX_CREDENTIAL_BYTES)),
+            Err(ConfigurationError::QuerySecurityKeyRequired)
+        ));
+    }
+}

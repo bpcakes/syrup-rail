@@ -209,13 +209,17 @@ fn provider_free_transaction_retry_policy_is_explicit_and_conservative() {
     ));
     for sqlstate in ["40001", "40P01", "55P03", "57014"] {
         assert!(
-            is_retryable_provider_free_transaction_sqlstate(sqlstate),
+            is_retryable_provider_free_transaction_error(&crate::test_support::sqlstate_error(
+                sqlstate
+            )),
             "expected {sqlstate} to be retryable"
         );
     }
-    for sqlstate in ["00000", "23505", "23514", "42P01", "XX000"] {
+    for sqlstate in ["00000", "08006", "23505", "23514", "42P01", "XX000"] {
         assert!(
-            !is_retryable_provider_free_transaction_sqlstate(sqlstate),
+            !is_retryable_provider_free_transaction_error(&crate::test_support::sqlstate_error(
+                sqlstate
+            )),
             "expected {sqlstate} to remain internal"
         );
     }
@@ -302,7 +306,7 @@ fn subscriber_admission_mapping_preserves_each_error_variant() {
 }
 
 #[test]
-fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
+fn gateway_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
     for (scope, code, detail) in [
         (
             GatewayMutationCooldownScope::Account,
@@ -406,46 +410,102 @@ fn subscriber_readiness_failure_preserves_codes_cooldowns_and_diagnostics() {
 }
 
 #[test]
-fn expected_gateway_identity_requires_every_resolved_component() {
+fn gateway_account_identity_requires_every_resolved_component() {
     let provider_key = GatewayProviderKey::new("nmi").expect("valid provider key");
-    let account = GatewayAccountSnapshot {
-        account_id: GatewayAccountId::new(uuid::Uuid::from_u128(1)),
-        provider_key: provider_key.clone(),
-    };
+    let gateway_account_id = GatewayAccountId::new(uuid::Uuid::from_u128(1));
     let billing_scope_id = BillingScopeId::new(uuid::Uuid::from_u128(2));
     let gateway_configuration_id =
         syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(3));
-    let expected =
-        ExpectedGatewayIdentity::for_account(billing_scope_id, gateway_configuration_id, &account);
+    let expected = GatewayAccountIdentity::new(
+        billing_scope_id,
+        gateway_account_id,
+        provider_key.clone(),
+        gateway_configuration_id,
+    );
 
-    assert!(expected.matches_components(
-        billing_scope_id,
-        account.account_id,
-        gateway_configuration_id,
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        BillingScopeId::new(uuid::Uuid::from_u128(4)),
-        account.account_id,
-        gateway_configuration_id,
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        billing_scope_id,
-        GatewayAccountId::new(uuid::Uuid::from_u128(5)),
-        gateway_configuration_id,
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        billing_scope_id,
-        account.account_id,
-        syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(6)),
-        &provider_key,
-    ));
-    assert!(!expected.matches_components(
-        billing_scope_id,
-        account.account_id,
-        gateway_configuration_id,
-        &GatewayProviderKey::new("other_gateway").expect("valid provider key"),
+    assert_eq!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            gateway_account_id,
+            provider_key.clone(),
+            gateway_configuration_id,
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            BillingScopeId::new(uuid::Uuid::from_u128(4)),
+            gateway_account_id,
+            provider_key.clone(),
+            gateway_configuration_id,
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            GatewayAccountId::new(uuid::Uuid::from_u128(5)),
+            provider_key.clone(),
+            gateway_configuration_id,
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            gateway_account_id,
+            provider_key.clone(),
+            syrup_rail::GatewayConfigurationId::new(uuid::Uuid::from_u128(6)),
+        )
+    );
+    assert_ne!(
+        expected,
+        GatewayAccountIdentity::new(
+            billing_scope_id,
+            gateway_account_id,
+            GatewayProviderKey::new("other_gateway").expect("valid provider key"),
+            gateway_configuration_id,
+        )
+    );
+}
+
+#[test]
+fn renewal_admission_retry_policy_excludes_pool_and_non_database_errors() {
+    for (codes, expected) in [
+        (&["40001", "40P01", "55P03", "57014"][..], true),
+        (
+            &["00000", "08006", "23505", "23514", "42P01", "XX000"][..],
+            false,
+        ),
+    ] {
+        for &code in codes {
+            assert_eq!(
+                is_retryable_renewal_admission_error(&SubscriptionEnrollmentApplicationError::Sql(
+                    crate::test_support::sqlstate_error(code)
+                )),
+                expected,
+                "direct {code}"
+            );
+            assert_eq!(
+                is_retryable_renewal_admission_error(
+                    &SubscriptionEnrollmentApplicationError::Attempt(
+                        PaymentAttemptStoreError::Sql(crate::test_support::sqlstate_error(code))
+                    )
+                ),
+                expected,
+                "nested {code}"
+            );
+        }
+    }
+    for error in [sqlx::Error::PoolTimedOut, sqlx::Error::RowNotFound] {
+        assert!(!is_retryable_renewal_admission_error(
+            &SubscriptionEnrollmentApplicationError::Sql(error),
+        ));
+    }
+    assert!(!is_retryable_renewal_admission_error(
+        &SubscriptionEnrollmentApplicationError::Attempt(PaymentAttemptStoreError::Sql(
+            sqlx::Error::PoolTimedOut
+        ),),
     ));
 }

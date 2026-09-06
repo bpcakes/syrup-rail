@@ -1,29 +1,34 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.5
-supports PostgreSQL 18 only and uses schema v4.
+SQLx operations, and high-level subscription billing service. The unreleased
+workspace supports PostgreSQL 18 only and version 0.6.0 uses schema v6. Schema
+v5 is the intermediate cutover from v4.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.2"
-syrup-rail-postgres = "0.5.2"
+syrup-rail = "0.6.0"
+syrup-rail-postgres = "0.6.0"
 ```
 
-New hosts install `schema/v4/install.sql` through their normal migration
-system. Existing schema-v3 hosts separately commit
-`schema/v4/prepare_from_v3.sql` and `schema/v4/validate_from_v3.sql`, run
-`schema/v4/index_from_v3.sql` outside a transaction, and finally commit
-`schema/v4/upgrade_from_v3.sql` while following the versioned cutover guide.
-Schemas v1, v2, and v3 are immutable. The detailed versioned guides explain
-the required lock, maintenance, and rehearsal boundaries.
+New hosts install `schema/v6/install.sql` through their normal migration
+system. Existing schema-v5 hosts stop billing writers, rehearse the additive
+cutover, and apply `schema/v6/upgrade_from_v5.sql` transactionally. Schemas v1
+through v5 are immutable. The [v6 guide](schema/v6/README.md) explains locking,
+historical classification, deployment, and recovery.
+
+Schema v5 is already immutable. Its fresh-install SQL has a historical comment
+that says "version 4" even though the catalog and artifact are schema v5. Do
+not edit or locally repair that shipped file; use its checked-in bytes and the
+v5 catalog fingerprint as authority. Schema v6 artifacts carry the corrected
+version label.
 
 After the host applies its migration and before it serves billing traffic,
 verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v4_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v6_compatible(pool).await?;
 # Ok(())
 # }
 ```
@@ -66,9 +71,16 @@ provider submission. The second query narrows the race window and makes the
 safety check structural for supported low-level submitters; it cannot make two
 NMI requests atomic. Initial enrollments and prepared host-charge replays change
 from `query → mutation` to `query → query → mutation`, roughly 50% more provider
-requests for those flows. Renewals, recoveries, payment-method replacements,
-and fresh host charges already performed a final readiness query, so their
-request counts do not increase. A transient failure of the new final query
+requests for those flows. Renewals check before reservation, after reservation,
+and at submission, so their successful path uses three mode queries. With NMI,
+these are Query API requests and count toward its
+[system-wide rate limit](https://docs.nmi.com/reference/rate-limiting), shared
+with payment traffic. A page of 100 successful renewals therefore adds 300 mode
+queries and 100 sale requests. The page bound is not a concurrency recommendation;
+hosts must size dispatch concurrency for their provider limits and honor persisted
+provider cooldowns. NMI does not publish a universal numeric rate threshold. Recoveries,
+payment-method replacements, and fresh host charges retain their existing
+readiness boundaries. A transient failure of the final query
 occurs after durable admission, but the provider mutation endpoint was not
 contacted. Resumable enrollment, recovery, payment-method replacement, and
 host-charge attempts are therefore atomically restored to prepared state and
@@ -179,3 +191,21 @@ any nested savepoint before consuming that value with `commit` or `rollback`.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
+
+Version 0.6.0 requires schema v6; schema v5 is the intermediate cutover from v4.
+Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
+raw client derives it from all decision/text occurrences before reducing fields.
+`Structured` preserves a possible processor charge even when the payment decision
+is unknown; `TextOnly` blocks manual failure of payment-bearing attempts without
+identifying a charge;
+`Absent` means no approval signal was found, not that no payment occurred.
+`Unclassified` protects payment-bearing manual review even when raw fields were discarded.
+Empty observations and new reservations start `Absent`; local notes do not change
+classification. Zero-value payment-method updates may be closed against their
+retained subscription snapshot without applying the new method; closure keeps
+their evidence available for audit and reconciliation. Mutation errors derive
+their evidence from certainty: proven
+non-submission is `Absent`, while indeterminate details stay `Unclassified`.
+Raw response strings are retained as evidence and are never interpreted by core
+financial policy. See the [schema-v6 cutover guide](schema/v6/README.md)
+for deployment and historical-evidence handling.

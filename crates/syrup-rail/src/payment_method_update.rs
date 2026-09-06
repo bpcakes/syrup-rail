@@ -3,10 +3,10 @@ use std::fmt;
 use crate::{
     BillingContact, BillingContactSnapshot, BillingScopeId, CurrencyCode, GatewayAccountId,
     GatewayAccountMode, GatewayConfigurationId, GatewayProviderKey, GatewayTransactionId,
-    IdempotencyKey, Money, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
-    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget,
-    PaymentMethodId, PaymentMethodUpdateSnapshot, PaymentToken, PlanKey, ResolvedGateway,
-    SubscriberId, SubscriptionId, SubscriptionPaymentContext,
+    IdempotencyKey, Money, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId,
+    PaymentMethodUpdateSnapshot, PaymentToken, PlanKey, ResolvedGateway, SubscriberId,
+    SubscriptionId, SubscriptionPaymentContext,
 };
 use thiserror::Error;
 
@@ -186,20 +186,13 @@ impl SubscriptionPaymentMethodReplacement {
             gateway.gateway_configuration_id(),
             required_gateway_account_mode,
         );
-        let fingerprint = PaymentAttemptFingerprint::for_subscription_payment_method_update(
-            command.plan_key(),
-            expected_state.subscription_id(),
-            expected_state.payment_method_id(),
-            expected_state.expected_initial_transaction_id(),
-        );
-        let request = PaymentAttemptRequest::new(
+        let request = PaymentAttemptRequest::canonical(
             PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
                 plan_key: command.plan_key().clone(),
                 payment_method_id: expected_state.payment_method_id(),
                 expected_state,
             },
             command.idempotency_key().clone(),
-            fingerprint,
             Money::new(0, currency).expect("zero payment-method replacement amount is valid"),
             gateway.mutation_reference_factory().for_attempt(
                 PaymentAttemptKind::SubscriptionPaymentMethodUpdate,

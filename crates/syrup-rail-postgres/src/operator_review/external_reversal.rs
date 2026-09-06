@@ -145,8 +145,7 @@ pub async fn attest_external_reversal(
         return Ok(ExternalReversalAttestationOutcome::Ineligible);
     }
 
-    let prior = expected_prior_resolution_code(&attempt, &charge).to_owned();
-    let final_code = expected_final_resolution_code(attempt.kind(), kind);
+    let resolution = expected_reversal_resolution(&attempt, &charge, kind);
     let attested_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
         .fetch_one(&mut *transaction)
         .await?;
@@ -155,10 +154,8 @@ pub async fn attest_external_reversal(
         &attempt,
         &charge,
         actor_id,
-        kind,
         reason,
-        &prior,
-        final_code,
+        resolution,
         attested_at,
     )
     .await?;
@@ -173,7 +170,7 @@ pub async fn attest_external_reversal(
         "#,
     )
     .bind(processor_charge_id.as_uuid())
-    .bind(&prior)
+    .bind(resolution.prior_resolution_code())
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() != 1 {
@@ -191,7 +188,7 @@ pub async fn attest_external_reversal(
             "#,
         )
         .bind(attempt.identity().attempt_id().as_uuid())
-        .bind(final_code.as_str())
+        .bind(resolution.final_resolution_code().as_str())
         .bind(attested_at)
         .bind(attempt.status().as_str())
         .execute(&mut *transaction)
@@ -277,7 +274,7 @@ pub(super) async fn lock_processor_charge(
             gateway_order_id, attempt_kind, amount_cents, currency,
             charge_role, progression_state, state_code,
             gateway_transaction_id, gateway_payment_method_reference,
-            gateway_response, gateway_response_code, gateway_response_text,
+            gateway_approval_evidence, gateway_response, gateway_response_code, gateway_response_text,
             gateway_condition, payment_type, card_brand, card_last4,
             card_exp_month, card_exp_year, observed_at
         FROM billing_processor_charges WHERE id = $1 FOR UPDATE
@@ -286,7 +283,7 @@ pub(super) async fn lock_processor_charge(
     .bind(charge_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
-    row.as_ref().map(processor_charge_from_row).transpose()
+    Ok(row.as_ref().map(processor_charge_from_row).transpose()?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -295,10 +292,8 @@ async fn insert_attestation(
     attempt: &PaymentAttempt,
     charge: &ProcessorCharge,
     actor_id: ActorId,
-    kind: ExternalReversalKind,
     reason: &ExternalReversalReason,
-    prior: &str,
-    final_code: PaymentResolutionCode,
+    resolution: ExternalReversalResolution,
     attested_at: DateTime<Utc>,
 ) -> Result<(), OperatorReviewError> {
     let identity = attempt.identity();
@@ -318,20 +313,20 @@ async fn insert_attestation(
             amount_cents, currency, gateway_transaction_id,
             gateway_payment_method_reference, gateway_response, gateway_response_code,
             gateway_response_text, gateway_condition, payment_type, card_brand,
-            card_last4, card_exp_month, card_exp_year, attested_at
+            card_last4, card_exp_month, card_exp_year, attested_at, gateway_approval_evidence
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24
+            $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25
         )
         "#,
     )
     .bind(charge.id().as_uuid())
     .bind(identity.attempt_id().as_uuid())
     .bind(actor_id.as_uuid())
-    .bind(kind.as_str())
+    .bind(resolution.kind().as_str())
     .bind(reason.expose())
-    .bind(prior)
-    .bind(final_code.as_str())
+    .bind(resolution.prior_resolution_code())
+    .bind(resolution.final_resolution_code().as_str())
     .bind(identity.gateway_account_id().as_uuid())
     .bind(identity.gateway_configuration_id().as_uuid())
     .bind(charge.gateway_order_id().expose())
@@ -353,6 +348,7 @@ async fn insert_attestation(
     .bind(descriptor.card_exp_month())
     .bind(descriptor.card_exp_year())
     .bind(attested_at)
+    .bind(evidence.approval_evidence().as_str())
     .execute(&mut **transaction)
     .await?;
     Ok(())

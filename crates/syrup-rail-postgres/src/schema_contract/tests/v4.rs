@@ -13,7 +13,7 @@ async fn runtime_schema_v4_accepts_fresh_install_and_v3_upgrade() -> Result<(), 
     {
         return Err(io::Error::other("schema-v4 artifacts must not be empty").into());
     }
-    let fresh = TestDatabase::start("sr_fresh_v4").await?;
+    let fresh = TestDatabase::start_v4("sr_fresh_v4").await?;
     let upgraded = TestDatabase::start_v3("sr_upgrade_v4").await?;
     upgraded.upgrade_v3_to_v4().await?;
     let result = async {
@@ -311,7 +311,7 @@ async fn v3_upgrade_backfills_historical_attempts_and_subscriptions_as_live()
 #[tokio::test]
 async fn runtime_schema_v4_rejects_v3_and_canonical_column_drift() -> Result<(), Box<dyn Error>> {
     let v3 = TestDatabase::start_v3("sr_v4_reject_v3").await?;
-    let drifted = TestDatabase::start("sr_v4_drift").await?;
+    let drifted = TestDatabase::start_v4("sr_v4_drift").await?;
     let result = async {
         assert!(matches!(
             crate::assert_runtime_schema_v4_compatible(&v3.pool).await,

@@ -1,3 +1,5 @@
+// agentic-loc-exception: Release-critical code remains under the absolute limit; split follow-up is tracked separately.
+
 use super::*;
 
 #[test]
@@ -170,6 +172,64 @@ fn payment_decision_evidence_is_reduced_symmetrically() {
     )
     .expect("consistent decline evidence should parse");
     assert_eq!(agreed.status, PaymentStatus::Declined);
+}
+
+#[test]
+fn decision_diagnostic_precedence_covers_each_closed_state() {
+    for (members, expected_status, expected_diagnostic) in [
+        (r#""response":"1""#, PaymentStatus::Approved, None),
+        (r#""status":"pending""#, PaymentStatus::Unknown, None),
+        (
+            r#""response":"1","response_code":"200""#,
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::ConflictingDecisionEvidence),
+        ),
+        (
+            r#""response":"1","status":"processor_surprise""#,
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence),
+        ),
+        (
+            r#""response":"1","response":"2","status":"processor_surprise""#,
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField),
+        ),
+        (
+            "",
+            PaymentStatus::Unknown,
+            Some(PaymentOutcomeDiagnostic::MissingDecisionEvidence),
+        ),
+    ] {
+        let comma = if members.is_empty() { "" } else { "," };
+        let outcome = payment_outcome_from_json_text(&format!(
+            r#"{{"transaction_id":"txn_decision_precedence"{comma}{members}}}"#
+        ))
+        .expect("closed decision state should parse conservatively");
+
+        assert_eq!(outcome.status, expected_status, "{members}");
+        assert_eq!(
+            outcome.diagnostics,
+            expected_diagnostic.into_iter().collect::<Vec<_>>(),
+            "{members}"
+        );
+    }
+}
+
+#[test]
+fn unrecognized_decision_evidence_remains_redacted_from_outcome_debug() {
+    let raw = "decision-debug-sentinel";
+    let outcome = payment_outcome_from_json(&json!({
+        "transaction_id": "txn_redacted_decision",
+        "status": raw,
+    }))
+    .expect("unrecognized decision evidence should parse conservatively");
+
+    assert_eq!(outcome.status, PaymentStatus::Unknown);
+    assert_eq!(
+        outcome.diagnostics,
+        vec![PaymentOutcomeDiagnostic::UnrecognizedDecisionEvidence]
+    );
+    assert!(!format!("{outcome:?}").contains(raw));
 }
 
 #[test]
@@ -670,4 +730,88 @@ fn missing_decision_evidence_emits_a_payload_free_diagnostic() {
         outcome.diagnostics,
         vec![PaymentOutcomeDiagnostic::MissingDecisionEvidence]
     );
+}
+
+#[test]
+fn approval_signals_survive_lossless_json_reduction() {
+    use crate::PaymentApprovalEvidence as Signal;
+    for (members, expected) in [
+        (
+            r#""status":"approved","condition":"declined""#,
+            Signal::Structured,
+        ),
+        (r#""response":"1","response":"2""#, Signal::Structured),
+        (r#""response":"2","response":"1""#, Signal::Structured),
+        (
+            r#""condition":"complete","condition":"pending_settlement""#,
+            Signal::Structured,
+        ),
+        (r#""response":{},"response":"1""#, Signal::Structured),
+        (r#""response":{}"#, Signal::Unclassified),
+        (
+            r#""response_text":"Approved","response_text":"Error""#,
+            Signal::TextOnly,
+        ),
+        (
+            r#""response":"3","response_text":"not-approved""#,
+            Signal::TextOnly,
+        ),
+    ] {
+        let outcome =
+            payment_outcome_from_json_text(&format!(r#"{{{members},"id":null}}"#)).unwrap();
+        assert_eq!(outcome.approval_evidence, expected, "{members}");
+    }
+    let text = format!("{} Approved", "x".repeat(600));
+    let outcome =
+        payment_outcome_from_json_text(&format!(r#"{{"response":"3","response_text":"{text}"}}"#))
+            .unwrap();
+    assert_eq!(outcome.approval_evidence, Signal::TextOnly);
+    assert!(!outcome.response_text.unwrap().expose().contains("Approved"));
+}
+
+#[test]
+fn decision_certainty_controls_absence_without_overriding_approval() {
+    use crate::PaymentApprovalEvidence as Signal;
+    for (body, status, signal) in [
+        (r#"{}"#, PaymentStatus::Unknown, Signal::Unclassified),
+        (
+            r#"{"response":"2"}"#,
+            PaymentStatus::Declined,
+            Signal::Absent,
+        ),
+        (
+            r#"{"response":"3","response_code":"300"}"#,
+            PaymentStatus::Failed,
+            Signal::Absent,
+        ),
+        (
+            r#"{"response":"3"}"#,
+            PaymentStatus::Unknown,
+            Signal::Unclassified,
+        ),
+        (
+            r#"{"status":"pending"}"#,
+            PaymentStatus::Unknown,
+            Signal::Unclassified,
+        ),
+        (
+            r#"{"condition":"error"}"#,
+            PaymentStatus::Unknown,
+            Signal::Unclassified,
+        ),
+        (
+            r#"{"response":"1","response_code":"430"}"#,
+            PaymentStatus::Unknown,
+            Signal::Structured,
+        ),
+    ] {
+        let outcome = payment_outcome_from_json_text(body).unwrap();
+        assert_eq!(outcome.status, status, "{body}");
+        assert_eq!(outcome.approval_evidence, signal, "{body}");
+    }
+    for code in [400, 420, 421, 430, 440, 441] {
+        let outcome = payment_outcome_from_json(&json!({"response_code": code})).unwrap();
+        assert_eq!(outcome.status, PaymentStatus::Unknown, "{code}");
+        assert_eq!(outcome.approval_evidence, Signal::Unclassified, "{code}");
+    }
 }

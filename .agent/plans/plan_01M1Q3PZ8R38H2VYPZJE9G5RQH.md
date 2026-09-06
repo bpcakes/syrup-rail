@@ -1,0 +1,1 @@
+Merge origin/master at v0.5.2, retaining workspace version 0.6.0 and schema v5. Carry the lifecycle alert concurrency fix and regression test unchanged; preserve release history and local append-only Jig records. Validate configured contract, tests, SQLx, formatting, Clippy, release metadata and schema immutability. Complete a local merge commit.

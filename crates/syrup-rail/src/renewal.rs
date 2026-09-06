@@ -3,11 +3,10 @@ use thiserror::Error;
 
 use crate::{
     BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, GatewayAccountId,
-    GatewayAccountMode, GatewayProviderKey, IdempotencyKey, PaymentAttempt,
-    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PlanKey, RenewalFailurePolicy,
-    ResolvedGateway, SubscriberId, SubscriptionId, SubscriptionPaymentStateSnapshot,
-    SubscriptionStatus,
+    GatewayAccountMode, GatewayProviderKey, IdempotencyKey, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget,
+    PaymentMethodId, PlanKey, RenewalFailurePolicy, ResolvedGateway, SubscriberId, SubscriptionId,
+    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 
 pub const RENEWAL_DISPATCH_LIMIT: i64 = 100;
@@ -473,23 +472,15 @@ impl SubscriptionRenewalReservation {
             attempt_sequence_count,
         )
         .map_err(|_| SubscriptionRenewalReservationBuildError::InvalidIdempotencyKey)?;
-        let fingerprint = PaymentAttemptFingerprint::for_subscription_renewal(
-            &plan_key,
-            command.subscription_id(),
-            expected_state.payment_method_id(),
-            *period.start_at(),
-            charge.money(),
-        );
         let target = PaymentAttemptTarget::SubscriptionRenewal {
             plan_key,
             payment_method_id: expected_state.payment_method_id(),
             period,
             expected_state,
         };
-        let request = PaymentAttemptRequest::new(
+        let request = PaymentAttemptRequest::canonical(
             target,
             idempotency_key,
-            fingerprint,
             charge.money(),
             gateway
                 .mutation_reference_factory()

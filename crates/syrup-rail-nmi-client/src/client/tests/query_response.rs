@@ -567,3 +567,20 @@ fn noncredential_query_error_envelope_is_a_redacted_invalid_request() {
     assert!(!error.detail().expose().contains(PROVIDER_SENTINEL));
     assert!(!format!("{error:?} {error}").contains(PROVIDER_SENTINEL));
 }
+
+#[test]
+fn query_approval_signals_survive_duplicate_and_status_reduction() {
+    for body in [
+        "<status>approved</status><condition>declined</condition>",
+        "<response>1</response><response>2</response>",
+        "<response>2</response><response>1</response>",
+    ] {
+        let outcome = query_outcome_from_xml(&format!("<nm_response><transaction><transaction_id>txn_signals</transaction_id>{body}</transaction></nm_response>")).unwrap().unwrap();
+        assert_eq!(outcome.status, PaymentStatus::Unknown);
+        assert_eq!(
+            outcome.approval_evidence,
+            crate::PaymentApprovalEvidence::Structured,
+            "{body}"
+        );
+    }
+}

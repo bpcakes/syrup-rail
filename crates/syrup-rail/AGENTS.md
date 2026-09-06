@@ -27,6 +27,9 @@ command/outcome types for application-independent subscription billing.
 - `src/{gateway,gateway_value,resolver}.rs` own the five-method provider port,
   typed evidence, sensitive values, provider-I/O-free host resolver contract,
   and diagnostic boundary.
+- `src/audit_reason.rs` owns private normalization, Unicode length bounds, and
+  card-data rejection shared by the distinct public audit-reason types. Their
+  errors, accessors, and formatting remain with their domain owners.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure
   payment/calendar policy.
 - `src/billing_portal.rs` owns the provider-neutral customer billing portal,
@@ -62,8 +65,12 @@ command/outcome types for application-independent subscription billing.
 ## Invariants
 
 - No SQLx, Axum, Runledger, or application-specific crate dependencies.
+- `ProcessorApprovalEvidence` carries adapter-derived review signals; preserve it
+  through observation copies and persistence. Never derive it from raw strings.
 - No provider request, response, or lifecycle protocol vocabulary in this
-  crate. `PaymentCardBrand` may recognize common card-scheme presentation
+  crate, except isolated deprecated `legacy_gateway_policy` predicates retained
+  for shipped callers. Financial policy must never call those predicates.
+  `PaymentCardBrand` may recognize common card-scheme presentation
   aliases; each provider adapter must conformance-test its documented labels.
 - Subscription offers explicitly choose immediate recurring or a positive paid
   trial; accepted cadence, recurring economics, dunning, and access terms are
@@ -73,9 +80,10 @@ command/outcome types for application-independent subscription billing.
   `SubscriptionActivationProjection`; do not add context-free pricing helpers
   that collapse those temporal facts.
 - Only submitted determinate automatic-renewal failures consume dunning.
-- `SubscriptionPaymentFailed.access` is the canonical post-failure product
-  access projection. Consumers must not derive it from the disposition or a
-  current offer; it reflects snapshotted policy and causal failure history.
+- `SubscriptionPaymentFailed.outcome.access()` is the canonical post-failure
+  product access projection. Consumers must not reconstruct it from the
+  disposition projection or a current offer; it reflects snapshotted policy
+  and causal failure history.
   Recovery and infrastructure/provider pacing remain distinct, and `Unpaid`
   is terminal collection history with no payment-state authority.
 - Provider identifiers, tokens, contacts, and diagnostics have value-free

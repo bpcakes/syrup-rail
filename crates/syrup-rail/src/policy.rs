@@ -3,37 +3,6 @@ use thiserror::Error;
 
 use crate::{BillingPeriod, BillingPeriodError, SubscriptionPeriodRule};
 
-pub fn gateway_state_is_approved(value: &str) -> bool {
-    matches!(
-        normalized_gateway_state_value(value).as_str(),
-        "approved"
-            | "complete"
-            | "completed"
-            | "captured"
-            | "success"
-            | "successful"
-            | "pendingsettlement"
-    )
-}
-
-pub fn gateway_response_is_approved(value: Option<&str>) -> bool {
-    let Some(normalized) = value.map(normalized_gateway_state_value) else {
-        return false;
-    };
-    matches!(normalized.as_str(), "1" | "100") || gateway_state_is_approved(&normalized)
-}
-
-fn normalized_gateway_state_value(value: &str) -> String {
-    value
-        .trim()
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|character| {
-            !character.is_ascii_whitespace() && *character != '_' && *character != '-'
-        })
-        .collect()
-}
-
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum BillingPeriodPolicyError {
     #[error("billing period overflowed the supported date range")]
@@ -66,28 +35,6 @@ mod tests {
     use chrono::{TimeZone, Timelike};
 
     use super::*;
-
-    #[test]
-    fn approved_state_matching_preserves_processor_spellings() {
-        for value in [
-            "approved",
-            "complete",
-            "completed",
-            "captured",
-            "success",
-            "successful",
-            "pending settlement",
-            "pending_settlement",
-            "pending-settlement",
-            "Pending Settlement",
-        ] {
-            assert!(gateway_state_is_approved(value), "missed {value}");
-        }
-        assert!(gateway_response_is_approved(Some("1")));
-        assert!(gateway_response_is_approved(Some("100")));
-        assert!(!gateway_response_is_approved(Some("200")));
-        assert!(!gateway_response_is_approved(None));
-    }
 
     #[test]
     fn monthly_policy_repeats_clamping_from_the_previous_boundary() {

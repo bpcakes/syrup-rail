@@ -6,12 +6,11 @@ use sqlx::{PgConnection, PgPool, Row};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentDiagnostic,
-    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewayStorePaymentMethodRequest, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
-    PaymentCardDisplay, PaymentMethodId, PaymentResolutionCode, ProcessorChargeProgression,
-    ProcessorChargeRole, ProcessorEvidence, ReplaceSubscriptionPaymentMethod,
-    SubscriptionEnrollmentPaymentResult, SubscriptionPaymentMethodReplacement,
-    SubscriptionPaymentMethodReplacementSubmissionOutcome,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayStorePaymentMethodRequest, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptStatus, PaymentCardDisplay, PaymentMethodId,
+    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
+    ReplaceSubscriptionPaymentMethod, SubscriptionEnrollmentPaymentResult,
+    SubscriptionPaymentMethodReplacement, SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection,
 };
 
@@ -34,10 +33,10 @@ use super::{
     disable_payment_method_if_unreferenced, finalize_approved_application,
     is_retryable_evidence_error, load_applied_subscription, load_subscription,
     lock_expected_reservation_attempt, lock_payment_method_domain, lock_subscription_aggregate,
-    mark_attempt_approved, mutation_error_evidence, park_locked_attempt,
-    payment_result_for_attempt, persist_approved_evidence_without_attempt_lock,
-    reconcile_non_approved_evidence, resolve_locked_outcome, resolve_pool_outcome,
-    set_application_timeouts, stop_conflicting_subscription_approval, upsert_payment_method,
+    mark_attempt_approved, park_locked_attempt, payment_result_for_attempt,
+    persist_approved_evidence_without_attempt_lock, reconcile_non_approved_evidence,
+    resolve_locked_reconciled_outcome, resolve_pool_outcome, set_application_timeouts,
+    stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 mod approval;
@@ -185,48 +184,52 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
         )
         .await
         .map(SubscriptionPaymentMethodReplacementProviderResult::Payment),
-        Err(GatewayMutationError::NotSubmitted(error)) => {
-            let evidence = mutation_error_evidence(error.detail());
-            let policy = GatewayNotSubmittedPolicy::for_error(&error);
-            let application = apply_resumable_not_submitted_policy(
-                pool,
-                OutcomeReservation::PaymentMethodReplacement(&admission.reservation),
-                &evidence,
-                policy,
-            )
-            .await?;
-            if application.should_surface_not_submitted(policy) {
-                Ok(
-                    SubscriptionPaymentMethodReplacementProviderResult::NotSubmitted {
-                        payment: application.payment,
-                        error,
-                    },
-                )
-            } else {
-                Ok(SubscriptionPaymentMethodReplacementProviderResult::Payment(
-                    application.payment,
-                ))
+        Err(error) => {
+            let evidence = error.processor_evidence();
+            match error {
+                GatewayMutationError::NotSubmitted(error) => {
+                    let policy = GatewayNotSubmittedPolicy::for_error(&error);
+                    let application = apply_resumable_not_submitted_policy(
+                        pool,
+                        OutcomeReservation::PaymentMethodReplacement(&admission.reservation),
+                        &evidence,
+                        policy,
+                    )
+                    .await?;
+                    if application.should_surface_not_submitted(policy) {
+                        Ok(
+                            SubscriptionPaymentMethodReplacementProviderResult::NotSubmitted {
+                                payment: application.payment,
+                                error,
+                            },
+                        )
+                    } else {
+                        Ok(SubscriptionPaymentMethodReplacementProviderResult::Payment(
+                            application.payment,
+                        ))
+                    }
+                }
+                GatewayMutationError::RateLimitedIndeterminate(_) => {
+                    resolve_payment_method_replacement_unknown_outcome(
+                        pool,
+                        &admission.reservation,
+                        &evidence,
+                        Some(RateLimitCooldown::Provider),
+                    )
+                    .await
+                    .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
+                }
+                GatewayMutationError::Indeterminate(_) => {
+                    resolve_payment_method_replacement_unknown_outcome(
+                        pool,
+                        &admission.reservation,
+                        &evidence,
+                        None,
+                    )
+                    .await
+                    .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
+                }
             }
-        }
-        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => {
-            resolve_payment_method_replacement_unknown_outcome(
-                pool,
-                &admission.reservation,
-                &mutation_error_evidence(&detail),
-                Some(RateLimitCooldown::Provider),
-            )
-            .await
-            .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
-        }
-        Err(GatewayMutationError::Indeterminate(detail)) => {
-            resolve_payment_method_replacement_unknown_outcome(
-                pool,
-                &admission.reservation,
-                &mutation_error_evidence(&detail),
-                None,
-            )
-            .await
-            .map(SubscriptionPaymentMethodReplacementProviderResult::Payment)
         }
     }
 }
@@ -335,43 +338,30 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
     attempt_id: PaymentAttemptId,
     outcome: &GatewayPaymentOutcome,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let mut transaction = pool.begin().await?;
-    let attempt = crate::find_payment_attempt_by_id_in_transaction(
-        &mut transaction,
+    super::apply_reconciled_gateway_outcome_for(
+        pool,
+        coordinator,
         billing_scope_id,
         attempt_id,
+        outcome,
+        super::ReconciledApplicationEntry::Exact(
+            super::ReservationOperation::PaymentMethodReplacement,
+        ),
     )
-    .await?
-    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-        "payment method replacement attempt was not found",
-    ))?;
-    let provider_key = sqlx::query_scalar::<_, String>(
-        "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
-    )
-    .bind(billing_scope_id.as_uuid())
-    .bind(attempt.identity().gateway_account_id().as_uuid())
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-        "payment method replacement gateway account was not found",
-    ))?;
-    transaction.commit().await?;
-    let provider_key = GatewayProviderKey::new(provider_key).map_err(|_| {
-        SubscriptionEnrollmentApplicationError::InvalidState(
-            "payment method replacement gateway provider key is invalid",
-        )
-    })?;
-    let reservation = SubscriptionPaymentMethodReplacement::from_attempt(&attempt, provider_key)
-        .map_err(|_| {
-            SubscriptionEnrollmentApplicationError::InvalidState(
-                "reconciled attempt is not a valid payment method replacement",
-            )
-        })?;
+    .await
+}
+
+pub(super) async fn apply_reconciled_replacement_outcome(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    reservation: &SubscriptionPaymentMethodReplacement,
+    outcome: &GatewayPaymentOutcome,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     if outcome.status() == GatewayPaymentStatus::Approved {
         for attempt_index in 0..APPROVED_APPLICATION_ATTEMPTS {
             match apply_locked_reconciled_payment_method_replacement_outcome(
                 coordinator,
-                &reservation,
+                reservation,
                 outcome,
             )
             .await
@@ -385,7 +375,7 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
         }
         return park_reconciled_payment_method_replacement_approved_outcome(
             pool,
-            &reservation,
+            reservation,
             outcome,
             PAYMENT_METHOD_REPLACEMENT_STORAGE_FAILURE_TEXT,
         )
@@ -393,7 +383,7 @@ pub async fn apply_reconciled_subscription_payment_method_replacement_gateway_ou
     }
     apply_locked_reconciled_non_approved_payment_method_replacement_outcome(
         pool,
-        &reservation,
+        reservation,
         outcome,
     )
     .await
@@ -418,7 +408,7 @@ async fn apply_locked_reconciled_non_approved_payment_method_replacement_outcome
         OutcomeReservation::PaymentMethodReplacement(reservation),
     )
     .await?;
-    let reconciled = reconciled_outcome_with_persisted_evidence(&attempt, observed_outcome);
+    let reconciled = reconciled_outcome_with_durable_identity(&attempt, observed_outcome);
     let diagnostics = reconciled.observation_diagnostics;
     let outcome = reconciled.outcome;
     let resolution = match outcome.status() {
@@ -441,11 +431,11 @@ async fn apply_locked_reconciled_non_approved_payment_method_replacement_outcome
             ));
         }
     };
-    let application = resolve_locked_outcome(
+    let application = resolve_locked_replacement_observation(
         &mut transaction,
         OutcomeReservation::PaymentMethodReplacement(reservation),
         attempt,
-        outcome.evidence(),
+        &outcome,
         resolution,
     )
     .await?;
@@ -472,7 +462,7 @@ async fn apply_locked_reconciled_payment_method_replacement_outcome(
         let connection = transaction.connection();
         let attempt =
             lock_payment_method_replacement_application_attempt(connection, reservation).await?;
-        let reconciled = reconciled_outcome_with_persisted_evidence(&attempt, observed_outcome);
+        let reconciled = reconciled_outcome_with_durable_identity(&attempt, observed_outcome);
         let diagnostics = reconciled.observation_diagnostics;
         if let Some(evidence) = reconciled.conflicting_approved_evidence.as_ref() {
             observe_processor_charge(
@@ -535,11 +525,11 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
             )
             .await
         }
-        GatewayPaymentStatus::Declined => resolve_locked_outcome(
+        GatewayPaymentStatus::Declined => resolve_locked_replacement_observation(
             connection,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            outcome,
             OutcomeResolutionCommand::non_approved(
                 AttemptResolutionStatus::Declined,
                 None,
@@ -549,11 +539,11 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
         )
         .await
         .map(|application| (application.into_payment(), None)),
-        GatewayPaymentStatus::Failed => resolve_locked_outcome(
+        GatewayPaymentStatus::Failed => resolve_locked_replacement_observation(
             connection,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            outcome,
             OutcomeResolutionCommand::non_approved(
                 AttemptResolutionStatus::Failed,
                 None,
@@ -563,16 +553,36 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
         )
         .await
         .map(|application| (application.into_payment(), None)),
-        GatewayPaymentStatus::Unknown => resolve_locked_outcome(
+        GatewayPaymentStatus::Unknown => resolve_locked_replacement_observation(
             connection,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            outcome,
             OutcomeResolutionCommand::unknown(None),
         )
         .await
         .map(|application| (application.into_payment(), None)),
     }
+}
+
+/// Preserve the current observation's quarantine independently of accumulated
+/// attempt risk; a durable identity cannot restore its charge authority.
+async fn resolve_locked_replacement_observation(
+    connection: &mut PgConnection,
+    reservation: OutcomeReservation<'_>,
+    attempt: PaymentAttempt,
+    outcome: &GatewayPaymentOutcome,
+    resolution: OutcomeResolutionCommand,
+) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
+    let mut reconciled = reconcile_non_approved_evidence(&attempt, outcome.evidence());
+    if outcome.has_diagnostic(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier)
+        || outcome
+            .has_diagnostic(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference)
+    {
+        reconciled.quarantine_charge_observation();
+    }
+    resolve_locked_reconciled_outcome(connection, reservation, attempt, reconciled, resolution)
+        .await
 }
 
 struct ReconciledPaymentMethodReplacementOutcome {
@@ -581,12 +591,11 @@ struct ReconciledPaymentMethodReplacementOutcome {
     conflicting_approved_evidence: Option<ProcessorEvidence>,
 }
 
-fn reconciled_outcome_with_persisted_evidence(
+fn reconciled_outcome_with_durable_identity(
     attempt: &PaymentAttempt,
     outcome: &GatewayPaymentOutcome,
 ) -> ReconciledPaymentMethodReplacementOutcome {
     let observed = outcome.evidence();
-    let persisted = attempt.state().processor_evidence();
     let is_resolvable = attempt.status().is_resolvable();
     let reconciled_evidence = reconcile_non_approved_evidence(attempt, observed);
     let reconciled_identity_diagnostics = reconciled_evidence.identity_conflict_diagnostics();
@@ -606,18 +615,9 @@ fn reconciled_outcome_with_persisted_evidence(
         && (transaction_id_conflict
             || payment_method_reference_conflict
             || diagnosed_identity_conflict);
-    let evidence = if !is_resolvable {
-        observed.clone()
-    } else if identity_conflict {
-        persisted.clone()
-    } else if outcome.status() == GatewayPaymentStatus::Approved {
-        // An approval may authorize a stored-method rebind, so every identity
-        // it needs must come from that approving observation itself. Never
-        // restore a missing or quarantined identity from older evidence.
-        observed.clone()
-    } else {
-        reconciled_evidence.evidence
-    };
+    // Keep this outcome as one actual processor observation. The locked
+    // resolution path separately merges its durable attempt risk and identity.
+    let evidence = observed.clone();
     let mut observation_diagnostics = outcome.diagnostics().to_vec();
     for diagnostic in reconciled_identity_diagnostics {
         if !observation_diagnostics.contains(&diagnostic) {
@@ -632,7 +632,8 @@ fn reconciled_outcome_with_persisted_evidence(
                 outcome.status()
             },
             evidence,
-        ),
+        )
+        .with_diagnostics(outcome.diagnostics().to_vec()),
         observation_diagnostics,
         conflicting_approved_evidence: (identity_conflict
             && outcome.status() == GatewayPaymentStatus::Approved)
@@ -795,7 +796,7 @@ async fn try_park_reconciled_payment_method_replacement_approved_outcome(
         OutcomeReservation::PaymentMethodReplacement(reservation),
     )
     .await?;
-    let reconciled = reconciled_outcome_with_persisted_evidence(&attempt, observed_outcome);
+    let reconciled = reconciled_outcome_with_durable_identity(&attempt, observed_outcome);
     let diagnostics = reconciled.observation_diagnostics;
     if let Some(evidence) = reconciled.conflicting_approved_evidence.as_ref() {
         observe_processor_charge(
@@ -824,11 +825,11 @@ async fn try_park_reconciled_payment_method_replacement_approved_outcome(
             )
             .await?
         }
-        GatewayPaymentStatus::Unknown => resolve_locked_outcome(
+        GatewayPaymentStatus::Unknown => resolve_locked_replacement_observation(
             &mut transaction,
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
-            outcome.evidence(),
+            &outcome,
             OutcomeResolutionCommand::unknown(None),
         )
         .await?

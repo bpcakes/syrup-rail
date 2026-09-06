@@ -152,8 +152,10 @@ fn first_failure_decision_projects_retry_and_event_without_persistence() {
     assert!(matches!(
         transition.events[0],
         BillingEvent::SubscriptionPaymentFailed {
-            disposition: SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at },
-            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+            outcome: SubscriptionPaymentFailureOutcome::RetryScheduled {
+                retry_at,
+                access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+            },
             ..
         } if retry_at == timestamp(260) && access_ended_at == timestamp(200)
     ));
@@ -183,7 +185,8 @@ fn failure_event_projection_carries_the_complete_access_consequence() {
             },
         )
         .expect("immediate suspension has a causal boundary")
-        .access,
+        .outcome
+        .access(),
         SubscriptionPaymentFailureAccess::Ended {
             access_ended_at: timestamp(200),
         }
@@ -203,7 +206,8 @@ fn failure_event_projection_carries_the_complete_access_consequence() {
             },
         )
         .expect("scheduled dunning retains access")
-        .access,
+        .outcome
+        .access(),
         SubscriptionPaymentFailureAccess::ContinuesDuringDunning
     );
     assert_eq!(
@@ -215,7 +219,8 @@ fn failure_event_projection_carries_the_complete_access_consequence() {
             },
         )
         .expect("exhausted dunning has a causal boundary")
-        .access,
+        .outcome
+        .access(),
         SubscriptionPaymentFailureAccess::Ended {
             access_ended_at: timestamp(300),
         }
@@ -261,8 +266,9 @@ fn first_automatic_failure_after_legacy_recovery_preserves_suspension_boundary()
         transition.events.as_slice(),
         [
             BillingEvent::SubscriptionPaymentFailed {
-                access: SubscriptionPaymentFailureAccess::Ended {
+                outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded {
                     access_ended_at: failure_access_ended_at,
+                    ..
                 },
                 ..
             },
@@ -396,8 +402,9 @@ fn terminal_event_access_boundary_follows_the_snapshotted_policy() {
             transition.events.as_slice(),
             [
                 BillingEvent::SubscriptionPaymentFailed {
-                    access: SubscriptionPaymentFailureAccess::Ended {
+                    outcome: SubscriptionPaymentFailureOutcome::SubscriptionEnded {
                         access_ended_at: failure_access_ended_at,
+                        ..
                     },
                     ..
                 },

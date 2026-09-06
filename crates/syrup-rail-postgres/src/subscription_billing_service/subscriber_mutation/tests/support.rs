@@ -155,7 +155,7 @@ pub(super) async fn insert_blocking_renewal(
     .bind(subscription.period_end + ChronoDuration::days(30))
     .bind(account.gateway_account_id)
     .bind(account.gateway_configuration_id)
-    .bind(format!("service_renewal_order_{attempt_id}"))
+    .bind(format!("service_renewal_order_{}", attempt_id.simple()))
     .bind(&subscription.initial_transaction_id)
     .execute(pool)
     .await?;
@@ -200,7 +200,7 @@ pub(super) async fn insert_stale_payment_method_update(
     .bind(format!("service_update_fingerprint_{attempt_id}"))
     .bind(account.gateway_account_id)
     .bind(account.gateway_configuration_id)
-    .bind(format!("service_update_order_{attempt_id}"))
+    .bind(format!("service_update_order_{}", attempt_id.simple()))
     .bind(&subscription.initial_transaction_id)
     .bind(created_at)
     .execute(pool)
@@ -247,7 +247,7 @@ pub(super) async fn insert_pending_initial_attempt(
     .bind(format!("service_discount_fingerprint_{attempt_id}"))
     .bind(account.gateway_account_id)
     .bind(account.gateway_configuration_id)
-    .bind(format!("service_discount_order_{attempt_id}"))
+    .bind(format!("service_discount_order_{}", attempt_id.simple()))
     .execute(pool)
     .await?;
     Ok(())

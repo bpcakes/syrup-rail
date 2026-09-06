@@ -68,5 +68,8 @@ if find_public_reexport_globs "${facades[@]}"; then
   exit 1
 fi
 
+# Feature-gated helpers must not mask broken links in the ordinary host API.
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+cargo test --workspace --doc --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps --locked
 cargo test --workspace --all-features --doc --locked

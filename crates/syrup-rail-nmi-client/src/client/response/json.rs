@@ -127,8 +127,11 @@ pub(in crate::client) fn payment_outcome_from_json(
     if json_is_known_preprocessing_rate_limit(value, &decision) {
         return Err(rate_limited_wire_error());
     }
-    let (response_text, _) =
-        resolve_optional_scalar(collect_json_direct_scalar(value, "response_text", true).finish());
+    let text_occurrences = collect_json_direct_scalar(value, "response_text", true);
+    let approval_evidence = decision
+        .approval_evidence
+        .merge(text_occurrences.approval_text_evidence());
+    let (response_text, _) = resolve_optional_scalar(text_occurrences.finish());
     let mut status = decision.status;
     let mut diagnostics = decision.diagnostics;
     let (transaction_id, customer_vault_id) = finalize_payment_identifiers(
@@ -143,6 +146,7 @@ pub(in crate::client) fn payment_outcome_from_json(
     );
     Ok(PaymentOutcome {
         status,
+        approval_evidence,
         transaction_id,
         customer_vault_id,
         response: sensitive_gateway_field(decision.response),

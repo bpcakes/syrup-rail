@@ -7,7 +7,9 @@
 #![forbid(unsafe_code)]
 
 mod admission;
+mod approval_evidence;
 mod attempt;
+mod audit_reason;
 mod billing_portal;
 mod card_data;
 mod discount;
@@ -17,6 +19,7 @@ mod gateway;
 mod gateway_value;
 mod host_charge;
 mod identity;
+mod legacy_gateway_policy;
 mod money;
 mod operator_review;
 mod payment_method_update;
@@ -29,6 +32,10 @@ mod resolver;
 mod subscription;
 mod subscription_payment_context;
 mod terms;
+
+pub use approval_evidence::{ProcessorApprovalEvidence, ProcessorApprovalEvidenceParseError};
+#[allow(deprecated)]
+pub use legacy_gateway_policy::{gateway_response_is_approved, gateway_state_is_approved};
 
 pub use admission::{
     EndUserMutationAdmission, EndUserMutationAdmissionResult, EndUserMutationCommand,
@@ -52,10 +59,11 @@ pub use billing_portal::{
 pub use card_data::{raw_card_data_ranges, string_contains_raw_card_data};
 pub use discount::{
     ClearSubscriptionDiscount, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
-    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimStatus,
-    SubscriptionDiscountClearOutcome, SubscriptionDiscountCodeCreation,
-    SubscriptionDiscountCodeQuote, SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus,
-    SubscriptionDiscountCodeUpdate, discounted_charge,
+    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimState,
+    SubscriptionDiscountClaimStatus, SubscriptionDiscountClearOutcome,
+    SubscriptionDiscountCodeCreation, SubscriptionDiscountCodeQuote,
+    SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus, SubscriptionDiscountCodeUpdate,
+    discounted_charge,
 };
 pub use enrollment::{
     EnrollSubscription, SubscriptionActivationProjection, SubscriptionEnrollmentDiscountSnapshot,
@@ -69,6 +77,7 @@ pub use enrollment::{
 pub use event::{
     BillingEvent, BillingEventKey, BillingEventSubject, PaymentCardDisplay, SubscriptionEndReason,
     SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureDisposition,
+    SubscriptionPaymentFailureOutcome,
 };
 pub use gateway::{
     ApprovedProcessorEvidence, CardLastFour, GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS,
@@ -99,7 +108,7 @@ pub use host_charge::{
 };
 pub use identity::{
     ActorId, BillingScopeId, DiscountClaimId, DiscountCodeId, GatewayAccountId,
-    GatewayAccountRegistration, GatewayConfigurationActivation,
+    GatewayAccountIdentity, GatewayAccountRegistration, GatewayConfigurationActivation,
     GatewayConfigurationActivationOutcome, GatewayConfigurationId, GatewayLifecycleCursorKey,
     GatewayProviderKey, HostChargeTargetId, IdempotencyKey, IdempotencyKeyError, PaymentAttemptId,
     PaymentAttemptKind, PaymentAttemptKindParseError, PaymentAttemptStatus,
@@ -114,13 +123,15 @@ pub use money::{
 };
 pub use operator_review::{
     AttemptReviewCursor, AttemptReviewPage, ExternalReversalAttestation,
-    ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalReason,
-    ExternalReversalReasonError, MANUAL_ATTEMPT_FAILURE_NOTE, ManualAttemptFailureOutcome,
-    ManualFailureHostCharge, OPERATOR_REVIEW_PAGE_LIMIT, OperatorReviewPageLimit,
-    OperatorReviewPageLimitError, PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE, ProcessorCharge,
-    ProcessorChargeProgression, ProcessorChargeReviewCursor, ProcessorChargeReviewItem,
-    ProcessorChargeReviewPage, ProcessorChargeRole, ProcessorChargeStateCode,
-    review_required_attempt_can_be_manually_failed, review_required_manual_failure_evidence,
+    ExternalReversalHostChargeRelease, ExternalReversalKind, ExternalReversalOutcome,
+    ExternalReversalPriorClassification, ExternalReversalReason, ExternalReversalReasonError,
+    ExternalReversalResolution, ExternalReversalResolutionError, MANUAL_ATTEMPT_FAILURE_NOTE,
+    ManualAttemptFailureOutcome, ManualFailureHostCharge, OPERATOR_REVIEW_PAGE_LIMIT,
+    OperatorReviewPageLimit, OperatorReviewPageLimitError,
+    PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE, ProcessorCharge, ProcessorChargeProgression,
+    ProcessorChargeReviewCursor, ProcessorChargeReviewItem, ProcessorChargeReviewPage,
+    ProcessorChargeRole, ProcessorChargeStateCode, review_required_attempt_can_be_manually_failed,
+    review_required_manual_failure_evidence,
 };
 pub use payment_method_update::{
     ReplaceSubscriptionPaymentMethod, SubscriptionPaymentMethodReplacement,
@@ -132,10 +143,7 @@ pub use payment_method_update::{
     SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection,
 };
-pub use policy::{
-    BillingPeriodPolicyError, gateway_response_is_approved, gateway_state_is_approved,
-    next_billing_period,
-};
+pub use policy::{BillingPeriodPolicyError, next_billing_period};
 pub use reconciliation::{GatewayAccountReconciliationCandidate, GatewayLifecycleAccount};
 pub use recovery::{
     RecoverSubscriptionPayment, SubscriptionRecoveryLockedTerms,
@@ -169,7 +177,9 @@ pub use subscription::{
     SubscriptionGrantCreationOutcome, SubscriptionGrantError, SubscriptionGrantKind,
     SubscriptionGrantKindParseError, SubscriptionGrantReason, SubscriptionGrantReasonError,
     SubscriptionGrantRecord, SubscriptionGrantRecordError, SubscriptionGrantRevocation,
-    SubscriptionGrantRevocationOutcome, classify_past_due_access,
+    SubscriptionGrantRevocationAudit, SubscriptionGrantRevocationOutcome,
+    SubscriptionGrantRevocationState, SubscriptionLifecycle, SubscriptionLifecycleError,
+    classify_past_due_access,
 };
 pub use subscription_payment_context::SubscriptionPaymentContext;
 pub use terms::{

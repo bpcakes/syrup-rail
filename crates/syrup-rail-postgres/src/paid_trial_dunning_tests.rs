@@ -30,7 +30,7 @@ use syrup_rail::{
     SubscriptionEndReason, SubscriptionEnrollmentExpectedTerms,
     SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentReservation,
     SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentFailureAccess,
-    SubscriptionPaymentFailureDisposition, SubscriptionPeriodRule, SubscriptionPhase,
+    SubscriptionPaymentFailureOutcome, SubscriptionPeriodRule, SubscriptionPhase,
     SubscriptionRenewalOutcome, SubscriptionStatus,
 };
 use tokio::sync::Mutex;
@@ -169,14 +169,20 @@ impl SubscriptionOfferStore for StaticOfferStore {
 #[derive(Clone)]
 struct TestCoordinator {
     pool: PgPool,
-    events: Arc<Mutex<Vec<BillingEvent>>>,
+    events: Arc<Mutex<Vec<RecordedBillingEvent>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RecordedBillingEvent {
+    subject: BillingEventSubject,
+    event: BillingEvent,
 }
 
 #[async_trait]
 impl BillingTransactionCoordinator for TestCoordinator {
     async fn begin(
         &self,
-        _subject: BillingEventSubject,
+        subject: BillingEventSubject,
         _lock_timeout: Duration,
     ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError> {
         Ok(Box::new(TestTransaction {
@@ -186,14 +192,18 @@ impl BillingTransactionCoordinator for TestCoordinator {
                     .await
                     .map_err(BillingTransactionError::new)?,
             ),
-            events: Arc::clone(&self.events),
+            subject,
+            pending_events: Vec::new(),
+            committed_events: Arc::clone(&self.events),
         }))
     }
 }
 
 struct TestTransaction {
     transaction: Option<Transaction<'static, Postgres>>,
-    events: Arc<Mutex<Vec<BillingEvent>>>,
+    subject: BillingEventSubject,
+    pending_events: Vec<RecordedBillingEvent>,
+    committed_events: Arc<Mutex<Vec<RecordedBillingEvent>>>,
 }
 
 #[async_trait]
@@ -207,7 +217,10 @@ impl BillingTransaction for TestTransaction {
     }
 
     async fn append_event(&mut self, event: &BillingEvent) -> Result<(), BillingEventWriteError> {
-        self.events.lock().await.push(event.clone());
+        self.pending_events.push(RecordedBillingEvent {
+            subject: self.subject,
+            event: event.clone(),
+        });
         Ok(())
     }
 
@@ -217,7 +230,12 @@ impl BillingTransaction for TestTransaction {
             .expect("active test transaction")
             .commit()
             .await
-            .map_err(BillingTransactionError::new)
+            .map_err(BillingTransactionError::new)?;
+        self.committed_events
+            .lock()
+            .await
+            .append(&mut self.pending_events);
+        Ok(())
     }
 
     async fn rollback(mut self: Box<Self>) -> Result<(), BillingTransactionError> {
@@ -228,6 +246,126 @@ impl BillingTransaction for TestTransaction {
             .await
             .map_err(BillingTransactionError::new)
     }
+}
+
+fn outbox_test_event(value: u128) -> BillingEvent {
+    BillingEvent::PaymentMethodChanged {
+        attempt_id: PaymentAttemptId::new(Uuid::from_u128(value)),
+        subscription_id: syrup_rail::SubscriptionId::new(Uuid::from_u128(value + 100)),
+        plan_key: PlanKey::new("outbox_test").expect("valid test plan key"),
+        card: None,
+    }
+}
+
+fn outbox_test_subject(value: u128) -> BillingEventSubject {
+    BillingEventSubject::new(
+        BillingScopeId::new(Uuid::from_u128(value)),
+        SubscriberId::new(Uuid::from_u128(value + 100)),
+    )
+}
+
+#[tokio::test]
+async fn test_outbox_promotes_exact_subject_payload_and_local_order_after_commit()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_outbox_commit").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let subject = outbox_test_subject(1);
+    let first = outbox_test_event(10);
+    let second = outbox_test_event(20);
+    let mut transaction = coordinator.begin(subject, Duration::from_secs(1)).await?;
+
+    transaction.append_event(&first).await?;
+    transaction.append_event(&second).await?;
+    assert!(events.lock().await.is_empty());
+    transaction.commit().await?;
+
+    assert_eq!(
+        *events.lock().await,
+        vec![
+            RecordedBillingEvent {
+                subject,
+                event: first,
+            },
+            RecordedBillingEvent {
+                subject,
+                event: second,
+            },
+        ]
+    );
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn test_outbox_discards_pending_events_after_rollback() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_ob_rollback").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let mut transaction = coordinator
+        .begin(outbox_test_subject(2), Duration::from_secs(1))
+        .await?;
+
+    transaction.append_event(&outbox_test_event(30)).await?;
+    transaction.rollback().await?;
+
+    assert!(events.lock().await.is_empty());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn test_outbox_discards_pending_events_when_transaction_is_dropped()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_outbox_drop").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let mut transaction = coordinator
+        .begin(outbox_test_subject(3), Duration::from_secs(1))
+        .await?;
+
+    transaction.append_event(&outbox_test_event(40)).await?;
+    drop(transaction);
+
+    assert!(events.lock().await.is_empty());
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn test_outbox_discards_pending_events_when_sql_commit_fails() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("pt_ob_failure").await?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    };
+    let mut transaction = coordinator
+        .begin(outbox_test_subject(4), Duration::from_secs(1))
+        .await?;
+    sqlx::query(
+        "CREATE TEMP TABLE deferred_duplicate (value integer UNIQUE DEFERRABLE INITIALLY DEFERRED)",
+    )
+    .execute(transaction.connection())
+    .await?;
+    sqlx::query("INSERT INTO deferred_duplicate (value) VALUES (1), (1)")
+        .execute(transaction.connection())
+        .await?;
+    transaction.append_event(&outbox_test_event(50)).await?;
+
+    transaction
+        .commit()
+        .await
+        .expect_err("deferred uniqueness violation must fail commit");
+
+    assert!(events.lock().await.is_empty());
+    database.cleanup().await
 }
 
 fn paid_trial_offer() -> Result<syrup_rail::SubscriptionOffer, Box<dyn Error>> {
@@ -285,6 +423,7 @@ fn approved_outcome_with_reference(
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Structured,
             Some(GatewayTransactionId::new(transaction_id).expect("valid transaction ID")),
             Some(
                 GatewayPaymentMethodReference::new(payment_method_reference)
@@ -303,6 +442,7 @@ fn declined_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Declined,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Absent,
             Some(GatewayTransactionId::new(transaction_id).expect("valid transaction ID")),
             None,
             Some(GatewayDiagnostic::new("2")),
@@ -318,6 +458,7 @@ fn unknown_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             None,
@@ -333,6 +474,7 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -430,15 +572,59 @@ async fn make_trial_due(
     Ok(due_at)
 }
 
-async fn make_retry_due(
+async fn force_due_renewal(
     pool: &PgPool,
+    billing_scope_id: BillingScopeId,
     subscription_id: syrup_rail::SubscriptionId,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+) -> Result<ChargeRenewal, sqlx::Error> {
+    let (persisted_scope_id, persisted_subscription_id, due_at): (Uuid, Uuid, DateTime<Utc>) =
+        sqlx::query_as(
+            r#"
+        WITH clock AS MATERIALIZED (
+            SELECT clock_timestamp() - interval '1 second' AS due_at
+        )
+        UPDATE billing_subscriptions AS subscription
+        SET current_period_start_at =
+                clock.due_at
+                - (subscription.current_period_end_at - subscription.current_period_start_at),
+            current_period_end_at = clock.due_at,
+            next_renewal_at = clock.due_at,
+            next_payment_attempt_at = clock.due_at
+        FROM clock
+        WHERE subscription.billing_scope_id = $1
+            AND subscription.id = $2
+        RETURNING
+            subscription.billing_scope_id,
+            subscription.id,
+            subscription.next_renewal_at
+        "#,
+        )
+        .bind(billing_scope_id.as_uuid())
+        .bind(subscription_id.as_uuid())
+        .fetch_one(pool)
+        .await?;
+    Ok(ChargeRenewal::new(
+        BillingScopeId::new(persisted_scope_id),
+        syrup_rail::SubscriptionId::new(persisted_subscription_id),
+        due_at,
+    ))
+}
+
+async fn make_retry_due(pool: &PgPool, renewal: ChargeRenewal) -> Result<(), sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE billing_subscriptions
+        SET next_payment_attempt_at = clock_timestamp() - interval '1 second'
+        WHERE billing_scope_id = $1
+            AND id = $2
+            AND next_renewal_at = $3
+        RETURNING id
+        "#,
     )
-    .bind(subscription_id.as_uuid())
-    .execute(pool)
+    .bind(renewal.billing_scope_id().as_uuid())
+    .bind(renewal.subscription_id().as_uuid())
+    .bind(renewal.period_start_at())
+    .fetch_one(pool)
     .await?;
     Ok(())
 }
@@ -447,17 +633,10 @@ async fn decline_due_renewal(
     pool: &PgPool,
     gateway: &ResolvedGateway,
     coordinator: &dyn BillingTransactionCoordinator,
-    billing_scope_id: BillingScopeId,
-    subscription_id: syrup_rail::SubscriptionId,
-    due_at: DateTime<Utc>,
+    renewal: ChargeRenewal,
     transaction_id: &str,
 ) -> Result<(SubscriptionEnrollmentPaymentResult, DateTime<Utc>), Box<dyn Error>> {
-    let reservation = reserve_and_admit_renewal(
-        pool,
-        gateway,
-        ChargeRenewal::new(billing_scope_id, subscription_id, due_at),
-    )
-    .await?;
+    let reservation = reserve_and_admit_renewal(pool, gateway, renewal).await?;
     let result = apply_subscription_renewal_gateway_outcome(
         pool,
         coordinator,

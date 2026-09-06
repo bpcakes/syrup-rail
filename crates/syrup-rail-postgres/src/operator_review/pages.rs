@@ -77,6 +77,7 @@ pub async fn processor_charge_review_page(
             charges.state_code AS review_charge_state_code,
             charges.gateway_transaction_id AS review_charge_gateway_transaction_id,
             charges.gateway_payment_method_reference AS review_charge_gateway_payment_method_reference,
+            charges.gateway_approval_evidence AS review_charge_gateway_approval_evidence,
             charges.gateway_response AS review_charge_gateway_response,
             charges.gateway_response_code AS review_charge_gateway_response_code,
             charges.gateway_response_text AS review_charge_gateway_response_text,
@@ -170,6 +171,9 @@ fn processor_charge_from_review_row(row: &PgRow) -> Result<ProcessorCharge, Oper
         return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
     }
     let evidence = ProcessorEvidence::new(
+        row.try_get::<String, _>("review_charge_gateway_approval_evidence")?
+            .parse()
+            .map_err(|_| OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?,
         row.try_get::<Option<String>, _>("review_charge_gateway_transaction_id")?
             .map(GatewayTransactionId::new)
             .transpose()

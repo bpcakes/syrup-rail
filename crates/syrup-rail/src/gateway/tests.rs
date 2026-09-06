@@ -178,6 +178,7 @@ fn sensitive_debug_output_is_value_free() {
     assert!(!debug.contains("txn_sentinel"));
     assert!(debug.contains("redacted"));
     let evidence = ProcessorEvidence::new(
+        crate::ProcessorApprovalEvidence::Unclassified,
         Some(identifier),
         None,
         None,
@@ -196,44 +197,64 @@ fn sensitive_debug_output_is_value_free() {
 }
 
 #[test]
-fn approved_payment_evidence_requires_identity_and_an_authoritative_decision() {
-    let approved =
-        |response: Option<&str>, response_code: Option<&str>, condition: Option<&str>| {
-            ProcessorEvidence::new(
-                Some(GatewayTransactionId::new("txn-approved-evidence").unwrap()),
-                None,
-                response.map(GatewayDiagnostic::new),
-                response_code.map(GatewayDiagnostic::new),
-                None,
-                condition.map(GatewayDiagnostic::new),
-                GatewayPaymentDescriptor::default(),
-            )
-        };
-    assert!(approved(Some("1"), None, None).indicates_approved_payment());
-    assert!(approved(None, Some("100"), None).indicates_approved_payment());
-    assert!(approved(None, None, Some("complete")).indicates_approved_payment());
-    assert!(!approved(Some("2"), Some("200"), Some("declined")).indicates_approved_payment());
-    assert!(!approved(None, None, None).indicates_approved_payment());
-
-    let missing_identity = ProcessorEvidence::new(
+fn approval_evidence_uses_adapter_facts_without_reinterpreting_raw_fields() {
+    use crate::ProcessorApprovalEvidence as Signal;
+    let raw = ProcessorEvidence::new(
+        crate::ProcessorApprovalEvidence::Unclassified,
+        Some(GatewayTransactionId::new("txn-evidence").unwrap()),
         None,
         None,
-        Some(GatewayDiagnostic::new("1")),
-        Some(GatewayDiagnostic::new("100")),
-        Some(GatewayDiagnostic::new("Approved")),
-        Some(GatewayDiagnostic::new("complete")),
+        Some(GatewayDiagnostic::new("provider-specific-success")),
+        None,
+        None,
         GatewayPaymentDescriptor::default(),
     );
-    assert!(!missing_identity.indicates_approved_payment());
-
-    let incomplete_but_authoritative =
-        GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, ProcessorEvidence::default());
-    assert!(incomplete_but_authoritative.approved_evidence().is_some());
-    let non_approved = GatewayPaymentOutcome::new(
-        GatewayPaymentStatus::Unknown,
-        approved(Some("1"), None, None),
+    assert!(
+        raw.clone()
+            .with_approval_evidence(Signal::Structured)
+            .indicates_approved_payment()
     );
-    assert!(non_approved.approved_evidence().is_none());
+    assert!(
+        !raw.clone()
+            .with_approval_evidence(Signal::Absent)
+            .indicates_approved_payment()
+    );
+    assert_eq!(
+        raw.clone()
+            .with_approval_evidence(Signal::Absent)
+            .approval_evidence(),
+        Signal::Unclassified,
+        "adding evidence cannot downgrade a conservative signal"
+    );
+    assert!(
+        !raw.clone()
+            .with_approval_evidence(Signal::TextOnly)
+            .indicates_approved_payment()
+    );
+    assert!(
+        raw.clone()
+            .with_approval_evidence(Signal::TextOnly)
+            .may_indicate_approval()
+    );
+    assert!(
+        raw.may_indicate_approval(),
+        "unclassified nonempty evidence fails closed"
+    );
+    assert!(!ProcessorEvidence::default().may_indicate_approval());
+    let unknown = GatewayPaymentOutcome::new(
+        GatewayPaymentStatus::Unknown,
+        raw.with_approval_evidence(Signal::Structured),
+    );
+    assert_eq!(unknown.status(), GatewayPaymentStatus::Unknown);
+    assert!(unknown.approved_evidence().is_none());
+    let missing_identity =
+        unknown.with_diagnostics(vec![GatewayPaymentDiagnostic::MissingTransactionIdentifier]);
+    assert!(!missing_identity.evidence().indicates_approved_payment());
+    assert!(missing_identity.evidence().may_indicate_approval());
+    let approved =
+        GatewayPaymentOutcome::new(GatewayPaymentStatus::Approved, ProcessorEvidence::default());
+    assert!(approved.approved_evidence().is_some());
+    assert_eq!(approved.evidence().approval_evidence(), Signal::Absent);
 }
 
 #[test]
@@ -365,6 +386,7 @@ fn gateway_outcome_approval_policy_distinguishes_identity_from_decision_certaint
 fn gateway_outcome_quarantines_every_diagnosed_identity() {
     let evidence = || {
         ProcessorEvidence::new(
+            crate::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("txn-diagnosed").unwrap()),
             Some(GatewayPaymentMethodReference::new("method-diagnosed").unwrap()),
             None,
@@ -469,6 +491,20 @@ fn gateway_diagnostic_certainty_policy_applies_to_every_status() {
 
 #[test]
 fn quarantine_resolution_reason_is_normalized_bounded_and_card_safe() {
+    assert!(
+        GatewayLifecycleQuarantineResolutionReason::new(format!("  {}  ", "é".repeat(500))).is_ok()
+    );
+    assert_eq!(
+        GatewayLifecycleQuarantineResolutionReason::new("é".repeat(501)),
+        Err(GatewayLifecycleQuarantineResolutionReasonError::TooLong)
+    );
+    assert_eq!(
+        GatewayLifecycleQuarantineResolutionReason::new(format!(
+            "{}4111111111111111",
+            "x".repeat(500)
+        )),
+        Err(GatewayLifecycleQuarantineResolutionReasonError::TooLong)
+    );
     let reason = GatewayLifecycleQuarantineResolutionReason::new("  reviewed evidence  ").unwrap();
     assert_eq!(reason.expose(), "reviewed evidence");
     assert!(!format!("{reason:?}").contains("reviewed evidence"));
@@ -552,4 +588,54 @@ fn gateway_errors_preserve_value_free_debug_and_stable_messages() {
     assert!(debug.starts_with("Indeterminate"));
     assert!(debug.contains("has_detail: true"));
     assert!(!debug.contains(SENTINEL));
+}
+
+#[test]
+fn unclassified_review_protection_does_not_depend_on_retained_text() {
+    use crate::ProcessorApprovalEvidence as Signal;
+    assert!(
+        ProcessorEvidence::default()
+            .with_approval_evidence(Signal::Unclassified)
+            .may_indicate_approval()
+    );
+    let local_note = ProcessorEvidence::new(
+        Signal::Absent,
+        None,
+        None,
+        None,
+        None,
+        Some(GatewayDiagnostic::new(
+            "Payment processor did not return a transaction before the reconciliation deadline.",
+        )),
+        None,
+        GatewayPaymentDescriptor::default(),
+    );
+    assert!(!local_note.may_indicate_approval());
+}
+
+#[test]
+fn mutation_error_evidence_is_owned_by_certainty_not_diagnostic_text() {
+    use crate::{
+        GatewayMutationError, GatewayNotSubmittedError, ProcessorApprovalEvidence as Signal,
+    };
+    for error in [
+        GatewayMutationError::Indeterminate(GatewayDiagnostic::new(
+            "Approved but confirmation failed",
+        )),
+        GatewayMutationError::RateLimitedIndeterminate(GatewayDiagnostic::new("Approved")),
+        GatewayMutationError::Indeterminate(GatewayDiagnostic::new("")),
+    ] {
+        let evidence = error.processor_evidence();
+        assert_eq!(evidence.approval_evidence(), Signal::Unclassified);
+        assert!(evidence.may_indicate_approval());
+        assert!(!evidence.indicates_approved_payment());
+    }
+    let error = GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::NotTransmitted(
+        GatewayDiagnostic::new("locally approved configuration; transport never started"),
+    ));
+    assert_eq!(
+        error.processor_evidence().approval_evidence(),
+        Signal::Absent
+    );
+    assert!(!error.processor_evidence().may_indicate_approval());
 }

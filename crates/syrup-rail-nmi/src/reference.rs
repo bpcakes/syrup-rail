@@ -51,19 +51,42 @@ impl NmiMutationReferenceFactory {
     }
 }
 
+const fn mutation_kind_token(kind: PaymentAttemptKind) -> &'static str {
+    match kind {
+        PaymentAttemptKind::HostCharge => "order",
+        PaymentAttemptKind::SubscriptionInitial => "base-sub",
+        PaymentAttemptKind::SubscriptionRenewal => "renewal",
+        PaymentAttemptKind::SubscriptionRecovery => "recovery",
+        PaymentAttemptKind::SubscriptionPaymentMethodUpdate => "payment-method",
+    }
+}
+
+pub(crate) fn nmi_mutation_reference_attempt_id(value: &str) -> Option<PaymentAttemptId> {
+    let mut parts = value.split('_');
+    let namespace = parts.next()?;
+    let kind = parts.next()?;
+    let attempt_id = parts.next()?;
+    let has_canonical_shape = parts.next().is_none()
+        && NmiMutationNamespace::new(namespace).is_ok()
+        && PaymentAttemptKind::ALL
+            .into_iter()
+            .any(|candidate| mutation_kind_token(candidate) == kind)
+        && attempt_id.len() == 32
+        && attempt_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
+    has_canonical_shape
+        .then(|| attempt_id.parse::<PaymentAttemptId>().ok())
+        .flatten()
+}
+
 impl GatewayMutationReferenceFactory for NmiMutationReferenceFactory {
     fn for_attempt(
         &self,
         kind: PaymentAttemptKind,
         attempt_id: PaymentAttemptId,
     ) -> GatewayOrderId {
-        let kind = match kind {
-            PaymentAttemptKind::HostCharge => "order",
-            PaymentAttemptKind::SubscriptionInitial => "base-sub",
-            PaymentAttemptKind::SubscriptionRenewal => "renewal",
-            PaymentAttemptKind::SubscriptionRecovery => "recovery",
-            PaymentAttemptKind::SubscriptionPaymentMethodUpdate => "payment-method",
-        };
+        let kind = mutation_kind_token(kind);
         let value = format!(
             "{}_{kind}_{}",
             self.namespace.as_str(),
@@ -93,7 +116,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_references_remain_byte_stable_and_bounded() {
+    fn every_generated_reference_is_byte_stable_bounded_and_recognized() {
         let id =
             PaymentAttemptId::new(Uuid::parse_str("018f52c0-8a17-7b2f-9bc8-5fa621ce1173").unwrap());
         let factory = NmiMutationReferenceFactory::new(NmiMutationNamespace::new("ck").unwrap());
@@ -113,6 +136,40 @@ mod tests {
                 format!("ck_{token}_018f52c08a177b2f9bc85fa621ce1173")
             );
             assert!(reference.expose().len() <= 50);
+            assert_eq!(
+                nmi_mutation_reference_attempt_id(reference.expose()),
+                Some(id)
+            );
+        }
+    }
+
+    #[test]
+    fn recognition_rejects_invalid_segments_namespaces_kinds_and_uuids() {
+        let id = "018f52c08a177b2f9bc85fa621ce1173";
+        for invalid in [
+            "ck_order",
+            &format!("ck_order_{id}_extra"),
+            &format!("_order_{id}"),
+            &format!("ck__{id}"),
+            "ck_order_",
+            &format!("c_order_{id}"),
+            &format!("ckk_order_{id}"),
+            &format!("CK_order_{id}"),
+            &format!("c1_order_{id}"),
+            &format!("ck_ORDER_{id}"),
+            &format!("ck_host-charge_{id}"),
+            &format!("ck_subscription_renewal_{id}"),
+            "ck_order_018f52c0-8a17-7b2f-9bc8-5fa621ce1173",
+            "ck_order_018F52C08A177B2F9BC85FA621CE1173",
+            "ck_order_018f52c08a177b2f9bc85fa621ce117",
+            "ck_order_018f52c08a177b2f9bc85fa621ce11730",
+            "ck_order_018f52c08a177b2f9bc85fa621ce117g",
+        ] {
+            assert_eq!(
+                nmi_mutation_reference_attempt_id(invalid),
+                None,
+                "unexpectedly recognized {invalid}"
+            );
         }
     }
 

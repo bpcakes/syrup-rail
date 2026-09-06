@@ -5,8 +5,8 @@ gateway and lifecycle-evidence contracts.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.2"
-syrup-rail-nmi = "0.5.2"
+syrup-rail = "0.6.0"
+syrup-rail-nmi = "0.6.0"
 ```
 
 The adapter re-exports the matching raw client as
@@ -44,24 +44,24 @@ provenance is no longer present. Identity quarantine does not turn an otherwise
 determinate decline or failure into an unknown outcome; approvals still fail
 closed. Diagnostics are deduplicated and canonically ordered, but order has no
 chronology or precedence semantics; use `has_diagnostic()` for routing by
-membership. Foreground
-`syrup-rail-postgres` subscription and host-charge results copy diagnostics to
-`observation_diagnostics()`. Those result diagnostics describe the observation
-applied by the current call; they are not separately persisted and a later
-attempt replay may not contain them. Exact response fields remain durable
-processor evidence. The 0.5.0 `gateway_diagnostics()` names remain as deprecated
-compatibility aliases. The gateway outcome's effective status already includes
-the core diagnostic-certainty policy; a diagnostic copied onto a foreground
-result does not rewrite an earlier durable replay result. Hosts must use the
-returned status and evidence when deciding whether submission is complete or
-reconciliation is required. NMI
-documents exact order-ID lookup but does not define an empty query result as
-final. A stale empty observation therefore remains operator review for sales
-and renewal/dunning attempts rather than becoming a determinate failure.
-For a nonempty order-only query, the raw client accepts a coherent decline or
-determinate failure only after the response echoes that order ID and contains
-exactly one transaction record; an unusable response transaction ID remains a
-diagnostic rather than weakening the independently bound non-approved decision.
+membership. Foreground `syrup-rail-postgres` subscription and host-charge
+results copy diagnostics to `observation_diagnostics()`. Those result
+diagnostics describe the observation applied by the current call; they are not
+separately persisted and a later attempt replay may not contain them. Exact
+response fields remain durable processor evidence. The 0.5.0
+`gateway_diagnostics()` names remain as deprecated compatibility aliases. The
+gateway outcome's effective status already includes the core
+diagnostic-certainty policy; a diagnostic copied onto a foreground result does
+not rewrite an earlier durable replay result. Hosts must use the returned
+status and evidence when deciding whether submission is complete or
+reconciliation is required. NMI documents exact order-ID lookup but does not
+define an empty query result as final. A stale empty observation therefore
+remains operator review for sales and renewal/dunning attempts rather than
+becoming a determinate failure. For a nonempty order-only query, the raw client
+accepts a coherent decline or determinate failure only after the response
+echoes that order ID and contains exactly one transaction record; an unusable
+response transaction ID remains a diagnostic rather than weakening the
+independently bound non-approved decision.
 The duplicate is not mapped to a card decline or known non-submission. Keep the
 processor duplicate window shorter than the shortest normal billing or renewal
 interval and the minimum replacement-charge interval, then wait out that window
@@ -81,3 +81,14 @@ the host and the matching `syrup-rail-postgres` integration.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
+
+The adapter attaches `ProcessorApprovalEvidence` independently of the payment
+decision. Numeric approval response codes use the raw client's numeric semantics
+(including `0100`); the original spelling remains in the evidence. Structured
+approval signals on unknown outcomes require financial review. Text-only hints
+block manual failure but never identify or approve a payment.
+
+Approval signals come from the raw client's complete decision/text observation,
+including discarded duplicate fields and raw `status`. The adapter translates
+`PaymentApprovalEvidence` without repeating the response-code or lifecycle-state
+vocabulary. Payment certainty remains independent of this conservative summary.

@@ -561,14 +561,13 @@ impl From<&BillingEvent> for HostBillingEventPayloadV1 {
                 attempt_id,
                 subscription_id,
                 plan_key,
-                disposition,
-                access,
+                outcome,
             } => Self::SubscriptionPaymentFailed {
                 attempt_id: *attempt_id.as_uuid(),
                 subscription_id: *subscription_id.as_uuid(),
                 plan_key: plan_key.as_str().to_owned(),
-                disposition: (*disposition).into(),
-                access: (*access).into(),
+                disposition: outcome.disposition().into(),
+                access: outcome.access().into(),
             },
             BillingEvent::SubscriptionEnded {
                 attempt_id,

@@ -84,6 +84,22 @@ for crate in "${publishable_crates[@]}"; do
   fi
 done
 
+unreleased_heading_count="$(grep -cFx '## [Unreleased]' CHANGELOG.md || true)"
+if [[ "$unreleased_heading_count" -ne 1 ]]; then
+  echo "CHANGELOG.md must contain exactly one canonical ## [Unreleased] heading." >&2
+  exit 1
+fi
+
+unreleased_body="$(awk '
+  $0 == "## [Unreleased]" { in_unreleased = 1; next }
+  in_unreleased && /^## \[/ { exit }
+  in_unreleased && NF { print }
+' CHANGELOG.md)"
+if [[ "$unreleased_body" != "_No unreleased changes._" ]]; then
+  echo "CHANGELOG.md must have no unreleased changes before publishing v$version." >&2
+  exit 1
+fi
+
 if ! grep -Fq "## [$version] -" CHANGELOG.md; then
   echo "CHANGELOG.md has no dated $version release heading." >&2
   exit 1
@@ -101,13 +117,15 @@ fi
 
 cargo metadata --locked --no-deps --format-version 1 >/dev/null
 
-package_dirty_args=()
+# Keep the empty clean-mode argument vector safe under `set -u` on Bash 3.2
+# through 4.3.
+set --
 if [[ "$allow_dirty" == true ]]; then
-  package_dirty_args+=(--allow-dirty)
+  set -- --allow-dirty
 fi
 
 for crate in "${publishable_crates[@]}"; do
-  package_files="$(cargo package --locked --list "${package_dirty_args[@]}" -p "$crate")"
+  package_files="$(cargo package --locked --list "$@" -p "$crate")"
   for required_file in LICENSE README.md; do
     if ! grep -Fqx "$required_file" <<<"$package_files"; then
       echo "$crate package does not contain $required_file." >&2

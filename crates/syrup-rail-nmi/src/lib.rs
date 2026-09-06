@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod adapter;
+mod approval_evidence;
 mod lifecycle;
 mod reference;
 

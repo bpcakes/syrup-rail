@@ -82,7 +82,7 @@ impl SubscriptionBillingService {
             )
             .await?;
         if prepared_reservation.as_ref().is_some_and(|reservation| {
-            reservation.identity().gateway_account_id() != account.account_id
+            reservation.identity().gateway_account_id() != account.account_id()
         }) {
             return Err(SubscriptionBillingServiceError::InvalidState(
                 INVALID_SERVICE_STATE,
@@ -104,15 +104,15 @@ impl SubscriptionBillingService {
             .resolver
             .resolve(
                 command.billing_scope_id(),
-                account.account_id,
+                account.account_id(),
                 command.gateway_configuration_id(),
-                account.provider_key.clone(),
+                account.provider_key().clone(),
             )
             .await?;
         if gateway.billing_scope_id() != command.billing_scope_id()
-            || gateway.gateway_account_id() != account.account_id
+            || gateway.gateway_account_id() != account.account_id()
             || gateway.gateway_configuration_id() != command.gateway_configuration_id()
-            || gateway.provider_key() != &account.provider_key
+            || gateway.provider_key() != account.provider_key()
         {
             return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
@@ -327,7 +327,7 @@ impl SubscriptionBillingService {
                     .resolve_host_charge_cooldown(
                         targets,
                         reservation,
-                        &account.provider_key,
+                        account.provider_key(),
                         scope,
                         resolution,
                     )
@@ -354,7 +354,7 @@ impl SubscriptionBillingService {
                 self.extend_provider_cooldown(
                     gateway.billing_scope_id(),
                     gateway.gateway_account_id(),
-                    &account.provider_key,
+                    account.provider_key(),
                 )
                 .await?;
                 Err(SubscriptionBillingServiceError::GatewayMutationCooldown {

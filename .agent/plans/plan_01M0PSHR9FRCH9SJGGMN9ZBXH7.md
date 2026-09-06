@@ -1,0 +1,1 @@
+Implement R-20 in lifecycle.rs only: build a one-pass typed action summary, preserve lifecycle/error precedence and locator behavior, add acceptance-edge regression tests, and run NMI plus repository gates.

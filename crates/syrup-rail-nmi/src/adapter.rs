@@ -6,17 +6,19 @@ use syrup_rail::{
     GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentOutcome,
     GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest, GatewaySaleIntent,
     GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId,
-    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway,
-    ProcessorEvidence,
+    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentGateway, ProcessorEvidence,
 };
 use syrup_rail_nmi_client::{
     AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeDiagnostic,
-    PaymentOutcomeParts, PaymentSource, PaymentStatus, QueryError, ReportQuery, SaleRequest,
-    SensitiveText, StorePaymentMethodRequest, StoredCredential, TransactionActionParts,
-    TransactionQuery, TransactionReportDiagnostic, TransactionReportParts, VaultAction,
+    PaymentOutcomeParts, PaymentStatus, QueryError, ReportQuery, SaleIntent, SaleRequest,
+    SensitiveText, StorePaymentMethodRequest, TransactionActionParts, TransactionQuery,
+    TransactionReportDiagnostic, TransactionReportParts,
 };
 
-use crate::lifecycle::{NmiAction, NmiReport, admit_report};
+use crate::{
+    lifecycle::{NmiAction, NmiReport, admit_report},
+    reference::nmi_mutation_reference_attempt_id,
+};
 
 pub struct NmiPaymentGateway {
     client: Client,
@@ -144,35 +146,27 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
             )),
         ));
     }
-    let (source, vault_action, stored_credential) = match intent {
-        GatewaySaleIntent::OneTime { payment_token } => (
-            PaymentSource::PaymentToken(payment_token.into_inner()),
-            None,
-            None,
-        ),
-        GatewaySaleIntent::InitialStoredCredential { payment_token } => (
-            PaymentSource::PaymentToken(payment_token.into_inner()),
-            Some(VaultAction::AddCustomer),
-            Some(StoredCredential::InitialCustomer),
-        ),
+    let intent = match intent {
+        GatewaySaleIntent::OneTime { payment_token } => {
+            SaleIntent::PaymentToken(payment_token.into_inner())
+        }
+        GatewaySaleIntent::InitialStoredCredential { payment_token } => {
+            SaleIntent::InitialStoredCredential {
+                payment_token: payment_token.into_inner(),
+            }
+        }
         GatewaySaleIntent::RecurringStoredCredential {
             payment_method_reference,
             initial_transaction_id,
-        } => (
-            PaymentSource::CustomerVault(payment_method_reference.into_inner()),
-            None,
-            Some(StoredCredential::RecurringMerchant {
-                initial_transaction_id: initial_transaction_id.into_inner(),
-            }),
-        ),
+        } => SaleIntent::RecurringStoredCredential {
+            customer_vault_id: payment_method_reference.into_inner(),
+            initial_transaction_id: initial_transaction_id.into_inner(),
+        },
     };
     Ok(SaleRequest {
         amount_cents: charge.cents(),
-        currency: charge.currency().as_str().to_owned(),
         order_id: order_id.into_inner(),
-        source,
-        vault_action,
-        stored_credential,
+        intent,
         billing_contact: billing_contact.map(map_billing_contact),
     })
 }
@@ -191,6 +185,7 @@ fn map_payment_outcome(outcome: syrup_rail_nmi_client::PaymentOutcome) -> Gatewa
 }
 
 fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcome {
+    let approval_evidence = crate::approval_evidence::classify(&parts);
     for diagnostic in &parts.diagnostics {
         match diagnostic {
             PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor => {
@@ -232,6 +227,7 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
         identifiers.payment_method_reference = None;
     }
     let evidence = ProcessorEvidence::new(
+        approval_evidence,
         identifiers.transaction_id,
         identifiers.payment_method_reference,
         sanitized_text(parts.response),
@@ -429,27 +425,6 @@ fn validated_report_order_id(value: Option<SensitiveText>) -> Option<GatewayOrde
             None
         }
     }
-}
-
-fn nmi_mutation_reference_attempt_id(value: &str) -> Option<PaymentAttemptId> {
-    let mut parts = value.split('_');
-    let namespace = parts.next()?;
-    let kind = parts.next()?;
-    let attempt_id = parts.next()?;
-    let has_canonical_shape = parts.next().is_none()
-        && namespace.len() == 2
-        && namespace.bytes().all(|byte| byte.is_ascii_lowercase())
-        && matches!(
-            kind,
-            "order" | "base-sub" | "renewal" | "recovery" | "payment-method"
-        )
-        && attempt_id.len() == 32
-        && attempt_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'));
-    has_canonical_shape
-        .then(|| attempt_id.parse::<PaymentAttemptId>().ok())
-        .flatten()
 }
 
 fn map_transaction_action_parts(parts: TransactionActionParts) -> NmiAction {

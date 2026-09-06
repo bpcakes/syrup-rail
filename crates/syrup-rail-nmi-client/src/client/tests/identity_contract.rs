@@ -63,7 +63,9 @@ async fn public_vault_creation_sale_requires_transaction_and_vault_identities() 
     )
     .await;
     let mut request = test_sale_request(PaymentSource::PaymentToken("tok_create_vault".to_owned()));
-    request.vault_action = Some(VaultAction::AddCustomer);
+    request.intent = SaleIntent::AddCustomer {
+        payment_token: "tok_create_vault".to_owned(),
+    };
 
     let outcome = client
         .sale(request)

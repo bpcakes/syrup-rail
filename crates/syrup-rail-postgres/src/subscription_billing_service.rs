@@ -1,5 +1,7 @@
 #![warn(missing_docs)]
 
+use crate::transaction_support::is_transient_sqlstate;
+
 use std::{fmt, sync::Arc, time::Duration};
 
 use sqlx::PgPool;
@@ -7,17 +9,18 @@ use syrup_rail::{
     BillingEventSubject, BillingScopeId, CancelSubscription, CancelSubscriptionOutcome,
     ChargeHostTarget, ChargeRenewal, ClearSubscriptionDiscount, EndUserMutationAdmission,
     EndUserMutationAdmissionResult, EndUserMutationCommand, EndUserMutationOperation,
-    EnrollSubscription, GatewayAccountId, GatewayAccountMode, GatewayDiagnostic, GatewayError,
-    GatewayNotSubmittedError, GatewayPaymentDescriptor, GatewayPaymentOutcome, GatewayProviderKey,
-    GatewayResolutionError, GatewayResolver, HostChargePaymentResult, HostChargeReservation,
-    HostChargeTargetRejection, PaymentAttempt, PaymentAttemptId, PaymentAttemptKind,
-    PaymentAttemptStatus, PaymentResolutionCode, ProcessorEvidence, RecoverSubscriptionPayment,
-    ReplaceSubscriptionPaymentMethod, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
-    SubscriptionDiscountClearOutcome, SubscriptionEnrollmentPaymentResult,
-    SubscriptionEnrollmentPreflightOutcome, SubscriptionEnrollmentReservation,
-    SubscriptionEnrollmentReservationBuildError, SubscriptionEnrollmentReservationOutcome,
-    SubscriptionEnrollmentReservationRejection, SubscriptionEnrollmentSubmissionRejection,
-    SubscriptionPaymentMethodReplacement, SubscriptionPaymentMethodReplacementPreflightOutcome,
+    EnrollSubscription, GatewayAccountId, GatewayAccountIdentity, GatewayAccountMode,
+    GatewayDiagnostic, GatewayError, GatewayNotSubmittedError, GatewayPaymentDescriptor,
+    GatewayPaymentOutcome, GatewayProviderKey, GatewayResolutionError, GatewayResolver,
+    HostChargePaymentResult, HostChargeReservation, HostChargeTargetRejection, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus, PaymentResolutionCode,
+    ProcessorEvidence, RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod,
+    SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome, SubscriptionDiscountClearOutcome,
+    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPreflightOutcome,
+    SubscriptionEnrollmentReservation, SubscriptionEnrollmentReservationBuildError,
+    SubscriptionEnrollmentReservationOutcome, SubscriptionEnrollmentReservationRejection,
+    SubscriptionEnrollmentSubmissionRejection, SubscriptionPaymentMethodReplacement,
+    SubscriptionPaymentMethodReplacementPreflightOutcome,
     SubscriptionPaymentMethodReplacementRejection,
     SubscriptionPaymentMethodReplacementReservationOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection, SubscriptionRecoveryPreflightOutcome,
@@ -46,19 +49,16 @@ use crate::{
     admit_subscription_enrollment_submission, admit_subscription_payment_method_replacement,
     admit_subscription_recovery_submission, admit_subscription_renewal_submission,
     apply_reconciled_host_charge_gateway_outcome,
-    apply_reconciled_subscription_enrollment_gateway_outcome,
-    apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
-    apply_reconciled_subscription_recovery_gateway_outcome,
-    apply_reconciled_subscription_renewal_gateway_outcome,
     attempts::{
         AttemptReplayDisposition, AttemptResolutionStatus, LocalAttemptPolicy,
         attempt_replay_disposition,
     },
     enrollment_application::{
-        OutcomeApplication, OutcomeResolutionBoundary, OutcomeResolutionCommand, RateLimitCooldown,
-        RateLimitCooldownPersistence, payment_result_for_attempt,
-        persist_bound_provider_rate_limit_cooldown, resolve_non_approved_outcome,
-        resolve_payment_method_replacement_non_approved_outcome,
+        OutcomeApplication, OutcomeResolutionBoundary, OutcomeResolutionCommand,
+        RECONCILED_SUBSCRIPTION_PAYMENT_ATTEMPT_NOT_FOUND, RateLimitCooldown,
+        RateLimitCooldownPersistence, apply_reconciled_subscription_gateway_outcome,
+        payment_result_for_attempt, persist_bound_provider_rate_limit_cooldown,
+        resolve_non_approved_outcome, resolve_payment_method_replacement_non_approved_outcome,
         resolve_recovery_non_approved_outcome, resolve_renewal_non_approved_outcome,
         set_application_timeouts,
     },
@@ -408,11 +408,7 @@ fn is_retryable_provider_free_transaction_error(error: &sqlx::Error) -> bool {
     };
     error
         .code()
-        .is_some_and(|code| is_retryable_provider_free_transaction_sqlstate(code.as_ref()))
-}
-
-fn is_retryable_provider_free_transaction_sqlstate(code: &str) -> bool {
-    matches!(code, "40001" | "40P01" | "55P03" | "57014")
+        .is_some_and(|code| is_transient_sqlstate(code.as_ref()))
 }
 
 /// High-level provider-neutral billing facade for authorized host commands.
@@ -543,6 +539,23 @@ enum SubscriberReadinessFailure {
     AccountMode(GatewayAccountMode),
 }
 
+/// Failures produced by the gateway readiness check itself. Cooldown is
+/// detected by a separate persistence-backed check and therefore cannot occur
+/// here.
+enum GatewayReadinessFailure {
+    Gateway(GatewayError),
+    AccountMode(GatewayAccountMode),
+}
+
+impl From<GatewayReadinessFailure> for SubscriberReadinessFailure {
+    fn from(failure: GatewayReadinessFailure) -> Self {
+        match failure {
+            GatewayReadinessFailure::Gateway(error) => Self::Gateway(error),
+            GatewayReadinessFailure::AccountMode(mode) => Self::AccountMode(mode),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SubscriberReadinessPolicy {
     resolution_code: PaymentResolutionCode,
@@ -656,14 +669,14 @@ fn map_subscriber_mutation_admission(
 async fn subscriber_gateway_readiness(
     gateway: &syrup_rail::ResolvedGateway,
     required_mode: GatewayAccountMode,
-) -> Result<ModeVerifiedGateway<'_>, SubscriberReadinessFailure> {
+) -> Result<ModeVerifiedGateway<'_>, GatewayReadinessFailure> {
     match verify_gateway_account_mode(gateway, required_mode).await {
         Ok(verified) => Ok(verified),
         Err(GatewayAccountModeVerificationError::AccountModeMismatch { required, .. }) => {
-            Err(SubscriberReadinessFailure::AccountMode(required))
+            Err(GatewayReadinessFailure::AccountMode(required))
         }
         Err(GatewayAccountModeVerificationError::Gateway(error)) => {
-            Err(SubscriberReadinessFailure::Gateway(error))
+            Err(GatewayReadinessFailure::Gateway(error))
         }
     }
 }
@@ -690,64 +703,15 @@ fn is_retryable_renewal_admission_error(error: &SubscriptionEnrollmentApplicatio
         )) => error.code(),
         _ => None,
     };
-    matches!(
-        sqlstate.as_deref(),
-        Some("40001" | "40P01" | "55P03" | "57014")
-    )
+    sqlstate.as_deref().is_some_and(is_transient_sqlstate)
 }
 
 struct GatewayAccountSnapshot {
-    account_id: GatewayAccountId,
-    provider_key: GatewayProviderKey,
-}
-
-/// Canonical identity the resolver must return for subscriber-initiated
-/// gateway mutations.
-struct ExpectedGatewayIdentity<'a> {
-    billing_scope_id: BillingScopeId,
-    gateway_account_id: GatewayAccountId,
-    gateway_configuration_id: syrup_rail::GatewayConfigurationId,
-    provider_key: &'a GatewayProviderKey,
-}
-
-impl<'a> ExpectedGatewayIdentity<'a> {
-    const fn for_account(
-        billing_scope_id: BillingScopeId,
-        gateway_configuration_id: syrup_rail::GatewayConfigurationId,
-        account: &'a GatewayAccountSnapshot,
-    ) -> Self {
-        Self {
-            billing_scope_id,
-            gateway_account_id: account.account_id,
-            gateway_configuration_id,
-            provider_key: &account.provider_key,
-        }
-    }
-
-    fn matches(&self, gateway: &syrup_rail::ResolvedGateway) -> bool {
-        self.matches_components(
-            gateway.billing_scope_id(),
-            gateway.gateway_account_id(),
-            gateway.gateway_configuration_id(),
-            gateway.provider_key(),
-        )
-    }
-
-    fn matches_components(
-        &self,
-        billing_scope_id: BillingScopeId,
-        gateway_account_id: GatewayAccountId,
-        gateway_configuration_id: syrup_rail::GatewayConfigurationId,
-        provider_key: &GatewayProviderKey,
-    ) -> bool {
-        billing_scope_id == self.billing_scope_id
-            && gateway_account_id == self.gateway_account_id
-            && gateway_configuration_id == self.gateway_configuration_id
-            && provider_key == self.provider_key
-    }
+    identity: GatewayAccountIdentity,
 }
 
 struct RenewalGatewayAccountSnapshot {
+    billing_scope_id: BillingScopeId,
     account_id: GatewayAccountId,
     configuration_id: syrup_rail::GatewayConfigurationId,
     provider_key: GatewayProviderKey,
@@ -756,9 +720,27 @@ struct RenewalGatewayAccountSnapshot {
 impl RenewalGatewayAccountSnapshot {
     fn as_gateway_snapshot(&self) -> GatewayAccountSnapshot {
         GatewayAccountSnapshot {
-            account_id: self.account_id,
-            provider_key: self.provider_key.clone(),
+            identity: GatewayAccountIdentity::new(
+                self.billing_scope_id,
+                self.account_id,
+                self.provider_key.clone(),
+                self.configuration_id,
+            ),
         }
+    }
+}
+
+impl GatewayAccountSnapshot {
+    const fn identity(&self) -> &GatewayAccountIdentity {
+        &self.identity
+    }
+
+    const fn account_id(&self) -> GatewayAccountId {
+        self.identity.gateway_account_id()
+    }
+
+    const fn provider_key(&self) -> &GatewayProviderKey {
+        self.identity.provider_key()
     }
 }
 

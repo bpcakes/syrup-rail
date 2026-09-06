@@ -26,7 +26,7 @@ use syrup_rail::{
     PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptLifecycle,
     PaymentAttemptRequest, PaymentAttemptState, PaymentAttemptTarget, PaymentAttemptTimestamps,
     PaymentCardBrand, PaymentGateway, PaymentToken, PercentOffBasisPoints,
-    RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod, ResolvedGateway,
+    RecoverSubscriptionPayment, ReplaceSubscriptionPaymentMethod, ResolvedGateway, SubscriberId,
     SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountKind,
     SubscriptionDiscountSnapshot, SubscriptionEnrollmentExpectedTerms,
     SubscriptionEnrollmentReservationOutcome, SubscriptionPaymentMethodReplacement,
@@ -36,7 +36,7 @@ use syrup_rail::{
     SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
     SubscriptionStatus,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use super::*;
 use crate::{
@@ -428,6 +428,21 @@ struct TestCoordinator {
     events: Arc<Mutex<Vec<BillingEvent>>>,
     fail_begin: bool,
     fail_event: bool,
+    append_pause: Option<Arc<AppendPause>>,
+}
+
+struct AppendPause {
+    reached: Semaphore,
+    release: Semaphore,
+}
+
+impl AppendPause {
+    fn new() -> Self {
+        Self {
+            reached: Semaphore::new(0),
+            release: Semaphore::new(0),
+        }
+    }
 }
 
 struct NeverManualFailureHost;
@@ -470,6 +485,7 @@ impl BillingTransactionCoordinator for TestCoordinator {
             ),
             events: Arc::clone(&self.events),
             fail_event: self.fail_event,
+            append_pause: self.append_pause.clone(),
         }))
     }
 }
@@ -478,6 +494,7 @@ struct TestTransaction {
     transaction: Option<Transaction<'static, Postgres>>,
     events: Arc<Mutex<Vec<BillingEvent>>>,
     fail_event: bool,
+    append_pause: Option<Arc<AppendPause>>,
 }
 
 #[async_trait]
@@ -495,6 +512,15 @@ impl BillingTransaction for TestTransaction {
             return Err(BillingEventWriteError::new(InjectedHostError));
         }
         self.events.lock().await.push(event.clone());
+        if let Some(pause) = &self.append_pause {
+            pause.reached.add_permits(1);
+            pause
+                .release
+                .acquire()
+                .await
+                .expect("test append pause remains open")
+                .forget();
+        }
         Ok(())
     }
 
@@ -698,6 +724,7 @@ async fn enrollment_fixture(
         events: Arc::new(Mutex::new(Vec::new())),
         fail_begin: false,
         fail_event,
+        append_pause: None,
     };
     Ok(ApplicationFixture {
         database,
@@ -782,11 +809,13 @@ async fn hold_subscription_aggregate_lock(
     plan_key: &str,
 ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id)
-        .bind(plan_key)
-        .execute(&mut *transaction)
-        .await?;
+    let plan_key = PlanKey::new(plan_key).expect("test subscription plan key must be valid");
+    crate::attempts::lock_subscription_aggregate(
+        &mut transaction,
+        SubscriberId::new(subscriber_id),
+        &plan_key,
+    )
+    .await?;
     Ok(transaction)
 }
 
@@ -798,6 +827,7 @@ fn processor_duplicate_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -814,6 +844,7 @@ fn indeterminate_processor_error_outcome() -> GatewayPaymentOutcome {
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             None,
             None,
             Some(GatewayDiagnostic::new("3")),
@@ -844,6 +875,7 @@ fn approved_outcome_with_optional_reference(
     GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Approved,
         ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Structured,
             transaction_id.map(|value| GatewayTransactionId::new(value).unwrap()),
             payment_method_reference
                 .map(|value| GatewayPaymentMethodReference::new(value).unwrap()),

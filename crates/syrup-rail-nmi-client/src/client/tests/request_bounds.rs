@@ -6,7 +6,7 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
         "t".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES),
     ));
     assert!(validate_sale_request(&sale, "private_key").is_ok());
-    sale.source = PaymentSource::PaymentToken("t".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES + 1));
+    sale.intent = SaleIntent::PaymentToken("t".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES + 1));
     assert!(matches!(
         validate_sale_request(&sale, "private_key"),
         Err(MutationError::InvalidRequest(_))
@@ -16,7 +16,7 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
         "v".repeat(MAX_NMI_IDENTIFIER_BYTES),
     ));
     assert!(validate_sale_request(&sale, "private_key").is_ok());
-    sale.source = PaymentSource::CustomerVault("v".repeat(MAX_NMI_IDENTIFIER_BYTES + 1));
+    sale.intent = SaleIntent::CustomerVault("v".repeat(MAX_NMI_IDENTIFIER_BYTES + 1));
     assert!(matches!(
         validate_sale_request(&sale, "private_key"),
         Err(MutationError::InvalidRequest(_))
@@ -32,13 +32,15 @@ fn caller_controlled_request_fields_enforce_inclusive_byte_limits() {
     ));
 
     let mut sale = test_sale_request(PaymentSource::CustomerVault("vault_test".to_owned()));
-    sale.stored_credential = Some(StoredCredential::RecurringMerchant {
+    sale.intent = SaleIntent::RecurringStoredCredential {
+        customer_vault_id: "vault_test".to_owned(),
         initial_transaction_id: "i".repeat(MAX_NMI_IDENTIFIER_BYTES),
-    });
+    };
     assert!(validate_sale_request(&sale, "private_key").is_ok());
-    sale.stored_credential = Some(StoredCredential::RecurringMerchant {
+    sale.intent = SaleIntent::RecurringStoredCredential {
+        customer_vault_id: "vault_test".to_owned(),
         initial_transaction_id: "i".repeat(MAX_NMI_IDENTIFIER_BYTES + 1),
-    });
+    };
     assert!(matches!(
         validate_sale_request(&sale, "private_key"),
         Err(MutationError::InvalidRequest(_))
@@ -149,7 +151,9 @@ fn encoded_request_budget_rejects_individually_bounded_aggregate_data() {
         "%".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES),
     ));
     request.order_id = "%".repeat(MAX_NMI_ORDER_ID_BYTES);
-    request.vault_action = Some(VaultAction::AddCustomer);
+    request.intent = SaleIntent::AddCustomer {
+        payment_token: "%".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES),
+    };
     request.billing_contact = Some(BillingContact {
         first_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         last_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
@@ -190,7 +194,9 @@ async fn oversized_public_requests_are_rejected_without_network_io() {
         "%".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES),
     ));
     aggregate_form_request.order_id = "%".repeat(MAX_NMI_ORDER_ID_BYTES);
-    aggregate_form_request.vault_action = Some(VaultAction::AddCustomer);
+    aggregate_form_request.intent = SaleIntent::AddCustomer {
+        payment_token: "%".repeat(MAX_NMI_PAYMENT_TOKEN_BYTES),
+    };
     aggregate_form_request.billing_contact = Some(BillingContact {
         first_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         last_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
@@ -322,7 +328,7 @@ async fn final_form_budget_is_a_local_invalid_query_without_network_io() {
         spawn_capturing_server("HTTP/1.1 200 OK", "text/plain", b"unexpected".to_vec()).await;
     client.credentials = Credentials::new(
         "private_key".to_owned(),
-        "%".repeat(crate::MAX_CREDENTIAL_BYTES),
+        "%".repeat(crate::configuration::MAX_CREDENTIAL_BYTES),
     )
     .expect("maximum-size query credential should construct");
 

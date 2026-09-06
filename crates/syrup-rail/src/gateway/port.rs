@@ -187,6 +187,25 @@ pub enum MutationCertainty {
 }
 
 impl GatewayMutationError {
+    /// Projects durable review evidence from the complete error certainty.
+    /// Indeterminate details may contain provider evidence, so they cannot
+    /// certify approval-signal absence even when their retained text is empty.
+    pub fn processor_evidence(&self) -> crate::ProcessorEvidence {
+        crate::ProcessorEvidence::new(
+            match self.certainty() {
+                MutationCertainty::NotSubmitted => crate::ProcessorApprovalEvidence::Absent,
+                MutationCertainty::Indeterminate => crate::ProcessorApprovalEvidence::Unclassified,
+            },
+            None,
+            None,
+            None,
+            None,
+            (!self.detail().expose().is_empty()).then(|| self.detail().clone()),
+            None,
+            crate::GatewayPaymentDescriptor::default(),
+        )
+    }
+
     pub const fn detail(&self) -> &GatewayDiagnostic {
         match self {
             Self::NotSubmitted(error) => error.detail(),

@@ -35,21 +35,11 @@ impl SubscriptionBillingService {
         if let Some(scope) = self.active_cooldown(&account).await? {
             return Err(SubscriptionBillingServiceError::GatewayMutationCooldown { scope });
         }
-        let expected = ExpectedGatewayIdentity::for_account(
-            billing_scope_id,
-            gateway_configuration_id,
-            &account,
-        );
         let gateway = self
             .resolver
-            .resolve(
-                expected.billing_scope_id,
-                expected.gateway_account_id,
-                expected.gateway_configuration_id,
-                expected.provider_key.clone(),
-            )
+            .resolve_identity(account.identity().clone())
             .await?;
-        if !expected.matches(&gateway) {
+        if account.identity() != gateway.identity() {
             return Err(SubscriptionBillingServiceError::ResolvedGatewayIdentityMismatch);
         }
         Ok((account, gateway))
@@ -75,8 +65,12 @@ impl SubscriptionBillingService {
         let provider_key = GatewayProviderKey::new(&row.1)
             .map_err(|_| SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE))?;
         Ok(GatewayAccountSnapshot {
-            account_id: GatewayAccountId::new(row.0),
-            provider_key,
+            identity: GatewayAccountIdentity::new(
+                billing_scope_id,
+                GatewayAccountId::new(row.0),
+                provider_key,
+                gateway_configuration_id,
+            ),
         })
     }
 
@@ -95,8 +89,8 @@ impl SubscriptionBillingService {
             WHERE accounts.id = $1 AND accounts.provider_key = $2
             "#,
         )
-        .bind(account.account_id.as_uuid())
-        .bind(account.provider_key.as_str())
+        .bind(account.account_id().as_uuid())
+        .bind(account.provider_key().as_str())
         .fetch_optional(&self.pool)
         .await?
         .ok_or(SubscriptionBillingServiceError::GatewayConfigurationChanged)?;
@@ -130,13 +124,16 @@ impl SubscriptionBillingService {
         let cooldown = policy.cooldown();
         let cooldown_error_scope = policy.cooldown_error_scope();
         let detail = failure.into_detail();
+        let condition = (code != PaymentResolutionCode::GatewayProviderRateLimitedBeforeSubmission)
+            .then(|| GatewayDiagnostic::new("failed"));
         let evidence = ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Absent,
             None,
             None,
             None,
             None,
             Some(detail),
-            Some(GatewayDiagnostic::new("failed")),
+            condition,
             GatewayPaymentDescriptor::default(),
         );
         let payment = reservation

@@ -95,6 +95,96 @@ fn past_due_access_requires_both_continuing_policy_and_a_scheduled_payment() {
 }
 
 #[test]
+fn subscription_lifecycle_validates_the_complete_status_schedule_matrix() {
+    let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+    let ends = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let before_end = ends - chrono::Duration::seconds(1);
+    let after_end = ends + chrono::Duration::seconds(1);
+
+    for (status, next_payment_attempt_at) in [
+        (SubscriptionStatus::Active, Some(ends)),
+        (SubscriptionStatus::PastDue, None),
+        (SubscriptionStatus::PastDue, Some(ends)),
+        (SubscriptionStatus::PastDue, Some(after_end)),
+        (SubscriptionStatus::Canceled, None),
+        (SubscriptionStatus::Unpaid, None),
+    ] {
+        let lifecycle = SubscriptionLifecycle::from_parts(
+            status,
+            BillingPeriod::new(starts, ends).unwrap(),
+            ends,
+            next_payment_attempt_at,
+        )
+        .unwrap();
+        assert_eq!(lifecycle.status(), status);
+        assert_eq!(lifecycle.current_period().start_at(), &starts);
+        assert_eq!(lifecycle.current_period().end_at(), &ends);
+        assert_eq!(lifecycle.next_renewal_at(), &ends);
+        assert_eq!(
+            lifecycle.next_payment_attempt_at(),
+            next_payment_attempt_at.as_ref()
+        );
+    }
+
+    for (status, next_payment_attempt_at) in [
+        (SubscriptionStatus::Active, None),
+        (SubscriptionStatus::Active, Some(before_end)),
+        (SubscriptionStatus::Active, Some(after_end)),
+        (SubscriptionStatus::PastDue, Some(before_end)),
+        (SubscriptionStatus::Canceled, Some(ends)),
+        (SubscriptionStatus::Unpaid, Some(ends)),
+    ] {
+        assert_eq!(
+            SubscriptionLifecycle::from_parts(
+                status,
+                BillingPeriod::new(starts, ends).unwrap(),
+                ends,
+                next_payment_attempt_at,
+            ),
+            Err(SubscriptionLifecycleError::InvalidPaymentSchedule),
+        );
+    }
+
+    for status in SubscriptionStatus::ALL {
+        assert_eq!(
+            SubscriptionLifecycle::from_parts(
+                status,
+                BillingPeriod::new(starts, ends).unwrap(),
+                ends + chrono::Duration::seconds(1),
+                None,
+            ),
+            Err(SubscriptionLifecycleError::NextRenewalDoesNotMatchPeriod),
+        );
+    }
+}
+
+#[test]
+fn subscription_from_lifecycle_derives_status_and_schedule_projections() {
+    let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+    let ends = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let subscription = Subscription::from_lifecycle(
+        SubscriptionId::new(Uuid::from_u128(1)),
+        PlanKey::new("plan").unwrap(),
+        SubscriptionPhase::Recurring,
+        GatewayAccountMode::Live,
+        PaymentMethodId::new(Uuid::from_u128(2)),
+        ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+        SubscriptionPeriodRule::calendar_months(1).unwrap(),
+        RenewalFailurePolicy::new(
+            DunningSchedule::default(),
+            DunningExhaustion::MarkUnpaid,
+            PastDueAccessPolicy::SuspendImmediately,
+        ),
+        SubscriptionLifecycle::active(BillingPeriod::new(starts, ends).unwrap()),
+    );
+
+    assert_eq!(subscription.status(), SubscriptionStatus::Active);
+    assert_eq!(subscription.current_period().end_at(), &ends);
+    assert_eq!(subscription.next_renewal_at(), &ends);
+    assert_eq!(subscription.next_payment_attempt_at(), Some(&ends));
+}
+
+#[test]
 fn grant_period_is_valid_by_construction() {
     let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
     let id = SubscriptionGrantId::new(Uuid::from_u128(1));
@@ -113,7 +203,111 @@ fn grant_period_is_valid_by_construction() {
 }
 
 #[test]
+fn grant_revocation_is_one_validated_audit_state() {
+    let starts = Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap();
+    let ends = Utc.with_ymd_and_hms(2026, 9, 1, 0, 0, 0).unwrap();
+    let scope = BillingScopeId::new(Uuid::from_u128(1));
+    let subscriber = SubscriberId::new(Uuid::from_u128(2));
+    let granting_actor = ActorId::new(Uuid::from_u128(3));
+    let revoking_actor = ActorId::new(Uuid::from_u128(4));
+    let grant = SubscriptionGrant::new(
+        SubscriptionGrantId::new(Uuid::from_u128(5)),
+        PlanKey::new("plan").unwrap(),
+        SubscriptionGrantKind::Testing,
+        starts,
+        ends,
+        granting_actor,
+    )
+    .unwrap();
+    let grant_reason = SubscriptionGrantReason::new("testing access").unwrap();
+
+    let active = SubscriptionGrantRecord::from_revocation_state(
+        scope,
+        subscriber,
+        grant.clone(),
+        grant_reason.clone(),
+        SubscriptionGrantRevocationState::Active,
+        starts,
+        starts,
+    )
+    .unwrap();
+    assert_eq!(
+        active.revocation_state(),
+        &SubscriptionGrantRevocationState::Active
+    );
+    assert_eq!(active.revoked_at(), None);
+    assert_eq!(active.revoked_by_actor_id(), None);
+    assert_eq!(active.revocation_reason(), None);
+
+    let revocation_reason = SubscriptionGrantReason::new("testing complete").unwrap();
+    let revoked = SubscriptionGrantRecord::from_revocation_state(
+        scope,
+        subscriber,
+        grant.clone(),
+        grant_reason.clone(),
+        SubscriptionGrantRevocationState::Revoked(SubscriptionGrantRevocationAudit::new(
+            starts,
+            revoking_actor,
+            revocation_reason.clone(),
+        )),
+        starts,
+        starts,
+    )
+    .unwrap();
+    assert!(matches!(
+        revoked.revocation_state(),
+        SubscriptionGrantRevocationState::Revoked(audit)
+            if audit.revoked_at() == &starts
+                && audit.revoked_by_actor_id() == revoking_actor
+                && audit.reason() == &revocation_reason
+    ));
+    assert_eq!(revoked.revoked_at(), Some(&starts));
+    assert_eq!(revoked.revoked_by_actor_id(), Some(revoking_actor));
+    assert_eq!(revoked.revocation_reason(), Some(&revocation_reason));
+
+    assert_eq!(
+        SubscriptionGrantRecord::new(
+            scope,
+            subscriber,
+            grant.clone(),
+            grant_reason.clone(),
+            Some(starts),
+            None,
+            None,
+            starts,
+            starts,
+        ),
+        Err(SubscriptionGrantRecordError::InvalidRevocation)
+    );
+    assert_eq!(
+        SubscriptionGrantRecord::from_revocation_state(
+            scope,
+            subscriber,
+            grant,
+            grant_reason,
+            SubscriptionGrantRevocationState::Revoked(SubscriptionGrantRevocationAudit::new(
+                starts - chrono::Duration::seconds(1),
+                revoking_actor,
+                revocation_reason,
+            )),
+            starts,
+            starts,
+        ),
+        Err(SubscriptionGrantRecordError::RevocationBeforeStart)
+    );
+}
+
+#[test]
 fn grant_reason_is_trimmed_bounded_and_card_safe() {
+    assert!(SubscriptionGrantReason::new(format!("  {}  ", "é".repeat(500))).is_ok());
+    assert_eq!(
+        SubscriptionGrantReason::new("é".repeat(501)),
+        Err(SubscriptionGrantReasonError::TooLong)
+    );
+    assert_eq!(
+        SubscriptionGrantReason::new(format!("{}4111111111111111", "x".repeat(500))),
+        Err(SubscriptionGrantReasonError::TooLong)
+    );
     assert_eq!(
         SubscriptionGrantReason::new("  launch partner  ")
             .unwrap()

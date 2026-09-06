@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use chrono::{DateTime, Utc};
 use syrup_rail::{
     BillingScopeId, GatewayAccountId, GatewayAccountRegistration, GatewayConfigurationId,
     GatewayProviderKey, PaymentAttemptKind,
@@ -8,9 +9,10 @@ use uuid::Uuid;
 
 use super::{
     ExactQueryObservation, RECONCILIATION_PHASE_BATCH_SIZE, apply_exact_query_observation,
-    claim_exact_reconciliation_attempts, classify_pending_processor_charges,
+    attempt_locator, claim_exact_reconciliation_attempts, classify_pending_processor_charges,
     fail_stale_unsubmitted_payment_method_replacements,
     fail_stale_unsubmitted_subscription_charges, fail_stale_unsubmitted_subscription_enrollments,
+    lock_attempt_for_classification, lock_pending_charge_for_classification,
     reconciliation_gateway_accounts,
 };
 use crate::{
@@ -522,51 +524,69 @@ async fn pending_charge_classification_skips_a_busy_persisted_plan_without_starv
 }
 
 #[tokio::test]
-async fn pending_charge_classification_caps_each_account_pass_at_one_hundred()
+async fn pending_charge_classification_skips_busy_attempt_and_charge_rows()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_charge_bound").await?;
+    let database = TestDatabase::start("sr_charge_rows").await?;
     let result = async {
         let account = create_gateway_account(&database.pool, "test_gateway").await?;
-        let sibling = create_gateway_account(&database.pool, "test_gateway").await?;
-        for position in 0..=RECONCILIATION_PHASE_BATCH_SIZE {
-            insert_pending_processor_charge(
-                &database.pool,
-                account,
-                Uuid::now_v7(),
-                "test_plan",
-                position,
-            )
-            .await?;
-        }
-        let sibling_charge = insert_pending_processor_charge(
+        let attempt_locked_charge = insert_pending_processor_charge(
             &database.pool,
-            sibling,
+            account,
             Uuid::now_v7(),
-            "test_plan",
-            10_000,
+            "attempt_locked",
+            20,
+        )
+        .await?;
+        let charge_locked_charge = insert_pending_processor_charge(
+            &database.pool,
+            account,
+            Uuid::now_v7(),
+            "charge_locked",
+            10,
         )
         .await?;
 
-        let first = classify_pending_processor_charges(
+        let mut attempt_holder = database.pool.begin().await?;
+        sqlx::query(
+            r#"
+            SELECT attempts.id
+            FROM billing_payment_attempts attempts
+            INNER JOIN billing_processor_charges charges
+                ON charges.attempt_id = attempts.id
+            WHERE charges.id = $1
+            FOR UPDATE OF attempts
+            "#,
+        )
+        .bind(attempt_locked_charge)
+        .execute(&mut *attempt_holder)
+        .await?;
+        let mut charge_holder = database.pool.begin().await?;
+        sqlx::query("SELECT id FROM billing_processor_charges WHERE id = $1 FOR UPDATE")
+            .bind(charge_locked_charge)
+            .execute(&mut *charge_holder)
+            .await?;
+
+        let summary = classify_pending_processor_charges(
             &database.pool,
             GatewayAccountId::new(account.gateway_account_id),
-            u64::MAX,
+            2,
         )
         .await?;
-        assert_eq!(first.transitioned(), RECONCILIATION_PHASE_BATCH_SIZE as u64);
-        assert_eq!(first.remaining_pending(), 1);
-        let second = classify_pending_processor_charges(
+        assert_eq!(summary.transitioned(), 0);
+        assert_eq!(summary.skipped_locked(), 2);
+        assert_eq!(summary.remaining_pending(), 2);
+
+        charge_holder.rollback().await?;
+        attempt_holder.rollback().await?;
+        let summary = classify_pending_processor_charges(
             &database.pool,
             GatewayAccountId::new(account.gateway_account_id),
-            u64::MAX,
+            2,
         )
         .await?;
-        assert_eq!(second.transitioned(), 1);
-        assert_eq!(second.remaining_pending(), 0);
-        assert_eq!(
-            charge_progression(&database.pool, sibling_charge).await?,
-            "pending"
-        );
+        assert_eq!(summary.transitioned(), 2);
+        assert_eq!(summary.skipped_locked(), 0);
+        assert_eq!(summary.remaining_pending(), 0);
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
@@ -575,138 +595,4 @@ async fn pending_charge_classification_caps_each_account_pass_at_one_hundred()
     cleanup
 }
 
-async fn insert_pending_processor_charge(
-    pool: &sqlx::PgPool,
-    account: crate::test_support::GatewayAccountFixture,
-    subscriber_id: Uuid,
-    plan_key: &str,
-    age_seconds: i64,
-) -> Result<Uuid, sqlx::Error> {
-    let attempt_id = Uuid::now_v7();
-    let charge_id = Uuid::now_v7();
-    let order_id = format!("order-{attempt_id}");
-    sqlx::query(
-        r#"
-            INSERT INTO billing_payment_attempts (
-                required_gateway_account_mode,
-                id, billing_scope_id, subscriber_id, plan_key, attempt_kind,
-                status, idempotency_key, request_fingerprint, amount_cents,
-                currency, gateway_account_id, gateway_configuration_id,
-                gateway_order_id, subscription_initial_terms_version,
-                subscription_initial_start_kind,
-                subscription_initial_recurring_base_amount_cents,
-                subscription_initial_recurring_period_kind,
-                subscription_initial_recurring_period_count,
-                subscription_initial_dunning_retry_delays_seconds,
-                subscription_initial_dunning_exhaustion,
-                subscription_initial_past_due_access
-            ) VALUES (
-                'live',
-                $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
-                100, 'USD', $7, $8, $9, 2, 'recurring_immediately', 100,
-                'calendar_months', 1, ARRAY[]::bigint[],
-                'remain_past_due', 'suspend_immediately'
-            )
-            "#,
-    )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(format!("idem-{attempt_id}"))
-    .bind(format!("fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(&order_id)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        r#"
-            INSERT INTO billing_processor_charges (
-                id, attempt_id, billing_scope_id, gateway_account_id,
-                gateway_order_id, gateway_transaction_id, gateway_response,
-                gateway_response_code, gateway_response_text,
-                gateway_condition, charge_role, progression_state,
-                observed_at, attempt_kind, plan_key, amount_cents, currency
-            ) VALUES (
-                $1, $2, $3, $4, $5, $6, '1', '100', 'Approved',
-                'complete', 'primary', 'pending',
-                clock_timestamp() - ($7::bigint * interval '1 second'),
-                'subscription_initial', $8, 100, 'USD'
-            )
-            "#,
-    )
-    .bind(charge_id)
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(order_id)
-    .bind(format!("transaction-{attempt_id}"))
-    .bind(age_seconds)
-    .bind(plan_key)
-    .execute(pool)
-    .await?;
-    Ok(charge_id)
-}
-
-async fn charge_progression(pool: &sqlx::PgPool, charge_id: Uuid) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges WHERE id = $1")
-        .bind(charge_id)
-        .fetch_one(pool)
-        .await
-}
-
-async fn insert_stale_enrollment(
-    pool: &sqlx::PgPool,
-    account: crate::test_support::GatewayAccountFixture,
-    subscriber_id: Uuid,
-    plan_key: &str,
-) -> Result<Uuid, sqlx::Error> {
-    let attempt_id = Uuid::now_v7();
-    sqlx::query(
-        r#"
-            INSERT INTO billing_payment_attempts (
-                required_gateway_account_mode,
-                id, billing_scope_id, subscriber_id, plan_key, attempt_kind,
-                status, idempotency_key, request_fingerprint, amount_cents,
-                currency, gateway_account_id, gateway_configuration_id,
-                gateway_order_id, created_at, updated_at,
-                subscription_initial_terms_version,
-                subscription_initial_start_kind,
-                subscription_initial_recurring_base_amount_cents,
-                subscription_initial_recurring_period_kind,
-                subscription_initial_recurring_period_count,
-                subscription_initial_dunning_retry_delays_seconds,
-                subscription_initial_dunning_exhaustion,
-                subscription_initial_past_due_access
-            ) VALUES (
-                'live',
-                $1, $2, $3, $4, 'subscription_initial', 'pending', $5, $6,
-                100, 'USD', $7, $8, $9,
-                clock_timestamp() - interval '31 minutes',
-                clock_timestamp() - interval '31 minutes',
-                2, 'recurring_immediately', 100, 'calendar_months', 1,
-                ARRAY[]::bigint[], 'remain_past_due', 'suspend_immediately'
-            )
-            "#,
-    )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(format!("idem-{attempt_id}"))
-    .bind(format!("fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("order_{}", attempt_id.simple()))
-    .execute(pool)
-    .await?;
-    Ok(attempt_id)
-}
-
-async fn attempt_status(pool: &sqlx::PgPool, attempt_id: Uuid) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-        .bind(attempt_id)
-        .fetch_one(pool)
-        .await
-}
+include!("tests/charge_transitions.rs");

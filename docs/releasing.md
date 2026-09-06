@@ -83,3 +83,7 @@ credential provider and run the preflight from a clean `main`. Publish each
 crate in the order above with `cargo publish --locked -p CRATE`, checking its
 package first with `--dry-run`. Push an annotated `vVERSION` tag only after all
 four crate versions are visible on crates.io.
+
+The 0.6.0 release line publishes from `main`. The repository default branch
+and Jig default remain `master`; they are distinct from this release line.
+Rust, repository-policy, and agent-map push checks cover both branches.

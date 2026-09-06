@@ -2,7 +2,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 use syrup_rail::{
     BillingScopeId, GatewayAccountId, GatewayAccountReconciliationCandidate, PaymentAttempt,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentResolutionCode, PlanKey, SubscriberId,
+    PaymentAttemptKind, PaymentAttemptStatus, PaymentResolutionCode, PlanKey,
+    ProcessorChargeProgression, ProcessorChargeRole, ProcessorChargeStateCode, SubscriberId,
 };
 use uuid::Uuid;
 
@@ -17,7 +18,8 @@ use crate::attempts::{
 use classification::{
     attempt_locator, classify_pending_charge, count_pending_processor_charges,
     invalid_reconciliation_state, lock_attempt_for_classification,
-    lock_pending_charge_for_classification, transition_pending_charge,
+    lock_external_reversal_attestation, lock_pending_charge_for_classification,
+    transition_pending_charge,
 };
 
 mod classification;
@@ -91,29 +93,13 @@ struct LockedAttempt {
     transaction_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChargeRole {
-    Primary,
-    Additional,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChargeProgression {
-    ReconciliationRequired,
-    ExternalReversalRequired,
-    Applied,
-    ExternallyReversed,
-}
-
-impl ChargeProgression {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReconciliationRequired => "reconciliation_required",
-            Self::ExternalReversalRequired => "external_reversal_required",
-            Self::Applied => "applied",
-            Self::ExternallyReversed => "externally_reversed",
-        }
-    }
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LockedPendingCharge {
+    id: Uuid,
+    role: ProcessorChargeRole,
+    transaction_id: Option<String>,
+    matches_attempt_evidence: bool,
+    dimensions_match: bool,
 }
 
 /// Returns every registered gateway account in deterministic locator order.
@@ -291,7 +277,8 @@ pub async fn apply_exact_query_observation(
                 )
                 && current.state().timestamps().submitted_at().is_some()
                 && evidence.transaction_id().is_none()
-                && evidence.condition().is_none() =>
+                && evidence.condition().is_none()
+                && !evidence.may_indicate_approval() =>
         {
             (
                 PaymentAttemptStatus::Failed,
@@ -322,8 +309,8 @@ pub async fn apply_exact_query_observation(
         sqlx::query(
             r#"
             UPDATE billing_payment_attempts
-            SET status = 'failed', gateway_response_text = $2,
-                gateway_condition = COALESCE(gateway_condition, 'failed'),
+            SET status = 'failed',
+                gateway_response_text = CASE WHEN NULLIF(BTRIM(gateway_response_text), '') IS NULL THEN $2 ELSE gateway_response_text END,
                 resolved_at = clock_timestamp(), updated_at = clock_timestamp()
             WHERE id = $1 AND status IN ('pending', 'review_required')
             "#,
@@ -338,8 +325,7 @@ pub async fn apply_exact_query_observation(
             UPDATE billing_payment_attempts
             SET status = 'review_required',
                 gateway_response_text = CASE
-                    WHEN status = 'review_required'
-                        AND NULLIF(BTRIM(gateway_response_text), '') IS NOT NULL
+                    WHEN NULLIF(BTRIM(gateway_response_text), '') IS NOT NULL
                     THEN gateway_response_text ELSE $2
                 END,
                 updated_at = clock_timestamp()
@@ -354,7 +340,7 @@ pub async fn apply_exact_query_observation(
         sqlx::query(
             r#"
             UPDATE billing_payment_attempts
-            SET gateway_response_text = $2, updated_at = clock_timestamp()
+            SET gateway_response_text = CASE WHEN NULLIF(BTRIM(gateway_response_text), '') IS NULL THEN $2 ELSE gateway_response_text END, updated_at = clock_timestamp()
             WHERE id = $1 AND status = $3
             "#,
         )
@@ -651,38 +637,26 @@ pub async fn classify_pending_processor_charges(
                 transaction.rollback().await?;
                 continue;
             };
-            let Some((role, charge_transaction_id, same_charge, dimensions_match)) =
-                lock_pending_charge_for_classification(
-                    &mut transaction,
-                    candidate.id,
-                    candidate.attempt_id,
-                )
-                .await?
+            let Some(charge) = lock_pending_charge_for_classification(
+                &mut transaction,
+                candidate.id,
+                candidate.attempt_id,
+            )
+            .await?
             else {
                 skipped_locked += 1;
                 transaction.rollback().await?;
                 continue;
             };
-            if !dimensions_match || charge_transaction_id != candidate.transaction_id {
+            if !charge.dimensions_match || charge.transaction_id != candidate.transaction_id {
                 return Err(invalid_reconciliation_state());
             }
 
-            let (progression, state_code) = classify_pending_charge(
-                &mut transaction,
-                &attempt,
-                candidate.id,
-                role,
-                charge_transaction_id.as_deref(),
-                same_charge,
-            )
-            .await?;
-            transition_pending_charge(
-                &mut transaction,
-                candidate.id,
-                progression,
-                state_code.as_deref(),
-            )
-            .await?;
+            let attestation =
+                lock_external_reversal_attestation(&mut transaction, &attempt, &charge).await?;
+            let transition = classify_pending_charge(&attempt, &charge, attestation.as_ref())
+                .map_err(|_| invalid_reconciliation_state())?;
+            transition_pending_charge(&mut transaction, charge.id, transition).await?;
             transaction.commit().await?;
             transitioned += 1;
         }

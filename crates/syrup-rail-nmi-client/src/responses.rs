@@ -177,6 +177,7 @@ pub struct PaymentDescriptorParts {
 #[must_use = "payment outcomes must be inspected before the operation is considered handled"]
 pub struct PaymentOutcome {
     pub(crate) status: PaymentStatus,
+    pub(crate) approval_evidence: crate::PaymentApprovalEvidence,
     pub(crate) transaction_id: Option<SensitiveText>,
     pub(crate) customer_vault_id: Option<SensitiveText>,
     pub(crate) response: Option<SensitiveText>,
@@ -210,6 +211,7 @@ impl PaymentOutcome {
     pub fn into_parts(self) -> PaymentOutcomeParts {
         PaymentOutcomeParts {
             status: self.status,
+            approval_evidence: self.approval_evidence,
             transaction_id: self.transaction_id,
             customer_vault_id: self.customer_vault_id,
             response: self.response,
@@ -227,6 +229,7 @@ impl fmt::Debug for PaymentOutcome {
         formatter
             .debug_struct("PaymentOutcome")
             .field("status", &self.status)
+            .field("approval_evidence", &self.approval_evidence)
             .field("has_transaction_id", &self.transaction_id.is_some())
             .field("has_customer_vault_id", &self.customer_vault_id.is_some())
             .field("has_response", &self.response.is_some())
@@ -242,6 +245,8 @@ impl fmt::Debug for PaymentOutcome {
 #[must_use = "payment outcome parts retain the provider decision and must be inspected"]
 pub struct PaymentOutcomeParts {
     pub status: PaymentStatus,
+    /// Signals retained from all decision and text occurrences before reduction.
+    pub approval_evidence: crate::PaymentApprovalEvidence,
     pub transaction_id: Option<SensitiveText>,
     pub customer_vault_id: Option<SensitiveText>,
     pub response: Option<SensitiveText>,
@@ -372,6 +377,7 @@ mod tests {
     fn payment_outcome_diagnostics_have_set_semantics() {
         let outcome = PaymentOutcome {
             status: PaymentStatus::Unknown,
+            approval_evidence: crate::PaymentApprovalEvidence::Unclassified,
             transaction_id: None,
             customer_vault_id: None,
             response: None,

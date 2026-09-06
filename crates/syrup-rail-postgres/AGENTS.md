@@ -9,10 +9,21 @@ and transaction orchestration.
 
 - `src/lib.rs` — the public PostgreSQL operation facade and crate-private
   module ownership map.
-- `schema/v4/install.sql` — current authoritative fresh-install DDL;
+- `schema/v6/install.sql` — current authoritative fresh-install DDL;
+  `schema/v6/upgrade_from_v5.sql` is the forward-only classification cutover.
+  `schema/v1/**` through `schema/v5/**` are immutable.
+- `schema/v5/install.sql` — shipped predecessor;
+  `schema/v5/preflight_from_v4.sql`,
+  `audit_incompatible_attestations_from_v4.sql`, and `upgrade_from_v4.sql`
+  are the read-only preflight, minimized blocker audit, and forward-only v4
+  cutover artifacts.
+- `schema/current.rs` — shared current install selection for integration
+  fixtures and the independent SQLx gate. Update it on each schema cutover;
+  the fresh-install runtime conformance test validates the selected artifact.
+- `schema/v4/install.sql` — immutable shipped version-4 fresh-install DDL;
   `schema/v4/prepare_from_v3.sql`, `validate_from_v3.sql`, the
   non-transactional concurrent `index_from_v3.sql`, and `upgrade_from_v3.sql`
-  are the forward-only v3 cutover stages.
+  are its immutable forward-only v3 cutover stages.
 - `schema/v3/**` — immutable shipped version-3 distribution artifacts.
 - `schema/v2/preflight_from_v1.sql`,
   `schema/v2/audit_retry_reclassification_from_v1.sql`, and
@@ -20,7 +31,7 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v4 runtime compatibility
+- `src/schema_contract.rs` — production read-only v6 runtime compatibility
   assertion plus canonical catalog conformance. Version-specific, upgrade, and
   shared fixture tests live under `src/schema_contract/tests/`; checked-in
   install/upgrade SQL constants remain behind tests or the explicit
@@ -66,6 +77,9 @@ and transaction orchestration.
 - `src/host_charge_reconciliation.rs` — bounded stale-unsubmitted host-charge
   claiming, host-target release, and atomic local attempt failure without
   gateway I/O.
+- `src/transaction_support.rs` — private SQLSTATE recognition and transaction-local
+  two-timeout execution. Workflow owners retain retry authorization, error
+  extraction, timeout policy values, and transaction ownership.
 - `src/transactions.rs` — host-prepared billing transaction and typed event
   projection capability; the host recipient authorization lock comes first.
 - `src/entitlement.rs` — exact scope/subscriber/plan entitlement projection and
@@ -150,7 +164,7 @@ and transaction orchestration.
   Pass selected presentation fields to the core conversion before deciding
   presence; normalized absence must remain `None`. Keep the exact-plan
   identity prefix plus descending `(created_at, id)` keyset aligned with
-  `billing_payment_attempts_subscription_history_idx` in the current schema-v4
+  `billing_payment_attempts_subscription_history_idx` in the current schema-v6
   artifacts and the runtime schema contract. Keep first-page and continuation
   SQL as separate physical statements, with the continuation keyset as an
   unconditional index condition; the PostgreSQL generic-plan regression must
@@ -164,7 +178,7 @@ and transaction orchestration.
   fold so it is not unconditionally materialized before the outer page limit,
   and keep that keyset aligned with `billing_subscriptions_due_idx` for all-mode
   scans and `billing_subscriptions_due_mode_idx` for mode-specific scans in
-  both schema-v4 artifacts and the complete runtime index contract. Folding and
+  both schema-v6 artifacts and the complete runtime index contract. Folding and
   aligned indexes make early stopping available; PostgreSQL still chooses plans
   by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
@@ -219,14 +233,15 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
-- `assert_runtime_schema_v4_compatible` must reuse the complete canonical v4
+- `assert_runtime_schema_v6_compatible` must reuse the complete canonical v6
   catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
   major other than 18, and run no DDL; hosts apply versioned install and
   forward-only upgrade artifacts through their own migrations.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
-  `assert_v3_conforms`, and `assert_v4_conforms` wrappers are also read-only;
+  `assert_v3_conforms`, `assert_v4_conforms`, and `assert_v5_conforms` wrappers
+  are also read-only;
   mutation and locking
   behavior belongs in package fixtures and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;
@@ -307,8 +322,8 @@ and transaction orchestration.
   causal-history boundary in `renewal_failure.rs`; it owns admission of the
   first v2 automatic result and access timing for cancellation and terminal
   events.
-- `SubscriptionPaymentFailed.access` is the canonical post-failure access
-  projection. Build it only from the locked subscription's snapshotted policy
+- `SubscriptionPaymentFailed.outcome.access()` is the canonical post-failure
+  access projection. Build it only from the locked subscription's snapshotted policy
   and causal failure history, and reuse the same projection for any matching
   terminal event boundary.
 - Discount-code list and disable operations administer durable records without
@@ -351,7 +366,7 @@ and transaction orchestration.
 - Keep `src/lib.rs` exports explicit. The high-level service and host
   transaction/event boundary enable the missing-rustdoc warning, and
   `scripts/check-public-api.sh` elevates that warning to an error and enforces
-  the facade and all-feature workspace documentation gates.
+  the facade and default-feature and all-feature workspace documentation gates.
 
 ## Common commands
 

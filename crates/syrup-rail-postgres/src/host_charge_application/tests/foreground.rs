@@ -100,6 +100,7 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
             GatewayAccountMode::Test,
         )?;
         let applied_conflicting_evidence = ProcessorEvidence::new(
+            syrup_rail::ProcessorApprovalEvidence::Unclassified,
             Some(GatewayTransactionId::new("host_txn_approved")?),
             Some(syrup_rail::GatewayPaymentMethodReference::new(
                 "host_vault_observed",
@@ -184,6 +185,7 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
         let late_decline = GatewayPaymentOutcome::new(
             GatewayPaymentStatus::Declined,
             ProcessorEvidence::new(
+                syrup_rail::ProcessorApprovalEvidence::Unclassified,
                 Some(GatewayTransactionId::new("host_txn_late_decline")?),
                 None,
                 Some(GatewayDiagnostic::new("2")),
@@ -314,6 +316,7 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
         let unknown = GatewayPaymentOutcome::new(
             GatewayPaymentStatus::Unknown,
             ProcessorEvidence::new(
+                syrup_rail::ProcessorApprovalEvidence::Unclassified,
                 Some(GatewayTransactionId::new("host_txn_durable")?),
                 Some(syrup_rail::GatewayPaymentMethodReference::new(
                     "host_vault_durable",

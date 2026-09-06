@@ -1,0 +1,1 @@
+Implement Beads R-30 by preserving the established writer key gateway_account_id:subscriber_id, moving it to one neutral typed crate-private owner shared by approved payment-method writers and deletion scrub, replacing self-referential lock tests with cross-workflow contention, and proving 55P03 occurs before row changes and multi-account acquisition remains deterministic.

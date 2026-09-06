@@ -4,6 +4,163 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+_No unreleased changes._
+
+## [0.6.0] - 2026-09-01
+
+This section records the prepared 0.6.0 changes; publication remains blocked
+pending a recovery or compatibility policy for legacy terminal host attempts.
+See the v6 Migration requirements below before planning a host cutover.
+
+### Fixed
+
+- Make the retained schema-v4 runtime assertion reject incompatible live
+  external-reversal resolution tuples in the same read-only snapshot as its
+  catalog check. Hosts validating v4 while staging the required schema-v5
+  cutover can enable the `schema-contract-test-support` feature to use it.
+- Coordinate subscriber billing-data scrubbing with approved payment-method
+  writers through the deployed payment-method advisory-lock identity. A
+  concurrent approval can no longer restore mutable attempt or payment-method
+  data while the scrub runs.
+
+### Breaking
+
+- Gate `assert_runtime_schema_v4_compatible` behind
+  `schema-contract-test-support`. Production startup now uses
+  `assert_runtime_schema_v6_compatible` after the required v5-to-v6 cutover;
+  the v5 assertion only validates the old side while preparing that cutover.
+
+- Replace the NMI client's independent sale source, vault action, stored-
+  credential, and currency fields with the closed `SaleIntent` contract.
+  Direct raw-client callers must construct one of the five supported intents;
+  code migrating historical field combinations can use
+  `SaleIntent::from_legacy_parts`. NMI sales remain fixed to USD.
+- Replace the independent `disposition` and `access` fields on
+  `BillingEvent::SubscriptionPaymentFailed` with one
+  `SubscriptionPaymentFailureOutcome`. Consumers can obtain the compatibility
+  projections through `outcome.disposition()` and `outcome.access()`; the host
+  integration example preserves the existing V1 outbox JSON shape.
+- Replace the raw `ExternalReversalAttestation::new` constructor with a typed
+  `ExternalReversalResolution` input. Code that reconstructs legacy raw tuples
+  must use the fallible `ExternalReversalAttestation::from_legacy_parts` and
+  handle `ExternalReversalResolutionError` instead of relying on unchecked or
+  panicking construction.
+- Add an explicit `ProcessorApprovalEvidence` argument to
+  `ProcessorEvidence::new`. Third-party adapters must deliberately classify
+  observations as `Absent`, `TextOnly`, `Structured`, or fail-closed
+  `Unclassified`; omitted classification is now a compile error.
+
+### Changed
+
+- Count invalid or conflicting gateway lifecycle evidence in reconciliation
+  quarantine totals. Reconciliation summaries count only newly staged
+  evidence, including a refused host-target reversal; redelivery of an already
+  durable pending row does not increment `staged` again.
+- Add `SubscriptionLifecycle` as the validated status, billing-period, and
+  payment-schedule construction path. PostgreSQL subscription hydration now
+  rejects contradictory rows, while `Subscription::new` remains available as
+  the flat compatibility constructor.
+- Model subscription discount-claim lifecycle and grant revocation audit facts
+  as closed state values while retaining the legacy constructors and getters as
+  compatibility projections.
+- Add `GatewayAccountIdentity` and the compatible
+  `GatewayResolver::resolve_identity` entry point so account identity travels
+  intact across persistence and resolver boundaries.
+- Separate canonical live payment-attempt request construction from opaque
+  persisted fingerprint rehydration. New requests use
+  `PaymentAttemptRequest::canonical`; persistence codecs use
+  `PaymentAttemptRequest::from_persisted_parts`, while `new` remains available
+  as a compatibility wrapper for callers carrying durable fingerprints.
+- Record provider-rate-limit readiness failures without inventing a
+  `gateway_condition` of `failed`. The typed provider-rate-limit resolution
+  code remains the durable reason for the failed attempt.
+- Recheck automatic-renewal account mode after reservation while retaining the
+  final capability-consumption check immediately before sale. Determinate
+  post-reservation failures resolve the canonical attempt without submission;
+  a final transport failure remains a typed not-submitted renewal result.
+- Interpret each NMI transaction report's lifecycle actions in one bounded
+  pass while preserving action precedence, success handling, refund economics,
+  and diagnostic provenance.
+- Use `expires_at` as the sole pending lifecycle-evidence clock. Reconciliation
+  no longer repeats the unactionable-candidate query or writes inert check
+  counters; the existing bounded expiry cleanup behavior remains unchanged.
+- Derive NMI approval signals before duplicate/status reduction and preserve
+  them through identity quarantine, bounded text, attempt application,
+  reconciliation, processor-charge recording, and reversal attestations.
+- Base payment-bearing manual-review protection on typed approval evidence.
+  Negative exact queries and payment-method cleanup preserve earlier evidence,
+  and unidentified reconciliation observations cannot erase a stronger
+  approval signal.
+- Preserve response-text-only payment-method-update evidence during manual
+  closure while keeping the closure annotation inside the bounded diagnostic.
+- Interpret conservative approval signals in the NMI raw parser and translate
+  the typed summary at the adapter boundary. Numeric response-code aliases such
+  as `0100` and `+0100` receive the same review protection as `100` without
+  promoting an unknown decision to approved.
+- Replace raw-string approval helpers with the closed
+  `ProcessorApprovalEvidence` classification. Text-only and unclassified
+  observations fail closed for payment-bearing manual closure but cannot create
+  an immutable pending charge. Zero-value payment-method updates retain their
+  separate snapshot-guarded closure path without applying the new method.
+
+### Migration
+
+- Version 0.6.0 requires PostgreSQL schema v6. Existing hosts must first reach
+  schema v5: before scheduling downtime, run
+  `schema/v5/preflight_from_v4.sql` to measure retained external-reversal
+  attestations and count incompatible resolution tuples. When blockers exist,
+  run `schema/v5/audit_incompatible_attestations_from_v4.sql` through an
+  authorized operator process to identify the affected internal rows without
+  exposing unnecessary provider or presentation evidence. Rehearse the exact
+  upgrade artifact on representative data, drain schema-v4 billing traffic,
+  stop every v4 writer, and apply `schema/v5/upgrade_from_v4.sql` in one
+  host-owned transaction. Its validated CHECK replacement scans the retained
+  table under `ACCESS EXCLUSIVE`; size the maintenance window and configure
+  deployment timeouts from the rehearsal rather than an assumed universal row
+  limit. Investigate blockers through an audited host process, never by
+  bypassing the constraint or silently rewriting financial evidence.
+- After reaching v5, keep billing writers stopped and run
+  `schema/v6/preflight_from_v5.sql`. The
+  `terminal_host_attempts_with_unclassified_evidence_count` must be zero:
+  nonempty evidence on declined host attempts or unsubmitted failures without
+  charges cannot preserve their v5 retry/release eligibility under v6. The
+  upgrade aborts with SQLSTATE `23514` before schema changes if this population
+  exists. Roll back and remain on v5; clearing, rewriting, or deleting retained
+  evidence to bypass this guard is not supported. These cases still require a
+  recovery or compatibility policy and remain a 0.6.0 release blocker.
+  Audit these terminal attempts and protected legacy review rows with
+  `schema/v6/audit_unclassified_review_attempts_from_v5.sql`. For an eligible
+  cutover, apply
+  `schema/v6/upgrade_from_v5.sql` in one host-owned transaction. The cutover
+  classifies retained charges and reversal attestations from their durable v5
+  provenance, marks only entirely empty attempt evidence as `Absent`, and keeps
+  every other retained attempt fail-closed as `Unclassified` without parsing
+  provider strings. After commit, start 0.6.0 with
+  `assert_runtime_schema_v6_compatible`; do not restart a v4 or v5 writer.
+
+### Developer experience
+
+- Consolidate initial-attempt row locks, transient SQLSTATE recognition, local
+  timeout execution, audit-reason validation, and processor-charge role decoding
+  behind private helpers while preserving public contracts and workflow policy.
+- Keep release-wrapper fixtures aligned with exact internal dependency pins
+  and verify that non-exact pins are rejected before packaging.
+- Check documentation and doctests with default features as well as all
+  features, and correct renewal documentation to require the schema-v6 startup
+  assertion.
+- Share the current schema install selection between integration fixtures and
+  the independent SQLx metadata gate so both validate schema v6.
+- Make clean release preflight work under Bash 3.2 through 4.3 by avoiding
+  nounset expansion of an empty optional-argument array. CI now exercises clean
+  and `--allow-dirty` packaging under both current Bash and macOS Bash 3.2.
+
+### Internal refactoring
+
+- Narrow shared approval parking to initial enrollment, recovery, and renewal;
+  payment-method replacement retains its separate zero-value workflow.
+- Clarify lifecycle outcome counts versus newly staged reconciliation rows and
+  the feature required to validate schema v4 while preparing the v5 cutover.
+
 ## [0.5.2] - 2026-09-04
 
 ### Fixed
@@ -199,7 +356,6 @@ All notable changes to the Syrup Rail crates are documented in this file.
   the shortest normal billing or renewal interval and the host's
   replacement-charge interval, then wait out the window by default after an
   indeterminate attempt.
-
 ## [0.4.0] - 2026-08-27
 
 ### Added

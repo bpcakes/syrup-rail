@@ -76,6 +76,8 @@ async fn v1_active_recovery_authority_survives_v2_v3_and_v4_cutovers() -> Result
         assert_v3_conforms(&database.pool).await?;
         database.upgrade_v3_to_v4().await?;
         assert_v4_conforms(&database.pool).await?;
+        database.upgrade_v4_to_v5().await?;
+        database.upgrade_v5_to_v6().await?;
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let coordinator = TestCoordinator {

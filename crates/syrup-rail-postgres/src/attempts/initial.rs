@@ -31,12 +31,11 @@ pub async fn reserve_subscription_enrollment_in_transaction(
     )
     .await?;
 
-    if let Some(existing) = payment_attempt_by_idempotency(
+    if let Some(existing) = find_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        false,
     )
     .await?
     {
@@ -65,12 +64,11 @@ pub async fn reserve_subscription_enrollment_in_transaction(
                 reservation.plan_key(),
             )
             .await?;
-            let expired = payment_attempt_by_idempotency(
+            let expired = lock_payment_attempt_by_idempotency(
                 transaction,
                 identity.billing_scope_id(),
                 identity.subscriber_id(),
                 reservation.idempotency_key(),
-                true,
             )
             .await?
             .ok_or_else(invalid_state)?;
@@ -143,12 +141,11 @@ pub async fn reserve_subscription_enrollment_in_transaction(
     )
     .await?;
 
-    if let Some(existing) = payment_attempt_by_idempotency(
+    if let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
     )
     .await?
         && matches!(
@@ -214,12 +211,11 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         ));
     }
 
-    if let Some(existing) = payment_attempt_by_idempotency(
+    if let Some(existing) = lock_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
     )
     .await?
     {
@@ -242,23 +238,21 @@ pub async fn reserve_subscription_enrollment_in_transaction(
 
     let inserted = insert_initial_attempt(transaction, identity, &request).await?;
     if inserted {
-        let attempt = payment_attempt_by_idempotency(
+        let attempt = lock_payment_attempt_by_idempotency(
             transaction,
             identity.billing_scope_id(),
             identity.subscriber_id(),
             reservation.idempotency_key(),
-            true,
         )
         .await?
         .ok_or_else(invalid_state)?;
         return Ok(SubscriptionEnrollmentReservationOutcome::Reserved(attempt));
     }
-    let existing = payment_attempt_by_idempotency(
+    let existing = lock_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
     )
     .await?
     .ok_or_else(invalid_state)?;
@@ -323,12 +317,11 @@ pub async fn preflight_subscription_enrollment_in_transaction(
     }
 
     lock_subscription_aggregate(transaction, command.subscriber_id(), command.plan_key()).await?;
-    let existing = payment_attempt_by_idempotency(
+    let existing = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     .ok_or_else(invalid_state)?;
@@ -370,12 +363,11 @@ pub async fn preflight_subscription_enrollment_in_transaction(
         command.plan_key(),
     )
     .await?;
-    let expired = payment_attempt_by_idempotency(
+    let expired = lock_payment_attempt_by_idempotency(
         transaction,
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
     )
     .await?
     .ok_or_else(invalid_state)?;
@@ -408,12 +400,11 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
     // admission before their offer/attempt locks diverge in order. Keep it
     // ahead of both locks; host offer callbacks must not acquire attempt-ledger
     // locks independently.
-    let attempt = payment_attempt_by_idempotency(
+    let attempt = lock_payment_attempt_by_idempotency(
         transaction,
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
     )
     .await?
     .ok_or_else(invalid_state)?;

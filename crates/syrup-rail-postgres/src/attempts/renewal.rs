@@ -13,7 +13,7 @@ fn renewal_attempt_belongs_to_reservation(
 async fn gateway_identity_matches_subscription(
     transaction: &mut Transaction<'_, Postgres>,
     subscription_id: SubscriptionId,
-    expected: &ExpectedGatewayIdentity<'_>,
+    expected: &ExpectedGatewayIdentity,
 ) -> Result<bool, sqlx::Error> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
         r#"
@@ -125,60 +125,6 @@ async fn renewal_subscription_state_matches(
         && row.try_get::<bool, _>("is_due")?)
 }
 
-async fn insert_renewal_attempt(
-    transaction: &mut Transaction<'_, Postgres>,
-    reservation: &SubscriptionRenewalReservation,
-) -> Result<bool, sqlx::Error> {
-    let identity = reservation.identity();
-    let request = reservation.request();
-    let expected = reservation.expected_state();
-    let result = sqlx::query(
-        r#"
-        INSERT INTO billing_payment_attempts (
-            id, billing_scope_id, subscriber_id, plan_key, subscription_id,
-            payment_method_id, attempt_kind, status, idempotency_key,
-            request_fingerprint, amount_cents, currency,
-            billing_period_start_at, billing_period_end_at,
-            gateway_account_id, gateway_configuration_id, gateway_order_id,
-            billing_first_name, billing_last_name, billing_email,
-            subscription_expected_payment_method_id,
-            subscription_expected_initial_transaction_id,
-            subscription_expected_status, required_gateway_account_mode
-        ) VALUES (
-            $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'pending',
-            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-            $18, $19, $20, $21, $22
-        )
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(request.idempotency_key().expose())
-    .bind(request.fingerprint().expose())
-    .bind(request.amount().cents())
-    .bind(request.amount().currency().as_str())
-    .bind(reservation.period().start_at())
-    .bind(reservation.period().end_at())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(request.gateway_order_id().expose())
-    .bind(request.billing_contact().first_name())
-    .bind(request.billing_contact().last_name())
-    .bind(request.billing_contact().email())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(expected.initial_transaction_id().expose())
-    .bind(expected.status().as_str())
-    .bind(identity.required_gateway_account_mode().as_str())
-    .execute(&mut **transaction)
-    .await?;
-    Ok(result.rows_affected() == 1)
-}
-
 async fn reject_locked_renewal(
     transaction: &mut Transaction<'_, Postgres>,
     attempt: PaymentAttempt,
@@ -197,6 +143,7 @@ async fn reject_locked_renewal(
     Ok(SubscriptionRenewalSubmissionOutcome::Rejected { attempt, reason })
 }
 
+#[allow(deprecated)]
 fn map_renewal_store_error(error: crate::RenewalStoreError) -> PaymentAttemptStoreError {
     match error {
         crate::RenewalStoreError::Sql(error) => PaymentAttemptStoreError::Sql(error),
@@ -345,7 +292,13 @@ pub async fn reserve_subscription_renewal_in_transaction(
         subscription_mode,
     )
     .map_err(|_| invalid_state())?;
-    if !insert_renewal_attempt(transaction, &reservation).await? {
+    if !insert_subscription_charge_attempt(
+        transaction,
+        reservation.identity(),
+        reservation.request(),
+    )
+    .await?
+    {
         return Ok(SubscriptionRenewalReservationOutcome::Rejected(
             SubscriptionRenewalReservationRejection::AttemptInProgress,
         ));

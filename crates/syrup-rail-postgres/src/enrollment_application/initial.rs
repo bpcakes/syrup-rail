@@ -3,40 +3,34 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
-    ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId,
-    EnrollSubscription, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome,
-    GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest,
-    GatewayTransactionId, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentMethodId,
-    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
-    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
-    SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
-    SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionPhase,
-    next_billing_period,
+    BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId, EnrollSubscription,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
+    GatewaySaleIntent, GatewaySaleRequest, GatewayTransactionId, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, ProcessorChargeProgression,
+    ProcessorChargeRole, ProcessorEvidence, SubscriptionDiscountDuration, SubscriptionDiscountKind,
+    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentReservation,
+    SubscriptionEnrollmentSubmissionOutcome, SubscriptionEnrollmentSubmissionRejection,
+    SubscriptionId, SubscriptionPhase, next_billing_period,
 };
 use uuid::Uuid;
 
 use crate::{
     BillingTransactionCoordinator, BillingTransactionSubjectState, ModeVerifiedGateway,
     attempts::find_payment_attempt_by_id_on_connection,
-    processor_charges::{
-        LockFreeApprovedEvidenceTerms, ObservedCharge, observe_processor_charge, transition_charge,
-    },
+    processor_charges::{ObservedCharge, observe_processor_charge, transition_charge},
 };
 
 use super::{
-    APPROVED_APPLICATION_ATTEMPTS, APPROVED_EVIDENCE_RETRY_DELAY, APPROVED_EVIDENCE_WRITE_ATTEMPTS,
-    APPROVED_STORAGE_FAILURE_TEXT, AttemptResolutionStatus, BILLING_LOCK_TIMEOUT,
-    CURRENT_GRANT_CONFLICT_TEXT, CURRENT_SUBSCRIPTION_CONFLICT_TEXT, GatewayNotSubmittedPolicy,
-    INCOMPLETE_APPROVAL_TEXT, INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation,
-    OutcomeResolutionBoundary, OutcomeResolutionCommand, RateLimitCooldown,
-    SubscriptionEnrollmentApplicationError, TERMINAL_APPROVAL_RACE_TEXT,
-    append_subscription_observation_diagnostics, apply_resumable_not_submitted_policy,
-    finalize_approved_application, is_retryable_evidence_error, load_applied_subscription,
+    APPROVED_APPLICATION_ATTEMPTS, APPROVED_EVIDENCE_RETRY_DELAY, APPROVED_STORAGE_FAILURE_TEXT,
+    AttemptResolutionStatus, BILLING_LOCK_TIMEOUT, CURRENT_GRANT_CONFLICT_TEXT,
+    CURRENT_SUBSCRIPTION_CONFLICT_TEXT, GatewayNotSubmittedPolicy, INCOMPLETE_APPROVAL_TEXT,
+    INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation, OutcomeResolutionBoundary,
+    OutcomeResolutionCommand, RateLimitCooldown, SubscriptionEnrollmentApplicationError,
+    TERMINAL_APPROVAL_RACE_TEXT, append_subscription_observation_diagnostics,
+    apply_resumable_not_submitted_policy, finalize_approved_application, load_applied_subscription,
     load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
-    lock_subscription_aggregate, mark_attempt_approved, mutation_error_evidence,
-    park_locked_attempt, payment_result_for_attempt,
-    persist_approved_evidence_without_attempt_lock, resolve_pool_outcome, set_application_timeouts,
-    stop_conflicting_subscription_approval, upsert_payment_method,
+    lock_subscription_aggregate, mark_attempt_approved, park_locked_attempt, resolve_pool_outcome,
+    set_application_timeouts, stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 mod approval;
@@ -195,43 +189,44 @@ pub async fn submit_admitted_subscription_enrollment(
         )
         .await
         .map(SubscriptionEnrollmentProviderResult::Payment),
-        Err(GatewayMutationError::NotSubmitted(error)) => {
-            let evidence = mutation_error_evidence(error.detail());
-            let policy = GatewayNotSubmittedPolicy::for_error(&error);
-            let application = apply_resumable_not_submitted_policy(
-                pool,
-                OutcomeReservation::Initial(&admission.reservation),
-                &evidence,
-                policy,
-            )
-            .await?;
-            if application.should_surface_not_submitted(policy) {
-                Ok(SubscriptionEnrollmentProviderResult::NotSubmitted {
-                    payment: application.payment,
-                    error,
-                })
-            } else {
-                Ok(SubscriptionEnrollmentProviderResult::Payment(
-                    application.payment,
-                ))
+        Err(error) => {
+            let evidence = error.processor_evidence();
+            match error {
+                GatewayMutationError::NotSubmitted(error) => {
+                    let policy = GatewayNotSubmittedPolicy::for_error(&error);
+                    let application = apply_resumable_not_submitted_policy(
+                        pool,
+                        OutcomeReservation::Initial(&admission.reservation),
+                        &evidence,
+                        policy,
+                    )
+                    .await?;
+                    if application.should_surface_not_submitted(policy) {
+                        Ok(SubscriptionEnrollmentProviderResult::NotSubmitted {
+                            payment: application.payment,
+                            error,
+                        })
+                    } else {
+                        Ok(SubscriptionEnrollmentProviderResult::Payment(
+                            application.payment,
+                        ))
+                    }
+                }
+                GatewayMutationError::RateLimitedIndeterminate(_) => resolve_unknown_outcome(
+                    pool,
+                    &admission.reservation,
+                    &evidence,
+                    Some(RateLimitCooldown::Provider),
+                )
+                .await
+                .map(SubscriptionEnrollmentProviderResult::Payment),
+                GatewayMutationError::Indeterminate(_) => {
+                    resolve_unknown_outcome(pool, &admission.reservation, &evidence, None)
+                        .await
+                        .map(SubscriptionEnrollmentProviderResult::Payment)
+                }
             }
         }
-        Err(GatewayMutationError::RateLimitedIndeterminate(detail)) => resolve_unknown_outcome(
-            pool,
-            &admission.reservation,
-            &mutation_error_evidence(&detail),
-            Some(RateLimitCooldown::Provider),
-        )
-        .await
-        .map(SubscriptionEnrollmentProviderResult::Payment),
-        Err(GatewayMutationError::Indeterminate(detail)) => resolve_unknown_outcome(
-            pool,
-            &admission.reservation,
-            &mutation_error_evidence(&detail),
-            None,
-        )
-        .await
-        .map(SubscriptionEnrollmentProviderResult::Payment),
     }
 }
 
@@ -264,9 +259,9 @@ async fn apply_subscription_enrollment_gateway_decision(
                 SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE),
             )?;
             if outcome.transaction_id().is_none() || outcome.payment_method_reference().is_none() {
-                return park_approved_outcome(
+                return super::park_approved_outcome(
                     pool,
-                    reservation,
+                    super::ApprovedParkingReservation::Initial(reservation),
                     &approved_evidence,
                     INCOMPLETE_APPROVAL_TEXT,
                 )
@@ -282,9 +277,9 @@ async fn apply_subscription_enrollment_gateway_decision(
                     Err(_) => break,
                 }
             }
-            park_approved_outcome(
+            super::park_approved_outcome(
                 pool,
-                reservation,
+                super::ApprovedParkingReservation::Initial(reservation),
                 &approved_evidence,
                 APPROVED_STORAGE_FAILURE_TEXT,
             )
@@ -333,44 +328,15 @@ pub async fn apply_reconciled_subscription_enrollment_gateway_outcome(
     attempt_id: PaymentAttemptId,
     outcome: &GatewayPaymentOutcome,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let mut transaction = pool.begin().await?;
-    let attempt = crate::find_payment_attempt_by_id_in_transaction(
-        &mut transaction,
+    super::apply_reconciled_gateway_outcome_for(
+        pool,
+        coordinator,
         billing_scope_id,
         attempt_id,
+        outcome,
+        super::ReconciledApplicationEntry::Exact(super::ReservationOperation::Initial),
     )
-    .await?
-    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-        "subscription enrollment attempt was not found",
-    ))?;
-    let provider_key = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT provider_key
-        FROM billing_gateway_accounts
-        WHERE billing_scope_id = $1 AND id = $2
-        "#,
-    )
-    .bind(billing_scope_id.as_uuid())
-    .bind(attempt.identity().gateway_account_id().as_uuid())
-    .fetch_optional(&mut *transaction)
-    .await?
-    .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-        "subscription enrollment gateway account was not found",
-    ))?;
-    transaction.commit().await?;
-
-    let provider_key = GatewayProviderKey::new(provider_key).map_err(|_| {
-        SubscriptionEnrollmentApplicationError::InvalidState(
-            "subscription enrollment gateway provider key is invalid",
-        )
-    })?;
-    let reservation = SubscriptionEnrollmentReservation::from_attempt(&attempt, provider_key)
-        .map_err(|_| {
-            SubscriptionEnrollmentApplicationError::InvalidState(
-                "reconciled attempt is not a valid subscription enrollment",
-            )
-        })?;
-    apply_subscription_enrollment_gateway_outcome(pool, coordinator, &reservation, outcome).await
+    .await
 }
 
 pub(crate) async fn resolve_non_approved_outcome(
@@ -406,139 +372,4 @@ async fn resolve_unknown_outcome(
     )
     .await
     .map(OutcomeApplication::into_payment)
-}
-
-async fn park_approved_outcome(
-    pool: &PgPool,
-    reservation: &SubscriptionEnrollmentReservation,
-    approved_evidence: &ApprovedProcessorEvidence,
-    message: &'static str,
-) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let evidence = approved_evidence.evidence();
-    match try_park_approved_outcome(pool, reservation, evidence, message).await {
-        Ok(result) => Ok(result),
-        Err(_) => {
-            observe_approved_evidence_with_retry(pool, reservation, evidence).await?;
-            let mut transaction = pool.begin().await?;
-            let attempt = find_payment_attempt_by_id_on_connection(
-                &mut transaction,
-                reservation.identity().billing_scope_id(),
-                reservation.identity().attempt_id(),
-            )
-            .await?
-            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
-                INVALID_APPLICATION_STATE,
-            ))?;
-            let result = if attempt.status() == PaymentAttemptStatus::Approved {
-                payment_result_for_attempt(&mut transaction, attempt).await?
-            } else {
-                SubscriptionEnrollmentPaymentResult::confirmation_pending(
-                    attempt,
-                    approved_evidence.clone(),
-                )?
-            };
-            transaction.commit().await?;
-            Ok(result)
-        }
-    }
-}
-
-async fn try_park_approved_outcome(
-    pool: &PgPool,
-    reservation: &SubscriptionEnrollmentReservation,
-    evidence: &ProcessorEvidence,
-    message: &'static str,
-) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
-    let mut transaction = pool.begin().await?;
-    set_application_timeouts(&mut transaction).await?;
-    lock_subscription_aggregate(
-        &mut transaction,
-        reservation.identity().subscriber_id(),
-        reservation.plan_key(),
-    )
-    .await?;
-    let attempt = lock_expected_reservation_attempt(
-        &mut transaction,
-        OutcomeReservation::Initial(reservation),
-    )
-    .await?;
-    let attempt = if attempt.status() == PaymentAttemptStatus::Approved {
-        observe_processor_charge(
-            &mut transaction,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::Applied,
-        )
-        .await?;
-        attempt
-    } else if attempt.status().is_terminal() {
-        let progression =
-            if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
-                ProcessorChargeProgression::ExternalReversalRequired
-            } else {
-                ProcessorChargeProgression::ReconciliationRequired
-            };
-        observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
-        attempt
-    } else {
-        observe_processor_charge(
-            &mut transaction,
-            &attempt,
-            evidence,
-            ProcessorChargeProgression::Pending,
-        )
-        .await?;
-        park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
-    };
-    let result = payment_result_for_attempt(&mut transaction, attempt).await?;
-    transaction.commit().await?;
-    Ok(result)
-}
-
-async fn observe_approved_evidence_with_retry(
-    pool: &PgPool,
-    reservation: &SubscriptionEnrollmentReservation,
-    evidence: &ProcessorEvidence,
-) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let mut last_error = None;
-    for attempt_index in 0..APPROVED_EVIDENCE_WRITE_ATTEMPTS {
-        let result = async {
-            let mut transaction = pool.begin().await?;
-            set_application_timeouts(&mut transaction).await?;
-            let attempt = lock_expected_reservation_attempt(
-                &mut transaction,
-                OutcomeReservation::Initial(reservation),
-            )
-            .await?;
-            observe_processor_charge(
-                &mut transaction,
-                &attempt,
-                evidence,
-                ProcessorChargeProgression::Pending,
-            )
-            .await?;
-            transaction.commit().await?;
-            Ok::<(), SubscriptionEnrollmentApplicationError>(())
-        }
-        .await;
-        match result {
-            Ok(()) => return Ok(()),
-            Err(error) if is_retryable_evidence_error(&error) => {
-                last_error = Some(error);
-                if attempt_index + 1 < APPROVED_EVIDENCE_WRITE_ATTEMPTS {
-                    tokio::time::sleep(APPROVED_EVIDENCE_RETRY_DELAY).await;
-                } else {
-                    break;
-                }
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    let _ = last_error;
-    persist_approved_evidence_without_attempt_lock(
-        pool,
-        LockFreeApprovedEvidenceTerms::initial(reservation),
-        evidence,
-    )
-    .await
 }

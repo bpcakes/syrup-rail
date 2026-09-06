@@ -444,6 +444,25 @@ fn classic_301_without_lifecycle_evidence_is_known_not_submitted() {
 }
 
 #[test]
+fn classic_rate_limit_requires_the_exact_preprocessing_decision_tuple() {
+    for response in [
+        "response=03&response_code=301",
+        "response=3&response_code=0301",
+        "response=3&response_code=3010",
+        "response=3&response_code=301.0",
+        "response=3&response_code=301&status=pending",
+    ] {
+        assert!(
+            !matches!(
+                classic_payment_outcome_from_form(response),
+                Err(WireError::RateLimited(_))
+            ),
+            "{response} must not be treated as the documented preprocessing rate limit"
+        );
+    }
+}
+
+#[test]
 fn classic_301_with_lifecycle_evidence_is_never_known_not_submitted() {
     for lifecycle_fields in [
         "customer_vault_id=vault_assigned",
@@ -657,4 +676,44 @@ fn last4_requires_masked_or_four_digit_card_text() {
     );
     assert_eq!(last4("1111".to_owned()).as_deref(), Some("1111"));
     assert_eq!(last4("4111111111111111".to_owned()), None);
+}
+
+#[test]
+fn classic_approval_signals_survive_duplicate_and_status_reduction() {
+    for body in [
+        "status=approved&condition=declined",
+        "response=1&response=2",
+        "response=2&response=1",
+        "condition=complete&condition=pending_settlement",
+    ] {
+        let outcome = classic_payment_outcome_from_form(body).unwrap();
+        assert_eq!(
+            outcome.approval_evidence,
+            crate::PaymentApprovalEvidence::Structured,
+            "{body}"
+        );
+    }
+    let outcome =
+        classic_payment_outcome_from_form("response=3&responsetext=Approved&response_text=Error")
+            .unwrap();
+    assert_eq!(
+        outcome.approval_evidence,
+        crate::PaymentApprovalEvidence::TextOnly
+    );
+    assert!(outcome.response_text.is_none());
+}
+
+#[test]
+fn classic_text_only_pending_response_cannot_certify_absence() {
+    for body in [
+        "responsetext=Transaction+is+pending",
+        "responsetext=Transaction+is+under+review",
+    ] {
+        let outcome = classic_payment_outcome_from_form(body).unwrap();
+        assert_eq!(outcome.status, PaymentStatus::Unknown);
+        assert_eq!(
+            outcome.approval_evidence,
+            crate::PaymentApprovalEvidence::Unclassified
+        );
+    }
 }

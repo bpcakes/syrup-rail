@@ -208,8 +208,11 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
             .finish_decision(DecisionFieldKind::GatewayState),
     )
     .resolve();
-    let (response_text, _) =
-        resolve_optional_scalar(collect_xml_scalar(transaction, &["response_text"], true).finish());
+    let text_occurrences = collect_xml_scalar(transaction, &["response_text"], true);
+    let approval_evidence = decision
+        .approval_evidence
+        .merge(text_occurrences.approval_text_evidence());
+    let (response_text, _) = resolve_optional_scalar(text_occurrences.finish());
     let mut status = decision.status;
     let mut diagnostics = decision.diagnostics;
     let order_identifier =
@@ -246,6 +249,7 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
     Ok(Some(ExactQueryResponse {
         outcome: PaymentOutcome {
             status,
+            approval_evidence,
             transaction_id,
             customer_vault_id,
             response: sensitive_gateway_field(decision.response),

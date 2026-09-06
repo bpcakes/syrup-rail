@@ -6,24 +6,24 @@ use syrup_rail::{
     BillingScopeId, ChargeAmount, CurrencyCode, DiscountClaimId, DiscountCodeId, IdempotencyKey,
     LimitedDiscountMonths, PaymentAttemptId, PercentOffBasisPoints, PlanKey, PositiveDiscountCents,
     SubscriberId, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
-    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimStatus,
-    SubscriptionDiscountClearOutcome, SubscriptionDiscountCode, SubscriptionDiscountCodeCreation,
-    SubscriptionDiscountCodeQuote, SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus,
-    SubscriptionDiscountCodeUpdate, SubscriptionDiscountDuration, SubscriptionDiscountError,
-    SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionEnrollmentReservation,
-    SubscriptionId, SubscriptionOffer,
+    SubscriptionDiscountClaimRecord, SubscriptionDiscountClaimState,
+    SubscriptionDiscountClaimStatus, SubscriptionDiscountClearOutcome, SubscriptionDiscountCode,
+    SubscriptionDiscountCodeCreation, SubscriptionDiscountCodeQuote,
+    SubscriptionDiscountCodeRecord, SubscriptionDiscountCodeStatus, SubscriptionDiscountCodeUpdate,
+    SubscriptionDiscountDuration, SubscriptionDiscountError, SubscriptionDiscountKind,
+    SubscriptionDiscountSnapshot, SubscriptionEnrollmentReservation, SubscriptionId,
+    SubscriptionOffer,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::attempts::{lock_initial_attempt_rows_on_connection, lock_subscription_aggregate};
 pub use persistence::saved_subscription_discount_claim_in_transaction;
 use persistence::{
     blocking_initial_attempt, blocking_initial_attempt_exists, claim_from_row, code_by_id,
     code_from_row, current_subscription_exists, discount_value, duration_months,
-    expire_saved_claims_for_code, find_active_code, lock_initial_attempt_rows,
-    lock_initial_attempts, lock_offer, lock_subscription_aggregate, quote_for_offer,
-    quote_from_row, saved_subscription_discount_claim_on_connection, set_lock_timeout,
-    validate_discount_cadence,
+    expire_saved_claims_for_code, find_active_code, lock_offer, quote_for_offer, quote_from_row,
+    saved_subscription_discount_claim_on_connection, set_lock_timeout, validate_discount_cadence,
 };
 
 mod persistence;
@@ -547,7 +547,13 @@ pub(crate) async fn claim_subscription_discount_on_connection(
             existing.clone(),
         )));
     }
-    lock_initial_attempts(connection, claim).await?;
+    lock_initial_attempt_rows_on_connection(
+        connection,
+        claim.billing_scope_id(),
+        claim.subscriber_id(),
+        claim.plan_key(),
+    )
+    .await?;
     if blocking_initial_attempt_exists(connection, claim).await? {
         return Ok(SubscriptionDiscountClaimOutcome::BlockedByInitialAttempt);
     }
@@ -655,7 +661,8 @@ pub(crate) async fn clear_subscription_discount_on_connection(
         plan_key,
     )
     .await?;
-    lock_initial_attempt_rows(connection, billing_scope_id, subscriber_id, plan_key).await?;
+    lock_initial_attempt_rows_on_connection(connection, billing_scope_id, subscriber_id, plan_key)
+        .await?;
     if blocking_initial_attempt(connection, billing_scope_id, subscriber_id, plan_key).await? {
         return Ok(SubscriptionDiscountClearOutcome::BlockedByInitialAttempt);
     }

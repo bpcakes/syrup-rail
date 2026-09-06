@@ -123,6 +123,9 @@ impl DueRenewalPageQuery {
 pub enum RenewalStoreError {
     #[error("renewal storage operation failed")]
     Sql(#[from] sqlx::Error),
+    #[deprecated(
+        note = "provider cooldown presence is enforced by the v3 schema and mandatory startup conformance; retained until a breaking release"
+    )]
     #[error("a gateway provider has no canonical cooldown row")]
     MissingProviderCooldown,
     #[error("renewal page cursor belongs to a different gateway account mode scan")]
@@ -164,6 +167,11 @@ pub async fn due_renewals_for_mode(
 /// unblocked candidates behind the continuation key wait for a fresh scan.
 /// Nor is it a dispatch lease: hosts own queue/outbox persistence and the
 /// eventual renewal operation revalidates mutable state.
+///
+/// Hosts must successfully run [`crate::assert_runtime_schema_v6_compatible`]
+/// before accepting traffic. Pagination relies on the validated immediate
+/// foreign keys from subscriptions to accounts and accounts to provider
+/// cooldown rows rather than repeating a global orphan scan on every page.
 pub async fn due_renewals_page(
     pool: &PgPool,
     cursor: Option<&RenewalDispatchPageCursor>,
@@ -199,23 +207,6 @@ async fn load_due_renewals_page(
     }
     let page_query = DueRenewalPageQuery::load(pool, cursor).await?;
     let observed_at = page_query.observed_at();
-    let missing_provider_cooldown = sqlx::query_scalar::<_, bool>(
-        r#"
-        SELECT EXISTS (
-            SELECT 1
-            FROM billing_gateway_accounts AS accounts
-            LEFT JOIN billing_gateway_provider_rate_limits AS provider_limits
-                ON provider_limits.provider_key = accounts.provider_key
-            WHERE provider_limits.provider_key IS NULL
-        )
-        "#,
-    )
-    .fetch_one(pool)
-    .await?;
-    if missing_provider_cooldown {
-        return Err(RenewalStoreError::MissingProviderCooldown);
-    }
-
     let infrastructure_retry_codes =
         resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_RETRY_CODES);
     let infrastructure_pacing_codes =

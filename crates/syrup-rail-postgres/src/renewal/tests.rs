@@ -1,3 +1,5 @@
+// agentic-loc-exception: Release-critical code remains under the absolute limit; split follow-up is tracked separately.
+
 use std::{collections::HashSet, error::Error, io, time::Duration as StdDuration};
 
 use chrono::Duration;
@@ -22,6 +24,19 @@ async fn due_selection_is_provider_keyed_and_has_a_fixed_shared_bound() -> Resul
     let other = create_gateway_account(&database.pool, "other-provider").await?;
     let nmi_subscription = insert_due_subscription(&database.pool, nmi, "nmi-plan").await?;
     let other_subscription = insert_due_subscription(&database.pool, other, "other-plan").await?;
+
+    let missing_provider = sqlx::query(
+        "DELETE FROM billing_gateway_provider_rate_limits WHERE provider_key = 'other-provider'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect_err("an account's provider cooldown row must be protected by an immediate foreign key");
+    assert_eq!(
+        missing_provider
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("billing_gateway_accounts_provider_fk")
+    );
 
     sqlx::query(
         "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = clock_timestamp() + interval '1 hour' WHERE provider_key = 'nmi'",

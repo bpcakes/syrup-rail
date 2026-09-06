@@ -12,20 +12,20 @@ use syrup_rail::{
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::PaymentAttemptStoreError;
 use crate::attempts::{
     PAYMENT_ATTEMPT_SELECT, find_payment_attempt_by_id_on_connection,
     lock_payment_attempt_by_id_on_connection, lock_subscription_aggregate,
     payment_attempt_from_row, set_enrollment_timeouts,
 };
 use crate::processor_charge_persistence::{
-    attestation_by_charge, attestation_matches_source, processor_charge_from_row,
+    ProcessorChargePersistenceError, attestation_by_charge, attestation_matches_source,
+    processor_charge_from_row,
 };
-use crate::{OperatorReviewError, PaymentAttemptStoreError};
 
 use storage::{
     charge_by_id, compensating_progression, identify_transactionless, initial_charge_progression,
-    initial_charge_state_code, is_transient, map_operator_error, matching_charge,
-    owned_by_other_attempt, parse_role,
+    initial_charge_state_code, is_transient, matching_charge, owned_by_other_attempt, parse_role,
 };
 
 mod storage;
@@ -42,6 +42,15 @@ pub enum ProcessorChargeStoreError {
     Attempt(#[from] PaymentAttemptStoreError),
     #[error("{0}")]
     InvalidState(&'static str),
+}
+
+impl From<ProcessorChargePersistenceError> for ProcessorChargeStoreError {
+    fn from(error: ProcessorChargePersistenceError) -> Self {
+        match error {
+            ProcessorChargePersistenceError::Sql(error) => Self::Sql(error),
+            ProcessorChargePersistenceError::InvalidState(message) => Self::InvalidState(message),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,10 +236,10 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock(
                 gateway_response, gateway_response_code, gateway_response_text,
                 gateway_condition, payment_type, card_brand, card_last4,
                 card_exp_month, card_exp_year, charge_role, progression_state,
-                attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
+                attempt_kind, plan_key, host_charge_target_id, amount_cents, currency, gateway_approval_evidence
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, 'pending', $18, $19, $20, $21, $22
+                $14, $15, $16, $17, 'pending', $18, $19, $20, $21, $22, $23
             )
             ON CONFLICT DO NOTHING
             RETURNING id
@@ -262,6 +271,7 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock(
         .bind(terms.host_charge_target_id)
         .bind(terms.amount_cents)
         .bind(terms.currency.as_str())
+        .bind(evidence.approval_evidence().as_str())
         .fetch_optional(&mut *transaction)
         .await?;
         if inserted.is_some() {
@@ -272,22 +282,24 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock(
 
     let evidence_matches = sqlx::query_scalar::<_, bool>(
         r#"
-        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
-            AND gateway_response IS NOT DISTINCT FROM $4
-            AND gateway_response_code IS NOT DISTINCT FROM $5
-            AND gateway_response_text IS NOT DISTINCT FROM $6
-            AND gateway_condition IS NOT DISTINCT FROM $7
-            AND payment_type IS NOT DISTINCT FROM $8
-            AND card_brand IS NOT DISTINCT FROM $9
-            AND card_last4 IS NOT DISTINCT FROM $10
-            AND card_exp_month IS NOT DISTINCT FROM $11
-            AND card_exp_year IS NOT DISTINCT FROM $12
+        SELECT gateway_approval_evidence IS NOT DISTINCT FROM $3
+            AND gateway_payment_method_reference IS NOT DISTINCT FROM $4
+            AND gateway_response IS NOT DISTINCT FROM $5
+            AND gateway_response_code IS NOT DISTINCT FROM $6
+            AND gateway_response_text IS NOT DISTINCT FROM $7
+            AND gateway_condition IS NOT DISTINCT FROM $8
+            AND payment_type IS NOT DISTINCT FROM $9
+            AND card_brand IS NOT DISTINCT FROM $10
+            AND card_last4 IS NOT DISTINCT FROM $11
+            AND card_exp_month IS NOT DISTINCT FROM $12
+            AND card_exp_year IS NOT DISTINCT FROM $13
         FROM billing_processor_charges
         WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
         "#,
     )
     .bind(identity.attempt_id().as_uuid())
     .bind(transaction_id)
+    .bind(evidence.approval_evidence().as_str())
     .bind(
         evidence
             .payment_method_reference()
@@ -448,7 +460,7 @@ async fn store_once(
             }
             if let Some(attestation) = attestation_by_charge(&mut transaction, charge.id)
                 .await
-                .map_err(map_operator_error)?
+                .map_err(ProcessorChargeStoreError::from)?
                 && (!charge.exact_replay
                     || !attestation_matches_source(&attestation, &attempt, &persisted))
             {
@@ -603,14 +615,14 @@ pub(crate) async fn observe_processor_charge(
             gateway_condition, payment_type, card_brand, card_last4,
             card_exp_month, card_exp_year, charge_role, progression_state, state_code,
             reconciliation_required_at, external_reversal_required_at, applied_at,
-            attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
+            attempt_kind, plan_key, host_charge_target_id, amount_cents, currency, gateway_approval_evidence
         ) VALUES (
             $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
             $14, $15, $16, $17, $18, $19,
             CASE WHEN $18 = 'reconciliation_required' THEN clock_timestamp() END,
             CASE WHEN $18 = 'external_reversal_required' THEN clock_timestamp() END,
             CASE WHEN $18 = 'applied' THEN clock_timestamp() END,
-            $20, $21, $22, $23, $24
+            $20, $21, $22, $23, $24, $25
         )
         {conflict_clause}
         "#
@@ -650,6 +662,7 @@ pub(crate) async fn observe_processor_charge(
         )
         .bind(attempt.request().amount().cents())
         .bind(attempt.request().amount().currency().as_str())
+        .bind(evidence.approval_evidence().as_str())
         .fetch_optional(&mut *connection)
         .await?;
     if let Some(id) = inserted {
@@ -758,7 +771,7 @@ async fn transition_processor_charge(
             gateway_order_id, attempt_kind, amount_cents, currency,
             charge_role, progression_state, state_code,
             gateway_transaction_id, gateway_payment_method_reference,
-            gateway_response, gateway_response_code, gateway_response_text,
+            gateway_approval_evidence, gateway_response, gateway_response_code, gateway_response_text,
             gateway_condition, payment_type, card_brand, card_last4,
             card_exp_month, card_exp_year, observed_at
         "#,
@@ -773,7 +786,7 @@ async fn transition_processor_charge(
     .ok_or(ProcessorChargeStoreError::InvalidState(
         "processor charge transition did not match its expected state or eligibility",
     ))?;
-    processor_charge_from_row(&row).map_err(map_operator_error)
+    processor_charge_from_row(&row).map_err(ProcessorChargeStoreError::from)
 }
 
 #[cfg(test)]

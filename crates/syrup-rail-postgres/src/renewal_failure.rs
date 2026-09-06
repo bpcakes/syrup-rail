@@ -4,7 +4,7 @@ use syrup_rail::{
     BillingEvent, PastDueAccessPolicy, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
     PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget, PlanKey,
     RenewalFailureDisposition, RenewalFailurePolicy, SubscriptionEndReason, SubscriptionId,
-    SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureDisposition, SubscriptionStatus,
+    SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureOutcome, SubscriptionStatus,
     renewal_failure_disposition,
 };
 use thiserror::Error;
@@ -472,12 +472,12 @@ fn failure_events(
         attempt_id: attempt.identity.attempt_id(),
         subscription_id: attempt.subscription_id,
         plan_key: attempt.plan_key.clone(),
-        disposition: projection.disposition,
-        access: projection.access,
+        outcome: projection.outcome,
     }];
     if let RenewalFailureDisposition::MarkUnpaid { ended_at } = disposition {
         let access_ends_at = projection
-            .access
+            .outcome
+            .access()
             .access_ended_at()
             .ok_or_else(invalid_state)?;
         events.push(BillingEvent::SubscriptionEnded {
@@ -494,8 +494,7 @@ fn failure_events(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RenewalFailureEventProjection {
-    disposition: SubscriptionPaymentFailureDisposition,
-    access: SubscriptionPaymentFailureAccess,
+    outcome: SubscriptionPaymentFailureOutcome,
 }
 
 fn failure_event_projection(
@@ -503,17 +502,6 @@ fn failure_event_projection(
     causal_history: PastDueCausalHistory,
     disposition: RenewalFailureDisposition,
 ) -> Result<RenewalFailureEventProjection, RenewalFailureStoreError> {
-    let event_disposition = match disposition {
-        RenewalFailureDisposition::RetryScheduled { retry_at } => {
-            SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at }
-        }
-        RenewalFailureDisposition::RemainPastDue { exhausted_at } => {
-            SubscriptionPaymentFailureDisposition::DunningExhausted { exhausted_at }
-        }
-        RenewalFailureDisposition::MarkUnpaid { ended_at } => {
-            SubscriptionPaymentFailureDisposition::SubscriptionEnded { ended_at }
-        }
-    };
     let access = match (policy.past_due_access(), disposition) {
         (
             PastDueAccessPolicy::ContinueUntilDunningExhausted,
@@ -525,10 +513,31 @@ fn failure_event_projection(
                 .ok_or_else(invalid_state)?,
         },
     };
-    Ok(RenewalFailureEventProjection {
-        disposition: event_disposition,
-        access,
-    })
+    let outcome = match (disposition, access) {
+        (RenewalFailureDisposition::RetryScheduled { retry_at }, access) => {
+            SubscriptionPaymentFailureOutcome::RetryScheduled { retry_at, access }
+        }
+        (
+            RenewalFailureDisposition::RemainPastDue { exhausted_at },
+            SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+        ) => SubscriptionPaymentFailureOutcome::DunningExhausted {
+            exhausted_at,
+            access_ended_at,
+        },
+        (
+            RenewalFailureDisposition::MarkUnpaid { ended_at },
+            SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+        ) => SubscriptionPaymentFailureOutcome::SubscriptionEnded {
+            ended_at,
+            access_ended_at,
+        },
+        (
+            RenewalFailureDisposition::RemainPastDue { .. }
+            | RenewalFailureDisposition::MarkUnpaid { .. },
+            SubscriptionPaymentFailureAccess::ContinuesDuringDunning,
+        ) => return Err(invalid_state()),
+    };
+    Ok(RenewalFailureEventProjection { outcome })
 }
 
 async fn persist_renewal_failure_transition(

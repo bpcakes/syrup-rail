@@ -218,18 +218,6 @@ pub(crate) async fn persist_bound_provider_rate_limit_cooldown(
     })
 }
 
-pub(crate) fn mutation_error_evidence(detail: &GatewayDiagnostic) -> ProcessorEvidence {
-    ProcessorEvidence::new(
-        None,
-        None,
-        None,
-        None,
-        Some(detail.clone()),
-        None,
-        syrup_rail::GatewayPaymentDescriptor::default(),
-    )
-}
-
 /// Complete durable policy for a mutation that provably stopped before the
 /// provider accepted it.
 ///

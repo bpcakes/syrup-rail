@@ -3,8 +3,8 @@ use std::fmt;
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
-    DuplicateCheck, PaymentSource, ReportQuery, SaleRequest, StorePaymentMethodRequest,
-    StoredCredential, TransactionQuery, VaultAction,
+    DuplicateCheck, ReportQuery, SaleIntent, SaleRequest, StorePaymentMethodRequest,
+    TransactionQuery,
 };
 
 use super::WireError;
@@ -127,36 +127,38 @@ pub(super) fn classic_sale_params<'a>(
     params.push_borrowed("security_key", security_key);
     params.push_borrowed("type", "sale");
     params.push_public_owned("amount", amount);
-    params.push_borrowed("currency", &request.currency);
+    params.push_borrowed("currency", super::SUPPORTED_NMI_CURRENCY);
     if let Some(seconds) = duplicate_check.wire_seconds() {
         params.push_public_owned("dup_seconds", seconds.to_string());
     }
     params.push_borrowed("orderid", request.order_id.trim());
-    match &request.source {
-        PaymentSource::PaymentToken(payment_token) => {
+    match &request.intent {
+        SaleIntent::PaymentToken(payment_token) => {
             params.push_borrowed("payment_token", payment_token);
         }
-        PaymentSource::CustomerVault(customer_vault_id) => {
+        SaleIntent::CustomerVault(customer_vault_id) => {
             params.push_borrowed("customer_vault_id", customer_vault_id);
         }
-    }
-    if request.vault_action == Some(VaultAction::AddCustomer) {
-        params.push_borrowed("customer_vault", "add_customer");
-    }
-    if let Some(cit_mit) = &request.stored_credential {
-        params.push_borrowed("billing_method", "recurring");
-        match cit_mit {
-            StoredCredential::InitialCustomer => {
-                params.push_borrowed("stored_credential_indicator", "stored");
-                params.push_borrowed("initiated_by", "customer");
-            }
-            StoredCredential::RecurringMerchant {
-                initial_transaction_id,
-            } => {
-                params.push_borrowed("stored_credential_indicator", "used");
-                params.push_borrowed("initiated_by", "merchant");
-                params.push_borrowed("initial_transaction_id", initial_transaction_id);
-            }
+        SaleIntent::AddCustomer { payment_token } => {
+            params.push_borrowed("payment_token", payment_token);
+            params.push_borrowed("customer_vault", "add_customer");
+        }
+        SaleIntent::InitialStoredCredential { payment_token } => {
+            params.push_borrowed("payment_token", payment_token);
+            params.push_borrowed("customer_vault", "add_customer");
+            params.push_borrowed("billing_method", "recurring");
+            params.push_borrowed("stored_credential_indicator", "stored");
+            params.push_borrowed("initiated_by", "customer");
+        }
+        SaleIntent::RecurringStoredCredential {
+            customer_vault_id,
+            initial_transaction_id,
+        } => {
+            params.push_borrowed("customer_vault_id", customer_vault_id);
+            params.push_borrowed("billing_method", "recurring");
+            params.push_borrowed("stored_credential_indicator", "used");
+            params.push_borrowed("initiated_by", "merchant");
+            params.push_borrowed("initial_transaction_id", initial_transaction_id);
         }
     }
     if let Some(contact) = &request.billing_contact {

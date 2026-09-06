@@ -1,20 +1,25 @@
 use serde_json::{Value, json};
 
-use crate::{BillingContact, DuplicateCheck, PaymentSource, SaleRequest, StoredCredential};
+use crate::{BillingContact, DuplicateCheck, SaleIntent, SaleRequest};
 
 use super::WireError;
 use super::validation::trimmed_optional;
 
-fn payment_details_json(source: &PaymentSource) -> Value {
+fn payment_details_json(intent: &SaleIntent) -> Value {
     // serde_json owns a temporary copy of these sensitive identifiers. The
     // source strings and client credentials retain their zeroization guards,
     // but serde_json and reqwest do not offer reliable zeroization of their
     // serialized request buffers; this is an explicit non-protection.
-    match source {
-        PaymentSource::PaymentToken(payment_token) => {
+    match intent {
+        SaleIntent::PaymentToken(payment_token)
+        | SaleIntent::AddCustomer { payment_token }
+        | SaleIntent::InitialStoredCredential { payment_token } => {
             json!({ "payment_token": payment_token })
         }
-        PaymentSource::CustomerVault(customer_vault_id) => {
+        SaleIntent::CustomerVault(customer_vault_id)
+        | SaleIntent::RecurringStoredCredential {
+            customer_vault_id, ..
+        } => {
             json!({ "customer_vault_id": customer_vault_id })
         }
     }
@@ -44,8 +49,8 @@ pub(super) fn sale_body_json(
 ) -> Value {
     let mut body = json!({
         "amount": amount,
-        "currency": request.currency.as_str(),
-        "payment_details": payment_details_json(&request.source),
+        "currency": super::SUPPORTED_NMI_CURRENCY,
+        "payment_details": payment_details_json(&request.intent),
         "order_details": order_details_json(&request.order_id),
     });
     if let Some(seconds) = duplicate_check.wire_seconds() {
@@ -57,11 +62,14 @@ pub(super) fn sale_body_json(
     // NMI's v5 custom-recurring contract puts `billing_method=recurring`
     // under `customer_vault` for scheduled CIT/MIT sales, even when the
     // request is only using an existing vault entry rather than mutating it.
-    if request.stored_credential.is_some() {
+    if matches!(
+        request.intent,
+        SaleIntent::InitialStoredCredential { .. } | SaleIntent::RecurringStoredCredential { .. }
+    ) {
         body["customer_vault"] = customer_vault_json();
     }
-    if let Some(cit_mit) = &request.stored_credential {
-        body["cit_mit"] = cit_mit_json(cit_mit);
+    if let Some(cit_mit) = cit_mit_json(&request.intent) {
+        body["cit_mit"] = cit_mit;
     }
     body
 }
@@ -70,19 +78,23 @@ fn customer_vault_json() -> Value {
     json!({ "billing_method": "recurring" })
 }
 
-fn cit_mit_json(stored_credential: &StoredCredential) -> Value {
-    match stored_credential {
-        StoredCredential::InitialCustomer => json!({
+fn cit_mit_json(intent: &SaleIntent) -> Option<Value> {
+    match intent {
+        SaleIntent::InitialStoredCredential { .. } => Some(json!({
             "stored_credential_indicator": "stored",
             "initiated_by": "customer",
-        }),
-        StoredCredential::RecurringMerchant {
+        })),
+        SaleIntent::RecurringStoredCredential {
             initial_transaction_id,
-        } => json!({
+            ..
+        } => Some(json!({
             "stored_credential_indicator": "used",
             "initiated_by": "merchant",
             "initial_transaction_id": initial_transaction_id,
-        }),
+        })),
+        SaleIntent::PaymentToken(_)
+        | SaleIntent::CustomerVault(_)
+        | SaleIntent::AddCustomer { .. } => None,
     }
 }
 

@@ -4,10 +4,9 @@ use crate::gateway::normalize_gateway_payment_diagnostics;
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
     ChargeAmount, GatewayAccountMode, GatewayConfigurationId, GatewayPaymentDiagnostic,
-    HostChargeTargetId, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
-    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
-    PaymentAttemptStatus, PaymentAttemptTarget, PaymentReversalKind, PaymentToken,
-    ProcessorEvidence, ResolvedGateway, SubscriberId,
+    HostChargeTargetId, IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptStatus, PaymentAttemptTarget,
+    PaymentReversalKind, PaymentToken, ProcessorEvidence, ResolvedGateway, SubscriberId,
 };
 use thiserror::Error;
 
@@ -142,12 +141,11 @@ impl HostChargeReservation {
             required_gateway_account_mode,
         );
         let amount = snapshot.charge().money();
-        let request = PaymentAttemptRequest::new(
+        let request = PaymentAttemptRequest::canonical(
             PaymentAttemptTarget::HostCharge {
                 target_id: command.target_id(),
             },
             command.idempotency_key().clone(),
-            PaymentAttemptFingerprint::for_host_charge(command.target_id(), amount),
             amount,
             gateway
                 .mutation_reference_factory()
