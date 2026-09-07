@@ -173,6 +173,9 @@ attempt_id)`. The standalone `refresh_payment_method_metadata` operation takes
 a pool and host `GatewayResolver` for hosts that do not use the service. Use the
 latest approved attempt for that saved method. The host must authorize the
 scope and subscriber before calling either entrypoint.
+Saved methods can be shared across plans. Use the latest approval for the method
+across those plans, even if its original subscription has since switched methods;
+another subscription for the same account and subscriber must still use it.
 Renewals may approve without echoed vault-reference evidence; their durable
 method and subscription linkage is sufficient. A conflicting retained reference
 is rejected, and an older approval cannot bypass a newer approved renewal.
@@ -189,13 +192,23 @@ Back off for either result even when the storage cause is transient.
 The provider cooldown pauses financial readiness and renewal dispatch for
 **every gateway account with that provider key**, including other billing scopes.
 The gateway's coarse rate-limit error does not establish a query-only quota, so
-refresh follows the existing conservative policy. Budget background backfills
+refresh follows the existing conservative policy. NMI documents HTTP 429 as a
+[system-wide limit spanning Payment and Query APIs](https://docs.nmi.com/reference/rate-limiting).
+The shared cooldown lasts 60 seconds, exposed as
+`syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS`.
+Budget background backfills
 across that provider and prioritize payment traffic. Scheduling/concurrency
 limits remain host-owned.
 Query errors are independent of payment success: keep the approved
 payment result and retry only the refresh operation with host-owned bounded
 scheduling and concurrency. Never resubmit a sale or replay financial approval
 to backfill display.
+The separate refresh error type does not use the financial service's
+`disposition()` method. A host may retry the same refresh with bounded backoff
+for storage SQLSTATE `40001`, `40P01`, `55P03`, or `57014`; other storage failures
+need investigation. A commit acknowledgement can be ambiguous, so a retry
+rechecks current display. Refresh briefly shares the approval lock domain;
+keep its scheduling below payment traffic to avoid contention.
 
 `NotFound` means the exact query returned no transaction, not that display is
 complete or the approved payment failed. Hosts may retry with a bounded budget;

@@ -6,11 +6,19 @@ pub(super) struct Fixture {
     pub attempt_id: PaymentAttemptId,
     pub method_id: Uuid,
     pub subscription_id: syrup_rail::SubscriptionId,
+    pub plan_key: PlanKey,
     pub coordinator: TestCoordinator,
 }
 
 impl Fixture {
     pub async fn new(pool: &PgPool) -> Result<Self, Box<dyn Error>> {
+        Self::new_with_reference(pool, "vault_metadata").await
+    }
+
+    pub async fn new_with_reference(
+        pool: &PgPool,
+        reference: &str,
+    ) -> Result<Self, Box<dyn Error>> {
         let account = create_gateway_account(pool, "nmi").await?;
         let subscriber_id = SubscriberId::new(Uuid::now_v7());
         let gateway = resolved_gateway(account)?;
@@ -19,6 +27,7 @@ impl Fixture {
             events: Arc::new(Mutex::new(Vec::new())),
         };
         let offer = paid_trial_offer()?;
+        let plan_key = offer.plan_key().clone();
         let payment = approve_enrollment(
             pool,
             &StaticOfferStore {
@@ -31,7 +40,7 @@ impl Fixture {
             "metadata_trial",
             SubscriptionEnrollmentExpectedTerms::full_price(offer),
             "txn_metadata",
-            "vault_metadata",
+            reference,
         )
         .await?;
         let subscription_id = *payment
@@ -50,6 +59,7 @@ impl Fixture {
             attempt_id: payment.attempt().identity().attempt_id(),
             method_id,
             subscription_id: syrup_rail::SubscriptionId::new(subscription_id),
+            plan_key,
             coordinator,
         })
     }
@@ -61,11 +71,7 @@ impl Fixture {
         RefreshPaymentMethodMetadata::new(self.scope(), self.subscriber_id, self.attempt_id)
     }
     pub fn portal_query(&self) -> SubscriptionBillingPortalQuery {
-        SubscriptionBillingPortalQuery::new(
-            self.scope(),
-            self.subscriber_id,
-            PlanKey::new("identity_pro").unwrap(),
-        )
+        SubscriptionBillingPortalQuery::new(self.scope(), self.subscriber_id, self.plan_key.clone())
     }
 
     pub fn resolver(

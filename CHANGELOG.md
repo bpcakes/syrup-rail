@@ -19,7 +19,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
   rejects stale responses after replacement or scrubbing. It retains provider
   brand evidence for consistent portal display, allows missing optional vault
   references, honors shared gateway cooldowns, and distinguishes absent
-  transactions from candidates changed during the query. Schema v4 is unchanged.
+  transactions from candidates changed during the query. Methods shared across
+  plans remain repairable using their latest approval. Schema v4 is unchanged.
 
 ## [0.5.2] - 2026-09-04
 

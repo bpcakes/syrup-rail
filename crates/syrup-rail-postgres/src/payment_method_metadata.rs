@@ -68,6 +68,9 @@ pub enum PaymentMethodMetadataRefreshOutcome {
 #[non_exhaustive]
 pub enum PaymentMethodMetadataRefreshError {
     /// Canonical storage could not be read or the display transaction failed.
+    /// Hosts may retry the same fill-only refresh with bounded backoff for
+    /// SQLSTATE `40001`, `40P01`, `55P03`, or `57014`. Revalidation handles
+    /// concurrent changes and an ambiguous commit acknowledgement safely.
     #[error("payment method metadata storage failed")]
     Storage(#[from] sqlx::Error),
     /// The host could not resolve the canonical provider account.
@@ -131,6 +134,8 @@ impl fmt::Debug for PaymentMethodMetadataRefreshError {
 /// Query throttling extends the shared provider cooldown using the existing
 /// durable policy; financial evidence remains unchanged. This does not provide
 /// end-user admission or a concurrency limiter, which remain host responsibilities.
+/// Its scope is provider-wide and its duration is
+/// [`syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS`] (60 seconds).
 /// Provider I/O has a 10-second timeout and runs before the write transaction.
 /// Missing/conflicting evidence cannot erase display. Replacement, scrubbing, or
 /// any intervening change to the candidate causes a no-op; retry with the latest

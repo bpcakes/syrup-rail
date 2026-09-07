@@ -12,6 +12,7 @@ mod fixture;
 mod operational;
 mod races;
 mod review_races;
+mod shared_methods;
 mod workflows;
 use fixture::*;
 
@@ -118,18 +119,22 @@ async fn card_metadata_missing_failed_and_conflicting_queries_allow_later_refres
         ),
     ];
     for (reply, expected) in cases {
+        let expects_timeout = matches!(&reply, Reply::Never);
         let fixture = Fixture::new(&db.pool).await?;
         let before = fixture.financial_snapshot(&db.pool).await?;
         let method = fixture.method_snapshot(&db.pool).await?;
         let provider = Arc::new(QueryGateway::new(reply));
         let resolver = fixture.resolver(provider.clone())?;
-        let result = refresh_payment_method_metadata(&db.pool, &resolver, fixture.command()).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(12),
+            refresh_payment_method_metadata(&db.pool, &resolver, fixture.command()),
+        )
+        .await
+        .expect("refresh must finish within its provider timeout and local query budget");
         match expected {
             Some(expected) => assert_eq!(result?, expected),
-            None => assert!(matches!(
-                result,
-                Err(RefreshError::Query(_) | RefreshError::QueryTimedOut)
-            )),
+            None if expects_timeout => assert!(matches!(result, Err(RefreshError::QueryTimedOut))),
+            None => assert!(matches!(result, Err(RefreshError::Query(_)))),
         }
         assert_eq!(provider.queries.load(Ordering::SeqCst), 1);
         assert_eq!(fixture.financial_snapshot(&db.pool).await?, before);

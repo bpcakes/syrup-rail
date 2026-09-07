@@ -17,11 +17,18 @@ JOIN billing_payment_methods AS m
 JOIN billing_subscriptions AS s
   ON s.id = a.subscription_id AND s.billing_scope_id = a.billing_scope_id
  AND s.subscriber_id = a.subscriber_id AND s.gateway_account_id = a.gateway_account_id
- AND s.payment_method_id = m.id AND s.plan_key = a.plan_key
+ AND s.plan_key = a.plan_key
 WHERE a.billing_scope_id = $1 AND a.subscriber_id = $2 AND a.id = $3
   AND a.status = 'approved' AND a.gateway_transaction_id IS NOT NULL
   AND m.status = 'active'
-  AND m.gateway_payment_method_reference NOT LIKE 'erased:%'
+  AND m.gateway_payment_method_reference <> 'erased:' || m.id::text
+  AND EXISTS (
+      SELECT 1 FROM billing_subscriptions AS current_subscription
+      WHERE current_subscription.billing_scope_id = a.billing_scope_id
+        AND current_subscription.subscriber_id = a.subscriber_id
+        AND current_subscription.gateway_account_id = a.gateway_account_id
+        AND current_subscription.payment_method_id = m.id
+  )
   AND NOT EXISTS (
       SELECT 1 FROM billing_payment_attempts AS newer
       WHERE newer.payment_method_id = m.id AND newer.status = 'approved'

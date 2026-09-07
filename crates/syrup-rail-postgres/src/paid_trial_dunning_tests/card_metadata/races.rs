@@ -183,6 +183,15 @@ pub(super) async fn replace_method(
     fixture: &Fixture,
     reference: &str,
 ) -> Result<PaymentAttemptId, Box<dyn Error>> {
+    replace_method_with_transaction(pool, fixture, reference, "txn_replacement").await
+}
+
+pub(super) async fn replace_method_with_transaction(
+    pool: &PgPool,
+    fixture: &Fixture,
+    reference: &str,
+    transaction_id: &str,
+) -> Result<PaymentAttemptId, Box<dyn Error>> {
     use syrup_rail::{
         ReplaceSubscriptionPaymentMethod, SubscriptionPaymentMethodReplacementReservationOutcome,
     };
@@ -193,7 +202,7 @@ pub(super) async fn replace_method(
             fixture.scope(),
             fixture.subscriber_id,
             gateway.gateway_configuration_id(),
-            IdempotencyKey::new("metadata_replace")?,
+            IdempotencyKey::new(format!("metadata_replace_{}", fixture.plan_key.as_str()))?,
             PaymentToken::new("replacement_token")?,
             BillingContact::new(None, None, Some("subscriber@example.test".into()))?,
         ),
@@ -222,7 +231,7 @@ pub(super) async fn replace_method(
         pool,
         &fixture.coordinator,
         &reservation,
-        &approved_outcome_with_reference("txn_replacement", reference),
+        &approved_outcome_with_reference(transaction_id, reference),
     )
     .await?;
     assert_eq!(payment.status(), syrup_rail::PaymentAttemptStatus::Approved);

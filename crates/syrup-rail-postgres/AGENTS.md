@@ -168,6 +168,10 @@ and transaction orchestration.
   and keep unknown stored text without blocking unrelated absent fields.
   Honor durable account/provider cooldowns and persist query throttling through
   the existing provider-cooldown owner; keep financial evidence unchanged.
+  Methods can span plans: latest approval provenance is global per method,
+  while any same-account/same-subscriber subscription may prove current use.
+  Stabilize that reference check under the shared method domain; never weaken
+  global supersession to admit an older plan's card evidence.
 - Change due-renewal pagination in `src/renewal.rs`. Preserve every current
   eligibility gate, bind the first page's database-observed timestamp into all
   time-dependent gates on every continuation, retain strict ascending

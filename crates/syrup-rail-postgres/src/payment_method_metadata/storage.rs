@@ -58,6 +58,8 @@ pub(super) async fn lock_candidate(
     crate::enrollment_application::set_application_timeouts(connection).await?;
     // v0.5.2 scrub and approval use different domains. Enter both before any row
     // locks, then the approval plan aggregate. Neither lock is held during I/O.
+    // The approval domain spans this subscriber's plans: it also stabilizes the
+    // current-reference EXISTS check when another plan still uses the method.
     crate::deletion::lock_payment_method_scrub_domain(
         connection,
         command.billing_scope_id,
