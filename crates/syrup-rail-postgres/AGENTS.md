@@ -172,6 +172,11 @@ and transaction orchestration.
   while any same-account/same-subscriber subscription may prove current use.
   Stabilize that reference check under the shared method domain; never weaken
   global supersession to admit an older plan's card evidence.
+  Find current references through the method-linked attempt index and subscription
+  ID probes; retain generic-plan regressions for both exact production statements.
+  Ignore lifecycle-only attempt timestamp changes, while preserving the method
+  and subscription timestamp fences. The gateway-account share lock must span
+  revalidation through commit and can briefly delay configuration/cooldown writes.
 - Change due-renewal pagination in `src/renewal.rs`. Preserve every current
   eligibility gate, bind the first page's database-observed timestamp into all
   time-dependent gates on every continuation, retain strict ascending

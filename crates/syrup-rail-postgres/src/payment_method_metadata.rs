@@ -138,7 +138,7 @@ impl fmt::Debug for PaymentMethodMetadataRefreshError {
 /// [`syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS`] (60 seconds).
 /// Provider I/O has a 10-second timeout and runs before the write transaction.
 /// Missing/conflicting evidence cannot erase display. Replacement, scrubbing, or
-/// any intervening change to the candidate causes a no-op; retry with the latest
+/// an intervening method/subscription change causes a no-op; retry with the latest
 /// approved attempt if appropriate. Errors are independent of payment success.
 /// A missing vault reference (including its missing-reference diagnostic) is
 /// allowed because the approved exact transaction has durable method linkage.

@@ -9,6 +9,7 @@ use tokio::sync::Notify;
 
 mod boundaries;
 mod fixture;
+mod lifecycle;
 mod operational;
 mod races;
 mod review_races;

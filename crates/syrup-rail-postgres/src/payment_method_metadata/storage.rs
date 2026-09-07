@@ -20,7 +20,6 @@ pub(super) struct Candidate {
     plan_key: String,
     method_updated_at: DateTime<Utc>,
     subscription_updated_at: DateTime<Utc>,
-    attempt_updated_at: DateTime<Utc>,
     card_brand: Option<String>,
     card_last4: Option<String>,
     card_exp_month: Option<i16>,
@@ -37,6 +36,15 @@ impl Candidate {
 }
 
 const CANDIDATE_SQL: &str = include_str!("candidate.sql");
+// Keep both production statements available verbatim to the generic-plan test.
+const LOCKED_CANDIDATE_SQL: &str = concat!(
+    include_str!("candidate.sql"),
+    " FOR UPDATE OF a, m, s FOR SHARE OF g"
+);
+
+#[cfg(test)]
+#[path = "query_plan_tests.rs"]
+mod query_plan_tests;
 
 pub(super) async fn load_candidate(
     pool: &PgPool,
@@ -60,6 +68,9 @@ pub(super) async fn lock_candidate(
     // locks, then the approval plan aggregate. Neither lock is held during I/O.
     // The approval domain spans this subscriber's plans: it also stabilizes the
     // current-reference EXISTS check when another plan still uses the method.
+    // Approved attempt identity is rechecked by the query. Its lifecycle-only
+    // updates do not invalidate display; method/subscription timestamps still
+    // fence intervening projection changes, including away-and-back replacement.
     crate::deletion::lock_payment_method_scrub_domain(
         connection,
         command.billing_scope_id,
@@ -79,14 +90,12 @@ pub(super) async fn lock_candidate(
         .await?;
     // Keep configuration/provider identity stable from revalidation through
     // commit. Snapshot comparison alone cannot close that final write window.
-    sqlx::query_as(&format!(
-        "{CANDIDATE_SQL} FOR UPDATE OF a, m, s FOR SHARE OF g"
-    ))
-    .bind(command.billing_scope_id.as_uuid())
-    .bind(command.subscriber_id.as_uuid())
-    .bind(command.attempt_id.as_uuid())
-    .fetch_optional(connection)
-    .await
+    sqlx::query_as(LOCKED_CANDIDATE_SQL)
+        .bind(command.billing_scope_id.as_uuid())
+        .bind(command.subscriber_id.as_uuid())
+        .bind(command.attempt_id.as_uuid())
+        .fetch_optional(connection)
+        .await
 }
 
 pub(super) async fn fill_missing_fields(

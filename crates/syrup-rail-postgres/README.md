@@ -203,12 +203,18 @@ Query errors are independent of payment success: keep the approved
 payment result and retry only the refresh operation with host-owned bounded
 scheduling and concurrency. Never resubmit a sale or replay financial approval
 to backfill display.
+Across parser upgrades, retain normalized `ProcessorEvidence` for financial
+retries. Re-parsing an old response can expose newly supported metadata and is
+not an exact replay of the retained evidence. Use refresh for display enrichment;
+financial evidence equality remains strict.
 The separate refresh error type does not use the financial service's
 `disposition()` method. A host may retry the same refresh with bounded backoff
 for storage SQLSTATE `40001`, `40P01`, `55P03`, or `57014`; other storage failures
 need investigation. A commit acknowledgement can be ambiguous, so a retry
-rechecks current display. Refresh briefly shares the approval lock domain;
-keep its scheduling below payment traffic to avoid contention.
+rechecks current display. Refresh briefly shares the approval lock domain and
+locks the gateway-account identity through commit. It can therefore delay both
+approval application and account configuration/cooldown writes; keep its
+scheduling below payment traffic to avoid contention.
 
 `NotFound` means the exact query returned no transaction, not that display is
 complete or the approved payment failed. Hosts may retry with a bounded budget;
@@ -229,7 +235,9 @@ vault linkage, and method/subscription identity again under locks after the
 query. Conflicting evidence leaves display unchanged; a replaced, disabled,
 scrubbed, or superseded method returns `Ineligible` before provider I/O. An
 initially eligible candidate that changes during I/O returns `ChangedDuringQuery`;
-select the latest approved attempt before a bounded retry. Charge and attempt
+select the latest approved attempt before a bounded retry. Lifecycle-only
+reconciliation of that attempt does not invalidate otherwise eligible display.
+Charge and attempt
 evidence, vault references, access, amounts, renewal
 dates, contacts, and events are not changed. Billing portal reads then use the
 refreshed local method. This does not backfill historical attempt descriptors.
