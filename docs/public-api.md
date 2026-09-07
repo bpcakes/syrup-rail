@@ -167,8 +167,8 @@ bypassing the in-flight index is a supported manual exit.
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v6_compatible` after host migrations and before
-serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v6 only;
+Use `assert_runtime_schema_v5_compatible` after host migrations and before
+serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v5 only;
 the assertion is read-only and does not install or upgrade a schema. It
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is
@@ -396,7 +396,7 @@ debt snapshot or parse human compiler output. Add meaningful documentation at
 an owning abstraction, and expand `warn(missing_docs)` to another module only after that module is
 ready to stay clean.
 
-Version 0.6.0 requires schema v6; schema v5 is the intermediate cutover from v4.
+Version 0.6.0 requires schema v5, with one direct upgrade from schema v4.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
 raw client derives it from all decision/text occurrences before reducing fields.
 `Structured` preserves a possible processor charge even when the payment decision
@@ -411,5 +411,5 @@ their evidence available for audit and reconciliation. Mutation errors derive
 their evidence from certainty: proven
 non-submission is `Absent`, while indeterminate details stay `Unclassified`.
 Raw response strings are retained as evidence and are never interpreted by core
-financial policy. See the [schema-v6 cutover guide](../crates/syrup-rail-postgres/schema/v6/README.md)
+financial policy. See the [schema-v5 cutover guide](../crates/syrup-rail-postgres/schema/v5/README.md)
 for deployment and historical-evidence handling.

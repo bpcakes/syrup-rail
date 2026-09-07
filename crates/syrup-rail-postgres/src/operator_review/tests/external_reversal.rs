@@ -323,7 +323,7 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         .await?,
         ExternalReversalAttestationOutcome::ReplayConflict
     );
-    crate::assert_runtime_schema_v6_compatible(&database.pool).await?;
+    crate::assert_runtime_schema_v5_compatible(&database.pool).await?;
 
     database.cleanup().await?;
     Ok(())
@@ -555,7 +555,13 @@ async fn runtime_conformance_and_hydration_reject_an_incompatible_live_tuple()
     // Preserve the intentionally incompatible legacy tuple while providing the
     // current codec's classification columns. This is a corrupt-schema fixture,
     // not a supported shortcut around the required v4-to-v5 validation.
-    database.upgrade_v5_to_v6().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE billing_payment_attempts ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'unclassified';
+         ALTER TABLE billing_processor_charges ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'structured';
+         ALTER TABLE billing_external_reversal_attestations ADD COLUMN gateway_approval_evidence text NOT NULL DEFAULT 'structured';",
+    )
+    .execute(&database.pool)
+    .await?;
     let error = attest_external_reversal(
         &database.pool,
         &ExactHostRelease::default(),

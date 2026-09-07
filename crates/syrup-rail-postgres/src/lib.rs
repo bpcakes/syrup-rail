@@ -164,7 +164,6 @@ pub use renewal::{
 };
 pub use schema_contract::{
     SUPPORTED_POSTGRES_MAJOR_VERSION, SchemaConformanceError, assert_runtime_schema_v5_compatible,
-    assert_runtime_schema_v6_compatible,
 };
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 pub use schema_contract::{

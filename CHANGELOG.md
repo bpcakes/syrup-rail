@@ -10,7 +10,7 @@ _No unreleased changes._
 
 This section records the prepared 0.6.0 changes; publication remains blocked
 pending a recovery or compatibility policy for legacy terminal host attempts.
-See the v6 Migration requirements below before planning a host cutover.
+See the v5 Migration requirements below before planning a host cutover.
 
 ### Fixed
 
@@ -27,8 +27,7 @@ See the v6 Migration requirements below before planning a host cutover.
 
 - Gate `assert_runtime_schema_v4_compatible` behind
   `schema-contract-test-support`. Production startup now uses
-  `assert_runtime_schema_v6_compatible` after the required v5-to-v6 cutover;
-  the v5 assertion only validates the old side while preparing that cutover.
+  `assert_runtime_schema_v5_compatible` after the direct v4-to-v5 cutover.
 
 - Replace the NMI client's independent sale source, vault action, stored-
   credential, and currency fields with the closed `SaleIntent` contract.
@@ -105,38 +104,35 @@ See the v6 Migration requirements below before planning a host cutover.
 
 ### Migration
 
-- Version 0.6.0 requires PostgreSQL schema v6. Existing hosts must first reach
-  schema v5: before scheduling downtime, run
-  `schema/v5/preflight_from_v4.sql` to measure retained external-reversal
-  attestations and count incompatible resolution tuples. When blockers exist,
-  run `schema/v5/audit_incompatible_attestations_from_v4.sql` through an
-  authorized operator process to identify the affected internal rows without
-  exposing unnecessary provider or presentation evidence. Rehearse the exact
-  upgrade artifact on representative data, drain schema-v4 billing traffic,
-  stop every v4 writer, and apply `schema/v5/upgrade_from_v4.sql` in one
-  host-owned transaction. Its validated CHECK replacement scans the retained
-  table under `ACCESS EXCLUSIVE`; size the maintenance window and configure
-  deployment timeouts from the rehearsal rather than an assumed universal row
-  limit. Investigate blockers through an audited host process, never by
-  bypassing the constraint or silently rewriting financial evidence.
-- After reaching v5, keep billing writers stopped and run
-  `schema/v6/preflight_from_v5.sql`. The
-  `terminal_host_attempts_with_unclassified_evidence_count` must be zero:
+- Version 0.6.0 requires PostgreSQL schema v5. The two unreleased schema
+  changes are combined into one direct v4-to-v5 upgrade; shipped schemas v1–v4
+  are unchanged. New hosts install `schema/v5/install.sql`.
+- Before scheduling downtime, run `schema/v5/preflight_from_v4.sql`. Its single
+  result measures retained evidence and incompatible reversal tuples. Use
+  `schema/v5/audit_incompatible_attestations_from_v4.sql` and
+  `schema/v5/audit_unclassified_review_attempts_from_v4.sql` through an authorized
+  operator process to investigate the affected internal rows without exposing
+  unnecessary provider or presentation evidence.
+- `terminal_host_attempts_with_unclassified_evidence_count` must be zero:
   nonempty evidence on declined host attempts or unsubmitted failures without
-  charges cannot preserve their v5 retry/release eligibility under v6. The
-  upgrade aborts with SQLSTATE `23514` before schema changes if this population
-  exists. Roll back and remain on v5; clearing, rewriting, or deleting retained
-  evidence to bypass this guard is not supported. These cases still require a
-  recovery or compatibility policy and remain a 0.6.0 release blocker.
-  Audit these terminal attempts and protected legacy review rows with
-  `schema/v6/audit_unclassified_review_attempts_from_v5.sql`. For an eligible
-  cutover, apply
-  `schema/v6/upgrade_from_v5.sql` in one host-owned transaction. The cutover
-  classifies retained charges and reversal attestations from their durable v5
-  provenance, marks only entirely empty attempt evidence as `Absent`, and keeps
-  every other retained attempt fail-closed as `Unclassified` without parsing
-  provider strings. After commit, start 0.6.0 with
-  `assert_runtime_schema_v6_compatible`; do not restart a v4 or v5 writer.
+  charges cannot preserve their v4 retry/release eligibility under v5. The
+  upgrade locks all three evidence tables and aborts with SQLSTATE `23514`
+  before schema changes if this population exists. Roll back and remain on v4;
+  clearing, rewriting, or deleting retained evidence to bypass this guard is
+  unsupported. These cases still require a recovery or compatibility policy
+  and remain a 0.6.0 release blocker.
+- Prebuild the new application, rehearse `schema/v5/upgrade_from_v4.sql` on
+  representative data, drain billing traffic, stop every v4 writer (including
+  reconciliation, operator and scrub workers), and apply it in one host-owned
+  transaction. It validates reversal tuples and classifies retained charges
+  and attestations from their durable v4 provenance. Only entirely empty
+  attempt evidence becomes `Absent`; other retained attempts remain
+  `Unclassified`, without parsing or rewriting provider strings. Incompatible
+  tuples abort the transaction and require audited host remediation.
+  Validation scans and the empty-attempt update run under `ACCESS EXCLUSIVE`
+  locks until transaction end; budget timeouts and downtime from rehearsal.
+  After commit, start 0.6.0 with `assert_runtime_schema_v5_compatible` and do
+  not restart v4 writers.
 
 ### Developer experience
 
@@ -146,10 +142,10 @@ See the v6 Migration requirements below before planning a host cutover.
 - Keep release-wrapper fixtures aligned with exact internal dependency pins
   and verify that non-exact pins are rejected before packaging.
 - Check documentation and doctests with default features as well as all
-  features, and correct renewal documentation to require the schema-v6 startup
+  features, and correct renewal documentation to require the schema-v5 startup
   assertion.
 - Share the current schema install selection between integration fixtures and
-  the independent SQLx metadata gate so both validate schema v6.
+  the independent SQLx metadata gate so both validate schema v5.
 - Make clean release preflight work under Bash 3.2 through 4.3 by avoiding
   nounset expansion of an empty optional-argument array. CI now exercises clean
   and `--allow-dirty` packaging under both current Bash and macOS Bash 3.2.

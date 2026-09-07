@@ -64,18 +64,9 @@ pub const V4_TO_V5_INCOMPATIBLE_ATTESTATION_AUDIT_SQL: &str =
 pub const V4_TO_V5_UPGRADE_SQL: &str = include_str!("../schema/v5/upgrade_from_v4.sql");
 
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// Complete current install artifact, for host migration packaging and tests.
-pub const V6_INSTALL_SQL: &str = include_str!("../schema/v6/install.sql");
-#[cfg(any(test, feature = "schema-contract-test-support"))]
-/// Read-only v5-to-v6 preflight for sizing retained evidence classification.
-pub const V5_TO_V6_PREFLIGHT_SQL: &str = include_str!("../schema/v6/preflight_from_v5.sql");
-#[cfg(any(test, feature = "schema-contract-test-support"))]
-/// Read-only audit of review-required v5 attempts that remain unclassified.
-pub const V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL: &str =
-    include_str!("../schema/v6/audit_unclassified_review_attempts_from_v5.sql");
-#[cfg(any(test, feature = "schema-contract-test-support"))]
-/// Forward-only v5-to-v6 upgrade; host applications own migration execution.
-pub const V5_TO_V6_UPGRADE_SQL: &str = include_str!("../schema/v6/upgrade_from_v5.sql");
+/// Read-only audit of v4 review and terminal host attempts with unclassified evidence.
+pub const V4_TO_V5_UNCLASSIFIED_REVIEW_AUDIT_SQL: &str =
+    include_str!("../schema/v5/audit_unclassified_review_attempts_from_v4.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
@@ -87,8 +78,7 @@ const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
 const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
-const V5_CATALOG_FINGERPRINT: u64 = 0xa565_eddd_a93b_3368;
-const V6_CATALOG_FINGERPRINT: u64 = 0x0a99_7a70_f2ff_0659;
+const V5_CATALOG_FINGERPRINT: u64 = 0x0a99_7a70_f2ff_0659;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 pub(crate) const INCOMPATIBLE_EXTERNAL_REVERSAL_DETAIL: &str =
@@ -485,26 +475,9 @@ pub async fn assert_runtime_schema_v4_compatible(
     .await
 }
 
-/// Asserts the complete canonical schema-v6 catalog before accepting billing work.
-/// The host must first apply its immutable install or v5-to-v6 upgrade. Read-only;
+/// Asserts the complete canonical schema-v5 catalog before accepting billing work.
+/// The host must first apply its immutable install or v4-to-v5 upgrade. Read-only;
 /// requires PostgreSQL 18 and never installs or migrates a database.
-pub async fn assert_runtime_schema_v6_compatible(
-    pool: &PgPool,
-) -> Result<(), SchemaConformanceError> {
-    assert_schema_conforms_in_read_only_snapshot(
-        pool,
-        6,
-        V5_CURRENT_SUBSCRIPTION_COLUMNS,
-        V6_CATALOG_FINGERPRINT,
-    )
-    .await
-}
-
-/// Checks the historical schema-v5 catalog while preparing a v6 cutover.
-///
-/// This is read-only and requires PostgreSQL 18. Success validates the old side
-/// of the migration only; current billing queries require schema v6 and
-/// [`assert_runtime_schema_v6_compatible`].
 pub async fn assert_runtime_schema_v5_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {

@@ -9,14 +9,12 @@ and transaction orchestration.
 
 - `src/lib.rs` — the public PostgreSQL operation facade and crate-private
   module ownership map.
-- `schema/v6/install.sql` — current authoritative fresh-install DDL;
-  `schema/v6/upgrade_from_v5.sql` is the forward-only classification cutover.
-  `schema/v1/**` through `schema/v5/**` are immutable.
-- `schema/v5/install.sql` — shipped predecessor;
-  `schema/v5/preflight_from_v4.sql`,
-  `audit_incompatible_attestations_from_v4.sql`, and `upgrade_from_v4.sql`
-  are the read-only preflight, minimized blocker audit, and forward-only v4
-  cutover artifacts.
+- `schema/v5/install.sql` — current unreleased fresh-install DDL;
+  `schema/v5/upgrade_from_v4.sql` combines tuple validation and evidence
+  classification in one forward-only cutover. `preflight_from_v4.sql`,
+  `audit_incompatible_attestations_from_v4.sql`, and
+  `audit_unclassified_review_attempts_from_v4.sql` provide read-only sizing
+  and blocker investigation. `schema/v1/**` through `schema/v4/**` are immutable.
 - `schema/current.rs` — shared current install selection for integration
   fixtures and the independent SQLx gate. Update it on each schema cutover;
   the fresh-install runtime conformance test validates the selected artifact.
@@ -31,7 +29,7 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v6 runtime compatibility
+- `src/schema_contract.rs` — production read-only v5 runtime compatibility
   assertion plus canonical catalog conformance. Version-specific, upgrade, and
   shared fixture tests live under `src/schema_contract/tests/`; checked-in
   install/upgrade SQL constants remain behind tests or the explicit
@@ -164,7 +162,7 @@ and transaction orchestration.
   Pass selected presentation fields to the core conversion before deciding
   presence; normalized absence must remain `None`. Keep the exact-plan
   identity prefix plus descending `(created_at, id)` keyset aligned with
-  `billing_payment_attempts_subscription_history_idx` in the current schema-v6
+  `billing_payment_attempts_subscription_history_idx` in the current schema-v5
   artifacts and the runtime schema contract. Keep first-page and continuation
   SQL as separate physical statements, with the continuation keyset as an
   unconditional index condition; the PostgreSQL generic-plan regression must
@@ -178,7 +176,7 @@ and transaction orchestration.
   fold so it is not unconditionally materialized before the outer page limit,
   and keep that keyset aligned with `billing_subscriptions_due_idx` for all-mode
   scans and `billing_subscriptions_due_mode_idx` for mode-specific scans in
-  both schema-v6 artifacts and the complete runtime index contract. Folding and
+  both schema-v5 artifacts and the complete runtime index contract. Folding and
   aligned indexes make early stopping available; PostgreSQL still chooses plans
   by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
@@ -233,7 +231,7 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
-- `assert_runtime_schema_v6_compatible` must reuse the complete canonical v6
+- `assert_runtime_schema_v5_compatible` must reuse the complete canonical v5
   catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
   major other than 18, and run no DDL; hosts apply versioned install and
   forward-only upgrade artifacts through their own migrations.

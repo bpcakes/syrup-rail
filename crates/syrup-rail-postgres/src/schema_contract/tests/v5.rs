@@ -12,7 +12,7 @@ async fn runtime_schema_v5_accepts_fresh_install_and_v4_upgrade() -> Result<(), 
     {
         return Err(io::Error::other("schema-v5 artifacts must not be empty").into());
     }
-    let fresh = TestDatabase::start_v5("sr_fresh_v5").await?;
+    let fresh = TestDatabase::start("sr_fresh_v5").await?;
     let upgraded = TestDatabase::start_v4("sr_upgrade_v5").await?;
     let result = async {
         upgraded.upgrade_v4_to_v5().await?;
@@ -198,6 +198,11 @@ async fn v4_to_v5_upgrade_rejects_incompatible_tuple_then_succeeds_after_remedia
                 == Some("billing_external_reversal_attestations_resolution_check")
         }));
         transaction.rollback().await?;
+        assert_eq!(
+            canonical_catalog_fingerprint(&database.pool).await?,
+            V4_CATALOG_FINGERPRINT,
+            "tuple rejection must preserve the complete v4 catalog",
+        );
 
         let constraint_definition = sqlx::query_scalar::<_, String>(
             r#"

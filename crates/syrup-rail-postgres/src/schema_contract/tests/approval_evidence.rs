@@ -1,12 +1,9 @@
 use super::*;
-use crate::schema_contract::{
-    V5_TO_V6_PREFLIGHT_SQL, V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL, V5_TO_V6_UPGRADE_SQL,
-    V6_CATALOG_FINGERPRINT,
-};
+use crate::schema_contract::{V4_TO_V5_PREFLIGHT_SQL, V4_TO_V5_UNCLASSIFIED_REVIEW_AUDIT_SQL};
 
 #[tokio::test]
-async fn fresh_v6_defaults_fail_closed_by_evidence_owner() -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("sr_v6_defaults").await?;
+async fn fresh_v5_defaults_fail_closed_by_evidence_owner() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("sr_v5_defaults").await?;
     let result = async {
         let defaults: Vec<(String, Option<String>)> = sqlx::query_as(
             r#"
@@ -50,42 +47,9 @@ async fn fresh_v6_defaults_fail_closed_by_evidence_owner() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn runtime_schema_v6_matches_fresh_install_and_v5_upgrade() -> Result<(), Box<dyn Error>> {
-    let fresh = TestDatabase::start("sr_fresh_v6").await?;
-    let upgraded = TestDatabase::start_v5("sr_upgrade_v6").await?;
-    let result = async {
-        assert!(
-            crate::assert_runtime_schema_v6_compatible(&upgraded.pool)
-                .await
-                .is_err()
-        );
-        let mut transaction = upgraded.pool.begin().await?;
-        sqlx::raw_sql(V5_TO_V6_UPGRADE_SQL)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await?;
-        let actual = canonical_catalog_fingerprint(&fresh.pool).await?;
-        assert_eq!(actual, canonical_catalog_fingerprint(&upgraded.pool).await?);
-        assert_eq!(
-            actual, V6_CATALOG_FINGERPRINT,
-            "v6 fingerprint: {actual:#018x}"
-        );
-        crate::assert_runtime_schema_v6_compatible(&fresh.pool).await?;
-        crate::assert_runtime_schema_v6_compatible(&upgraded.pool).await?;
-        Ok::<(), Box<dyn Error>>(())
-    }
-    .await;
-    let a = fresh.cleanup().await;
-    let b = upgraded.cleanup().await;
-    result?;
-    a?;
-    b
-}
-
-#[tokio::test]
-async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
+async fn v4_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start_v5("sr_v6_legacy").await?;
+    let database = TestDatabase::start_v4("sr_v5_legacy").await?;
     let result = async {
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let attempt_id = Uuid::now_v7();
@@ -178,11 +142,11 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
     sqlx::query("SET TRANSACTION READ ONLY")
         .execute(&mut *preflight)
         .await?;
-    let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(V5_TO_V6_PREFLIGHT_SQL)
+    let counts: (i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(V4_TO_V5_PREFLIGHT_SQL)
         .fetch_one(&mut *preflight)
         .await?;
-    assert_eq!(counts, (4, 1, 3, 0, 1, 1));
-    let audited = sqlx::query(V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL)
+    assert_eq!(counts, (1, 0, 4, 1, 3, 0, 1));
+    let audited = sqlx::query(V4_TO_V5_UNCLASSIFIED_REVIEW_AUDIT_SQL)
         .fetch_all(&mut *preflight)
         .await?;
     let mut audited_ids = audited
@@ -203,7 +167,7 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
         ORDER BY 1, 3";
     let retained_tuples: Vec<(String, String, String)> = sqlx::query_as(retained_tuples_sql)
         .fetch_all(&database.pool).await?;
-    database.upgrade_v5_to_v6().await?;
+    database.upgrade_v4_to_v5().await?;
     let upgraded_tuples: Vec<(String, String, String)> = sqlx::query_as(retained_tuples_sql)
         .fetch_all(&database.pool).await?;
     assert_eq!(retained_tuples, upgraded_tuples, "charge and attestation backfill must not update retained tuples");
@@ -340,7 +304,7 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
         error.as_database_error().and_then(|e| e.constraint()),
         Some("billing_payment_attempts_approval_evidence_check")
     );
-    crate::assert_runtime_schema_v6_compatible(&database.pool).await?;
+    crate::assert_runtime_schema_v5_compatible(&database.pool).await?;
         Ok::<(), Box<dyn Error>>(())
     }.await;
     let cleanup = database.cleanup().await;
@@ -349,9 +313,9 @@ async fn v5_upgrade_preserves_unclassified_evidence_and_rejects_invalid_labels()
 }
 
 #[tokio::test]
-async fn v5_cutover_rejects_unsupported_terminal_hosts_without_changing_admission()
+async fn v4_cutover_rejects_unsupported_terminal_hosts_without_changing_admission()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start_v5("sr_v6_terminal").await?;
+    let database = TestDatabase::start_v4("sr_v5_terminal").await?;
     let result = async {
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber = Uuid::now_v7();
@@ -399,12 +363,12 @@ async fn v5_cutover_rejects_unsupported_terminal_hosts_without_changing_admissio
             .execute(&database.pool)
             .await?;
         }
-        let count: i64 = sqlx::query(V5_TO_V6_PREFLIGHT_SQL)
+        let count: i64 = sqlx::query(V4_TO_V5_PREFLIGHT_SQL)
             .fetch_one(&database.pool)
             .await?
             .try_get("terminal_host_attempts_with_unclassified_evidence_count")?;
         assert_eq!(count, 2);
-        let audited = sqlx::query(V5_TO_V6_UNCLASSIFIED_REVIEW_AUDIT_SQL)
+        let audited = sqlx::query(V4_TO_V5_UNCLASSIFIED_REVIEW_AUDIT_SQL)
             .fetch_all(&database.pool)
             .await?;
         let mut ids = audited
@@ -428,16 +392,16 @@ async fn v5_cutover_rejects_unsupported_terminal_hosts_without_changing_admissio
             for after_rejected_upgrade in [false, true] {
                 if after_rejected_upgrade {
                     let error = database
-                        .upgrade_v5_to_v6()
+                        .upgrade_v4_to_v5()
                         .await
                         .expect_err("unsupported terminal history must reject the entire cutover");
                     let database_error = error.as_database_error().expect("SQL guard error");
                     assert_eq!(database_error.code().as_deref(), Some("23514"));
                     assert_eq!(
                         database_error.message(),
-                        "v6 cutover would strand terminal host-charge targets"
+                        "v5 cutover would strand terminal host-charge targets"
                     );
-                    crate::assert_runtime_schema_v5_compatible(&database.pool).await?;
+                    crate::assert_runtime_schema_v4_compatible(&database.pool).await?;
                 }
                 for id in [declined, unsubmitted] {
                     for mode in ["reserve", "release"] {
@@ -461,8 +425,8 @@ async fn v5_cutover_rejects_unsupported_terminal_hosts_without_changing_admissio
         sqlx::query("UPDATE billing_payment_attempts SET gateway_response_text = NULL")
             .execute(&database.pool)
             .await?;
-        database.upgrade_v5_to_v6().await?;
-        crate::assert_runtime_schema_v6_compatible(&database.pool).await?;
+        database.upgrade_v4_to_v5().await?;
+        crate::assert_runtime_schema_v5_compatible(&database.pool).await?;
         Ok::<(), Box<dyn Error>>(())
     }
     .await;

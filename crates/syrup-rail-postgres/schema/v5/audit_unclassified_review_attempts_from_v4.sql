@@ -1,5 +1,5 @@
--- Read-only audit of schema-v5 review-required and terminal host attempts that remain
--- unclassified after the v6 cutover.
+-- Read-only audit of schema-v4 review-required and terminal host attempts that remain
+-- unclassified after the v5 cutover.
 --
 -- The result exposes only canonical internal identifiers, lifecycle facts,
 -- and evidence-presence flags. Keep access and exports inside the host's

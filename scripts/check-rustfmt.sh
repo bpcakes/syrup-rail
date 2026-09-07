@@ -14,5 +14,7 @@ cargo fmt --all -- --check
 # without walking generated output or other ignored files.
 git ls-files -z --cached --others --exclude-standard -- \
   'crates/**/*.rs' 'tools/**/*.rs' | while IFS= read -r -d '' source_file; do
+  # Unstaged deletions remain in the index but are no longer source inputs.
+  [[ -f "$source_file" ]] || continue
   rustfmt --check --edition 2024 "$source_file"
 done

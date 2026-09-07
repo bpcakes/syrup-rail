@@ -55,14 +55,6 @@ impl TestDatabase {
         Self::start_with_install(project, current_schema::INSTALL_SQL).await
     }
 
-    pub(crate) async fn upgrade_v5_to_v6(&self) -> Result<(), sqlx::Error> {
-        let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(crate::schema_contract::V5_TO_V6_UPGRADE_SQL)
-            .execute(&mut *transaction)
-            .await?;
-        transaction.commit().await
-    }
-
     pub(crate) async fn start_v1(project: &str) -> Result<Self, Box<dyn Error>> {
         Self::start_with_install(project, V1_INSTALL_SQL).await
     }
@@ -170,7 +162,7 @@ impl TestDatabase {
         Ok(())
     }
 
-    pub(crate) async fn upgrade_v4_to_v5(&self) -> Result<(), Box<dyn Error>> {
+    pub(crate) async fn upgrade_v4_to_v5(&self) -> Result<(), sqlx::Error> {
         let mut transaction = self.pool.begin().await?;
         sqlx::raw_sql(V4_TO_V5_UPGRADE_SQL)
             .execute(&mut *transaction)

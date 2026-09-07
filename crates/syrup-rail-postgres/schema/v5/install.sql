@@ -1,4 +1,4 @@
--- Syrup Rail canonical PostgreSQL schema, version 4.
+-- Syrup Rail canonical PostgreSQL schema, version 5.
 --
 -- Hosts materialize this file byte-for-byte in an immutable migration, then
 -- add host identity, actor, credential, and target bindings separately.
@@ -370,6 +370,9 @@ CREATE TABLE public.billing_payment_attempts (
     subscription_initial_past_due_access text,
     billing_last_name text,
     required_gateway_account_mode text NOT NULL,
+    gateway_approval_evidence text NOT NULL DEFAULT 'absent'
+        CONSTRAINT billing_payment_attempts_approval_evidence_check
+        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured')),
     CONSTRAINT billing_payment_attempts_id_scope_account_key
         UNIQUE (id, billing_scope_id, gateway_account_id),
     CONSTRAINT billing_payment_attempts_id_owner_plan_key
@@ -1042,6 +1045,9 @@ CREATE TABLE public.billing_processor_charges (
     currency text NOT NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
+    gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
+        CONSTRAINT billing_processor_charges_approval_evidence_check
+        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured')),
     CONSTRAINT billing_processor_charges_id_attempt_key
         UNIQUE (id, attempt_id),
     CONSTRAINT billing_processor_charges_gateway_order_check
@@ -1314,7 +1320,8 @@ LANGUAGE plpgsql
 SET search_path = pg_catalog, public
 AS $$
 BEGIN
-    IF NEW.gateway_payment_method_reference IS DISTINCT FROM
+    IF NEW.gateway_approval_evidence IS DISTINCT FROM OLD.gateway_approval_evidence
+        OR NEW.gateway_payment_method_reference IS DISTINCT FROM
             OLD.gateway_payment_method_reference
         OR NEW.gateway_response IS DISTINCT FROM OLD.gateway_response
         OR NEW.gateway_response_code IS DISTINCT FROM
@@ -1367,6 +1374,7 @@ EXECUTE FUNCTION public.billing_set_processor_charge_attempt_dimensions();
 
 CREATE TRIGGER billing_processor_charge_evidence_immutable
 BEFORE UPDATE OF
+    gateway_approval_evidence,
     gateway_transaction_id,
     gateway_payment_method_reference,
     gateway_response,
@@ -1407,6 +1415,9 @@ CREATE TABLE public.billing_external_reversal_attestations (
     card_exp_month smallint,
     card_exp_year smallint,
     attested_at timestamptz NOT NULL,
+    gateway_approval_evidence text NOT NULL DEFAULT 'unclassified'
+        CONSTRAINT billing_external_reversal_attestations_approval_evidence_check
+        CHECK (gateway_approval_evidence IN ('unclassified', 'absent', 'text_only', 'structured')),
     CONSTRAINT billing_external_reversal_attestations_pkey
         PRIMARY KEY (attempt_id, gateway_transaction_id),
     CONSTRAINT billing_external_reversal_attestations_charge_key
@@ -2343,6 +2354,7 @@ BEGIN
                 AND attempts.resolved_at IS NULL
                 AND attempts.gateway_lifecycle_status = 'unknown'
                 AND attempts.refunded_amount_cents = 0
+                AND attempts.gateway_approval_evidence = 'absent'
                 AND attempts.gateway_transaction_id IS NULL
                 AND attempts.gateway_payment_method_reference IS NULL
                 AND attempts.gateway_response IS NULL
@@ -2368,10 +2380,15 @@ BEGIN
                 attempts.gateway_lifecycle_status = 'unknown'
                 AND attempts.refunded_amount_cents = 0
                 AND (
-                    attempts.status = 'declined'
-                    OR (
-                        attempts.status = 'failed'
-                        AND attempts.submitted_at IS NULL
+                    (
+                        attempts.gateway_approval_evidence = 'absent'
+                        AND (
+                            attempts.status = 'declined'
+                            OR (
+                                attempts.status = 'failed'
+                                AND attempts.submitted_at IS NULL
+                            )
+                        )
                     )
                     OR (
                         attempts.status IN ('declined', 'failed')
@@ -2413,6 +2430,7 @@ BEGIN
             AND attempts.resolved_at IS NULL
             AND attempts.gateway_lifecycle_status = 'unknown'
             AND attempts.refunded_amount_cents = 0
+            AND attempts.gateway_approval_evidence = 'absent'
             AND attempts.gateway_transaction_id IS NULL
             AND attempts.gateway_payment_method_reference IS NULL
             AND attempts.gateway_response IS NULL
@@ -2518,6 +2536,9 @@ BEGIN
                             IS NOT DISTINCT FROM charges.card_exp_month
                         AND attestations.card_exp_year
                             IS NOT DISTINCT FROM charges.card_exp_year
+                        AND attestations.gateway_approval_evidence
+                            IS NOT DISTINCT FROM
+                            charges.gateway_approval_evidence
                 )
             )
     )

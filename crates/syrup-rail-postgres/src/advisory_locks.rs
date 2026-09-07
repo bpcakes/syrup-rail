@@ -6,10 +6,10 @@ pub(crate) async fn lock_payment_method_domain(
     subscriber_id: SubscriberId,
     gateway_account_id: GatewayAccountId,
 ) -> Result<(), sqlx::Error> {
-    // This is the deployed pre-v6 approval writer key. Keep its bytes stable
+    // This is the deployed pre-v5 approval writer key. Keep its bytes stable
     // with those writers. Pre-0.6 scrub callers used a different key and must
-    // be stopped for the v6 cutover; they do not share this exclusion domain. A gateway-account ID already identifies its
-    // billing scope; adding the scope or a namespace prefix would split the
+    // be stopped for the v5 cutover; they do not share this exclusion domain.
+    // A gateway-account ID already identifies its billing scope; adding the scope or a namespace prefix would split the
     // lock domain from older writers.
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",

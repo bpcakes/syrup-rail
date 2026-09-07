@@ -2,8 +2,8 @@
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
 SQLx operations, and high-level subscription billing service. The unreleased
-workspace supports PostgreSQL 18 only and version 0.6.0 uses schema v6. Schema
-v5 is the intermediate cutover from v4.
+workspace supports PostgreSQL 18 only and version 0.6.0 uses schema v5,
+with one direct upgrade from the last released schema v4.
 
 ```toml
 [dependencies]
@@ -11,24 +11,18 @@ syrup-rail = "0.6.0"
 syrup-rail-postgres = "0.6.0"
 ```
 
-New hosts install `schema/v6/install.sql` through their normal migration
-system. Existing schema-v5 hosts stop billing writers, rehearse the additive
-cutover, and apply `schema/v6/upgrade_from_v5.sql` transactionally. Schemas v1
-through v5 are immutable. The [v6 guide](schema/v6/README.md) explains locking,
+New hosts install `schema/v5/install.sql` through their normal migration
+system. Existing schema-v4 hosts stop billing writers, rehearse the additive
+cutover, and apply `schema/v5/upgrade_from_v4.sql` transactionally. Schemas v1
+through v4 are immutable. The [v5 guide](schema/v5/README.md) explains locking,
 historical classification, deployment, and recovery.
-
-Schema v5 is already immutable. Its fresh-install SQL has a historical comment
-that says "version 4" even though the catalog and artifact are schema v5. Do
-not edit or locally repair that shipped file; use its checked-in bytes and the
-v5 catalog fingerprint as authority. Schema v6 artifacts carry the corrected
-version label.
 
 After the host applies its migration and before it serves billing traffic,
 verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v6_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v5_compatible(pool).await?;
 # Ok(())
 # }
 ```
@@ -192,7 +186,7 @@ any nested savepoint before consuming that value with `commit` or `rollback`.
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
 
-Version 0.6.0 requires schema v6; schema v5 is the intermediate cutover from v4.
+Version 0.6.0 requires schema v5, with one direct upgrade from schema v4.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
 raw client derives it from all decision/text occurrences before reducing fields.
 `Structured` preserves a possible processor charge even when the payment decision
@@ -207,5 +201,5 @@ their evidence available for audit and reconciliation. Mutation errors derive
 their evidence from certainty: proven
 non-submission is `Absent`, while indeterminate details stay `Unclassified`.
 Raw response strings are retained as evidence and are never interpreted by core
-financial policy. See the [schema-v6 cutover guide](schema/v6/README.md)
+financial policy. See the [schema-v5 cutover guide](schema/v5/README.md)
 for deployment and historical-evidence handling.
