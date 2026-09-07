@@ -9,6 +9,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::*;
 
+mod card_metadata;
+
 fn text(value: &str) -> SensitiveText {
     SensitiveText::new(value)
 }

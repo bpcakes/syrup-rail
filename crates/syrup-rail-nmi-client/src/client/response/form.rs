@@ -6,7 +6,7 @@ use crate::{PaymentDescriptor, PaymentOutcome, PaymentStatus, SensitiveText};
 
 use super::super::{
     WireError,
-    text::{last4, sensitive_gateway_field},
+    text::{last4, parse_expiry, sensitive_gateway_field},
 };
 use super::common::{
     DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
@@ -86,11 +86,15 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
     let (payment_type, _) =
         resolve_optional_scalar(collect_classic_scalar(&fields, &["type"], true).finish());
     let (card_brand, _) = resolve_optional_scalar(
-        collect_classic_scalar(&fields, &["cctype", "card_type"], true).finish(),
+        collect_classic_scalar(&fields, &["cctype", "card_type", "cc_type"], true)
+            .finish_normalized(str::to_ascii_lowercase),
     );
     let (card_number, _) = resolve_optional_scalar(
         collect_classic_scalar(&fields, &["cc_number", "ccnumber"], true).finish(),
     );
+    let (expiry, _) =
+        resolve_optional_scalar(collect_classic_scalar(&fields, &["cc_exp"], true).finish());
+    let (card_exp_month, card_exp_year) = parse_expiry(expiry.as_deref());
     Ok(PaymentOutcome {
         status,
         transaction_id,
@@ -103,8 +107,8 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
             payment_type: sensitive_gateway_field(payment_type),
             card_brand: sensitive_gateway_field(card_brand),
             card_last4: card_number.and_then(last4).map(SensitiveText::new),
-            card_exp_month: None,
-            card_exp_year: None,
+            card_exp_month,
+            card_exp_year,
         },
         diagnostics,
     }
@@ -143,8 +147,9 @@ pub(in crate::client) fn classic_form_has_payment_processing_evidence(
         &["avsresponse", "avs_response"][..],
         &["cvvresponse", "cvv_response"][..],
         &["type"][..],
-        &["cctype", "card_type"][..],
+        &["cctype", "card_type", "cc_type"][..],
         &["cc_number", "ccnumber"][..],
+        &["cc_exp"][..],
     ]
     .into_iter()
     .any(|aliases| {

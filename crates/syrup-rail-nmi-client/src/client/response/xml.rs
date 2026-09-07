@@ -8,7 +8,7 @@ use crate::{
 
 use super::super::{
     MAX_NMI_REPORT_ACTIONS, MAX_NMI_REPORT_RESPONSE_BYTES, MAX_NMI_TRANSACTION_REPORTS, WireError,
-    text::{last4, sensitive_gateway_field},
+    text::{last4, parse_expiry, sensitive_gateway_field},
     validation::trimmed_optional,
 };
 use super::common::{
@@ -239,10 +239,15 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
     let (payment_type, _) = resolve_optional_scalar(
         collect_xml_scalar(transaction, &["transaction_type"], true).finish(),
     );
-    let (card_brand, _) =
-        resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_type"], true).finish());
+    let (card_brand, _) = resolve_optional_scalar(
+        collect_xml_scalar(transaction, &["cc_type"], true)
+            .finish_normalized(str::to_ascii_lowercase),
+    );
     let (card_number, _) =
         resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_number"], true).finish());
+    let (expiry, _) =
+        resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_exp"], true).finish());
+    let (card_exp_month, card_exp_year) = parse_expiry(expiry.as_deref());
     Ok(Some(ExactQueryResponse {
         outcome: PaymentOutcome {
             status,
@@ -256,8 +261,8 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
                 payment_type: sensitive_gateway_field(payment_type),
                 card_brand: sensitive_gateway_field(card_brand),
                 card_last4: card_number.and_then(last4).map(SensitiveText::new),
-                card_exp_month: None,
-                card_exp_year: None,
+                card_exp_month,
+                card_exp_year,
             },
             diagnostics,
         }
