@@ -1,7 +1,7 @@
 use sqlx::PgConnection;
 use syrup_rail::{
-    BillingDeletionBlockers, DeletionBlockerQuery, PaymentAttemptKind, ScrubSubscriberBillingData,
-    ScrubbedBillingRows,
+    BillingDeletionBlockers, BillingScopeId, DeletionBlockerQuery, PaymentAttemptKind,
+    ScrubSubscriberBillingData, ScrubbedBillingRows, SubscriberId,
 };
 
 use crate::attempts::LocalAttemptPolicy;
@@ -123,23 +123,12 @@ pub async fn scrub_subscriber_billing_data(
     .fetch_all(&mut *connection)
     .await?;
     for gateway_account_id in gateway_account_ids {
-        sqlx::query(
-            r#"
-            SELECT pg_advisory_xact_lock(
-                hashtextextended(
-                    'syrup-rail:payment-method:'
-                    || $1::uuid::text || ':'
-                    || $2::uuid::text || ':'
-                    || $3::uuid::text,
-                    0
-                )
-            )
-            "#,
+        lock_payment_method_scrub_domain(
+            connection,
+            command.billing_scope_id(),
+            command.subscriber_id(),
+            &gateway_account_id,
         )
-        .bind(billing_scope_id)
-        .bind(gateway_account_id)
-        .bind(subscriber_id)
-        .execute(&mut *connection)
         .await?;
     }
 
@@ -190,6 +179,23 @@ pub async fn scrub_subscriber_billing_data(
     .rows_affected();
 
     Ok(ScrubbedBillingRows::new(payment_attempts, payment_methods))
+}
+
+/// Enters the deployed scrub domain. Its key is intentionally preserved for
+/// compatibility with v0.5.2 writers; callers coordinating both workflows also
+/// enter the approval domain before acquiring row locks.
+pub(crate) async fn lock_payment_method_scrub_domain(
+    connection: &mut PgConnection,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    gateway_account_id: &uuid::Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('syrup-rail:payment-method:' || $1::uuid::text || ':' || $2::uuid::text || ':' || $3::uuid::text, 0))")
+        .bind(billing_scope_id.as_uuid())
+        .bind(gateway_account_id)
+        .bind(subscriber_id.as_uuid())
+        .execute(connection).await?;
+    Ok(())
 }
 
 #[cfg(test)]

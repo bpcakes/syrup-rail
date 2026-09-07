@@ -25,6 +25,7 @@ mod mode_verified_gateway;
 mod operator_review;
 #[cfg(test)]
 mod paid_trial_dunning_tests;
+mod payment_method_metadata;
 mod processor_charge_persistence;
 mod processor_charges;
 mod reconciliation;
@@ -143,6 +144,10 @@ pub use operator_review::{
     ManualAttemptFailureHostStoreError, ManualAttemptFailureHostTransitionOutcome,
     OperatorReviewError, attempt_review_page, attest_external_reversal,
     fail_review_required_attempt, processor_charge_review_page,
+};
+pub use payment_method_metadata::{
+    PaymentMethodMetadataRefreshError, PaymentMethodMetadataRefreshOutcome,
+    RefreshPaymentMethodMetadata, refresh_payment_method_metadata,
 };
 pub use processor_charges::{
     CompensatingProcessorChargeOutcome, ProcessorChargeObservationOutcome,

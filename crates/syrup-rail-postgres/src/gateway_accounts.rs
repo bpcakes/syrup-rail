@@ -98,6 +98,30 @@ pub async fn activate_gateway_configuration(
     })
 }
 
+/// Loads both durable cooldowns from one snapshot; a missing row fails closed
+/// at the calling operation's boundary.
+pub(crate) async fn load_gateway_cooldown(
+    pool: &sqlx::PgPool,
+    account_id: syrup_rail::GatewayAccountId,
+    provider_key: &syrup_rail::GatewayProviderKey,
+) -> Result<Option<(bool, bool)>, sqlx::Error> {
+    sqlx::query_as(
+        r#"
+        SELECT
+            COALESCE(accounts.mutation_rate_limited_until > clock_timestamp(), false),
+            provider.rate_limited_until > clock_timestamp()
+        FROM billing_gateway_accounts AS accounts
+        INNER JOIN billing_gateway_provider_rate_limits AS provider
+            ON provider.provider_key = accounts.provider_key
+        WHERE accounts.id = $1 AND accounts.provider_key = $2
+        "#,
+    )
+    .bind(account_id.as_uuid())
+    .bind(provider_key.as_str())
+    .fetch_optional(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::{error::Error, io};

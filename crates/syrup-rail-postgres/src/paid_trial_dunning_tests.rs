@@ -522,6 +522,7 @@ async fn approve_enrollment(
 
 mod access_policy;
 mod cancellation;
+mod card_metadata;
 mod consumer_edges;
 mod enrollment;
 mod infrastructure;

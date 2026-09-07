@@ -84,29 +84,16 @@ impl SubscriptionBillingService {
         &self,
         account: &GatewayAccountSnapshot,
     ) -> Result<Option<GatewayMutationCooldownScope>, SubscriptionBillingServiceError> {
-        let row = sqlx::query_as::<_, (bool, bool)>(
-            r#"
-            SELECT
-                COALESCE(accounts.mutation_rate_limited_until > clock_timestamp(), false),
-                provider.rate_limited_until > clock_timestamp()
-            FROM billing_gateway_accounts AS accounts
-            INNER JOIN billing_gateway_provider_rate_limits AS provider
-                ON provider.provider_key = accounts.provider_key
-            WHERE accounts.id = $1 AND accounts.provider_key = $2
-            "#,
+        let row = crate::gateway_accounts::load_gateway_cooldown(
+            &self.pool,
+            account.account_id,
+            &account.provider_key,
         )
-        .bind(account.account_id.as_uuid())
-        .bind(account.provider_key.as_str())
-        .fetch_optional(&self.pool)
         .await?
         .ok_or(SubscriptionBillingServiceError::GatewayConfigurationChanged)?;
-        Ok(if row.1 {
-            Some(GatewayMutationCooldownScope::Provider)
-        } else if row.0 {
-            Some(GatewayMutationCooldownScope::Account)
-        } else {
-            None
-        })
+        Ok(GatewayMutationCooldownScope::from_active_flags(
+            row.0, row.1,
+        ))
     }
 
     pub(super) async fn resolve_subscriber_readiness_failure(

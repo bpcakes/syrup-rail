@@ -4,6 +4,23 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Read Classic NMI `cc_type` card-brand evidence and Classic/XML `cc_exp`
+  expiration metadata while preserving conflicting-field rejection and payment
+  decisions.
+
+### Added
+
+- Add `refresh_payment_method_metadata` and its subscription-service entrypoint
+  to fill missing saved-card display from one bounded read-only exact query.
+  Hosts can call it after approval or for explicit repair of existing approved
+  methods. Refresh preserves financial evidence and good display fields and
+  rejects stale responses after replacement or scrubbing. It retains provider
+  brand evidence for consistent portal display, allows missing optional vault
+  references, honors shared gateway cooldowns, and distinguishes absent
+  transactions from candidates changed during the query. Schema v4 is unchanged.
+
 ## [0.5.2] - 2026-09-04
 
 ### Fixed
