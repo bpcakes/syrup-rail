@@ -15,6 +15,12 @@ use crate::GatewayMutationCooldownScope;
 
 mod storage;
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static PAUSE_AFTER_WRITE: std::sync::Arc<tokio::sync::Notify>;
+    pub(crate) static EXTEND_WRITE_WAIT: ();
+}
+
 /// An authorized subscriber's latest approved attempt for a current saved method.
 ///
 /// Hosts supply canonical attempt identity after approval commits, or from retained
@@ -240,6 +246,15 @@ pub async fn refresh_payment_method_metadata(
         return Ok(Outcome::ChangedDuringQuery);
     }
     let outcome = fill_missing_fields(&mut transaction, &current, observation.descriptor()).await?;
+    // Pause only an explicitly scoped test future, with its write uncommitted.
+    #[cfg(test)]
+    if outcome == Outcome::Updated
+        && PAUSE_AFTER_WRITE
+            .try_with(|ready| ready.notify_one())
+            .is_ok()
+    {
+        std::future::pending::<()>().await;
+    }
     transaction.commit().await?;
     Ok(outcome)
 }

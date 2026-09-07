@@ -64,6 +64,12 @@ pub(super) async fn lock_candidate(
     candidate: &Candidate,
 ) -> Result<Option<Candidate>, sqlx::Error> {
     crate::enrollment_application::set_application_timeouts(connection).await?;
+    // Give the scoped cancellation test time to abort, with a server-side bound.
+    #[cfg(test)]
+    if super::EXTEND_WRITE_WAIT.try_with(|()| ()).is_ok() {
+        sqlx::query("SELECT set_config('lock_timeout', '60s', true), set_config('statement_timeout', '60s', true)")
+            .execute(&mut *connection).await?;
+    }
     // v0.5.2 scrub and approval use different domains. Enter both before any row
     // locks, then the approval plan aggregate. Neither lock is held during I/O.
     // The approval domain spans this subscriber's plans: it also stabilizes the

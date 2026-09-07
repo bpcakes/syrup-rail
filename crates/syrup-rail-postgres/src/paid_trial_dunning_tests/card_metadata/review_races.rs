@@ -128,6 +128,67 @@ async fn card_metadata_canceled_write_transaction_rolls_back_and_releases_connec
         .max_connections(1)
         .connect_with(options)
         .await?;
+    let provider = Arc::new(QueryGateway::new(Reply::observation(Some(metadata(
+        "txn_metadata",
+        None,
+        "Visa",
+        "1111",
+        Some(10),
+        Some(2029),
+    )))));
+    let resolver = fixture.resolver(provider.clone())?;
+    let pool = single.clone();
+    let command = fixture.command();
+    let written = Arc::new(Notify::new());
+    let mut pending = tokio::spawn(
+        crate::payment_method_metadata::PAUSE_AFTER_WRITE.scope(written.clone(), async move {
+            refresh_payment_method_metadata(&pool, &resolver, command).await
+        }),
+    );
+    tokio::select! {
+        ready = tokio::time::timeout(Duration::from_secs(3), written.notified()) => ready?,
+        outcome = &mut pending => panic!("refresh completed before the uncommitted write pause: {outcome:?}"),
+    }
+    assert_eq!(provider.queries.load(Ordering::SeqCst), 1);
+    assert!(
+        !pending.is_finished(),
+        "refresh must own an open write transaction"
+    );
+    assert_eq!(fixture.method_snapshot(&db.pool).await?, before);
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    // Reusing the only connection forces queued SQLx rollback to complete.
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        sqlx::query("SELECT 1").execute(&single),
+    )
+    .await??;
+    assert_eq!(fixture.method_snapshot(&db.pool).await?, before);
+    assert_eq!(fixture.financial_snapshot(&db.pool).await?, financial);
+    let resolver = fixture.resolver(provider)?;
+    assert_eq!(
+        refresh_payment_method_metadata(&single, &resolver, fixture.command()).await?,
+        Outcome::Updated
+    );
+    single.close().await;
+    db.cleanup().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn card_metadata_canceled_inflight_statement_rolls_back_and_releases_connection()
+-> Result<(), Box<dyn Error>> {
+    let db = TestDatabase::start("meta_query_abort").await?;
+    let fixture = Fixture::new(&db.pool).await?;
+    let before = fixture.method_snapshot(&db.pool).await?;
+    let financial = fixture.financial_snapshot(&db.pool).await?;
+    let options = (*db.pool.connect_options())
+        .clone()
+        .application_name("metadata_query_abort");
+    let single = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
     let mut blocker = db.pool.begin().await?;
     sqlx::query("SELECT id FROM billing_gateway_accounts WHERE id = $1 FOR UPDATE")
         .bind(fixture.account.gateway_account_id)
@@ -144,13 +205,16 @@ async fn card_metadata_canceled_write_transaction_rolls_back_and_releases_connec
     let resolver = fixture.resolver(provider.clone())?;
     let pool = single.clone();
     let command = fixture.command();
-    let pending =
-        tokio::spawn(
-            async move { refresh_payment_method_metadata(&pool, &resolver, command).await },
-        );
+    // Extend only this test transaction's deadlines beyond the 3 s observation
+    // window, so the usual 250 ms lock timeout cannot substitute for cancellation.
+    let pending = tokio::spawn(
+        crate::payment_method_metadata::EXTEND_WRITE_WAIT.scope((), async move {
+            refresh_payment_method_metadata(&pool, &resolver, command).await
+        }),
+    );
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'metadata_write_abort' AND wait_event_type = 'Lock')")
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'metadata_query_abort' AND datname = current_database() AND wait_event_type = 'Lock')")
                 .fetch_one(&db.pool).await?;
             if waiting { return Ok::<_, sqlx::Error>(()); }
             tokio::time::sleep(Duration::from_millis(5)).await;

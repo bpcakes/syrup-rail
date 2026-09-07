@@ -1,8 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn card_metadata_refresh_respects_both_existing_method_lock_domains()
--> Result<(), Box<dyn Error>> {
+async fn card_metadata_refresh_respects_method_and_account_locks() -> Result<(), Box<dyn Error>> {
     let db = TestDatabase::start("meta_locks").await?;
     let fixture = Fixture::new(&db.pool).await?;
     let provider = Arc::new(QueryGateway::new(Reply::observation(Some(metadata(
@@ -15,9 +14,9 @@ async fn card_metadata_refresh_respects_both_existing_method_lock_domains()
     )))));
     let resolver = fixture.resolver(provider.clone())?;
     let before = fixture.method_snapshot(&db.pool).await?;
-    for scrub in [false, true] {
+    for lock in ["scrub", "approval", "account"] {
         let mut tx = db.pool.begin().await?;
-        if scrub {
+        if lock == "scrub" {
             crate::deletion::lock_payment_method_scrub_domain(
                 &mut tx,
                 fixture.scope(),
@@ -25,13 +24,18 @@ async fn card_metadata_refresh_respects_both_existing_method_lock_domains()
                 &fixture.account.gateway_account_id,
             )
             .await?;
-        } else {
+        } else if lock == "approval" {
             crate::enrollment_application::lock_payment_method_domain(
                 &mut tx,
                 fixture.subscriber_id,
                 &fixture.account.gateway_account_id,
             )
             .await?;
+        } else {
+            sqlx::query("SELECT id FROM billing_gateway_accounts WHERE id = $1 FOR UPDATE")
+                .bind(fixture.account.gateway_account_id)
+                .execute(&mut *tx)
+                .await?;
         }
         let error = refresh_payment_method_metadata(&db.pool, &resolver, fixture.command())
             .await
