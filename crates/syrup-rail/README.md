@@ -68,6 +68,9 @@ without changing financial query evidence. The metadata result retains identity,
 status and diagnostics for rejection checks. The API provides no conversion to
 `ProcessorEvidence` and discards financial response fields; hosts must not
 reconstruct a financial approval from a display observation.
+Gateway decorators must forward `query_payment_method_metadata` to the wrapped
+gateway as well as the five required methods. Otherwise, the default projects
+the decorator's financial query and can omit the provider's enriched fields.
 
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
 define a transport wire format for billing events. Those remain host

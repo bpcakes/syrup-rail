@@ -214,7 +214,10 @@ remains strict; hosts retain normalized `ProcessorEvidence` for financial retrie
 The separate refresh error type does not use the financial service's
 `disposition()` method. A host may retry the same refresh with bounded backoff
 for storage SQLSTATE `40001`, `40P01`, `55P03`, or `57014`; other storage failures
-need investigation. A commit acknowledgement can be ambiguous, so a retry
+need investigation. The refresh error's ordinary `Display` and `Debug` omit
+details, but its SQLx error source retains database diagnostics for explicit
+inspection. Use the top-level format for logs; automatic source-chain formatting
+can expose database values. A commit acknowledgement can be ambiguous, so a retry
 rechecks current display. Refresh briefly shares the approval lock domain and
 locks the gateway-account identity through commit. It can therefore delay both
 approval application and account configuration/cooldown writes; keep its

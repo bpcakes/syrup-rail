@@ -229,6 +229,9 @@ pub trait PaymentGateway: Send + Sync {
     /// enrich display independently of durable evidence should override this
     /// method. Implementations must preserve exact selector validation and query
     /// error semantics and must not submit payment or vault mutations.
+    /// Gateway decorators must forward this method to their wrapped gateway to
+    /// preserve provider-specific enrichment; inheriting the default instead
+    /// projects the decorator's financial query result.
     async fn query_payment_method_metadata(
         &self,
         request: GatewayQueryRequest,
