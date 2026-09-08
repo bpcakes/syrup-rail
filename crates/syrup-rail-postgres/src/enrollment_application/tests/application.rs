@@ -1,3 +1,5 @@
+// agentic-loc-exception: Preserve the 0.5.2 test layout for this metadata patch; master already splits application/mode_and_evidence.rs for 0.6.0.
+
 use super::*;
 
 mod metadata_upgrade;
