@@ -47,6 +47,9 @@ case "$*" in
     printf '%s\n' "$RELEASE_TEST_REPO_ROOT"
     ;;
   "rev-parse --quiet --verify refs/tags/v0.3.0")
+    if [[ "${RELEASE_TEST_TAG_EXISTS:-false}" == true ]]; then
+      exit 0
+    fi
     exit 1
     ;;
   "status --porcelain")
@@ -72,7 +75,10 @@ case "${1:-}" in
     fi
     ;;
   package)
-    printf 'LICENSE\nREADME.md\n'
+    if [[ "${RELEASE_TEST_MISSING_LICENSE:-false}" != true ]]; then
+      printf 'LICENSE\n'
+    fi
+    printf 'README.md\n'
     ;;
   *)
     printf 'unexpected cargo command: %s\n' "$*" >&2
@@ -95,7 +101,7 @@ run_case() {
     RELEASE_TEST_DIRTY="$dirty" \
     RELEASE_TEST_CARGO_CALLS="$calls" \
     PATH="$test_root/bin:$PATH" \
-    "$shell" "$subject" 0.3.0 "$@" >/dev/null
+    "$shell" "$subject" "${RELEASE_TEST_MODE:-0.3.0}" "$@" >/dev/null
 
   if [[ "$(sed -n '1p' "$calls")" != "metadata --locked --no-deps --format-version 1" ]]; then
     printf 'unexpected metadata invocation for %s\n' "$name" >&2
@@ -115,25 +121,42 @@ run_case() {
 
 run_case "modern-clean" "$modern_bash" false ""
 run_case "modern-dirty" "$modern_bash" true " --allow-dirty" --allow-dirty
+RELEASE_TEST_MODE=--development run_case "modern-development" "$modern_bash" false ""
+RELEASE_TEST_MODE=--development run_case "modern-development-dirty" "$modern_bash" true " --allow-dirty" --allow-dirty
+
+# A missing packaged license must fail in either mode, even when Cargo succeeds.
+for mode in 0.3.0 --development; do
+  if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+    RELEASE_TEST_CARGO_CALLS="$test_root/missing-license-calls" \
+    RELEASE_TEST_MISSING_LICENSE=true \
+    PATH="$test_root/bin:$PATH" \
+    "$modern_bash" "$subject" "$mode" >"$test_root/missing-license-rejection" 2>&1; then
+    printf 'checker accepted a package without LICENSE in mode %s\n' "$mode" >&2
+    exit 1
+  fi
+  grep -Fqx 'syrup-rail package does not contain LICENSE.' "$test_root/missing-license-rejection"
+done
 
 # Reject each non-exact dependency before reaching Cargo, independently of the
 # successful packaging cases above.
 cp "$fixture_root/Cargo.toml" "$test_root/exact-Cargo.toml"
 for crate in syrup-rail syrup-rail-nmi-client syrup-rail-postgres syrup-rail-nmi; do
   sed "/^$crate = /s/\"=0.3.0\"/\"0.3.0\"/" "$test_root/exact-Cargo.toml" >"$fixture_root/Cargo.toml"
-  calls="$test_root/$crate-invalid-cargo-calls"
-  if RELEASE_TEST_REPO_ROOT="$fixture_root" \
-    RELEASE_TEST_CARGO_CALLS="$calls" \
-    PATH="$test_root/bin:$PATH" \
-    "$modern_bash" "$subject" 0.3.0 >"$test_root/rejection" 2>&1; then
-    printf 'release checker accepted a non-exact dependency: %s\n' "$crate" >&2
-    exit 1
-  fi
-  if ! grep -Fqx "Workspace dependency $crate is not pinned exactly to version 0.3.0." "$test_root/rejection" || [[ -e "$calls" ]]; then
-    printf 'unexpected dependency rejection for %s\n' "$crate" >&2
-    cat "$test_root/rejection" >&2
-    exit 1
-  fi
+  for mode in 0.3.0 --development; do
+    calls="$test_root/$crate-$mode-invalid-cargo-calls"
+    if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+      RELEASE_TEST_CARGO_CALLS="$calls" \
+      PATH="$test_root/bin:$PATH" \
+      "$modern_bash" "$subject" "$mode" >"$test_root/rejection" 2>&1; then
+      printf 'checker accepted a non-exact dependency: %s in mode %s\n' "$crate" "$mode" >&2
+      exit 1
+    fi
+    if ! grep -Fqx "Workspace dependency $crate is not pinned exactly to version 0.3.0." "$test_root/rejection" || [[ -e "$calls" ]]; then
+      printf 'unexpected dependency rejection for %s in mode %s\n' "$crate" "$mode" >&2
+      cat "$test_root/rejection" >&2
+      exit 1
+    fi
+  done
 done
 cp "$test_root/exact-Cargo.toml" "$fixture_root/Cargo.toml"
 
@@ -162,6 +185,17 @@ if ! grep -Fqx "CHANGELOG.md must have no unreleased changes before publishing v
 fi
 cp "$test_root/release-CHANGELOG.md" "$fixture_root/CHANGELOG.md"
 
+# Development checks permit unreleased work and do not need a dated release.
+cat >"$fixture_root/CHANGELOG.md" <<'EOF'
+## [Unreleased]
+
+### Changed
+
+- Work toward the next minor release.
+EOF
+RELEASE_TEST_MODE=--development run_case "unreleased-development" "$modern_bash" false ""
+cp "$test_root/release-CHANGELOG.md" "$fixture_root/CHANGELOG.md"
+
 cat >"$fixture_root/CHANGELOG.md" <<'EOF'
 ## [Upcoming]
 
@@ -184,9 +218,21 @@ if ! grep -Fqx "CHANGELOG.md must contain exactly one canonical ## [Unreleased] 
 fi
 cp "$test_root/release-CHANGELOG.md" "$fixture_root/CHANGELOG.md"
 
+RELEASE_TEST_TAG_EXISTS=true RELEASE_TEST_MODE=--development \
+  run_case "tagged-development" "$modern_bash" false ""
+if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+  RELEASE_TEST_TAG_EXISTS=true \
+  PATH="$test_root/bin:$PATH" \
+  "$modern_bash" "$subject" 0.3.0 >"$test_root/tag-rejection" 2>&1; then
+  printf 'release checker accepted an existing release tag\n' >&2
+  exit 1
+fi
+grep -Fqx 'Tag v0.3.0 already exists.' "$test_root/tag-rejection"
+
 if [[ -x /bin/bash ]] && /bin/bash -c '[[ ${BASH_VERSINFO[0]} -eq 3 && ${BASH_VERSINFO[1]} -eq 2 ]]'; then
   run_case "bash-3.2-clean" /bin/bash false ""
   run_case "bash-3.2-dirty" /bin/bash true " --allow-dirty" --allow-dirty
+  RELEASE_TEST_MODE=--development run_case "bash-3.2-development" /bin/bash false ""
 elif [[ "$require_bash_32" == true ]]; then
   printf 'Bash 3.2 is required in this compatibility job.\n' >&2
   exit 1

@@ -4,14 +4,18 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: scripts/check-release.sh VERSION [--allow-dirty]
+       scripts/check-release.sh --development [--allow-dirty]
 
 Validate the workspace version, internal dependency requirements, changelog,
 tag availability, lockfile, and package file sets for a Syrup Rail release.
+Development mode checks the current workspace version and packages without
+requiring a finalized release changelog or an unused release tag.
 EOF
 }
 
 version="${1:-}"
 allow_dirty=false
+development=false
 
 if [[ -z "$version" || "$version" == "-h" || "$version" == "--help" ]]; then
   usage
@@ -20,6 +24,9 @@ if [[ -z "$version" || "$version" == "-h" || "$version" == "--help" ]]; then
 fi
 
 shift
+if [[ "$version" == "--development" ]]; then
+  development=true
+fi
 while (($#)); do
   case "$1" in
     --allow-dirty)
@@ -34,7 +41,7 @@ while (($#)); do
   shift
 done
 
-if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+if [[ "$development" == false && ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo "VERSION must be a semantic version such as 0.1.1." >&2
   exit 2
 fi
@@ -55,6 +62,14 @@ workspace_version="$({
     }
   ' Cargo.toml
 })"
+
+if [[ "$development" == true ]]; then
+  version="$workspace_version"
+  if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    echo "Workspace version must be a stable semantic version." >&2
+    exit 1
+  fi
+fi
 
 if [[ "$workspace_version" != "$version" ]]; then
   echo "Workspace version is ${workspace_version:-<missing>}, expected $version." >&2
@@ -90,24 +105,26 @@ if [[ "$unreleased_heading_count" -ne 1 ]]; then
   exit 1
 fi
 
-unreleased_body="$(awk '
+if [[ "$development" == false ]]; then
+  unreleased_body="$(awk '
   $0 == "## [Unreleased]" { in_unreleased = 1; next }
   in_unreleased && /^## \[/ { exit }
   in_unreleased && NF { print }
 ' CHANGELOG.md)"
-if [[ "$unreleased_body" != "_No unreleased changes._" ]]; then
-  echo "CHANGELOG.md must have no unreleased changes before publishing v$version." >&2
-  exit 1
-fi
+  if [[ "$unreleased_body" != "_No unreleased changes._" ]]; then
+    echo "CHANGELOG.md must have no unreleased changes before publishing v$version." >&2
+    exit 1
+  fi
 
-if ! grep -Fq "## [$version] -" CHANGELOG.md; then
-  echo "CHANGELOG.md has no dated $version release heading." >&2
-  exit 1
-fi
+  if ! grep -Fq "## [$version] -" CHANGELOG.md; then
+    echo "CHANGELOG.md has no dated $version release heading." >&2
+    exit 1
+  fi
 
-if git rev-parse --quiet --verify "refs/tags/v$version" >/dev/null; then
-  echo "Tag v$version already exists." >&2
-  exit 1
+  if git rev-parse --quiet --verify "refs/tags/v$version" >/dev/null; then
+    echo "Tag v$version already exists." >&2
+    exit 1
+  fi
 fi
 
 if [[ "$allow_dirty" == false ]] && [[ -n "$(git status --porcelain)" ]]; then
@@ -134,4 +151,8 @@ for crate in "${publishable_crates[@]}"; do
   done
 done
 
-echo "Release metadata and package file sets are ready for v$version."
+if [[ "$development" == true ]]; then
+  echo "Development metadata and package file sets are valid for v$version."
+else
+  echo "Release metadata and package file sets are ready for v$version."
+fi

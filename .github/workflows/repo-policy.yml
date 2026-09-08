@@ -3,37 +3,49 @@ name: Repo Policy
 on:
   pull_request:
     paths:
-
       - "crates/**"
-
+      - "tools/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - ".clippy.toml"
+      - "clippy.toml"
       - ".jig.toml"
       - ".agent/jig-contract.json"
-      - "scripts/jig"
-      - "scripts/install-jig.sh"
-
-      - "crates/syrup-rail-postgres/schema/**"
-      - "scripts/check-schema-immutability.sh"
-      - "scripts/tests/check-schema-immutability.sh"
-
-      - ".github/workflows/repo-policy.yml"
+      - "scripts/**"
+      - ".cargo/**"
+      - ".github/workflows/**"
+      - "LICENSE"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "docs/releasing.md"
+      - "docs/public-api.md"
+      - "docs/security/dependency-advisories.md"
   push:
     branches:
       - "main"
       - "master"
     paths:
-
       - "crates/**"
-
+      - "tools/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain"
+      - "rust-toolchain.toml"
+      - ".clippy.toml"
+      - "clippy.toml"
       - ".jig.toml"
       - ".agent/jig-contract.json"
-      - "scripts/jig"
-      - "scripts/install-jig.sh"
-
-      - "crates/syrup-rail-postgres/schema/**"
-      - "scripts/check-schema-immutability.sh"
-      - "scripts/tests/check-schema-immutability.sh"
-
-      - ".github/workflows/repo-policy.yml"
+      - "scripts/**"
+      - ".cargo/**"
+      - ".github/workflows/**"
+      - "LICENSE"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "docs/releasing.md"
+      - "docs/public-api.md"
+      - "docs/security/dependency-advisories.md"
   merge_group:
     types:
       - checks_requested
@@ -61,6 +73,8 @@ jobs:
         with:
           cache: false
           rustflags: ""
+      - name: Check repository contract
+        run: scripts/jig check contract
       - name: Detect disallowed mod.rs files
         run: |
           scripts/jig check no-mod-rs
@@ -81,24 +95,19 @@ jobs:
         with:
           cache: false
           rustflags: ""
+      - name: Test CI comparison bases
+        run: scripts/tests/ci-base-ref.sh
       - name: Check Rust file LOC policy
         env:
-          JIG_DEFAULT_BRANCH: "master"
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
           set -euo pipefail
-          if git rev-parse --verify "origin/$JIG_DEFAULT_BRANCH" >/dev/null 2>&1; then
-            base_ref="$(git merge-base HEAD "origin/$JIG_DEFAULT_BRANCH")"
-          elif git rev-parse --verify HEAD^ >/dev/null 2>&1; then
-            base_ref="HEAD^"
-          else
-            base_ref="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
-          fi
+          base_ref="$(scripts/ci-base-ref.sh)"
           echo "Using Rust LOC base ref: $base_ref"
           scripts/jig check rust-file-loc --changed-against "$base_ref"
 
-
   sqlx-metadata:
-    name: Verify SQLx metadata against schema v1
+    name: Verify SQLx metadata against the current schema
     runs-on: "ubuntu-latest"
     defaults:
       run:

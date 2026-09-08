@@ -20,6 +20,18 @@ with an older or newer core package.
 
 ## Preflight
 
+Pull requests and pushes to `master` or `main` run
+`scripts/check-release.sh --development`. This checks the current workspace
+version, exact internal dependencies, locked Cargo metadata, and each package's
+license and README without requiring the changelog to be finalized. For local
+work in progress, add `--allow-dirty`.
+
+CI also runs `crates/syrup-rail-nmi-client/check-standalone.sh` with stable Rust
+and Rust 1.88.0. It creates and extracts the client archive, then tests it outside
+the workspace. The other crates depend on matching unpublished workspace
+versions, so their registry-backed `cargo publish --dry-run` checks still run
+in dependency order during publishing.
+
 Update the workspace version, internal dependency requirements, `Cargo.lock`,
 and `CHANGELOG.md`. Install the exact additional release tools when they are
 not already available:

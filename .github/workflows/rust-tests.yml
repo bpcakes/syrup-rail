@@ -3,13 +3,8 @@ name: Rust Tests
 on:
   pull_request:
     paths:
-
       - "crates/**"
-
-
-      - "crates/syrup-rail-postgres/schema/**"
-      - "crates/syrup-rail-postgres/.sqlx/**"
-
+      - "tools/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain"
@@ -18,32 +13,22 @@ on:
       - "clippy.toml"
       - ".jig.toml"
       - ".agent/jig-contract.json"
-      - "scripts/jig"
-      - "scripts/install-jig.sh"
-      - "scripts/check-advisories.sh"
-      - "scripts/tests/check-advisories.sh"
-      - "scripts/check-release.sh"
-      - "scripts/tests/check-release.sh"
-      - "scripts/check-public-api.sh"
-      - "scripts/check-rustfmt.sh"
-      - "scripts/tests/check-rustfmt.sh"
+      - "scripts/**"
+      - ".cargo/**"
+      - ".github/workflows/**"
+      - "LICENSE"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "docs/releasing.md"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
-      - ".cargo/**"
-      - ".github/workflows/dependency-advisories.yml"
-      - ".github/workflows/rust-tests.yml"
   push:
     branches:
       - "main"
       - "master"
     paths:
-
       - "crates/**"
-
-
-      - "crates/syrup-rail-postgres/schema/**"
-      - "crates/syrup-rail-postgres/.sqlx/**"
-
+      - "tools/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "rust-toolchain"
@@ -52,20 +37,15 @@ on:
       - "clippy.toml"
       - ".jig.toml"
       - ".agent/jig-contract.json"
-      - "scripts/jig"
-      - "scripts/install-jig.sh"
-      - "scripts/check-advisories.sh"
-      - "scripts/tests/check-advisories.sh"
-      - "scripts/check-release.sh"
-      - "scripts/tests/check-release.sh"
-      - "scripts/check-public-api.sh"
-      - "scripts/check-rustfmt.sh"
-      - "scripts/tests/check-rustfmt.sh"
+      - "scripts/**"
+      - ".cargo/**"
+      - ".github/workflows/**"
+      - "LICENSE"
+      - "README.md"
+      - "CHANGELOG.md"
+      - "docs/releasing.md"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
-      - ".cargo/**"
-      - ".github/workflows/dependency-advisories.yml"
-      - ".github/workflows/rust-tests.yml"
   merge_group:
     types:
       - checks_requested
@@ -102,6 +82,45 @@ jobs:
         env:
           RELEASE_TEST_REQUIRE_BASH_32: "${{ matrix.require_bash_32 }}"
         run: scripts/tests/check-release.sh
+
+  packages:
+    name: Development package metadata
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
+      - name: Check workspace versions and package contents
+        run: scripts/check-release.sh --development
+
+  standalone-client:
+    name: Standalone NMI client (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, "1.88.0"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Install stable Cargo for packaging
+        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
+        with:
+          cache: false
+          rustflags: ""
+          toolchain: stable
+      - name: Install test toolchain
+        env:
+          TEST_TOOLCHAIN: ${{ matrix.toolchain }}
+        run: rustup toolchain install "$TEST_TOOLCHAIN" --profile minimal
+      - name: Test the extracted package outside the workspace
+        env:
+          RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+        run: crates/syrup-rail-nmi-client/check-standalone.sh
 
   msrv:
     name: Rust 1.88 workspace check
