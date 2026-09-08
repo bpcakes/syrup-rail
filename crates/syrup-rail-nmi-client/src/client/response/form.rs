@@ -107,6 +107,8 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
             payment_type: sensitive_gateway_field(payment_type),
             card_brand: sensitive_gateway_field(card_brand),
             card_last4: card_number.and_then(last4).map(SensitiveText::new),
+            // Financial normalization is a durable replay contract. Enrich
+            // missing display through the separate metadata query instead.
             card_exp_month: None,
             card_exp_year: None,
         },
@@ -147,8 +149,9 @@ pub(in crate::client) fn classic_form_has_payment_processing_evidence(
         &["avsresponse", "avs_response"][..],
         &["cvvresponse", "cvv_response"][..],
         &["type"][..],
-        &["cctype", "card_type"][..],
+        &["cctype", "card_type", "cc_type"][..],
         &["cc_number", "ccnumber"][..],
+        &["cc_exp"][..],
     ]
     .into_iter()
     .any(|aliases| {

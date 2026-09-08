@@ -157,6 +157,40 @@ See the v5 Migration requirements below before planning a host cutover.
 - Clarify lifecycle outcome counts versus newly staged reconciliation rows and
   the feature required to validate schema v4 while preparing the v5 cutover.
 
+## [0.5.3] - 2026-09-08
+
+### Fixed
+
+- Restore missing NMI card brand, last four digits, and expiry through a dedicated
+  metadata query while preserving 0.5.2 financial descriptor normalization and
+  immutable replay equality. Retained approvals can reconcile before missing
+  display fields are filled.
+- Treat Classic `cc_type` and `cc_exp` fields on HTTP-error mutation responses as
+  possible payment-processing evidence, preventing an unsafe same-key retry.
+
+### Added
+
+- Add `PaymentGateway::query_payment_method_metadata` with a default
+  implementation for existing providers and a metadata-only result type. NMI
+  overrides it to enrich display independently of financial sale/query evidence,
+  reusing exact-selector validation and bounded query transport.
+
+- Add `refresh_payment_method_metadata` and its subscription-service entrypoint
+  to fill missing saved-card display from one bounded read-only exact query.
+  Hosts can call it after approval or for explicit repair of existing approved
+  methods. Refresh preserves financial evidence and good display fields and
+  rejects stale responses after replacement or scrubbing. It retains provider
+  brand evidence for consistent portal display, allows missing optional vault
+  references, honors shared gateway cooldowns, and distinguishes absent
+  transactions from candidates changed during the query. Methods shared across
+  plans remain repairable using their latest approval. Schema v4 is unchanged.
+  Initial database reads and write revalidation use bounded lock and statement
+  waits; database connections are released before the provider query.
+
+Hosts must invoke refresh to populate missing display metadata; upgrading alone
+does not backfill saved methods. Gateway decorators must forward the metadata
+query to retain provider-specific enrichment.
+
 ## [0.5.2] - 2026-09-04
 
 ### Fixed
@@ -980,7 +1014,8 @@ See the v5 Migration requirements below before planning a host cutover.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/bpcakes/syrup-rail/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/bpcakes/syrup-rail/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/bpcakes/syrup-rail/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...v0.5.0

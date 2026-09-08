@@ -24,7 +24,8 @@ command/outcome types for application-independent subscription billing.
 - `src/subscription/{grant,discount,access}.rs` own their separate entitlement
   sources and policies; `src/subscription.rs` retains subscription lifecycle
   and cancellation facts while re-exporting the established public paths.
-- `src/{gateway,gateway_value,resolver}.rs` own the five-method provider port,
+- `src/{gateway,gateway_value,resolver}.rs` own the provider port with five required
+  operations and a default metadata-only query,
   typed evidence, sensitive values, provider-I/O-free host resolver contract,
   and diagnostic boundary.
 - `src/audit_reason.rs` owns private normalization, Unicode length bounds, and

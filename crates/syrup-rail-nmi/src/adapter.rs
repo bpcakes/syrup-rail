@@ -3,9 +3,9 @@ use chrono::Duration;
 use syrup_rail::{
     BillingContact, GatewayAccountMode, GatewayDiagnostic, GatewayError, GatewayLifecycleCursorKey,
     GatewayLifecycleQueryPolicy, GatewayMutationError, GatewayNotSubmittedError, GatewayOrderId,
-    GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentOutcome,
-    GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest, GatewaySaleIntent,
-    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId,
+    GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentMethodMetadata,
+    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest,
+    GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId,
     GatewayTransactionReport, GatewayTransactionReportRequest, PaymentGateway, ProcessorEvidence,
 };
 use syrup_rail_nmi_client::{
@@ -128,6 +128,43 @@ impl PaymentGateway for NmiPaymentGateway {
             .map(|report| map_transaction_report_parts(report.into_parts()))
             .collect())
     }
+
+    async fn query_payment_method_metadata(
+        &self,
+        request: GatewayQueryRequest,
+    ) -> Result<Option<GatewayPaymentMethodMetadata>, GatewayError> {
+        let (transaction_id, order_id) = request.into_parts();
+        self.client
+            .query_payment_method_metadata(TransactionQuery {
+                transaction_id: transaction_id.map(GatewayTransactionId::into_inner),
+                order_id: order_id.map(GatewayOrderId::into_inner),
+            })
+            .await
+            .map(|metadata| metadata.map(map_payment_method_metadata))
+            .map_err(map_query_error)
+    }
+}
+
+fn map_payment_method_metadata(
+    metadata: syrup_rail_nmi_client::PaymentMethodMetadata,
+) -> GatewayPaymentMethodMetadata {
+    let parts = metadata.into_parts();
+    // Reuse identity admission and diagnostic normalization, then discard all
+    // financial authority before returning across the metadata query boundary.
+    GatewayPaymentMethodMetadata::from_query_outcome(map_payment_outcome_parts(
+        PaymentOutcomeParts {
+            status: parts.status,
+            approval_evidence: syrup_rail_nmi_client::PaymentApprovalEvidence::Absent,
+            transaction_id: parts.transaction_id,
+            customer_vault_id: parts.customer_vault_id,
+            descriptor: parts.descriptor,
+            diagnostics: parts.diagnostics,
+            response: None,
+            response_code: None,
+            response_text: None,
+            condition: None,
+        },
+    ))
 }
 
 fn map_account_mode(mode: AccountMode) -> GatewayAccountMode {

@@ -50,6 +50,7 @@ fn query_outcome_from_xml(text: &str) -> Result<Option<PaymentOutcome>, WireErro
     )
 }
 
+mod card_metadata;
 mod classic_response;
 mod concurrency;
 mod form_requests;

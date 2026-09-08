@@ -1,3 +1,5 @@
+// agentic-loc-exception: Preserve the 0.5.2 layout for this metadata patch; master already splits gateway/outcome.rs for 0.6.0.
+
 use std::{fmt, num::NonZeroU32};
 
 use chrono::{DateTime, Duration, Utc};
@@ -24,7 +26,10 @@ pub use self::port::{
 };
 
 mod lifecycle;
+mod metadata;
 mod port;
+
+pub use self::metadata::GatewayPaymentMethodMetadata;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayAccountMode {

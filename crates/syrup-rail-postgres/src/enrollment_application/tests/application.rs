@@ -1,6 +1,7 @@
 use super::*;
 
 mod integration_regressions;
+mod metadata_upgrade;
 mod renewal_parking;
 mod retry_and_parking;
 

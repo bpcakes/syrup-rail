@@ -19,6 +19,30 @@ methods. The host supplies four policy boundaries:
 - `BillingTransactionCoordinator` locks the authorized host subject first and
   appends typed events to the host outbox on the same transaction.
 
+The additive 0.5.3 `refresh_payment_method_metadata` service method (also a
+standalone PostgreSQL function) repairs missing display for a current saved
+method after approval has committed. `RefreshPaymentMethodMetadata` selects an
+authorized scope, subscriber, and the latest approved attempt for that method.
+It performs at most one read-only exact provider query with a 10-second timeout,
+then revalidates canonical identity before filling absent card fields. It uses
+its own `PaymentMethodMetadataRefreshOutcome` and
+`PaymentMethodMetadataRefreshError`: a query failure never changes the approved
+payment result and permits a separately scheduled refresh retry. `NotFound`
+distinguishes an absent transaction observation; `Updated` and `Unchanged` do
+not promise complete display. `Ineligible` stops before provider I/O;
+`ChangedDuringQuery` asks the host to re-read current state before retrying.
+`CooldownActive` honors the existing durable account/provider throttle. A
+rate-limited query extends the shared provider cooldown, pausing financial
+readiness and renewal dispatch for every account sharing that provider key.
+`RateLimitCooldownPersistenceFailed` retains both query and storage errors;
+hosts must still back off if the cooldown could not be recorded. Hosts must
+authorize the subject and cap retries and concurrency per subscriber, account,
+and provider, including calls
+from user-facing endpoints. This call does not invoke the end-user financial
+mutation admission hook or append billing events. See the
+[PostgreSQL integration guide](../crates/syrup-rail-postgres/README.md) for replay,
+replacement, scrub, and historical-repair behavior. No schema change is needed.
+
 The compiled `syrup-rail-postgres` `host_integration` example is the canonical
 composition guide. `SubscriptionBillingServiceError::disposition()` is the
 stable operational classification boundary; callers retain a wildcard because

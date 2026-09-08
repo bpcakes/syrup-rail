@@ -1,5 +1,15 @@
 # syrup-rail-nmi-client
 
+Use `Client::query_payment_method_metadata` for enriched saved-card display.
+It returns `PaymentMethodMetadata`, which exposes correlation, status,
+diagnostics and descriptor parts without financial response evidence. It uses
+the same bounded transport and exact-selector validation as `query_transaction`.
+The existing financial sale/query APIs retain their 0.5.2 descriptor semantics;
+newly recognized XML expiry is confined to the metadata query. Metadata queries
+also accept repeated brands that differ only in case, retaining a spelling the
+provider sent; financial queries keep the original case-sensitive duplicate
+rule. Existing JSON expiry parsing remains unchanged.
+
 `syrup-rail-nmi-client` is a concrete asynchronous client for NMI payment APIs. It
 supports account-mode lookup, sales, Customer Vault payment method storage,
 individual transaction lookup, and paginated transaction reports. It does not

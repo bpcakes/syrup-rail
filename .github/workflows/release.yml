@@ -146,8 +146,8 @@ jobs:
 
           publish_crate syrup-rail
           publish_crate syrup-rail-nmi-client
-          publish_crate syrup-rail-postgres
           publish_crate syrup-rail-nmi
+          publish_crate syrup-rail-postgres
 
   tag:
     name: Tag v${{ inputs.version }}

@@ -8,7 +8,7 @@ use crate::{
 
 use super::super::{
     MAX_NMI_REPORT_ACTIONS, MAX_NMI_REPORT_RESPONSE_BYTES, MAX_NMI_TRANSACTION_REPORTS, WireError,
-    text::{last4, sensitive_gateway_field},
+    text::{last4, parse_expiry, sensitive_gateway_field},
     validation::trimmed_optional,
 };
 use super::common::{
@@ -139,7 +139,29 @@ pub(in crate::client) fn query_outcome_for_request_from_xml(
     text: &str,
     request: &TransactionQuery,
 ) -> Result<Option<PaymentOutcome>, WireError> {
-    let Some(response) = exact_query_response_from_xml(text)? else {
+    query_outcome_for_purpose(text, request, DescriptorPurpose::FinancialEvidence)
+}
+
+pub(in crate::client) fn query_metadata_for_request_from_xml(
+    text: &str,
+    request: &TransactionQuery,
+) -> Result<Option<crate::PaymentMethodMetadata>, WireError> {
+    query_outcome_for_purpose(text, request, DescriptorPurpose::DisplayMetadata)
+        .map(|outcome| outcome.map(crate::PaymentMethodMetadata::from_query_outcome))
+}
+
+#[derive(Clone, Copy)]
+enum DescriptorPurpose {
+    FinancialEvidence,
+    DisplayMetadata,
+}
+
+fn query_outcome_for_purpose(
+    text: &str,
+    request: &TransactionQuery,
+    purpose: DescriptorPurpose,
+) -> Result<Option<PaymentOutcome>, WireError> {
+    let Some(response) = exact_query_response_from_xml(text, purpose)? else {
         return Ok(None);
     };
     // The gateway response must echo every selector supplied by the caller.
@@ -181,7 +203,10 @@ fn bind_exact_query_identifier(
     )))
 }
 
-fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse>, WireError> {
+fn exact_query_response_from_xml(
+    text: &str,
+    purpose: DescriptorPurpose,
+) -> Result<Option<ExactQueryResponse>, WireError> {
     let document = parse_transaction_report_xml(text)?;
     let envelope = successful_query_response_root(&document, "exact query")?;
     let transaction_count = direct_element_count_without_nested_matches(
@@ -242,10 +267,23 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
     let (payment_type, _) = resolve_optional_scalar(
         collect_xml_scalar(transaction, &["transaction_type"], true).finish(),
     );
-    let (card_brand, _) =
-        resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_type"], true).finish());
+    let brand = collect_xml_scalar(transaction, &["cc_type"], true);
+    let (card_brand, _) = resolve_optional_scalar(match purpose {
+        DescriptorPurpose::FinancialEvidence => brand.finish(),
+        DescriptorPurpose::DisplayMetadata => brand.finish_normalized(str::to_ascii_lowercase),
+    });
     let (card_number, _) =
         resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_number"], true).finish());
+    let (card_exp_month, card_exp_year) = match purpose {
+        // Preserve the descriptor that v0.5.2 stored as immutable evidence.
+        DescriptorPurpose::FinancialEvidence => (None, None),
+        DescriptorPurpose::DisplayMetadata => {
+            let (expiry, _) = resolve_optional_scalar(
+                collect_xml_scalar(transaction, &["cc_exp"], true).finish(),
+            );
+            parse_expiry(expiry.as_deref())
+        }
+    };
     Ok(Some(ExactQueryResponse {
         outcome: PaymentOutcome {
             status,
@@ -260,8 +298,8 @@ fn exact_query_response_from_xml(text: &str) -> Result<Option<ExactQueryResponse
                 payment_type: sensitive_gateway_field(payment_type),
                 card_brand: sensitive_gateway_field(card_brand),
                 card_last4: card_number.and_then(last4).map(SensitiveText::new),
-                card_exp_month: None,
-                card_exp_year: None,
+                card_exp_month,
+                card_exp_year,
             },
             diagnostics,
         }

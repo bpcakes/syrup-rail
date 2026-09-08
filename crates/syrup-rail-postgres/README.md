@@ -172,6 +172,132 @@ guard described below deliberately owns its top-level transaction instead.
 Authentication, authorization, migrations, job queues, and event transport
 remain host-owned.
 
+For an approved subscription whose current saved method has incomplete card
+display, call `SubscriptionBillingService::refresh_payment_method_metadata`
+with `RefreshPaymentMethodMetadata::new(billing_scope_id, subscriber_id,
+attempt_id)`. The standalone `refresh_payment_method_metadata` operation takes
+a pool and host `GatewayResolver` for hosts that do not use the service. Use the
+latest approved attempt for that saved method. The host must authorize the
+scope and subscriber before calling either entrypoint.
+Saved methods can be shared across plans. Use the latest approval for the method
+across those plans, even if its original subscription has since switched methods;
+another subscription for the same account and subscriber must still use it.
+Renewals may approve without echoed vault-reference evidence; their durable
+method and subscription linkage is sufficient. A conflicting retained reference
+is rejected, and an older approval cannot bypass a newer approved renewal.
+
+Invoke refresh after the approval transaction commits, or enqueue that same
+command for explicit historical repair. One invocation performs at most one
+read-only exact transaction query, with a 10-second provider timeout and no
+internal retry. A complete display returns `Unchanged` without contacting the
+provider. Initial candidate/cooldown reads use the existing billing lock and
+statement timeouts in a short transaction that ends before gateway resolution.
+These are per-statement database limits; the 10-second provider budget is
+separate, and pool acquisition remains governed by the host's pool settings.
+Existing durable account/provider cooldowns return `CooldownActive`
+before gateway resolution. A rate-limited query extends the existing shared
+provider cooldown and returns `Query(RateLimited)`; a failure to persist that
+cooldown returns `RateLimitCooldownPersistenceFailed`, retaining both errors.
+Back off for either result even when the storage cause is transient.
+The provider cooldown pauses financial readiness and renewal dispatch for
+**every gateway account with that provider key**, including other billing scopes.
+The gateway's coarse rate-limit error does not establish a query-only quota, so
+refresh follows the existing conservative policy. NMI documents HTTP 429 as a
+[system-wide limit spanning Payment and Query APIs](https://docs.nmi.com/reference/rate-limiting).
+The shared cooldown lasts 60 seconds, exposed as
+`syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS`.
+Budget background backfills
+across that provider and prioritize payment traffic. Scheduling/concurrency
+limits remain host-owned.
+Query errors are independent of payment success: keep the approved
+payment result and retry only the refresh operation with host-owned bounded
+scheduling and concurrency. Never resubmit a sale or replay financial approval
+to backfill display.
+Refresh calls `PaymentGateway::query_payment_method_metadata`, whose result has
+no financial approval authority. NMI enriches this observation with expiry while
+keeping its financial sale and `query_transaction` descriptor normalization
+compatible with 0.5.2. An old parked approval can therefore reconcile before its
+saved method is enriched. Existing JSON financial expiry remains intact. Other
+providers inherit a default projection of their ordinary exact query and may
+override the metadata operation independently. Financial evidence equality
+remains strict; hosts retain normalized `ProcessorEvidence` for financial retries.
+The separate refresh error type does not use the financial service's
+`disposition()` method. A host may retry the same refresh with bounded backoff
+for storage SQLSTATE `40001`, `40P01`, `55P03`, or `57014`; other storage failures
+need investigation. The refresh error's ordinary `Display` and `Debug` omit
+details, but its SQLx error source retains database diagnostics for explicit
+inspection. Use the top-level format for logs; automatic source-chain formatting
+can expose database values. A commit acknowledgement can be ambiguous, so a retry
+rechecks current display. Refresh briefly shares the approval lock domain and
+locks the gateway-account identity through commit. It can therefore delay both
+approval application and account configuration/cooldown writes; keep its
+scheduling below payment traffic to avoid contention.
+The supersession check uses the method index but still filters that method's
+retained attempt history; include long shared-method histories in capacity rehearsal.
+
+`NotFound` means the exact query returned no transaction, not that display is
+complete or the approved payment failed. Hosts may retry with a bounded budget;
+the provider gives no visibility-delay guarantee. `Unchanged` means either the
+display was already complete or a matching observation supplied no additional
+safe fields. Hosts should use the local portal projection to assess remaining
+display gaps and record refresh outcomes/errors in their own metrics. Neither
+`Updated` nor `Unchanged` alone promises complete display.
+Hosts must cap calls per subscriber and across the account, including calls
+from user-facing endpoints. Stop automatic retries after that budget; do not
+loop until all display fields are present. The resolver may deny unavailable
+or deactivated accounts. Refresh itself is a historical read/repair operation
+and does not apply financial account-activation admission.
+
+Refresh fills only absent card brand, last four, and expiration fields on the
+still-current active method. It checks exact account, subject, transaction,
+vault linkage, and method/subscription identity again under locks after the
+query. Conflicting evidence leaves display unchanged; a replaced, disabled,
+scrubbed, or superseded method returns `Ineligible` before provider I/O. An
+initially eligible candidate that changes during I/O returns `ChangedDuringQuery`;
+select the latest approved attempt before a bounded retry. Lifecycle-only
+reconciliation of that attempt does not invalidate otherwise eligible display.
+Charge and attempt
+evidence, vault references, access, amounts, renewal
+dates, contacts, and events are not changed. Billing portal reads then use the
+refreshed local method. This does not backfill historical attempt descriptors.
+Each validated expiry component can fill its own absent field. A later approval
+that reuses a vault reference replaces the method's display evidence, which may
+clear these fields: the vault reference alone cannot prove that the underlying
+card stayed the same. Refresh that latest approval to restore its display;
+retaining old fields unconditionally could display the previous card.
+`Ineligible` deliberately does not distinguish wrong identity from an obsolete
+candidate. Verify the supplied scope/subscriber/attempt from authorized canonical
+history before treating it as a terminal backfill result. For `EvidenceRejected`,
+inspect the conflict through authorized operator tooling; repeated identical
+queries cannot repair conflicting stored fields. If the card changed, use the
+normal payment-method replacement/re-approval workflow and refresh its latest
+approval. Do not clear canonical display columns merely to bypass that guard.
+
+The method retains bounded provider brand text, as the approval writer does;
+the core presentation boundary alone converts it to `PaymentCardBrand`.
+Unrecognized existing brand text stays untouched and cannot establish a brand
+conflict that blocks other absent fields. Known brand, last-four, and expiry
+disagreements still reject the entire refresh. Exact transaction correlation
+does not require a repeated vault reference: an absent reference and the
+`MissingPaymentMethodReference` diagnostic are allowed. All other diagnostics
+and conflicting returned references reject the observation. Account-mode
+verification remains part of financial admission; refresh does not add a
+profile query to its single exact-query budget.
+
+The approved ledger attempt remains the payment authority. A diagnostic-free
+`Unknown` query observation can supply display after later lifecycle changes
+such as a void; it cannot change the approved payment or entitlement. Explicit
+decline/failure observations and contradictory diagnostics are rejected.
+The timestamp comparison is deliberately conservative: it detects replacement
+away from and back to the same method while the query is in flight. Unrelated
+updates may therefore produce `ChangedDuringQuery`; the host's bounded retry policy
+applies.
+
+The card-display repair introduced in 0.5.3 needs no additional columns.
+Upgrading to 0.6.0 still requires the schema-v5 cutover described above. Synthetic parser and PostgreSQL fixtures verify the
+library behavior; host staging retests and invocation for existing accounts
+remain a separate host integration step.
+
 Protected product writes use two ownership-enforced phases. Start an
 `EntitlementWriteTransaction` from the pool and use its connection for any
 preparatory host writes; that pending value has no commit operation.

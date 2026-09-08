@@ -86,6 +86,9 @@ and transaction orchestration.
   portal and exact-plan payment-history projections. It reuses entitlement
   semantics inside one repeatable-read snapshot and selects only masked card
   display and safe attempt facts.
+- `src/payment_method_metadata.rs` — independent bounded exact-query refresh of
+  missing current saved-card display; `payment_method_metadata/storage.rs`
+  revalidates ownership and identity under the shared approval/scrub domain.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
   revocation.
 - `src/discounts.rs` — exact-plan durable discount operations and the host
@@ -167,6 +170,27 @@ and transaction orchestration.
   SQL as separate physical statements, with the continuation keyset as an
   unconditional index condition; the PostgreSQL generic-plan regression must
   explain the exact production statements.
+- Change saved-card display repair in `src/payment_method_metadata.rs` and its
+  storage module. Keep initial candidate/cooldown reads in a short transaction
+  with the existing billing database timeouts; end it before gateway resolution
+  or provider I/O. Revalidate the exact latest
+  approved attempt, account, subscriber, and current method before filling
+  absent display. Preserve charge/attempt evidence and reject stale responses
+  after replacement or scrubbing. Keep host scheduling and retries outside.
+  Preserve the approval writer's provider brand format; canonical display
+  labels are not a storage codec. Compare recognized brands on both sides,
+  and keep unknown stored text without blocking unrelated absent fields.
+  Honor durable account/provider cooldowns and persist query throttling through
+  the existing provider-cooldown owner; keep financial evidence unchanged.
+  Methods can span plans: latest approval provenance is global per method,
+  while any same-account/same-subscriber subscription may prove current use.
+  Stabilize that reference check under the shared method domain; never weaken
+  global supersession to admit an older plan's card evidence.
+  Find current references through the method-linked attempt index and subscription
+  ID probes; retain generic-plan regressions for both exact production statements.
+  Ignore lifecycle-only attempt timestamp changes, while preserving the method
+  and subscription timestamp fences. The gateway-account share lock must span
+  revalidation through commit and can briefly delay configuration/cooldown writes.
 - Change due-renewal pagination in `src/renewal.rs`. Preserve every current
   eligibility gate, bind the first page's database-observed timestamp into all
   time-dependent gates on every continuation, retain strict ascending

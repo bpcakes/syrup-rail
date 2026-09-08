@@ -19,8 +19,8 @@ use self::response::common::{ApprovedIdentityRequirement, require_approved_ident
 use self::response::form::classic_payment_outcome_from_form;
 use self::response::json::payment_outcome_from_json;
 use self::response::xml::{
-    query_account_mode_from_xml, query_outcome_for_request_from_xml,
-    query_transaction_reports_from_xml,
+    query_account_mode_from_xml, query_metadata_for_request_from_xml,
+    query_outcome_for_request_from_xml, query_transaction_reports_from_xml,
 };
 use self::v5::{amount_value, sale_body_json};
 use self::validation::{
@@ -354,14 +354,30 @@ impl Client {
         &self,
         request: TransactionQuery,
     ) -> Result<Option<PaymentOutcome>, QueryError> {
-        validate_transaction_query(&request, self.credentials.query_security_key.as_str())?;
-        let params =
-            query_transaction_params(self.credentials.query_security_key.as_str(), &request);
-        let text = self
-            .post_form_text("/api/query.php", &params)
-            .await
-            .map_err(WireError::into_query)?;
+        let text = self.query_transaction_text(&request).await?;
         query_outcome_for_request_from_xml(&text, &request).map_err(WireError::into_query)
+    }
+
+    /// Queries enriched card display without changing durable financial evidence.
+    /// Uses the same bounds, selectors and one-shot transport as the financial query.
+    pub async fn query_payment_method_metadata(
+        &self,
+        request: TransactionQuery,
+    ) -> Result<Option<crate::PaymentMethodMetadata>, QueryError> {
+        let text = self.query_transaction_text(&request).await?;
+        query_metadata_for_request_from_xml(&text, &request).map_err(WireError::into_query)
+    }
+
+    async fn query_transaction_text(
+        &self,
+        request: &TransactionQuery,
+    ) -> Result<String, QueryError> {
+        validate_transaction_query(request, self.credentials.query_security_key.as_str())?;
+        let params =
+            query_transaction_params(self.credentials.query_security_key.as_str(), request);
+        self.post_form_text("/api/query.php", &params)
+            .await
+            .map_err(WireError::into_query)
     }
 
     pub async fn query_transaction_reports(

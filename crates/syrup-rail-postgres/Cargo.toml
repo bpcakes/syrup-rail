@@ -33,6 +33,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 postgres-test-harness.workspace = true
+syrup-rail-nmi.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
