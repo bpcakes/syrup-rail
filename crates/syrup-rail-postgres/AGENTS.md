@@ -159,7 +159,9 @@ and transaction orchestration.
   unconditional index condition; the PostgreSQL generic-plan regression must
   explain the exact production statements.
 - Change saved-card display repair in `src/payment_method_metadata.rs` and its
-  storage module. Fetch outside transactions; revalidate the exact latest
+  storage module. Keep initial candidate/cooldown reads in a short transaction
+  with the existing billing database timeouts; end it before gateway resolution
+  or provider I/O. Revalidate the exact latest
   approved attempt, account, subscriber, and current method before filling
   absent display. Preserve charge/attempt evidence and reject stale responses
   after replacement or scrubbing. Keep host scheduling and retries outside.

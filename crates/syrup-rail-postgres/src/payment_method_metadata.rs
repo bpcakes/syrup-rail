@@ -143,6 +143,8 @@ impl fmt::Debug for PaymentMethodMetadataRefreshError {
 /// Its scope is provider-wide and its duration is
 /// [`syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS`] (60 seconds).
 /// Provider I/O has a 10-second timeout and runs before the write transaction.
+/// Candidate and cooldown reads use the existing billing database timeouts in
+/// a short transaction that ends before gateway resolution or provider I/O.
 /// Missing/conflicting evidence cannot erase display. Replacement, scrubbing, or
 /// an intervening method/subscription change causes a no-op; retry with the latest
 /// approved attempt if appropriate. Errors are independent of payment success.
@@ -159,7 +161,9 @@ pub async fn refresh_payment_method_metadata(
 ) -> Result<PaymentMethodMetadataRefreshOutcome, PaymentMethodMetadataRefreshError> {
     use PaymentMethodMetadataRefreshOutcome as Outcome;
 
-    let Some(candidate) = load_candidate(pool, command).await? else {
+    let mut read_transaction = pool.begin().await?;
+    crate::enrollment_application::set_application_timeouts(&mut read_transaction).await?;
+    let Some(candidate) = load_candidate(&mut read_transaction, command).await? else {
         return Ok(Outcome::Ineligible);
     };
     if candidate.complete() {
@@ -171,9 +175,15 @@ pub async fn refresh_payment_method_metadata(
         .map_err(|_| PaymentMethodMetadataRefreshError::InvalidIdentity)?;
     let transaction_id = GatewayTransactionId::new(candidate.transaction_id.clone())
         .map_err(|_| PaymentMethodMetadataRefreshError::InvalidIdentity)?;
-    let cooldown = crate::gateway_accounts::load_gateway_cooldown(pool, account_id, &provider)
-        .await?
-        .ok_or(sqlx::Error::RowNotFound)?;
+    let cooldown = crate::gateway_accounts::load_gateway_cooldown(
+        &mut *read_transaction,
+        account_id,
+        &provider,
+    )
+    .await?
+    .ok_or(sqlx::Error::RowNotFound)?;
+    // Release read locks and restore connection settings before any host/provider I/O.
+    read_transaction.commit().await?;
     if let Some(scope) = GatewayMutationCooldownScope::from_active_flags(cooldown.0, cooldown.1) {
         return Err(PaymentMethodMetadataRefreshError::CooldownActive { scope });
     }

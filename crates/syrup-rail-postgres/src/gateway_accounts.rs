@@ -100,8 +100,8 @@ pub async fn activate_gateway_configuration(
 
 /// Loads both durable cooldowns from one snapshot; a missing row fails closed
 /// at the calling operation's boundary.
-pub(crate) async fn load_gateway_cooldown(
-    pool: &sqlx::PgPool,
+pub(crate) async fn load_gateway_cooldown<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     account_id: syrup_rail::GatewayAccountId,
     provider_key: &syrup_rail::GatewayProviderKey,
 ) -> Result<Option<(bool, bool)>, sqlx::Error> {
@@ -118,7 +118,7 @@ pub(crate) async fn load_gateway_cooldown(
     )
     .bind(account_id.as_uuid())
     .bind(provider_key.as_str())
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
 }
 

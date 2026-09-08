@@ -47,14 +47,14 @@ const LOCKED_CANDIDATE_SQL: &str = concat!(
 mod query_plan_tests;
 
 pub(super) async fn load_candidate(
-    pool: &PgPool,
+    connection: &mut PgConnection,
     command: RefreshPaymentMethodMetadata,
 ) -> Result<Option<Candidate>, sqlx::Error> {
     sqlx::query_as(CANDIDATE_SQL)
         .bind(command.billing_scope_id.as_uuid())
         .bind(command.subscriber_id.as_uuid())
         .bind(command.attempt_id.as_uuid())
-        .fetch_optional(pool)
+        .fetch_optional(connection)
         .await
 }
 

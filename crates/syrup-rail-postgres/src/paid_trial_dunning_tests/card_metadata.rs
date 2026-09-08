@@ -8,6 +8,7 @@ use syrup_rail::{PaymentCardBrand, SubscriptionBillingPortalQuery};
 use tokio::sync::Notify;
 
 mod boundaries;
+mod database_reads;
 mod fixture;
 mod lifecycle;
 mod operational;

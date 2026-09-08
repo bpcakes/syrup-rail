@@ -184,7 +184,11 @@ Invoke refresh after the approval transaction commits, or enqueue that same
 command for explicit historical repair. One invocation performs at most one
 read-only exact transaction query, with a 10-second provider timeout and no
 internal retry. A complete display returns `Unchanged` without contacting the
-provider. Existing durable account/provider cooldowns return `CooldownActive`
+provider. Initial candidate/cooldown reads use the existing billing lock and
+statement timeouts in a short transaction that ends before gateway resolution.
+These are per-statement database limits; the 10-second provider budget is
+separate, and pool acquisition remains governed by the host's pool settings.
+Existing durable account/provider cooldowns return `CooldownActive`
 before gateway resolution. A rate-limited query extends the existing shared
 provider cooldown and returns `Query(RateLimited)`; a failure to persist that
 cooldown returns `RateLimitCooldownPersistenceFailed`, retaining both errors.
@@ -222,6 +226,8 @@ rechecks current display. Refresh briefly shares the approval lock domain and
 locks the gateway-account identity through commit. It can therefore delay both
 approval application and account configuration/cooldown writes; keep its
 scheduling below payment traffic to avoid contention.
+The supersession check uses the method index but still filters that method's
+retained attempt history; include long shared-method histories in capacity rehearsal.
 
 `NotFound` means the exact query returned no transaction, not that display is
 complete or the approved payment failed. Hosts may retry with a bounded budget;
