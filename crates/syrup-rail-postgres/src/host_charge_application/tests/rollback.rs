@@ -111,7 +111,7 @@ async fn prepare_submitted_host_charge(
         syrup_rail::SubscriberId::new(subscriber_id),
         HostChargeTargetId::new(target_id),
         GatewayConfigurationId::new(account.gateway_configuration_id),
-        PaymentToken::new(format!("tok_{}", target_id.simple()))?,
+        PaymentToken::new("tok_host_rollback")?,
         IdempotencyKey::new(idempotency_key)?,
         None,
     );
@@ -228,7 +228,8 @@ async fn additional_approval_explicitly_rolls_back_target_and_charge() -> Result
     let result = async {
         create_host_charge_target_table(&database.pool).await?;
         let account = create_gateway_account(&database.pool, "nmi").await?;
-        let target_id = Uuid::now_v7();
+        // This UUID contains a PAN-shaped digit run if reused as a payment token.
+        let target_id = Uuid::parse_str("aaaaaaaa-aaaa-7111-8111-111111111111")?;
         let reservation = prepare_submitted_host_charge(
             &database.pool,
             account,
