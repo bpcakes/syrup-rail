@@ -1,0 +1,19 @@
+Prepare version metadata and release notes from the reviewed 0.5.2-based branch; preserve schema v4 and exclude unreleased 0.6.0 changes. Verify release packages, MSRV, advisories, public API docs, repository gates and locked serial tests. Commit the verified candidate and run remote CI before publishing all four crates and tagging v0.5.3 through the documented local fallback.
+
+Release candidate: 30680f1ea7c0a8482ab3c92c5b12272f36ffbf3e on release/0.5.3, based on v0.5.2. Beads was committed first in 1c97ab6. Version metadata and package order were prepared in e039e77; 30680f1 adds only two existing-policy LOC exception comments. The full-branch CI LOC check exposed gateway.rs (980 LOC) and enrollment application tests (940 LOC), already oversized in 0.5.2 and changed only by metadata module wiring. Their splits are already in unreleased master, so this patch uses the established agentic-loc-exception mechanism instead of duplicating those refactors. The v0.5.2-scoped LOC check now passes. Clean package dry runs for all four crates pass, and /tmp/syrup-0.5.3-artifacts.json records their source commit and checksums. Local locked release tests passed; the final required work gate and CI remain running. No publication or tag exists yet.
+
+0.5.3 released on 2026-09-08. All four crates were published with the documented Cargo fallback because GitHub trusted publishing has no configured publisher for this repository. The annotated v0.5.3 tag was pushed and resolves to 57a705aafe28ba20c28f17b280eee8c391644d8f. This is the reviewed 0.5.2-based metadata patch; schema v4 remains byte-identical to v0.5.2 and no unreleased main/master features were merged.
+
+Verification:
+- Release metadata/package file sets, archive build verification, advisory policy, Rust 1.88 all-target check, formatting, Clippy, public API documentation/doctests, schema immutability, contract, SQLx and required work gates passed.
+- Locked release tests passed. The final required serial workspace test gate also passed: 636 tests and 6 doctests, including all 272 PostgreSQL tests. PostgreSQL completed in 987.27 seconds.
+- GitHub CI passed for code commit 30680f1: Rust Tests https://github.com/bpcakes/syrup-rail/actions/runs/34202491763 ; Repo Policy https://github.com/bpcakes/syrup-rail/actions/runs/34202461288 ; Agent Map https://github.com/bpcakes/syrup-rail/actions/runs/34202494766 . Final commit 57a705a changes only installation version strings in five READMEs. Those docs were checked locally with scripts/check-public-api.sh, and clean release package dry runs were repeated on the final commit. No further runtime or test-body changes followed CI.
+- Registry API responses confirm all four versions are visible and not yanked. Their SHA-256 checksums match the clean, verified release archives:
+  - syrup-rail 0.5.3: ddc31bdb1460a3bc85bd07df97532d804c893e4a628e526ceeedcb95051cebcb
+  - syrup-rail-nmi-client 0.5.3: b444bf8cd706426105c89b015bf7969d81f76d1a5021429a1ad8914c59dd33db
+  - syrup-rail-nmi 0.5.3: ab13c5c8ed0dae6ede8b20ae960663ce37303b070c265a9e973d92b1966f9f12
+  - syrup-rail-postgres 0.5.3: f6da6fa70dff9e84aabf406241d106b0b73d762d325aaa4698cc6a8499ed7f4a
+
+Evidence files: /tmp/syrup-0.5.3-final-gates.json, /tmp/syrup-0.5.3-complete-evidence.json, /tmp/syrup-0.5.3-required-test-gate.json, /tmp/syrup-0.5.3-publish.log, /tmp/syrup-0.5.3-published.json. The first CI LOC failure and the superseded/cancelled CI runs are retained as history; the final policy run passed using the documented, narrow 0.5.x exceptions.
+
+Host acceptance remains in syrup-rail-20u: consume 0.5.3, forward the metadata query through gateway decorators, invoke refresh after committed approvals, and perform bounded repair/staging verification of affected methods. This release did not mutate host/staging billing data.
