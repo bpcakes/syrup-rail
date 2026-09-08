@@ -5,8 +5,11 @@ them in dependency order:
 
 1. `syrup-rail`
 2. `syrup-rail-nmi-client`
-3. `syrup-rail-postgres`
-4. `syrup-rail-nmi`
+3. `syrup-rail-nmi`
+4. `syrup-rail-postgres`
+
+The Postgres package has a versioned development dependency on the NMI adapter,
+so the adapter must also be available before packaging Postgres.
 
 The workspace's internal dependency requirements must exactly match the
 release version. The four crates share payment-evidence semantics as well as
@@ -47,8 +50,12 @@ unreachable SQLx-MySQL advisory described in
 [`security/dependency-advisories.md`](security/dependency-advisories.md), and
 fails if that dependency becomes reachable from a workspace build.
 
-Commit the release preparation, push `main`, wait for required CI to pass, and
-rerun `scripts/check-release.sh VERSION` from the clean release commit.
+Commit the release preparation, push the release branch, wait for required CI
+to pass, and rerun `scripts/check-release.sh VERSION` from the clean release
+commit. Normally the release branch is `main`. When `main` has advanced to the
+next minor version, keep patch releases on a dedicated `release/VERSION` branch
+based on the prior release. Dispatch the Rust tests and Repository policy
+workflows on that branch; do not merge unreleased features into a patch release.
 
 ## Trusted publishing
 
@@ -79,7 +86,7 @@ crates.io are skipped, and the remaining packages continue in order.
 ## Local fallback
 
 If trusted publishing is unavailable, authenticate Cargo through a configured
-credential provider and run the preflight from a clean `main`. Publish each
+credential provider and run the preflight from the clean release branch. Publish each
 crate in the order above with `cargo publish --locked -p CRATE`, checking its
 package first with `--dry-run`. Push an annotated `vVERSION` tag only after all
 four crate versions are visible on crates.io.

@@ -4,6 +4,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-08
+
 ### Fixed
 
 - Restore missing NMI card brand, last four digits, and expiry through a dedicated
@@ -29,6 +31,12 @@ All notable changes to the Syrup Rail crates are documented in this file.
   references, honors shared gateway cooldowns, and distinguishes absent
   transactions from candidates changed during the query. Methods shared across
   plans remain repairable using their latest approval. Schema v4 is unchanged.
+  Initial database reads and write revalidation use bounded lock and statement
+  waits; database connections are released before the provider query.
+
+Hosts must invoke refresh to populate missing display metadata; upgrading alone
+does not backfill saved methods. Gateway decorators must forward the metadata
+query to retain provider-specific enrichment.
 
 ## [0.5.2] - 2026-09-04
 
@@ -854,7 +862,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - Initial crates.io release of `syrup-rail`, `syrup-rail-postgres`,
   `syrup-rail-nmi`, and `syrup-rail-nmi-client`.
 
-[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/bpcakes/syrup-rail/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/bpcakes/syrup-rail/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/bpcakes/syrup-rail/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/bpcakes/syrup-rail/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/bpcakes/syrup-rail/compare/v0.4.0...v0.5.0
