@@ -60,6 +60,15 @@ exact evidence and test their own documented scheme vocabulary.
 Its persisted/provider-parts conversion normalizes first and returns `None`
 when no renderable field remains.
 
+`PaymentGateway::query_payment_method_metadata` returns a
+`GatewayPaymentMethodMetadata` observation for an already approved saved method.
+The default implementation projects an ordinary exact query, so existing gateway
+implementations continue to work. Providers may override it to enrich display
+without changing financial query evidence. The metadata result retains identity,
+status and diagnostics for rejection checks. The API provides no conversion to
+`ProcessorEvidence` and discards financial response fields; hosts must not
+reconstruct a financial approval from a display observation.
+
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
 define a transport wire format for billing events. Those remain host
 responsibilities. See the workspace `subscription_terms`, `entitlement_access`,

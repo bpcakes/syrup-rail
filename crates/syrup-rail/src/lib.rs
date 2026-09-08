@@ -78,10 +78,11 @@ pub use gateway::{
     GatewayLifecycleQuarantineResolutionReasonError, GatewayLifecycleQueryPolicy,
     GatewayLifecycleQueryPolicyError, GatewayLifecycleState, GatewayMutationError,
     GatewayMutationReferenceFactory, GatewayNotSubmittedError, GatewayPaymentDescriptor,
-    GatewayPaymentDiagnostic, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayQueryRequest,
-    GatewayRequestError, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
-    GatewayTransactionReport, GatewayTransactionReportRequest, MutationCertainty, PaymentCardBrand,
-    PaymentGateway, PaymentReversalKind, ProcessorEvidence, SharedGatewayMutationReferenceFactory,
+    GatewayPaymentDiagnostic, GatewayPaymentMethodMetadata, GatewayPaymentOutcome,
+    GatewayPaymentStatus, GatewayQueryRequest, GatewayRequestError, GatewaySaleIntent,
+    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionReport,
+    GatewayTransactionReportRequest, MutationCertainty, PaymentCardBrand, PaymentGateway,
+    PaymentReversalKind, ProcessorEvidence, SharedGatewayMutationReferenceFactory,
     SharedPaymentGateway,
 };
 pub use gateway_value::{

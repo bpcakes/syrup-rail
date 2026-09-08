@@ -223,6 +223,21 @@ pub trait PaymentGateway: Send + Sync {
         request: GatewayQueryRequest,
     ) -> Result<Option<GatewayPaymentOutcome>, GatewayError>;
 
+    /// Queries display metadata without changing the financial query contract.
+    ///
+    /// Existing providers use their ordinary exact query. Providers that can
+    /// enrich display independently of durable evidence should override this
+    /// method. Implementations must preserve exact selector validation and query
+    /// error semantics and must not submit payment or vault mutations.
+    async fn query_payment_method_metadata(
+        &self,
+        request: GatewayQueryRequest,
+    ) -> Result<Option<super::GatewayPaymentMethodMetadata>, GatewayError> {
+        self.query_transaction(request)
+            .await
+            .map(|outcome| outcome.map(super::GatewayPaymentMethodMetadata::from_query_outcome))
+    }
+
     async fn query_transaction_reports(
         &self,
         request: GatewayTransactionReportRequest,

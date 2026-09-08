@@ -15,6 +15,22 @@ host-owned credentials, wrap it in `NmiPaymentGateway`, and return that adapter
 from the host's `GatewayResolver`. `NmiMutationReferenceFactory` creates stable
 attempt-derived order identifiers in a two-letter host namespace.
 
+`query_payment_method_metadata` queries card display, including `cc_exp`, through
+the same bounded exact NMI query and selector checks as `query_transaction`.
+Its `GatewayPaymentMethodMetadata` result cannot authorize a payment. The
+PostgreSQL saved-method refresh uses it after approval, or for existing methods.
+Financial sale/query descriptors retain their 0.5.2 interpretation so additional
+display fields do not invalidate immutable replay evidence. Classic financial
+responses still use the original brand aliases and omit expiry; XML financial
+queries also omit expiry, while existing JSON financial expiry is preserved.
+Metadata queries additionally accept case-only brand duplicates and retain a
+provider-supplied spelling. Financial queries keep the 0.5.2 case-sensitive
+duplicate rule; customer display derives the canonical `PaymentCardBrand`.
+HTTP-error classification is intentionally more conservative: Classic `cc_type`
+and `cc_exp` fields count as possible payment-processing evidence even though
+the financial descriptor does not retain them. Such responses stay indeterminate
+instead of authorizing a same-key retry.
+
 Construct each raw account client with
 `ClientFactory::client_with_duplicate_check` and an explicit
 `DuplicateCheck`. `ProcessorConfigured` retains the account's processor-level

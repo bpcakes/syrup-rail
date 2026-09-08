@@ -27,9 +27,10 @@ pub use requests::{
     StoredCredential, TransactionQuery, VaultAction,
 };
 pub use responses::{
-    AccountMode, PaymentDescriptor, PaymentDescriptorParts, PaymentOutcome,
-    PaymentOutcomeDiagnostic, PaymentOutcomeParts, PaymentStatus, SensitiveText, TransactionAction,
-    TransactionActionParts, TransactionReport, TransactionReportDiagnostic, TransactionReportParts,
+    AccountMode, PaymentDescriptor, PaymentDescriptorParts, PaymentMethodMetadata,
+    PaymentMethodMetadataParts, PaymentOutcome, PaymentOutcomeDiagnostic, PaymentOutcomeParts,
+    PaymentStatus, SensitiveText, TransactionAction, TransactionActionParts, TransactionReport,
+    TransactionReportDiagnostic, TransactionReportParts,
 };
 
 #[cfg(test)]

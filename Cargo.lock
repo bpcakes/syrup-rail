@@ -2834,6 +2834,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "syrup-rail",
+ "syrup-rail-nmi",
  "thiserror",
  "tokio",
  "tracing",

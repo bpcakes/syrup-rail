@@ -2,6 +2,9 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
+mod metadata;
+pub use metadata::{PaymentMethodMetadata, PaymentMethodMetadataParts};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AccountMode {
     Live,

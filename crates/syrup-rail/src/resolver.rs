@@ -6,9 +6,9 @@ use thiserror::Error;
 use crate::{
     BillingScopeId, GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayError,
     GatewayLifecycleQueryPolicy, GatewayMutationError, GatewayMutationReferenceFactory,
-    GatewayPaymentOutcome, GatewayProviderKey, GatewayQueryRequest, GatewaySaleRequest,
-    GatewayStorePaymentMethodRequest, GatewayTransactionReport, GatewayTransactionReportRequest,
-    PaymentGateway,
+    GatewayPaymentMethodMetadata, GatewayPaymentOutcome, GatewayProviderKey, GatewayQueryRequest,
+    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionReport,
+    GatewayTransactionReportRequest, PaymentGateway,
 };
 
 #[derive(Clone)]
@@ -97,6 +97,14 @@ impl ResolvedGateway {
         request: GatewayTransactionReportRequest,
     ) -> Result<Vec<GatewayTransactionReport>, GatewayError> {
         self.gateway.query_transaction_reports(request).await
+    }
+
+    /// Resolves display metadata independently from financial query evidence.
+    pub async fn query_payment_method_metadata(
+        &self,
+        request: GatewayQueryRequest,
+    ) -> Result<Option<GatewayPaymentMethodMetadata>, GatewayError> {
+        self.gateway.query_payment_method_metadata(request).await
     }
 }
 

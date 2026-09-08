@@ -194,28 +194,29 @@ pub async fn refresh_payment_method_metadata(
     }
     let request = GatewayQueryRequest::new(Some(transaction_id.clone()), None)
         .map_err(|_| PaymentMethodMetadataRefreshError::InvalidIdentity)?;
-    let observation =
-        match tokio::time::timeout(Duration::from_secs(10), gateway.query_transaction(request))
-            .await
-            .map_err(|_| PaymentMethodMetadataRefreshError::QueryTimedOut)?
-        {
-            Ok(observation) => observation,
-            Err(error) => {
-                if matches!(&error, GatewayError::RateLimited(_))
-                    && let Err(storage) =
-                        storage::record_provider_cooldown(pool, command, account_id, &provider)
-                            .await
-                {
-                    return Err(
-                        PaymentMethodMetadataRefreshError::RateLimitCooldownPersistenceFailed {
-                            query: error,
-                            storage,
-                        },
-                    );
-                }
-                return Err(error.into());
+    let observation = match tokio::time::timeout(
+        Duration::from_secs(10),
+        gateway.query_payment_method_metadata(request),
+    )
+    .await
+    .map_err(|_| PaymentMethodMetadataRefreshError::QueryTimedOut)?
+    {
+        Ok(observation) => observation,
+        Err(error) => {
+            if matches!(&error, GatewayError::RateLimited(_))
+                && let Err(storage) =
+                    storage::record_provider_cooldown(pool, command, account_id, &provider).await
+            {
+                return Err(
+                    PaymentMethodMetadataRefreshError::RateLimitCooldownPersistenceFailed {
+                        query: error,
+                        storage,
+                    },
+                );
             }
-        };
+            return Err(error.into());
+        }
+    };
     let Some(observation) = observation else {
         return Ok(Outcome::NotFound);
     };

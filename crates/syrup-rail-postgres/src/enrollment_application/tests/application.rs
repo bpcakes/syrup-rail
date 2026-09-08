@@ -1,5 +1,6 @@
 use super::*;
 
+mod metadata_upgrade;
 mod retry_and_parking;
 
 #[tokio::test]

@@ -24,7 +24,10 @@ pub use self::port::{
 };
 
 mod lifecycle;
+mod metadata;
 mod port;
+
+pub use self::metadata::GatewayPaymentMethodMetadata;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayAccountMode {

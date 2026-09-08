@@ -6,7 +6,9 @@ Adapt the raw NMI client to Syrup Rail gateway and lifecycle-evidence contracts.
 
 ## Key entrypoints
 
-- `src/adapter.rs` maps the raw client to the five-method Syrup Rail gateway.
+- `src/adapter.rs` maps the raw client to the Syrup Rail gateway, including its
+  separate metadata-only query. Financial descriptor normalization stays
+  compatible with 0.5.2; display enrichment belongs to the metadata query.
 - `src/lifecycle.rs` alone interprets NMI action/condition vocabulary into
   canonical evidence or quarantine.
 - `src/reference.rs` owns the two-letter host namespace and exact mutation

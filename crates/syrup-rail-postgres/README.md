@@ -203,10 +203,14 @@ Query errors are independent of payment success: keep the approved
 payment result and retry only the refresh operation with host-owned bounded
 scheduling and concurrency. Never resubmit a sale or replay financial approval
 to backfill display.
-Across parser upgrades, retain normalized `ProcessorEvidence` for financial
-retries. Re-parsing an old response can expose newly supported metadata and is
-not an exact replay of the retained evidence. Use refresh for display enrichment;
-financial evidence equality remains strict.
+Refresh calls `PaymentGateway::query_payment_method_metadata`, whose result has
+no financial approval authority. NMI enriches this observation with expiry while
+keeping its financial sale and `query_transaction` descriptor normalization
+compatible with 0.5.2. An old parked approval can therefore reconcile before its
+saved method is enriched. Existing JSON financial expiry remains intact. Other
+providers inherit a default projection of their ordinary exact query and may
+override the metadata operation independently. Financial evidence equality
+remains strict; hosts retain normalized `ProcessorEvidence` for financial retries.
 The separate refresh error type does not use the financial service's
 `disposition()` method. A host may retry the same refresh with bounded backoff
 for storage SQLSTATE `40001`, `40P01`, `55P03`, or `57014`; other storage failures

@@ -6,11 +6,19 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ### Fixed
 
-- Read Classic NMI `cc_type` card-brand evidence and Classic/XML `cc_exp`
-  expiration metadata while preserving conflicting-field rejection and payment
-  decisions.
+- Restore missing NMI card brand, last four digits, and expiry through a dedicated
+  metadata query while preserving 0.5.2 financial descriptor normalization and
+  immutable replay equality. Retained approvals can reconcile before missing
+  display fields are filled.
+- Treat Classic `cc_type` and `cc_exp` fields on HTTP-error mutation responses as
+  possible payment-processing evidence, preventing an unsafe same-key retry.
 
 ### Added
+
+- Add `PaymentGateway::query_payment_method_metadata` with a default
+  implementation for existing providers and a metadata-only result type. NMI
+  overrides it to enrich display independently of financial sale/query evidence,
+  reusing exact-selector validation and bounded query transport.
 
 - Add `refresh_payment_method_metadata` and its subscription-service entrypoint
   to fill missing saved-card display from one bounded read-only exact query.
