@@ -35,6 +35,19 @@ printf '%s\n' 'schema two final' >"$prerelease_root/crates/syrup-rail-postgres/s
 commit_all "$prerelease_root" "Finish schema v2"
 (cd "$prerelease_root" && "$checker") >/dev/null
 
+# Consolidating unpublished versions may rename artifacts and change the
+# runtime selector, while the tagged schema v1 remains unchanged.
+mkdir -p "$prerelease_root/crates/syrup-rail-postgres/schema/v3"
+printf '%s\n' 'schema three draft' >"$prerelease_root/crates/syrup-rail-postgres/schema/v3/install.sql"
+printf '%s\n' 'select schema v3' >"$prerelease_root/crates/syrup-rail-postgres/schema/current.rs"
+commit_all "$prerelease_root" "Add schema v3 draft and selector"
+mv "$prerelease_root/crates/syrup-rail-postgres/schema/v3/install.sql" \
+  "$prerelease_root/crates/syrup-rail-postgres/schema/v2/upgrade_from_v1.sql"
+rmdir "$prerelease_root/crates/syrup-rail-postgres/schema/v3"
+printf '%s\n' 'select schema v2' >"$prerelease_root/crates/syrup-rail-postgres/schema/current.rs"
+commit_all "$prerelease_root" "Consolidate unpublished schemas into v2"
+(cd "$prerelease_root" && "$checker") >/dev/null
+
 v1_mutation_root="$(new_repo v1-mutation)"
 printf '%s\n' 'changed schema one' >"$v1_mutation_root/crates/syrup-rail-postgres/schema/v1/install.sql"
 commit_all "$v1_mutation_root" "Mutate schema v1"
@@ -71,6 +84,19 @@ if output="$(cd "$v2_mutation_root" && "$checker" 2>&1)"; then
 fi
 if [[ "$output" != *"schema/v2 differs from its first released snapshot at v0.2.0"* ]]; then
   echo "Schema-v2 addition did not report its release boundary: $output" >&2
+  exit 1
+fi
+
+rm "$v2_mutation_root/crates/syrup-rail-postgres/schema/v2/late.sql" \
+  "$v2_mutation_root/crates/syrup-rail-postgres/schema/v2/install.sql"
+rmdir "$v2_mutation_root/crates/syrup-rail-postgres/schema/v2"
+commit_all "$v2_mutation_root" "Delete released schema v2"
+if output="$(cd "$v2_mutation_root" && "$checker" 2>&1)"; then
+  echo "Schema policy accepted deletion of released schema v2." >&2
+  exit 1
+fi
+if [[ "$output" != *"schema/v2 differs from its first released snapshot at v0.2.0"* ]]; then
+  echo "Schema-v2 deletion did not report its release boundary: $output" >&2
   exit 1
 fi
 
