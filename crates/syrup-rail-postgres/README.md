@@ -6,8 +6,8 @@ supports PostgreSQL 18 only and uses schema v4.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.2"
-syrup-rail-postgres = "0.5.2"
+syrup-rail = "0.5.3"
+syrup-rail-postgres = "0.5.3"
 ```
 
 New hosts install `schema/v4/install.sql` through their normal migration

@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.2"
-syrup-rail-postgres = "0.5.2"
-syrup-rail-nmi = "0.5.2" # only for NMI-backed hosts
+syrup-rail = "0.5.3"
+syrup-rail-postgres = "0.5.3"
+syrup-rail-nmi = "0.5.3" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.5.2"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.5.3"`
 directly.
 
 ## Subscription terms
