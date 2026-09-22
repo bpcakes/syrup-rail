@@ -6,7 +6,7 @@ that remain owned by each host application.
 
 ## System boundary
 
-Syrup Rail contains four private Rust packages:
+Syrup Rail contains four Rust crates:
 
 - `syrup-rail` owns validated billing identities, lifecycle policy, gateway
   contracts, and command outcomes.

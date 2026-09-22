@@ -1,6 +1,8 @@
 # Syrup Rail
 
-Reusable subscription billing crates for Banana Pancakes applications.
+Source-available Rust crates for subscription billing, with PostgreSQL-backed
+lifecycle management and an NMI payment gateway integration. Developed by
+Banana Pancakes and licensed under the [Elastic License 2.0](LICENSE).
 
 ## Packages
 
@@ -234,7 +236,7 @@ compile the integration boundary without contacting a database or provider.
 - `scripts/check-public-api.sh`
 - `cargo test -p syrup-rail-nmi-client`
 
-See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
+See [the public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.
 
 ## Releasing
@@ -242,9 +244,8 @@ advanced transaction-local composition points, and event compatibility policy.
 See [docs/releasing.md](docs/releasing.md) for the local preflight and the
 manual, trusted-publishing workflow.
 
-Private Cargo consumers pin one exact Git revision with
-`git = "ssh://git@github.com/bpcakes/syrup-rail.git"` and set
-`CARGO_NET_GIT_FETCH_WITH_CLI=true` so authentication uses the system Git client.
+Git consumers use `git = "https://github.com/bpcakes/syrup-rail.git"` and
+pin the same exact `rev` for every Syrup Rail crate they depend on.
 
 Version 0.6.0 requires schema v5, with one direct upgrade from schema v4.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
@@ -263,3 +264,9 @@ non-submission is `Absent`, while indeterminate details stay `Unclassified`.
 Raw response strings are retained as evidence and are never interpreted by core
 financial policy. See the [schema-v5 cutover guide](crates/syrup-rail-postgres/schema/v5/README.md)
 for deployment and historical-evidence handling.
+
+## License
+
+Syrup Rail is source-available under the Elastic License 2.0 (`Elastic-2.0`).
+See [LICENSE](LICENSE) for the complete terms and [NOTICE.md](NOTICE.md) for
+ownership, scope, and third-party notices.

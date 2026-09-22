@@ -247,8 +247,9 @@ tokens and Customer Vault identifiers into `serde_json` and request-body
 buffers that cannot be reliably zeroized. The controls do not protect against
 a compromised process or memory forensics.
 
-This package is proprietary software distributed under the terms in the
-packaged `LICENSE` file.
+This package is source-available under the Elastic License 2.0
+(`Elastic-2.0`). See [LICENSE](LICENSE) for the terms and
+[NOTICE.md](NOTICE.md) for ownership and third-party notices.
 
 `PaymentOutcomeParts::approval_evidence` retains conservative approval signals
 from every structured decision and response-text occurrence before duplicate

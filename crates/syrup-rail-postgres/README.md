@@ -309,8 +309,9 @@ the owned transaction, including any earlier host writes. Perform and commit
 the host-owned protected mutation only through the admitted value, and finish
 any nested savepoint before consuming that value with `commit` or `rollback`.
 
-This package is proprietary software distributed under the terms in the
-packaged `LICENSE` file.
+This package is source-available under the Elastic License 2.0
+(`Elastic-2.0`). See [LICENSE](LICENSE) for the terms and
+[NOTICE.md](NOTICE.md) for ownership and third-party notices.
 
 Version 0.6.0 requires schema v5, with one direct upgrade from schema v4.
 Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI

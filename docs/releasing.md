@@ -23,8 +23,14 @@ with an older or newer core package.
 Pull requests and pushes to `master` or `main` run
 `scripts/check-release.sh --development`. This checks the current workspace
 version, exact internal dependencies, locked Cargo metadata, and each package's
-license and README without requiring the changelog to be finalized. For local
-work in progress, add `--allow-dirty`.
+Elastic-2.0 license metadata and packaged `LICENSE`, `NOTICE.md`, and README
+without requiring the changelog to be finalized. For local work in progress,
+add `--allow-dirty`.
+
+The four crate directories link `LICENSE` and `NOTICE.md` to the workspace
+copies. Cargo packages the linked contents as regular files, so consumers
+receive the terms and notices without needing the repository. Keep these
+files in every distribution; third-party material retains its own terms.
 
 CI also runs `crates/syrup-rail-nmi-client/check-standalone.sh` with stable Rust
 and Rust 1.88.0. It creates and extracts the client archive, then tests it outside

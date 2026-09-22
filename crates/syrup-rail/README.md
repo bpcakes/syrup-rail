@@ -77,5 +77,6 @@ define a transport wire format for billing events. Those remain host
 responsibilities. See the workspace `subscription_terms`, `entitlement_access`,
 and PostgreSQL `host_integration` examples for complete integration patterns.
 
-This package is proprietary software distributed under the terms in the
-packaged `LICENSE` file.
+This package is source-available under the Elastic License 2.0
+(`Elastic-2.0`). See [LICENSE](LICENSE) for the terms and
+[NOTICE.md](NOTICE.md) for ownership and third-party notices.

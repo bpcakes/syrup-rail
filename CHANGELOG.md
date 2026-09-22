@@ -4,7 +4,12 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
-_No unreleased changes._
+### Changed
+
+- Adopt the Elastic License 2.0 (`Elastic-2.0`) for Syrup Rail, replacing the
+  proprietary notice with source-available terms and explicit ownership and
+  third-party notices. Update Cargo metadata, package contents, and public
+  documentation to match. Historical release archives remain unchanged.
 
 ## [0.6.0] - 2026-09-01
 

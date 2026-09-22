@@ -83,6 +83,11 @@ publishable_crates=(
   syrup-rail-nmi
 )
 
+if ! grep -Fxq 'license = "Elastic-2.0"' Cargo.toml; then
+  echo 'Workspace license must be Elastic-2.0.' >&2
+  exit 1
+fi
+
 for crate in "${publishable_crates[@]}"; do
   if ! grep -Fq "$crate = { version = \"=$version\"," Cargo.toml; then
     echo "Workspace dependency $crate is not pinned exactly to version $version." >&2
@@ -91,10 +96,10 @@ for crate in "${publishable_crates[@]}"; do
 
   manifest="crates/$crate/Cargo.toml"
   if ! grep -Fq 'version.workspace = true' "$manifest" ||
-    ! grep -Fq 'license-file.workspace = true' "$manifest" ||
+    ! grep -Fq 'license.workspace = true' "$manifest" ||
     ! grep -Fq 'readme = "README.md"' "$manifest" ||
     ! grep -Fq 'publish = true' "$manifest"; then
-    echo "$manifest must inherit the workspace version and license file, declare its README, and remain publishable." >&2
+    echo "$manifest must inherit the workspace version and license, declare its README, and remain publishable." >&2
     exit 1
   fi
 done
@@ -143,7 +148,7 @@ fi
 
 for crate in "${publishable_crates[@]}"; do
   package_files="$(cargo package --locked --list "$@" -p "$crate")"
-  for required_file in LICENSE README.md; do
+  for required_file in LICENSE NOTICE.md README.md; do
     if ! grep -Fqx "$required_file" <<<"$package_files"; then
       echo "$crate package does not contain $required_file." >&2
       exit 1

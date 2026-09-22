@@ -14,6 +14,7 @@ mkdir -p "$fixture_root/crates" "$test_root/bin"
 cat >"$fixture_root/Cargo.toml" <<'EOF'
 [workspace.package]
 version = "0.3.0"
+license = "Elastic-2.0"
 
 [workspace.dependencies]
 syrup-rail = { version = "=0.3.0", path = "crates/syrup-rail" }
@@ -34,7 +35,7 @@ for crate in syrup-rail syrup-rail-nmi-client syrup-rail-postgres syrup-rail-nmi
   cat >"$fixture_root/crates/$crate/Cargo.toml" <<'EOF'
 [package]
 version.workspace = true
-license-file.workspace = true
+license.workspace = true
 readme = "README.md"
 publish = true
 EOF
@@ -75,10 +76,11 @@ case "${1:-}" in
     fi
     ;;
   package)
-    if [[ "${RELEASE_TEST_MISSING_LICENSE:-false}" != true ]]; then
-      printf 'LICENSE\n'
-    fi
-    printf 'README.md\n'
+    for file in LICENSE NOTICE.md README.md; do
+      if [[ "${RELEASE_TEST_MISSING_FILE:-}" != "$file" ]]; then
+        printf '%s\n' "$file"
+      fi
+    done
     ;;
   *)
     printf 'unexpected cargo command: %s\n' "$*" >&2
@@ -124,18 +126,36 @@ run_case "modern-dirty" "$modern_bash" true " --allow-dirty" --allow-dirty
 RELEASE_TEST_MODE=--development run_case "modern-development" "$modern_bash" false ""
 RELEASE_TEST_MODE=--development run_case "modern-development-dirty" "$modern_bash" true " --allow-dirty" --allow-dirty
 
-# A missing packaged license must fail in either mode, even when Cargo succeeds.
+# Missing terms, notices, or documentation must fail even when Cargo succeeds.
+for file in LICENSE NOTICE.md README.md; do
+  for mode in 0.3.0 --development; do
+    if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+      RELEASE_TEST_CARGO_CALLS="$test_root/missing-file-calls" \
+      RELEASE_TEST_MISSING_FILE="$file" \
+      PATH="$test_root/bin:$PATH" \
+      "$modern_bash" "$subject" "$mode" >"$test_root/missing-file-rejection" 2>&1; then
+      printf 'checker accepted a package without %s in mode %s\n' "$file" "$mode" >&2
+      exit 1
+    fi
+    grep -Fqx "syrup-rail package does not contain $file." "$test_root/missing-file-rejection"
+  done
+done
+
+cp "$fixture_root/Cargo.toml" "$test_root/licensed-Cargo.toml"
+sed 's/license = "Elastic-2.0"/license = "MIT"/' "$test_root/licensed-Cargo.toml" >"$fixture_root/Cargo.toml"
 for mode in 0.3.0 --development; do
+  calls="$test_root/$mode-invalid-license-calls"
   if RELEASE_TEST_REPO_ROOT="$fixture_root" \
-    RELEASE_TEST_CARGO_CALLS="$test_root/missing-license-calls" \
-    RELEASE_TEST_MISSING_LICENSE=true \
+    RELEASE_TEST_CARGO_CALLS="$calls" \
     PATH="$test_root/bin:$PATH" \
-    "$modern_bash" "$subject" "$mode" >"$test_root/missing-license-rejection" 2>&1; then
-    printf 'checker accepted a package without LICENSE in mode %s\n' "$mode" >&2
+    "$modern_bash" "$subject" "$mode" >"$test_root/license-rejection" 2>&1; then
+    printf 'checker accepted an incorrect workspace license in mode %s\n' "$mode" >&2
     exit 1
   fi
-  grep -Fqx 'syrup-rail package does not contain LICENSE.' "$test_root/missing-license-rejection"
+  grep -Fqx 'Workspace license must be Elastic-2.0.' "$test_root/license-rejection"
+  [[ ! -e "$calls" ]]
 done
+cp "$test_root/licensed-Cargo.toml" "$fixture_root/Cargo.toml"
 
 # Reject each non-exact dependency before reaching Cargo, independently of the
 # successful packaging cases above.
