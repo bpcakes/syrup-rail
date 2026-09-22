@@ -4,8 +4,6 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
-## [0.5.4] - 2026-09-22
-
 ### Fixed
 
 - Submit merchant-initiated saved-card renewals through NMI Classic, preserving

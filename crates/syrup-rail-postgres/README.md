@@ -6,8 +6,8 @@ supports PostgreSQL 18 only and uses schema v4.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.4"
-syrup-rail-postgres = "0.5.4"
+syrup-rail = "0.5.3"
+syrup-rail-postgres = "0.5.3"
 ```
 
 New hosts install `schema/v4/install.sql` through their normal migration
@@ -287,7 +287,7 @@ away from and back to the same method while the query is in flight. Unrelated
 updates may therefore produce `ChangedDuringQuery`; the host's bounded retry policy
 applies.
 
-The 0.5.4 card-display repair uses existing schema-v4 columns. Hosts apply no
+The 0.5.3 card-display repair uses existing schema-v4 columns. Hosts apply no
 schema migration for it. Synthetic parser and PostgreSQL fixtures verify the
 library behavior; host staging retests and invocation for existing accounts
 remain a separate host integration step.
