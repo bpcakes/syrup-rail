@@ -27,10 +27,11 @@ Elastic-2.0 license metadata and packaged `LICENSE`, `NOTICE.md`, and README
 without requiring the changelog to be finalized. For local work in progress,
 add `--allow-dirty`.
 
-The four crate directories link `LICENSE` and `NOTICE.md` to the workspace
-copies. Cargo packages the linked contents as regular files, so consumers
-receive the terms and notices without needing the repository. Keep these
-files in every distribution; third-party material retains its own terms.
+The four crate directories carry regular copies of the workspace `LICENSE`
+and `NOTICE.md` files. The release check requires each copy to match its
+workspace original, so consumers receive the complete terms and notices on
+every checkout platform. Keep these files in every distribution; third-party
+material retains its own terms.
 
 CI also runs `crates/syrup-rail-nmi-client/check-standalone.sh` with stable Rust
 and Rust 1.88.0. It creates and extracts the client archive, then tests it outside

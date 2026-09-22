@@ -29,6 +29,8 @@ _No unreleased changes._
 
 ## [0.3.0] - 2026-08-23
 EOF
+printf 'Fixture license terms.\n' >"$fixture_root/LICENSE"
+printf 'Fixture ownership notice.\n' >"$fixture_root/NOTICE.md"
 
 for crate in syrup-rail syrup-rail-nmi-client syrup-rail-postgres syrup-rail-nmi; do
   mkdir -p "$fixture_root/crates/$crate"
@@ -39,6 +41,8 @@ license.workspace = true
 readme = "README.md"
 publish = true
 EOF
+  cp "$fixture_root/LICENSE" "$fixture_root/crates/$crate/LICENSE"
+  cp "$fixture_root/NOTICE.md" "$fixture_root/crates/$crate/NOTICE.md"
 done
 
 cat >"$test_root/bin/git" <<'EOF'
@@ -139,6 +143,23 @@ for file in LICENSE NOTICE.md README.md; do
     fi
     grep -Fqx "syrup-rail package does not contain $file." "$test_root/missing-file-rejection"
   done
+done
+
+for file in LICENSE NOTICE.md; do
+  printf 'Stale package content.\n' >"$fixture_root/crates/syrup-rail/$file"
+  for mode in 0.3.0 --development; do
+    calls="$test_root/$file-$mode-stale-content-calls"
+    if RELEASE_TEST_REPO_ROOT="$fixture_root" \
+      RELEASE_TEST_CARGO_CALLS="$calls" \
+      PATH="$test_root/bin:$PATH" \
+      "$modern_bash" "$subject" "$mode" >"$test_root/stale-content-rejection" 2>&1; then
+      printf 'checker accepted stale %s content in mode %s\n' "$file" "$mode" >&2
+      exit 1
+    fi
+    grep -Fqx "crates/syrup-rail/$file must match the workspace $file." "$test_root/stale-content-rejection"
+    [[ ! -e "$calls" ]]
+  done
+  cp "$fixture_root/$file" "$fixture_root/crates/syrup-rail/$file"
 done
 
 cp "$fixture_root/Cargo.toml" "$test_root/licensed-Cargo.toml"

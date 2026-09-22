@@ -102,6 +102,13 @@ for crate in "${publishable_crates[@]}"; do
     echo "$manifest must inherit the workspace version and license, declare its README, and remain publishable." >&2
     exit 1
   fi
+
+  for required_file in LICENSE NOTICE.md; do
+    if ! cmp -s "$required_file" "crates/$crate/$required_file"; then
+      echo "crates/$crate/$required_file must match the workspace $required_file." >&2
+      exit 1
+    fi
+  done
 done
 
 unreleased_heading_count="$(grep -cFx '## [Unreleased]' CHANGELOG.md || true)"
