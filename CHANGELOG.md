@@ -4,6 +4,24 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-09-22
+
+### Fixed
+
+- Submit merchant-initiated saved-card renewals through NMI Classic, preserving
+  stored-credential metadata, processor duplicate checking, and the original
+  transaction reference. Preserve the submitted vault ID when an approval omits
+  its echo. No automatic fallback or resubmission is introduced.
+
+### Added
+
+- Add `fail_review_required_renewal_for_retry` for host-authorized incident
+  recovery after a fresh exact provider query finds no transaction. The operation
+  atomically closes an eligible reviewed renewal and accelerates only its next
+  permitted dunning retry. Replays, linked processor evidence, cancellations,
+  terminal subscriptions and exhausted policies cannot reopen another retry.
+  Schema v4 and ordinary manual-failure behavior remain unchanged.
+
 ## [0.5.3] - 2026-09-08
 
 ### Fixed

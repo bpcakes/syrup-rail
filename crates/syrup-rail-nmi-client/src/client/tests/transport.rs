@@ -181,11 +181,11 @@ async fn json_sale_sends_raw_private_key_authorization_header() {
 }
 
 #[tokio::test]
-async fn v5_recurring_merchant_sale_sends_scheduled_billing_metadata() {
+async fn classic_recurring_merchant_sale_sends_scheduled_billing_metadata() {
     let (client, request_receiver, server) = spawn_capturing_server(
         "HTTP/1.1 200 OK",
-        "application/json",
-        br#"{"id":"txn_recurring","status":"approved"}"#.to_vec(),
+        "application/x-www-form-urlencoded",
+        b"response=1&response_code=100&transactionid=txn_recurring&responsetext=Approved".to_vec(),
     )
     .await;
 
@@ -202,7 +202,7 @@ async fn v5_recurring_merchant_sale_sends_scheduled_billing_metadata() {
             billing_contact: None,
         })
         .await
-        .expect("recurring v5 sale should parse");
+        .expect("recurring Classic sale should parse");
     let outcome = outcome.into_parts();
     assert_eq!(outcome.status, PaymentStatus::Approved);
     assert_eq!(
@@ -215,31 +215,31 @@ async fn v5_recurring_merchant_sale_sends_scheduled_billing_metadata() {
     );
 
     let request = request_receiver.await.expect("request should be captured");
-    assert!(request.starts_with("POST /api/v5/payments/sale HTTP/1.1"));
+    assert!(request.starts_with("POST /api/transact.php HTTP/1.1"));
     let (_, body) = request
         .split_once("\r\n\r\n")
         .expect("captured request should contain a body");
-    let body: Value = serde_json::from_str(body).expect("sale body should be JSON");
+    let fields: std::collections::BTreeMap<_, _> = form_urlencoded::parse(body.as_bytes())
+        .into_owned()
+        .collect();
+    for (key, value) in [
+        ("security_key", "private_key"),
+        ("type", "sale"),
+        ("amount", "49.00"),
+        ("currency", "USD"),
+        ("orderid", "ck_recurring_order"),
+        ("customer_vault_id", "vault_recurring"),
+        ("billing_method", "recurring"),
+        ("initiated_by", "merchant"),
+        ("stored_credential_indicator", "used"),
+        ("initial_transaction_id", "txn_initial"),
+    ] {
+        assert_eq!(fields.get(key).map(String::as_str), Some(value), "{key}");
+    }
     assert_eq!(
-        body,
-        json!({
-            "amount": "49.00",
-            "currency": "USD",
-            "payment_details": {
-                "customer_vault_id": "vault_recurring"
-            },
-            "order_details": {
-                "id": "ck_recurring_order"
-            },
-            "customer_vault": {
-                "billing_method": "recurring"
-            },
-            "cit_mit": {
-                "stored_credential_indicator": "used",
-                "initiated_by": "merchant",
-                "initial_transaction_id": "txn_initial"
-            }
-        })
+        fields.len(),
+        10,
+        "no vault creation, token, or duplicate-window override"
     );
     server.await.expect("server task should finish");
 }

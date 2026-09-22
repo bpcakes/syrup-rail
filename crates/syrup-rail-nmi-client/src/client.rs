@@ -291,7 +291,12 @@ impl Client {
     }
 
     async fn sale_wire(&self, request: SaleRequest) -> Result<PaymentOutcome, WireError> {
-        if request.vault_action == Some(VaultAction::AddCustomer) {
+        if request.vault_action == Some(VaultAction::AddCustomer)
+            || matches!(
+                request.stored_credential,
+                Some(crate::StoredCredential::RecurringMerchant { .. })
+            )
+        {
             return self.classic_sale(request).await;
         }
         ensure_supported_sale_currency(&request.currency)?;
@@ -419,14 +424,20 @@ impl Client {
         let response = self
             .post_mutation_form_text("/api/transact.php", &params)
             .await?;
-        classic_payment_outcome_from_form(&response)
-            .map(|outcome| {
-                require_approved_identities(
-                    outcome,
-                    ApprovedIdentityRequirement::ApprovedTransactionAndCustomerVault,
-                )
-            })
-            .map_err(WireError::after_success)
+        let mut outcome =
+            classic_payment_outcome_from_form(&response).map_err(WireError::after_success)?;
+        if outcome.status == PaymentStatus::Approved
+            && outcome.customer_vault_id.is_none()
+            && let PaymentSource::CustomerVault(customer_vault_id) = &request.source
+        {
+            // An existing-vault sale may omit the vault in its response. Retain
+            // the validated source, exactly as for the v5 sale path.
+            outcome.customer_vault_id = Some(customer_vault_id.as_str().into());
+        }
+        Ok(require_approved_identities(
+            outcome,
+            ApprovedIdentityRequirement::ApprovedTransactionAndCustomerVault,
+        ))
     }
 }
 

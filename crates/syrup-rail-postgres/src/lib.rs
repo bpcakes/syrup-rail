@@ -143,7 +143,8 @@ pub use operator_review::{
     ExternalReversalHostTransitionOutcome, ManualAttemptFailureHostStore,
     ManualAttemptFailureHostStoreError, ManualAttemptFailureHostTransitionOutcome,
     OperatorReviewError, attempt_review_page, attest_external_reversal,
-    fail_review_required_attempt, processor_charge_review_page,
+    fail_review_required_attempt, fail_review_required_renewal_for_retry,
+    processor_charge_review_page,
 };
 pub use payment_method_metadata::{
     PaymentMethodMetadataRefreshError, PaymentMethodMetadataRefreshOutcome,

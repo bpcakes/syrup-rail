@@ -231,3 +231,5 @@ async fn insert_review_renewal(
 
 mod external_reversal;
 mod manual_failure;
+
+mod renewal_retry;
