@@ -1,272 +1,90 @@
 # Syrup Rail
 
-Source-available Rust crates for subscription billing, with PostgreSQL-backed
-lifecycle management and an NMI payment gateway integration. Developed by
-Banana Pancakes and licensed under the [Elastic License 2.0](LICENSE).
+Syrup Rail provides Rust crates for subscription billing. The core crate owns
+validated subscription terms, lifecycle policy, and entitlement decisions; the
+PostgreSQL crate adds durable billing operations, and the NMI crates connect
+those operations to a payment gateway. Host applications own authentication,
+authorization, pricing, gateway credentials, and customer-facing presentation.
 
-## Packages
+## Crates
 
 | Crate | Role |
 | --- | --- |
-| `syrup-rail` | Validated domain types and lifecycle policy |
-| `syrup-rail-postgres` | Canonical PostgreSQL schema contract and SQLx orchestration |
-| `syrup-rail-nmi` | NMI gateway and lifecycle-evidence adapter |
-| `syrup-rail-nmi-client` | Bounded, retry-free raw NMI HTTP client |
+| [`syrup-rail`](crates/syrup-rail/README.md) | Provider-neutral domain types and lifecycle policy |
+| [`syrup-rail-postgres`](crates/syrup-rail-postgres/README.md) | PostgreSQL schema contract and SQLx billing operations |
+| [`syrup-rail-nmi`](crates/syrup-rail-nmi/README.md) | NMI gateway and lifecycle-evidence adapter |
+| [`syrup-rail-nmi-client`](crates/syrup-rail-nmi-client/README.md) | Bounded, retry-free NMI HTTP client |
 
-## Installation
+Use only the layers your host needs, and keep all Syrup Rail dependencies on
+the same version or Git revision. The NMI adapter re-exports the matching raw
+client as `syrup_rail_nmi::nmi_client`.
 
-All four crates are released together and must use the same version. Add only
-the layers a host needs:
+## Getting started
+
+The current source tree is the unreleased `0.6.0` version. The last released
+version is `0.5.3`; see its [versioned documentation](https://docs.rs/crate/syrup-rail/0.5.3).
+To use the current source, pin every Syrup Rail dependency to the same Git
+revision. This committed revision contains the `0.6.0` implementation:
 
 ```toml
 [dependencies]
-syrup-rail = "0.6.0"
-syrup-rail-postgres = "0.6.0"
-syrup-rail-nmi = "0.6.0" # only for NMI-backed hosts
+syrup-rail = { git = "https://github.com/bpcakes/syrup-rail.git", rev = "14783547c5c55fd4592ce3c35bb3517251fb58b0" }
+syrup-rail-postgres = { git = "https://github.com/bpcakes/syrup-rail.git", rev = "14783547c5c55fd4592ce3c35bb3517251fb58b0" }
+syrup-rail-nmi = { git = "https://github.com/bpcakes/syrup-rail.git", rev = "14783547c5c55fd4592ce3c35bb3517251fb58b0" } # NMI hosts only
 ```
 
-`syrup-rail-nmi` re-exports its matching raw client as
-`syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.6.0"`
-directly.
+For the raw NMI client without the billing adapter, use
+`syrup-rail-nmi-client` at the same revision instead of `syrup-rail-nmi`.
+
+The minimum supported Rust version is 1.88. The current PostgreSQL integration
+supports PostgreSQL 18 and schema v5. New hosts apply the
+[versioned install SQL](crates/syrup-rail-postgres/schema/v5/install.sql);
+hosts on schema v4 use the [v5 cutover guide](crates/syrup-rail-postgres/schema/v5/README.md).
+The library does not run migrations for the host.
+
+The compiled [host integration example](crates/syrup-rail-postgres/examples/host_integration.rs)
+shows service wiring, host authorization, gateway resolution, and the
+transactional event boundary. It can be checked without a database or gateway:
+
+```console
+cargo check -p syrup-rail-postgres --example host_integration --locked
+```
+
+For the domain model, run the compiled
+[subscription terms example](crates/syrup-rail/examples/subscription_terms.rs):
+
+```console
+cargo run -p syrup-rail --example subscription_terms
+```
+
+These commands run from a checkout of this repository.
 
 ## Subscription terms
 
-Hosts select an explicit recurring start or a positive paid introductory
-period. Both variants snapshot the recurring price, cadence, dunning policy,
-and access policy when enrollment is admitted. The complete
-[`subscription_terms` example](crates/syrup-rail/examples/subscription_terms.rs)
-is compiled with the workspace and can be run with
-`cargo run -p syrup-rail --example subscription_terms`.
-
-Hosts with subscriber-specific trial eligibility implement
-`SubscriptionOfferStore::lock_enrollment_offer`. Syrup Rail supplies the same
-typed reservation identity at the reservation and final-admission stages,
-including the in-flight attempt ID. Eligibility queries over attempt history
-must exclude that ID so the prepared enrollment does not disqualify itself.
-The callback uses only the supplied transaction connection.
-
-Each dunning delay is relative to the preceding submitted, determinate
-automatic-renewal failure. In the example, collection occurs at the economic
-period boundary, then one day after the first customer-payment failure, then
-three days after the second. The example uses the checked
-`DunningRetryDelay::days` and `DunningSchedule::from_delays` APIs rather than
-unlabelled second counts. User recovery, unknown outcomes, provider throttling,
-and failures before submission do not consume those steps; infrastructure
-retries retain their separate bounded pacing.
-
-`Entitlement::PastDue` is a payment-state fact, not an access denial by itself.
-Use `Entitlement::permits_product_access()` for the canonical subscription
-decision after the host has authenticated and authorized its subject.
-`AllowedDuringDunning` continues both reads and protected writes, while
-`Suspended` denies them. The compiled [`entitlement_access`
-example](crates/syrup-rail/examples/entitlement_access.rs) shows the host
-security boundary and canonical method call.
-
-Gateway account mode constrains payment mutations. Entitlement reads and
-guards default to live paid subscriptions; test workers select `Test`, while
-trusted administrative tooling can opt into both modes explicitly. Current-
-subscription, billing-portal, and payment-history reads remain mode-neutral,
-so hosts that mix modes still need a trusted environment or tenant partition
-around those surfaces. Separate databases or merchant accounts remain the
-simplest hard isolation boundary.
-
-For a protected write, start an `EntitlementWriteTransaction` from the pool,
-make any preparatory host writes through its connection, and pass it by value
-to `require_entitlement_for_update`. The pending transaction cannot commit.
-Only successful admission returns an `AdmittedEntitlementWriteTransaction`
-with its entitlement locks held. Completed denial and database failure await a
-full rollback; cancellation queues the owned transaction's rollback. Perform
-and commit the host-owned protected mutation only with the admitted value, and
-finish any nested savepoint before consuming that value. The compiled
-[`host_integration` example](crates/syrup-rail-postgres/examples/host_integration.rs)
-shows this fail-closed ownership boundary.
-
-`MarkUnpaid` makes the subscription terminal after the schedule is exhausted:
-it removes renewal and recovery authority and grants no subscription
-entitlement. The final transaction appends `SubscriptionPaymentFailed`
-followed by `SubscriptionEnded { reason: NonPayment, .. }`. A host should
-persist those provider-neutral events in its own transactional outbox and run
-product-specific cleanup asynchronously; Syrup Rail does not call host
-fulfillment integrations.
-
-Every `SubscriptionPaymentFailed` carries one closed
-`SubscriptionPaymentFailureOutcome`. Its `access()` projection is the canonical
-product-access fact immediately after the failure; it already accounts for the
-subscription's snapshotted access policy and causal failure history. In
-particular, an immediate-suspension retry carries the original access boundary
-even though automatic dunning remains open. Hosts must not reconstruct this
-decision from current offer configuration.
-
-`RemainPastDue` instead keeps the financial lifecycle open with no further
-automatic payment scheduled. It does not emit `SubscriptionEnded`. When the
-access policy is `ContinueUntilDunningExhausted`, the final
-`SubscriptionPaymentFailed { outcome: DunningExhausted { exhausted_at,
-access_ended_at } }` records both facts at the same boundary: the subscription
-entitlement changes from `AllowedDuringDunning` to `Suspended`. Hosts that
-mirror access outside Syrup Rail must consume the outcome's access projection
-from their transactional outbox.
-
-PostgreSQL 18 is the only supported database major, and schema v5 is the
-current contract. New hosts install
-[`schema/v5/install.sql`](crates/syrup-rail-postgres/schema/v5/install.sql).
-Existing schema-v4 hosts follow the checked-in
-[`v4` to `v5` cutover guide](crates/syrup-rail-postgres/schema/v5/README.md).
-Hosts on an older schema must first follow the immutable versioned artifacts
-to reach schema v4, then perform the v4-to-v5 cutover.
+The [subscription and entitlement guide](docs/integration.md#subscription-terms)
+covers paid trials, dunning, access policy, and protected writes.
 
 ## PostgreSQL host integration
 
-The compiled [`host_integration`
-example](crates/syrup-rail-postgres/examples/host_integration.rs) shows the
-host-owned offer lock, gateway resolution, end-user admission, transaction and
-outbox boundary, service construction, authorized command construction, and
-durable enrollment-result handling. It is intentionally provider-neutral and
-does not install or run a database migrator. Its versioned event envelope
-separates database-assigned first-write facts from the complete replay-stable
-contract. Semantic-key conflicts are accepted only when schema version,
-billing subject, event kind, semantic key, and payload all match; JSONB payload
-equality is structural because PostgreSQL does not retain source bytes. The
-example compares untouched persisted values before typed decoding, whose exact
-round trip rejects unknown or normalized fields. Its `Debug` output exposes
-only schema version and event kind, never subject identifiers or payload
-values. The V1 phase and card labels are host-owned, so later core display
-changes cannot alter already-versioned wire data. Card brands in customer and
-event projections use a closed provider-neutral vocabulary; unknown provider
-text becomes `other` rather than being copied into the host payload.
-
-After the host has applied its v5 install or forward-only v4-to-v5 upgrade,
-call `assert_runtime_schema_v5_compatible(&pool).await` during process startup and
-before accepting billing traffic. The assertion checks the complete canonical
-v5 catalog and fingerprint inside one repeatable-read, read-only transaction.
-It first rejects every PostgreSQL major other than 18. Separately named
-host-prefixed tables, constraints, indexes, functions, and triggers are valid
-extension points, but canonical table and view columns are closed: adding even
-a host-prefixed column to a canonical relation is unsupported and fails the
-fingerprint check. The assertion also fails closed for v1, v2, v3, or other
-canonical drift. It never executes install, upgrade, preflight, or audit SQL.
-Hosts remain responsible for applying and coordinating their own migrations.
-The compiled host integration example includes a default-feature helper for
-this startup check.
-
-An active `REINDEX CONCURRENTLY` may temporarily create invalid `_ccnew` or
-`_ccold` indexes. The assertion tolerates only shadows whose lock owner is also
-visible to the validating database role in `pg_stat_progress_create_index` as
-a non-initializing concurrent reindex, and it rechecks that evidence before
-committing. PostgreSQL hides those progress details across roles unless the
-observer has statistics privileges, so use the same database role for startup
-validation and maintenance when uninterrupted startup during reindexing is
-required. Otherwise validation deliberately fails closed. A failed reindex can
-leave a stale invalid shadow; drop that shadow according to PostgreSQL's
-`REINDEX` recovery guidance before accepting billing traffic.
-
-After the host has authenticated and authorized an exact billing scope,
-subscriber, and plan, the same service also exposes `cancel`, `claim_discount`,
-and `clear_discount`. Cancellation changes canonical state and appends its
-typed event through the host transaction/outbox boundary before committing;
-replays and semantic blockers append nothing. Discount claim and clear retain
-their typed outcomes, use no gateway or provider I/O, and do not emit billing
-events. The host integration example includes compiled helpers for all three
-operations.
-
-For a failed high-level billing command, hosts can branch on
-`SubscriptionBillingServiceError::disposition()` instead of matching internal
-error variants. The disposition enum is non-exhaustive, so consumer matches
-must retain a conservative wildcard. `is_retryable()` means it is safe to
-resubmit the **same idempotent command and key** later; it does not guarantee
-success. A transient provider `Unavailable` result that is provably
-not-submitted restores prepared work when that flow supports replay, just like
-a transient final account-mode query. `retry_after()` returns an exact delay
-only for admission denial.
-Gateway and account cooldowns are temporarily unavailable but deliberately do
-not receive a fabricated delay. Conflicts are not retryable as-is: reload and
-rebuild against current authority, or reconcile the existing idempotency key.
-Provider-free cancellation and discount transactions also preserve pool
-acquisition timeouts and PostgreSQL's serialization, deadlock, lock-timeout,
-and statement-timeout conditions as `StorageTemporarilyUnavailable`; replaying
-those idempotent operations is safe. Generic storage faults and failures on
-paths that may have crossed provider I/O remain `Internal` because their
-outcome is ambiguous.
-
-Host callback error wrappers also stop the ordinary `Error::source()` chain
-before the arbitrary application error. Classify the outer service error
-first; use `into_source()` only after destructuring an owned callback wrapper
-in a protected path that deliberately inspects that potentially sensitive
-value.
-
-For customer billing pages, construct a `SubscriptionBillingPortalQuery` from
-that same authorized exact identity and call `subscription_billing_portal`. It
-returns the canonical `Entitlement`, including current terms and saved or
-applied discounts, plus an optional masked-card display.
-`subscription_payment_history_page` supplies bounded, cursor-paginated
-exact-plan attempt history. These reads deliberately exclude provider
-payment-method references, transaction identifiers, contacts, gateway
-responses, and raw diagnostics; hosts still own presentation and
-authorization.
-
-For automatic renewal dispatches, a mode-specific worker calls
-`due_renewals_page_for_mode(pool, required_mode, None)` and continues with its
-returned `RenewalDispatchPageCursor` until no next cursor is present. Keep the
-same required mode for the whole cursor chain; the cursor records it and rejects
-cross-mode reuse. A central router that owns both modes can instead call
-`due_renewals_page(pool, None)`. A dedicated mode-leading index prevents one
-mode's work from consuming the other worker's bounded page.
-PostgreSQL observes the first page's timestamp and the cursor reuses it for
-every time-based due, cooldown, stale-update, and retry-window gate, while
-strict `(next_payment_attempt_at, subscription_id)` ordering avoids offset and
-timestamp-tie gaps or repeats for unchanged candidates. It is not a cross-page
-MVCC snapshot: concurrently inserted, retimed, or newly unblocked candidates
-behind the continuation key wait for a fresh scan. Persist or reconstruct
-cursors only in trusted host code from a prior page—never accept a cursor from
-an end user. This is not a lease or queue writer: the host writes its own
-outbox/queue record and each eventual renewal still rechecks current canonical
-state. `due_renewals` remains the compatible fixed-100 first-page helper; use
-`due_renewals_for_mode` for a mode-specific fixed-100 first page. Each scan
-first applies subscription/account/provider gates, then probes only each
-eligible subscription's exact current-period attempt history; unrelated
-historical attempts are not globally aggregated on every page.
-
-Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
-compile the integration boundary without contacting a database or provider.
+The [host integration guide](docs/integration.md#postgresql-host-integration)
+covers service wiring, billing events, reconciliation, and renewal dispatch.
+The [public API guide](docs/public-api.md) describes the supported service
+facade and lower-level composition points.
 
 ## Development
 
-- `scripts/jig doctor`
-- `scripts/jig check test`
-- `scripts/check-public-api.sh`
-- `cargo test -p syrup-rail-nmi-client`
+Run `scripts/jig doctor` to check local prerequisites, then
+`scripts/jig check test` for the workspace test gate. Use
+`scripts/check-public-api.sh` to verify the public facade and documentation.
+The [release guide](docs/releasing.md) covers package and publication checks.
 
-See [the public API guide](docs/public-api.md) for the supported facade,
-advanced transaction-local composition points, and event compatibility policy.
+## Help
 
-## Releasing
-
-See [docs/releasing.md](docs/releasing.md) for the local preflight and the
-manual, trusted-publishing workflow.
-
-Git consumers use `git = "https://github.com/bpcakes/syrup-rail.git"` and
-pin the same exact `rev` for every Syrup Rail crate they depend on.
-
-Version 0.6.0 requires schema v5, with one direct upgrade from schema v4.
-Provider adapters attach `ProcessorApprovalEvidence` to every observation. The NMI
-raw client derives it from all decision/text occurrences before reducing fields.
-`Structured` preserves a possible processor charge even when the payment decision
-is unknown; `TextOnly` blocks manual failure of payment-bearing attempts without
-identifying a charge;
-`Absent` means no approval signal was found, not that no payment occurred.
-`Unclassified` protects payment-bearing manual review even when raw fields were discarded.
-Empty observations and new reservations start `Absent`; local notes do not change
-classification. Zero-value payment-method updates may be closed against their
-retained subscription snapshot without applying the new method; closure keeps
-their evidence available for audit and reconciliation. Mutation errors derive
-their evidence from certainty: proven
-non-submission is `Absent`, while indeterminate details stay `Unclassified`.
-Raw response strings are retained as evidence and are never interpreted by core
-financial policy. See the [schema-v5 cutover guide](crates/syrup-rail-postgres/schema/v5/README.md)
-for deployment and historical-evidence handling.
+Use [GitHub Issues](https://github.com/bpcakes/syrup-rail/issues) for questions
+and bug reports.
 
 ## License
 
 Syrup Rail is source-available under the Elastic License 2.0 (`Elastic-2.0`).
-See [LICENSE](LICENSE) for the complete terms and [NOTICE.md](NOTICE.md) for
-ownership, scope, and third-party notices.
+See [LICENSE](LICENSE) for the terms and [NOTICE.md](NOTICE.md) for ownership,
+scope, and third-party notices.
