@@ -78,5 +78,5 @@ responsibilities. See the workspace `subscription_terms`, `entitlement_access`,
 and PostgreSQL `host_integration` examples for complete integration patterns.
 
 This package is source-available under the Elastic License 2.0
-(`Elastic-2.0`). See [LICENSE](LICENSE) for the terms and
-[NOTICE.md](NOTICE.md) for ownership and third-party notices.
+(`Elastic-2.0`). See [LICENSE](https://github.com/bpcakes/syrup-rail/blob/master/crates/syrup-rail/LICENSE) for the terms and
+[NOTICE.md](https://github.com/bpcakes/syrup-rail/blob/master/crates/syrup-rail/NOTICE.md) for ownership and third-party notices.

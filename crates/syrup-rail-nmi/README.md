@@ -96,8 +96,8 @@ subscribers, or own subscription schedules. Those responsibilities remain in
 the host and the matching `syrup-rail-postgres` integration.
 
 This package is source-available under the Elastic License 2.0
-(`Elastic-2.0`). See [LICENSE](LICENSE) for the terms and
-[NOTICE.md](NOTICE.md) for ownership and third-party notices.
+(`Elastic-2.0`). See [LICENSE](https://github.com/bpcakes/syrup-rail/blob/master/crates/syrup-rail-nmi/LICENSE) for the terms and
+[NOTICE.md](https://github.com/bpcakes/syrup-rail/blob/master/crates/syrup-rail-nmi/NOTICE.md) for ownership and third-party notices.
 
 The adapter attaches `ProcessorApprovalEvidence` independently of the payment
 decision. Numeric approval response codes use the raw client's numeric semantics
