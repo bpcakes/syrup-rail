@@ -1,4 +1,5 @@
 use super::*;
+use syrup_rail::{BillingEvent, RenewalFailureDisposition, SubscriptionPaymentFailureDisposition};
 
 /// Value-redacted failure returned by the host's manual-failure store.
 #[derive(Debug)]
@@ -56,10 +57,69 @@ pub async fn fail_review_required_attempt(
     host: &dyn ManualAttemptFailureHostStore,
     attempt_id: PaymentAttemptId,
 ) -> Result<ManualAttemptFailureOutcome, OperatorReviewError> {
+    fail_review_required(
+        pool,
+        coordinator,
+        ManualFailureMode::Ordinary(host),
+        attempt_id,
+    )
+    .await
+}
+
+/// Closes an operator-reviewed, submitted renewal and makes its next permitted
+/// automatic retry due immediately, in the same transaction as its failure event.
+///
+/// The host must authorize this exact attempt and freshly reconcile its exact
+/// provider identity to confirm that no processor transaction exists before
+/// calling this function. This operation performs no provider query or charge.
+/// It preserves ordinary dunning history, access policy, and exhaustion; only a
+/// newly scheduled retry is accelerated. Canceled, unpaid, and already exhausted
+/// subscriptions are not reopened. Hosts must retain their cancellation fences
+/// when dispatching the resulting renewal through the ordinary renewal service.
+///
+/// Replays and concurrent calls cannot accelerate another attempt's retry. An
+/// uncertain commit is recovered by rereading the attempt and normal due-renewal
+/// discovery, never by submitting a provider charge directly.
+pub async fn fail_review_required_renewal_for_retry(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    attempt_id: PaymentAttemptId,
+) -> Result<ManualAttemptFailureOutcome, OperatorReviewError> {
+    fail_review_required(
+        pool,
+        coordinator,
+        ManualFailureMode::RetryRenewal,
+        attempt_id,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+enum ManualFailureMode<'a> {
+    Ordinary(&'a dyn ManualAttemptFailureHostStore),
+    RetryRenewal,
+}
+
+impl ManualFailureMode<'_> {
+    fn accepts(self, attempt: &PaymentAttempt) -> bool {
+        review_required_attempt_can_be_manually_failed(attempt)
+            && (matches!(self, Self::Ordinary(_))
+                || (attempt.kind() == PaymentAttemptKind::SubscriptionRenewal
+                    && attempt.state().timestamps().submitted_at().is_some()
+                    && attempt.state().resolution_code().is_none()))
+    }
+}
+
+async fn fail_review_required(
+    pool: &PgPool,
+    coordinator: &dyn BillingTransactionCoordinator,
+    mode: ManualFailureMode<'_>,
+    attempt_id: PaymentAttemptId,
+) -> Result<ManualAttemptFailureOutcome, OperatorReviewError> {
     let Some(preloaded) = payment_attempt_by_id(pool, attempt_id).await? else {
         return Ok(ManualAttemptFailureOutcome::NotFound);
     };
-    if !review_required_attempt_can_be_manually_failed(&preloaded) {
+    if !mode.accepts(&preloaded) {
         return Ok(ManualAttemptFailureOutcome::KeptOpen(preloaded));
     }
 
@@ -74,7 +134,9 @@ pub async fn fail_review_required_attempt(
         let target = preloaded.request().target();
         if let Some(plan_key) = target.plan_key() {
             lock_subscription_aggregate(connection, identity.subscriber_id(), plan_key).await?;
-        } else if let Some(target_id) = target.host_charge_target_id() {
+        } else if let (Some(target_id), ManualFailureMode::Ordinary(host)) =
+            (target.host_charge_target_id(), mode)
+        {
             host.lock_payment_failure_target(
                 connection,
                 ManualFailureHostCharge::new(
@@ -98,9 +160,15 @@ pub async fn fail_review_required_attempt(
         if current.identity() != preloaded.identity() || current.request() != preloaded.request() {
             return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
         }
-        if !review_required_attempt_can_be_manually_failed(&current)
+        if !mode.accepts(&current)
             || (current.kind() != PaymentAttemptKind::SubscriptionPaymentMethodUpdate
-                && unresolved_processor_charge_exists(connection, attempt_id).await?)
+                && processor_charge_blocks_failure(connection, attempt_id, mode).await?)
+        {
+            return Ok((ManualAttemptFailureOutcome::KeptOpen(current), Vec::new()));
+        }
+
+        if matches!(mode, ManualFailureMode::RetryRenewal)
+            && !lock_retryable_subscription(connection, &current).await?
         {
             return Ok((ManualAttemptFailureOutcome::KeptOpen(current), Vec::new()));
         }
@@ -111,7 +179,9 @@ pub async fn fail_review_required_attempt(
             return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
         }
 
-        if let Some(target_id) = current.request().target().host_charge_target_id() {
+        if let (Some(target_id), ManualFailureMode::Ordinary(host)) =
+            (current.request().target().host_charge_target_id(), mode)
+        {
             host.mark_payment_failed(
                 connection,
                 ManualFailureHostCharge::new(
@@ -134,6 +204,13 @@ pub async fn fail_review_required_attempt(
             && attempt.state().resolution_code().is_none()
         {
             match apply_resolved_automatic_renewal_failure(connection, &attempt).await? {
+                RenewalFailureApplication::Applied {
+                    disposition: RenewalFailureDisposition::RetryScheduled { retry_at },
+                    mut events,
+                } if matches!(mode, ManualFailureMode::RetryRenewal) => {
+                    expedite_retry(connection, &attempt, retry_at, &mut events).await?;
+                    events
+                }
                 RenewalFailureApplication::Applied { events, .. } => events,
                 RenewalFailureApplication::Noop => Vec::new(),
             }
@@ -161,6 +238,90 @@ pub async fn fail_review_required_attempt(
     Ok(outcome)
 }
 
+async fn lock_retryable_subscription(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+) -> Result<bool, OperatorReviewError> {
+    let target = attempt.request().target();
+    let subscription_id = target
+        .subscription_id()
+        .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    let period = target
+        .period()
+        .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT id FROM billing_subscriptions
+        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+            AND status IN ('active', 'past_due') AND unpaid_at IS NULL
+            AND next_renewal_at = $4 AND next_renewal_at <= clock_timestamp()
+            AND next_payment_attempt_at IS NOT NULL
+        FOR NO KEY UPDATE
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(attempt.identity().billing_scope_id().as_uuid())
+    .bind(attempt.identity().subscriber_id().as_uuid())
+    .bind(period.start_at())
+    .fetch_optional(connection)
+    .await?
+    .is_some())
+}
+
+async fn expedite_retry(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    scheduled_at: DateTime<Utc>,
+    events: &mut [BillingEvent],
+) -> Result<(), OperatorReviewError> {
+    let target = attempt.request().target();
+    let subscription_id = target
+        .subscription_id()
+        .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    let period = target
+        .period()
+        .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    let retry_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+        r#"
+        UPDATE billing_subscriptions
+        SET next_payment_attempt_at = LEAST(next_payment_attempt_at, clock_timestamp()),
+            updated_at = clock_timestamp()
+        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+            AND status = 'past_due' AND unpaid_at IS NULL
+            AND next_renewal_at = $4 AND next_payment_attempt_at = $5
+        RETURNING next_payment_attempt_at
+        "#,
+    )
+    .bind(subscription_id.as_uuid())
+    .bind(attempt.identity().billing_scope_id().as_uuid())
+    .bind(attempt.identity().subscriber_id().as_uuid())
+    .bind(period.start_at())
+    .bind(scheduled_at)
+    .fetch_optional(connection)
+    .await?
+    .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
+    let [
+        BillingEvent::SubscriptionPaymentFailed {
+            attempt_id,
+            disposition,
+            ..
+        },
+    ] = events
+    else {
+        return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
+    };
+    if *attempt_id != attempt.identity().attempt_id()
+        || *disposition
+            != (SubscriptionPaymentFailureDisposition::RetryScheduled {
+                retry_at: scheduled_at,
+            })
+    {
+        return Err(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE));
+    }
+    *disposition = SubscriptionPaymentFailureDisposition::RetryScheduled { retry_at };
+    Ok(())
+}
+
 async fn payment_attempt_by_id(
     pool: &PgPool,
     attempt_id: PaymentAttemptId,
@@ -176,9 +337,10 @@ async fn payment_attempt_by_id(
         .map_err(Into::into)
 }
 
-async fn unresolved_processor_charge_exists(
+async fn processor_charge_blocks_failure(
     connection: &mut PgConnection,
     attempt_id: PaymentAttemptId,
+    mode: ManualFailureMode<'_>,
 ) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         r#"
@@ -186,13 +348,14 @@ async fn unresolved_processor_charge_exists(
             SELECT 1
             FROM billing_processor_charges
             WHERE attempt_id = $1
-                AND progression_state IN (
+                AND ($2 OR progression_state IN (
                     'pending', 'reconciliation_required', 'external_reversal_required'
-                )
+                ))
         )
         "#,
     )
     .bind(attempt_id.as_uuid())
+    .bind(matches!(mode, ManualFailureMode::RetryRenewal))
     .fetch_one(&mut *connection)
     .await
 }

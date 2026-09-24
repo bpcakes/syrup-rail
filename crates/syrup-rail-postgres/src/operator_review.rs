@@ -49,6 +49,7 @@ pub use external_reversal::{
 pub use manual_failure::{
     ManualAttemptFailureHostStore, ManualAttemptFailureHostStoreError,
     ManualAttemptFailureHostTransitionOutcome, fail_review_required_attempt,
+    fail_review_required_renewal_for_retry,
 };
 pub use pages::{attempt_review_page, processor_charge_review_page};
 
