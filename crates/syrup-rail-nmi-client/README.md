@@ -249,3 +249,8 @@ a compromised process or memory forensics.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
+
+Hosts that send their own receipts can call
+`Client::with_customer_receipts_disabled()` to explicitly send
+`customer_receipt=false` for every Classic payment and v5 sale, including
+existing-vault renewals. By default the client omits this field.

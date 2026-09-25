@@ -36,7 +36,7 @@ pub(super) struct NmiFormParams<'a> {
 }
 
 impl<'a> NmiFormParams<'a> {
-    fn push_borrowed(&mut self, key: &'static str, value: &'a str) {
+    pub(super) fn push_borrowed(&mut self, key: &'static str, value: &'a str) {
         self.fields.push(NmiFormParam {
             key,
             value: NmiFormValue::Borrowed(value),

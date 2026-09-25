@@ -133,6 +133,7 @@ impl ClientFactory {
             endpoint,
             credentials,
             duplicate_check,
+            customer_receipts_disabled: false,
             report_admission: self.report_admission.clone(),
         })
     }
@@ -159,6 +160,7 @@ pub struct Client {
     pub(crate) endpoint: Endpoint,
     pub(crate) credentials: Credentials,
     duplicate_check: DuplicateCheck,
+    customer_receipts_disabled: bool,
     pub(crate) report_admission: Arc<Semaphore>,
 }
 
@@ -250,6 +252,16 @@ impl WireError {
 }
 
 impl Client {
+    /// Explicitly disables NMI customer receipts for every payment mutation.
+    ///
+    /// Sends `customer_receipt=false` on Classic requests and the boolean
+    /// equivalent on v5 sales, including payments using an existing vault.
+    /// Without this option the field is omitted and NMI applies its settings.
+    pub fn with_customer_receipts_disabled(mut self) -> Self {
+        self.customer_receipts_disabled = true;
+        self
+    }
+
     #[cfg(test)]
     fn new(
         base_url: impl AsRef<str>,
@@ -301,7 +313,10 @@ impl Client {
         }
         ensure_supported_sale_currency(&request.currency)?;
         let amount = amount_value(request.amount_cents)?;
-        let body = sale_body_json(&request, amount, self.duplicate_check);
+        let mut body = sale_body_json(&request, amount, self.duplicate_check);
+        if self.customer_receipts_disabled {
+            body["customer_receipt"] = serde_json::Value::Bool(false);
+        }
         let value = self.post_json("/api/v5/payments/sale", body).await?;
         let mut outcome = payment_outcome_from_json(&value).map_err(WireError::after_success)?;
         if outcome.status == PaymentStatus::Approved
@@ -340,10 +355,13 @@ impl Client {
         &self,
         request: StorePaymentMethodRequest,
     ) -> Result<PaymentOutcome, WireError> {
-        let params = classic_store_payment_method_params(
+        let mut params = classic_store_payment_method_params(
             self.credentials.private_api_key.as_str(),
             &request,
         );
+        if self.customer_receipts_disabled {
+            params.push_borrowed("customer_receipt", "false");
+        }
         let response = self
             .post_mutation_form_text("/api/transact.php", &params)
             .await?;
@@ -415,12 +433,15 @@ impl Client {
     async fn classic_sale(&self, request: SaleRequest) -> Result<PaymentOutcome, WireError> {
         ensure_supported_sale_currency(&request.currency)?;
         let amount = amount_string(request.amount_cents)?;
-        let params = classic_sale_params(
+        let mut params = classic_sale_params(
             self.credentials.private_api_key.as_str(),
             &request,
             amount,
             self.duplicate_check,
         );
+        if self.customer_receipts_disabled {
+            params.push_borrowed("customer_receipt", "false");
+        }
         let response = self
             .post_mutation_form_text("/api/transact.php", &params)
             .await?;
