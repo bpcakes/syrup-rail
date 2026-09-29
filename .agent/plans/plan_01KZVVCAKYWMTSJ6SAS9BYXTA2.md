@@ -1,1 +1,0 @@
-Address the merged review: make active-shadow classification operation-aware and transition-safe, add stale table-reindex and long-name coverage, release test pool connections promptly, and prove advisory-wrapper portability.
