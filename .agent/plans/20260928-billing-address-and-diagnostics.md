@@ -43,6 +43,11 @@ store PAN/CVV or issue a provider mutation to obtain diagnostic information.
 - [x] Independent audit of the first draft against code (2026-09-28); findings integrated below.
 - [x] Address the revised-plan audit's NMI limit/source correction (2026-09-28).
 - [ ] Implement and verify T-01 through T-03; planning is not implementation.
+- [x] T-01 (2026-09-29): address transport implemented and reviewed at
+  `bb75a4ab5da09b87341dc5481f113cbb7c29c42b` (review base `bd9c551`). Core,
+  NMI client and adapter tests pass; PostgreSQL passes single-threaded
+  (`scripts/jig check test-locked`), while the parallel run hits Docker
+  harness startup timeouts in this environment. Synthetic wire tests only.
 
 Restart checkpoint (2026-09-28): the main checkout
 `/home/aa/Documents/syrup-rail` is on `feature/billing-address-diagnostics-0.5.4`
