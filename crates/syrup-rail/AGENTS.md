@@ -27,7 +27,8 @@ command/outcome types for application-independent subscription billing.
 - `src/{gateway,gateway_value,resolver}.rs` own the provider port with five required
   operations and a default metadata-only query,
   typed evidence, sensitive values, provider-I/O-free host resolver contract,
-  and diagnostic boundary.
+  and diagnostic boundary. `src/gateway_value/contact.rs` owns the redacted
+  billing contact, billing address, and contact-parts values.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure
   payment/calendar policy.
 - `src/billing_portal.rs` owns the provider-neutral customer billing portal,
