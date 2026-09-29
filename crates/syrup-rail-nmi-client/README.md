@@ -235,6 +235,28 @@ outcome with a payload-free diagnostic. Caller-provided request fields have
 per-field byte limits and every encoded outbound request has a 16 KiB aggregate
 budget that is checked before serialization and network I/O.
 
+`BillingContact.address` optionally carries a `BillingAddress`. Classic sales
+(Customer Vault creation and merchant-initiated renewals) and Classic
+`validate` send `address1`, `address2`, `city`, `state`, `zip`, and `country`;
+v5 sales send the same names under `billing_address`. Values are trimmed and
+blank optional fields are omitted, so a request without an address keeps its
+previous wire fields. Before network I/O the client requires a non-blank
+`address1` of at most 100 bytes, an `address2` of at most 100 bytes, a `city`
+of at most 50 bytes, a non-blank `state` of exactly two ASCII letters or
+digits, a `zip` of at most 20 bytes of ASCII letters, digits, spaces, or
+hyphens, and a `country` of exactly two uppercase ASCII letters. Byte limits
+apply to the untrimmed UTF-8 value, so `state` and `country` cannot carry
+surrounding whitespace and multibyte text can fail within NMI's documented v5
+character limits. These are this client's conservative local rules: NMI
+documents 100, 100, 50, 50, 20, and 2 character limits for the v5 sale billing
+address and no maximum lengths for the Classic fields. Passing them does not
+mean NMI or the processor will accept the address or the payment. The encoded
+request budget measures each sale in the encoding it is sent with, so
+merchant-initiated renewals are measured as Classic forms. Address values are
+redacted from request `Debug` output. The field breaks existing
+`BillingContact` struct literals; add `address: None` to keep sending no
+address.
+
 Mutation futures are not cancellation-safe. Once a mutation future has been
 polled, dropping it does not prove that NMI did not receive or process the
 request. The caller must reconcile that mutation and must not blindly retry it.

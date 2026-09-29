@@ -4,14 +4,42 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 ## [Unreleased]
 
+### Action required for hosts
+
+- `BillingContact::into_parts` returns the new `BillingContactParts` struct
+  (first name, last name, email and billing address) instead of a three-field
+  tuple, so callers that rebuild a contact must decide how to handle the
+  address.
+- The raw `syrup_rail_nmi_client::BillingContact` struct gains a public
+  `address: Option<BillingAddress>` field. Existing struct literals must add
+  `address: None` to keep sending no address.
+
 ### Fixed
 
 - Submit merchant-initiated saved-card renewals through NMI Classic, preserving
   stored-credential metadata, processor duplicate checking, and the original
   transaction reference. Preserve the submitted vault ID when an approval omits
   its echo. No automatic fallback or resubmission is introduced.
+- Measure a merchant-initiated renewal's encoded request size as the Classic
+  form it is sent as, rather than as v5 JSON, before any network I/O.
 
 ### Added
+
+- Add the provider-neutral `BillingAddress` value (required first line and
+  two-letter country; optional second line, city, region and postal code),
+  `BillingContact::with_address`, `BillingContact::from_address` for an
+  address-only contact, and `BillingContact::address`. Addresses are trimmed,
+  limited to 255 bytes per field, free of control characters, and redacted from
+  ordinary formatting. `BillingContactSnapshot` records the address and compares
+  it structurally for exact replay; attempt fingerprints are unchanged.
+- Send billing addresses to NMI on Classic sales (enrollment, recovery and
+  merchant renewal), Classic validate (payment-method replacement) and v5 sales
+  (host charges). The raw client rejects addresses outside its conservative
+  local rules before network I/O: 100-byte address lines, a 50-byte city, a
+  two-character state, a 20-byte ZIP of letters, digits, spaces and hyphens,
+  and an uppercase two-letter country. Requests without an address keep their
+  previous wire fields. Local validation does not prove that NMI or the
+  processor accepts the address or the payment.
 
 - Add `fail_review_required_renewal_for_retry` for host-authorized incident
   recovery after a fresh exact provider query finds no transaction. The operation

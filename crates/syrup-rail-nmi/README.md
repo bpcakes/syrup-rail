@@ -85,6 +85,22 @@ by default after an indeterminate attempt.
 NMI's sandbox does not contact a processor, so hosts must verify duplicate
 override support against the effective processor configuration before rollout.
 
+A core `BillingAddress` maps to NMI's billing fields: `line1` to `address1`,
+`line2` to `address2`, `city` to `city`, `region` to `state`, `postal_code` to
+`zip`, and `country` to `country`. Enrollment and recovery sales,
+merchant-initiated renewals, and payment-method replacement send them through
+Classic; host charges send them under the v5 sale `billing_address`. An
+address-only contact sends no name or email fields. The raw client applies
+stricter local rules than the core type: 100-byte address lines, a 50-byte city,
+a two-character ASCII letter-or-digit state, a 20-byte ZIP of ASCII letters,
+digits, spaces, or hyphens, and an uppercase two-letter country. A value the
+core accepts but these rules reject returns
+`GatewayNotSubmittedError::Malformed` without contacting NMI. Because that
+happens after the attempt is reserved, and a corrected retry needs a new
+idempotency key, hosts must pre-validate addresses to these rules before
+reserving a payment. Passing them does not prove that NMI or the processor will
+accept the address or the payment.
+
 The raw client and adapter never retry a payment mutation. Indeterminate
 outcomes must be reconciled from the durable attempt identity before any
 replacement charge is considered. Unknown lifecycle vocabulary is quarantined

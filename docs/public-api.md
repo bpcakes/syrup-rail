@@ -43,6 +43,19 @@ mutation admission hook or append billing events. See the
 [PostgreSQL integration guide](../crates/syrup-rail-postgres/README.md) for replay,
 replacement, scrub, and historical-repair behavior. No schema change is needed.
 
+0.5.4 lets a host attach a customer-confirmed `BillingAddress` to the
+`BillingContact` it passes to enrollment, recovery, payment-method replacement,
+or a host charge (`with_address`, or `from_address` for an address-only
+contact). The address becomes part of the durable contact snapshot and exact
+replay equality; attempt fingerprints are unchanged. `BillingContact::into_parts`
+now returns `BillingContactParts`, and the raw
+`syrup_rail_nmi_client::BillingContact` struct gains an `address` field, so
+existing literals must add `address: None`. The NMI adapter applies stricter
+local address rules than the core type and rejects a nonconforming address as
+`GatewayNotSubmittedError::Malformed` after the attempt is reserved; hosts must
+pre-validate to the rules documented in the `syrup-rail-nmi` README before
+reserving. No local rule proves provider or processor acceptance.
+
 The compiled `syrup-rail-postgres` `host_integration` example is the canonical
 composition guide. `SubscriptionBillingServiceError::disposition()` is the
 stable operational classification boundary; callers retain a wildcard because

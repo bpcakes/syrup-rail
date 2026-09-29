@@ -72,6 +72,20 @@ Gateway decorators must forward `query_payment_method_metadata` to the wrapped
 gateway as well as the five required methods. Otherwise, the default projects
 the decorator's financial query and can omit the provider's enriched fields.
 
+A `BillingContact` can carry a customer-confirmed `BillingAddress`: attach one
+with `with_address`, or build an address-only contact with `from_address`.
+The address requires a first line and a two-letter country, trims every field,
+limits each field to 255 bytes, rejects control characters, stores the country
+uppercase, and keeps postal codes as text. It is country-neutral. The address
+is part of the durable `BillingContactSnapshot`, so a same-key retry with an
+added, removed, or changed address is a different request; attempt fingerprints
+never include contacts. `BillingContact::into_parts` returns
+`BillingContactParts`, which includes the address. Provider adapters can apply
+stricter formats. An address the adapter rejects fails before submission after
+the attempt has been reserved, and a corrected retry needs a new idempotency
+key, so hosts must pre-validate to their adapter's documented rules. Local
+validation never proves that a provider or processor accepts the address.
+
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
 define a transport wire format for billing events. Those remain host
 responsibilities. See the workspace `subscription_terms`, `entitlement_access`,
