@@ -1,4 +1,4 @@
-# Syrup Rail 0.5.2 public API
+# Syrup Rail 0.5.4 public API
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -54,7 +54,14 @@ existing literals must add `address: None`. The NMI adapter applies stricter
 local address rules than the core type and rejects a nonconforming address as
 `GatewayNotSubmittedError::Malformed` after the attempt is reserved; hosts must
 pre-validate to the rules documented in the `syrup-rail-nmi` README before
-reserving. No local rule proves provider or processor acceptance.
+reserving. No local rule proves provider or processor acceptance. Schema v5
+persists the address on stored methods and attempts. Renewal reservation
+snapshots the current method's address (a builder on
+`SubscriptionRenewalLockedTerms` carries it), and submission sends only that
+snapshot as an address-only contact; `BillingContactSnapshot::address`
+exposes it for hosts that rebuild continuation contacts. Subscriber scrubbing
+clears addresses and now also holds the payment-method approval domain, so the
+host's own subject lock must still come first.
 
 The compiled `syrup-rail-postgres` `host_integration` example is the canonical
 composition guide. `SubscriptionBillingServiceError::disposition()` is the
@@ -194,9 +201,12 @@ than being expired automatically.
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v4_compatible` after host migrations and before
-serving billing traffic. Version 0.5.2 supports PostgreSQL 18 and schema v4 only;
-the assertion is read-only and does not install or upgrade a schema. It
+Use `assert_runtime_schema_v5_compatible` after host migrations and before
+serving billing traffic. Version 0.5.4 supports PostgreSQL 18 and schema v5 only;
+the assertion is read-only and does not install or upgrade a schema.
+`assert_runtime_schema_v4_compatible` remains for confirming the pre-cutover
+state before a host commits `schema/v5/upgrade_from_v4.sql` with every billing
+writer stopped. It
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is
 fail-closed unless the observer has PostgreSQL statistics privileges.

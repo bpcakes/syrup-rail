@@ -9,10 +9,13 @@ and transaction orchestration.
 
 - `src/lib.rs` — the public PostgreSQL operation facade and crate-private
   module ownership map.
-- `schema/v4/install.sql` — current authoritative fresh-install DDL;
-  `schema/v4/prepare_from_v3.sql`, `validate_from_v3.sql`, the
-  non-transactional concurrent `index_from_v3.sql`, and `upgrade_from_v3.sql`
-  are the forward-only v3 cutover stages.
+- `schema/v5/install.sql` — current authoritative fresh-install DDL;
+  `schema/v5/upgrade_from_v4.sql` is the one-transaction, stopped-writer
+  forward-only v4 cutover that appends the billing-address columns.
+- `schema/v4/**` — immutable shipped version-4 distribution artifacts,
+  including the staged v3 cutover (`prepare_from_v3.sql`,
+  `validate_from_v3.sql`, the non-transactional `index_from_v3.sql`, and
+  `upgrade_from_v3.sql`).
 - `schema/v3/**` — immutable shipped version-3 distribution artifacts.
 - `schema/v2/preflight_from_v1.sql`,
   `schema/v2/audit_retry_reclassification_from_v1.sql`, and
@@ -20,8 +23,9 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v4 runtime compatibility
-  assertion plus canonical catalog conformance. Version-specific, upgrade, and
+- `src/schema_contract.rs` — production read-only v5 runtime compatibility
+  assertion, the retained v4 pre-cutover assertion, and canonical catalog
+  conformance. Version-specific, upgrade, and
   shared fixture tests live under `src/schema_contract/tests/`; checked-in
   install/upgrade SQL constants remain behind tests or the explicit
   `schema-contract-test-support` feature.
@@ -109,9 +113,10 @@ and transaction orchestration.
 
 - Change canonical tables, constraints, functions, triggers, or views in the
   current versioned schema artifact and supply a forward-only upgrade for any
-  materialized version. Never edit `schema/v1/**`.
+  materialized version. Never edit shipped `schema/v1/**` through
+  `schema/v4/**`.
 - Change host conformance or schema behavior tests in the matching
-  `src/schema_contract/tests/{v1,v2,upgrade}` module, keep shared setup in the
+  `src/schema_contract/tests/{v1,v2,v3,v4,v5,upgrade}` module, keep shared setup in the
   fixture modules, and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
@@ -153,7 +158,7 @@ and transaction orchestration.
   Pass selected presentation fields to the core conversion before deciding
   presence; normalized absence must remain `None`. Keep the exact-plan
   identity prefix plus descending `(created_at, id)` keyset aligned with
-  `billing_payment_attempts_subscription_history_idx` in the current schema-v4
+  `billing_payment_attempts_subscription_history_idx` in the current schema-v5
   artifacts and the runtime schema contract. Keep first-page and continuation
   SQL as separate physical statements, with the continuation keyset as an
   unconditional index condition; the PostgreSQL generic-plan regression must
@@ -188,7 +193,7 @@ and transaction orchestration.
   fold so it is not unconditionally materialized before the outer page limit,
   and keep that keyset aligned with `billing_subscriptions_due_idx` for all-mode
   scans and `billing_subscriptions_due_mode_idx` for mode-specific scans in
-  both schema-v4 artifacts and the complete runtime index contract. Folding and
+  the current schema-v5 install artifact and the complete runtime index contract. Folding and
   aligned indexes make early stopping available; PostgreSQL still chooses plans
   by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
@@ -206,7 +211,8 @@ and transaction orchestration.
   same transaction, and leave stored payment methods unchanged.
 - Change canonical deletion admission or billing attempt/payment-method scrub
   policy in `src/deletion.rs`; keep host identity, order, fulfillment, and
-  retained-subject work in the host transaction.
+  retained-subject work in the host transaction. Classify every new attempt or
+  method column as retained, cleared, or rewritten in the scrub tests.
 - Change registered-account reconciliation selection, local stale-attempt
   phases, or exact-query claiming/negative observation transitions in
   `src/reconciliation.rs`, and pending-charge classification in
@@ -243,14 +249,16 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
-- `assert_runtime_schema_v4_compatible` must reuse the complete canonical v4
+- `assert_runtime_schema_v5_compatible` must reuse the complete canonical v5
   catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
   major other than 18, and run no DDL; hosts apply versioned install and
-  forward-only upgrade artifacts through their own migrations.
+  forward-only upgrade artifacts through their own migrations. The retained
+  `assert_runtime_schema_v4_compatible` checks only the pre-cutover v4 state.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
-  `assert_v3_conforms`, and `assert_v4_conforms` wrappers are also read-only;
+  `assert_v3_conforms`, `assert_v4_conforms`, and `assert_v5_conforms`
+  wrappers are also read-only;
   mutation and locking
   behavior belongs in package fixtures and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;
@@ -341,9 +349,18 @@ and transaction orchestration.
 - `unpaid` is terminal financial history: it grants no entitlement, permits no
   renewal or recovery, and cannot keep a payment method enabled as collection
   authority. It is not rewritten to canceled during deletion cleanup.
-- Subscriber scrubbing enters every affected gateway-account payment-method
-  domain in deterministic order before mutating attempts or methods and never
-  changes immutable processor-charge observations.
+- Subscriber scrubbing enters every affected gateway-account scrub domain and
+  then the approval payment-method domain in ascending account order before
+  mutating attempts or methods, clears contacts and billing addresses, and
+  never changes immutable processor-charge observations. Global lock order is
+  scrub domain, approval domain, subscription aggregate, then rows; no path
+  takes a payment-method domain after the aggregate.
+- Stored methods and all five attempt kinds persist the optional billing
+  address as one all-or-nothing value. A same-reference approval without an
+  address keeps the whole stored address; never merge fields per column.
+  Renewal reservation enters the approval domain before the aggregate and
+  copies the selected active method's address into the attempt; admission and
+  submission use only that snapshot.
 - Exact-query claiming returns canonical `PaymentAttempt` values after one
   deterministic, account-scoped durable requery claim. Negative observations
   re-lock and revalidate the immutable shared request before changing status;

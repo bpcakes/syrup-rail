@@ -35,7 +35,7 @@ use syrup_rail_postgres::{
     EntitlementGuardError, EntitlementWriteTransaction, HostChargeTargetStore, RenewalStoreError,
     SchemaConformanceError, SubscriptionBillingPortalQueryError, SubscriptionBillingService,
     SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
-    SubscriptionOfferStore, assert_runtime_schema_v4_compatible, due_renewals_page_for_mode,
+    SubscriptionOfferStore, assert_runtime_schema_v5_compatible, due_renewals_page_for_mode,
     require_entitlement_for_update, subscription_billing_portal, subscription_payment_history_page,
 };
 
@@ -116,10 +116,12 @@ pub fn build_subscription_billing_service(
 /// one repeatable-read, read-only catalog snapshot; it never installs,
 /// upgrades, preflights, audits, or otherwise changes the schema. It requires
 /// PostgreSQL 18 and rejects host-specific columns on canonical relations.
+/// Schema v5 is required; a schema-v4 host must first commit
+/// `schema/v5/upgrade_from_v4.sql` with every billing writer stopped.
 pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
-    assert_runtime_schema_v4_compatible(pool).await
+    assert_runtime_schema_v5_compatible(pool).await
 }
 
 /// Admits a host-authorized protected write and returns its only valid transaction.

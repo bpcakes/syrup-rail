@@ -1,29 +1,32 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.5
-supports PostgreSQL 18 only and uses schema v4.
+SQLx operations, and high-level subscription billing service. Version 0.5.4
+supports PostgreSQL 18 only and uses schema v5.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.3"
-syrup-rail-postgres = "0.5.3"
+syrup-rail = "0.5.4"
+syrup-rail-postgres = "0.5.4"
 ```
 
-New hosts install `schema/v4/install.sql` through their normal migration
-system. Existing schema-v3 hosts separately commit
-`schema/v4/prepare_from_v3.sql` and `schema/v4/validate_from_v3.sql`, run
-`schema/v4/index_from_v3.sql` outside a transaction, and finally commit
-`schema/v4/upgrade_from_v3.sql` while following the versioned cutover guide.
-Schemas v1, v2, and v3 are immutable. The detailed versioned guides explain
-the required lock, maintenance, and rehearsal boundaries.
+New hosts install `schema/v5/install.sql` through their normal migration
+system. Existing schema-v4 hosts stop every billing writer and commit
+`schema/v5/upgrade_from_v4.sql` in one transaction, following
+`schema/v5/README.md`; old v4 binaries must not restart after that commit.
+Hosts still on schema v3 first complete the staged v4 cutover
+(`schema/v4/prepare_from_v3.sql`, `schema/v4/validate_from_v3.sql`,
+`schema/v4/index_from_v3.sql` outside a transaction, and
+`schema/v4/upgrade_from_v3.sql`). Schemas v1 through v4 are immutable. The
+detailed versioned guides explain the required lock, maintenance, and
+rehearsal boundaries.
 
 After the host applies its migration and before it serves billing traffic,
 verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v4_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v5_compatible(pool).await?;
 # Ok(())
 # }
 ```
@@ -287,8 +290,8 @@ away from and back to the same method while the query is in flight. Unrelated
 updates may therefore produce `ChangedDuringQuery`; the host's bounded retry policy
 applies.
 
-The 0.5.3 card-display repair uses existing schema-v4 columns. Hosts apply no
-schema migration for it. Synthetic parser and PostgreSQL fixtures verify the
+The 0.5.3 card-display repair uses columns that exist since schema v4 and
+adds no migration of its own. Synthetic parser and PostgreSQL fixtures verify the
 library behavior; host staging retests and invocation for existing accounts
 remain a separate host integration step.
 
@@ -302,6 +305,22 @@ denials and SQL failures await rollback, while cancellation queues rollback of
 the owned transaction, including any earlier host writes. Perform and commit
 the host-owned protected mutation only through the admitted value, and finish
 any nested savepoint before consuming that value with `commit` or `rollback`.
+
+Schema v5 stores an optional customer-confirmed billing address on payment
+methods and all five attempt kinds. Approved enrollment, recovery, and
+payment-method replacement write the command's address to the stored method;
+a same-reference approval without an address keeps the whole stored address,
+and a new card never inherits another card's address. Renewal reservation
+enters the payment-method approval domain before the subscription aggregate
+and copies the selected active method's address into the attempt, so a later
+method change cannot alter a reserved renewal. Submission sends only that
+snapshot, as an address-only contact, and an addressless renewal sends no
+contact. A same-key retry whose address differs from the durable attempt,
+including an address added to a historical addressless attempt, is an
+idempotency conflict before provider I/O. `scrub_subscriber_billing_data`
+clears the addresses under the scrub and approval domains, so a concurrent
+approval or renewal reservation cannot restore them; the host still takes its
+subject lock first.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.

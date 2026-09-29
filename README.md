@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.3"
-syrup-rail-postgres = "0.5.3"
-syrup-rail-nmi = "0.5.3" # only for NMI-backed hosts
+syrup-rail = "0.5.4"
+syrup-rail-postgres = "0.5.4"
+syrup-rail-nmi = "0.5.4" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.5.3"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.5.4"`
 directly.
 
 ## Subscription terms
@@ -105,13 +105,15 @@ subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
 at that boundary. Hosts that mirror access outside Syrup Rail must consume the
 event's `access` outcome from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v4 is the
+PostgreSQL 18 is the only supported database major, and schema v5 is the
 current contract. New hosts install
-[`schema/v4/install.sql`](crates/syrup-rail-postgres/schema/v4/install.sql).
-Existing schema-v3 hosts follow the checked-in
-[`v3` to `v4` cutover guide](crates/syrup-rail-postgres/schema/v4/README.md).
-Hosts on schema v1 or v2 must first follow the immutable versioned artifacts
-to reach schema v3, then perform the staged v3-to-v4 cutover.
+[`schema/v5/install.sql`](crates/syrup-rail-postgres/schema/v5/install.sql).
+Existing schema-v4 hosts follow the checked-in
+[`v4` to `v5` cutover guide](crates/syrup-rail-postgres/schema/v5/README.md),
+a single stopped-writer transaction that adds nullable billing-address
+columns. Hosts on schema v1, v2, or v3 must first follow the immutable
+versioned artifacts to reach schema v4, including the staged
+[v3-to-v4 cutover](crates/syrup-rail-postgres/schema/v4/README.md).
 
 ## PostgreSQL host integration
 
@@ -133,17 +135,19 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v4 install or completed every staged
-forward-only v3-to-v4 upgrade artifact, call
-`assert_runtime_schema_v4_compatible(&pool).await` during process startup and
+After the host has applied its immutable v5 install or committed the
+forward-only v4-to-v5 upgrade artifact, call
+`assert_runtime_schema_v5_compatible(&pool).await` during process startup and
 before accepting billing traffic. The assertion checks the complete canonical
-v4 catalog and fingerprint inside one repeatable-read, read-only transaction.
+v5 catalog and fingerprint inside one repeatable-read, read-only transaction.
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even
 a host-prefixed column to a canonical relation is unsupported and fails the
-fingerprint check. The assertion also fails closed for v1, v2, v3, or other
-canonical drift. It never executes install, upgrade, preflight, or audit SQL.
+fingerprint check. The assertion also fails closed for v1, v2, v3, v4, or other
+canonical drift. `assert_runtime_schema_v4_compatible` remains available to
+confirm the pre-cutover v4 state. Neither assertion executes install, upgrade,
+preflight, or audit SQL.
 Hosts remain responsible for applying and coordinating their own migrations.
 The compiled host integration example includes a default-feature helper for
 this startup check.

@@ -2,10 +2,22 @@
 
 All notable changes to the Syrup Rail crates are documented in this file.
 
-## [Unreleased]
+## [0.5.4] - Unreleased
+
+Schema-v5 release on the 0.5.x line. It is not a drop-in patch: hosts must
+complete a stopped-writer schema cutover and adapt to the source breaks below.
+The release manager dates this heading when the release is tagged.
 
 ### Action required for hosts
 
+- Apply the schema-v5 cutover before starting 0.5.4. Existing schema-v4 hosts
+  stop every billing writer, commit `schema/v5/upgrade_from_v4.sql` in one
+  transaction, and start 0.5.4 only after the new
+  `assert_runtime_schema_v5_compatible` passes; new hosts install
+  `schema/v5/install.sql`. Rehearse the constraint-validation scan on a
+  production-sized copy first. Old v4 binaries must not restart after the
+  upgrade commits, and recovery after commit is roll-forward only. See
+  `crates/syrup-rail-postgres/schema/v5/README.md`.
 - `BillingContact::into_parts` returns the new `BillingContactParts` struct
   (first name, last name, email and billing address) instead of a three-field
   tuple, so callers that rebuild a contact must decide how to handle the
@@ -13,6 +25,13 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - The raw `syrup_rail_nmi_client::BillingContact` struct gains a public
   `address: Option<BillingAddress>` field. Existing struct literals must add
   `address: None` to keep sending no address.
+- Pre-validate addresses to the NMI adapter's local rules before reserving a
+  payment. A core-valid address that the adapter rejects fails before
+  submission after the attempt is reserved, and a corrected retry needs a new
+  idempotency key.
+- Take the host subject lock before `scrub_subscriber_billing_data`, as the
+  coordinator contract already requires; the scrub now also enters the
+  payment-method approval domain before it changes any row.
 
 ### Fixed
 
@@ -22,9 +41,18 @@ All notable changes to the Syrup Rail crates are documented in this file.
   its echo. No automatic fallback or resubmission is introduced.
 - Measure a merchant-initiated renewal's encoded request size as the Classic
   form it is sent as, rather than as v5 JSON, before any network I/O.
+- Make subscriber billing scrubs exclusive with payment-method approvals and
+  renewal reservations. The scrub previously used only its own lock domain, so
+  a concurrent approval could restore contact data mid-scrub.
 
 ### Added
 
+- Add schema v5 (`schema/v5/install.sql`, `schema/v5/upgrade_from_v4.sql`)
+  with six nullable billing-address columns and validated all-or-nothing
+  address constraints on stored methods and payment attempts, plus
+  `assert_runtime_schema_v5_compatible`. `assert_runtime_schema_v4_compatible`
+  remains for confirming the pre-cutover state. Historical rows keep NULL
+  addresses.
 - Add the provider-neutral `BillingAddress` value (required first line and
   two-letter country; optional second line, city, region and postal code),
   `BillingContact::with_address`, `BillingContact::from_address` for an
@@ -32,6 +60,15 @@ All notable changes to the Syrup Rail crates are documented in this file.
   limited to 255 bytes per field, free of control characters, and redacted from
   ordinary formatting. `BillingContactSnapshot` records the address and compares
   it structurally for exact replay; attempt fingerprints are unchanged.
+- Persist the address on all five attempt kinds and on approved stored
+  methods. A same-reference approval without an address keeps the whole stored
+  address, and a new card never inherits another card's address. A same-key
+  retry with a different address, including an address added to a historical
+  addressless attempt, is an idempotency conflict before provider I/O.
+- Snapshot the current method's address when a renewal is reserved
+  (`SubscriptionRenewalLockedTerms::with_billing_address`) and send only that
+  snapshot as an address-only contact at submission. Addressless renewals keep
+  their previous provider request.
 - Send billing addresses to NMI on Classic sales (enrollment, recovery and
   merchant renewal), Classic validate (payment-method replacement) and v5 sales
   (host charges). The raw client rejects addresses outside its conservative
@@ -40,7 +77,9 @@ All notable changes to the Syrup Rail crates are documented in this file.
   and an uppercase two-letter country. Requests without an address keep their
   previous wire fields. Local validation does not prove that NMI or the
   processor accepts the address or the payment.
-
+- Add `Client::with_customer_receipts_disabled` to explicitly send
+  `customer_receipt=false` on every Classic payment and v5 sale, including
+  existing-vault renewals.
 - Add `fail_review_required_renewal_for_retry` for host-authorized incident
   recovery after a fresh exact provider query finds no transaction. The operation
   atomically closes an eligible reviewed renewal and accelerates only its next
