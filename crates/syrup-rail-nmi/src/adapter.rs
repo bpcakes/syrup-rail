@@ -6,17 +6,21 @@ use syrup_rail::{
     GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentDiagnostic,
     GatewayPaymentMethodMetadata, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
     GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
-    GatewayTransactionId, GatewayTransactionReport, GatewayTransactionReportRequest,
-    PaymentAttemptId, PaymentGateway, ProcessorEvidence,
+    GatewayTransactionDiagnostics, GatewayTransactionDiagnosticsRequest, GatewayTransactionId,
+    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway,
+    ProcessorEvidence,
 };
 use syrup_rail_nmi_client::{
     AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeDiagnostic,
     PaymentOutcomeParts, PaymentSource, PaymentStatus, QueryError, ReportQuery, SaleRequest,
     SensitiveText, StorePaymentMethodRequest, StoredCredential, TransactionActionParts,
-    TransactionQuery, TransactionReportDiagnostic, TransactionReportParts, VaultAction,
+    TransactionDiagnosticsQuery, TransactionQuery, TransactionReportDiagnostic,
+    TransactionReportParts, VaultAction,
 };
 
 use crate::lifecycle::{NmiAction, NmiReport, admit_report};
+
+mod diagnostics;
 
 pub struct NmiPaymentGateway {
     client: Client,
@@ -125,6 +129,27 @@ impl PaymentGateway for NmiPaymentGateway {
             .into_iter()
             .map(|report| map_transaction_report_parts(report.into_parts()))
             .collect())
+    }
+
+    async fn query_transaction_diagnostics(
+        &self,
+        request: GatewayTransactionDiagnosticsRequest,
+    ) -> Result<GatewayTransactionDiagnostics, GatewayError> {
+        let (transaction_id, operation, amount, expected_order_id) = request.into_parts();
+        let lookup = self
+            .client
+            .query_transaction_diagnostics(TransactionDiagnosticsQuery {
+                transaction_id: transaction_id.expose().to_owned(),
+            })
+            .await
+            .map_err(map_query_error)?;
+        Ok(diagnostics::select_transaction_diagnostics(
+            lookup,
+            &transaction_id,
+            operation,
+            amount,
+            expected_order_id.as_ref(),
+        ))
     }
 
     async fn query_payment_method_metadata(
