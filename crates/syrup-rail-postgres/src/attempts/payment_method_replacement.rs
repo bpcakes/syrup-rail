@@ -268,11 +268,14 @@ async fn insert_payment_method_replacement_attempt(
             billing_first_name, billing_last_name, billing_email,
             payment_method_update_expected_payment_method_id,
             payment_method_update_expected_initial_transaction_id,
-            required_gateway_account_mode
+            required_gateway_account_mode,
+            billing_address_line1, billing_address_line2, billing_address_city,
+            billing_address_region, billing_address_postal_code, billing_address_country
         ) VALUES (
             $1, $2, $3, $4, $5, $6,
             'subscription_payment_method_update', 'pending', $7, $8, 0, $9,
-            $10, $11, $12, $13, $14, $15, $16, $17, $18
+            $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
+            $23, $24
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -295,6 +298,7 @@ async fn insert_payment_method_replacement_attempt(
     .bind(expected.payment_method_id().as_uuid())
     .bind(expected.expected_initial_transaction_id().expose())
     .bind(identity.required_gateway_account_mode().as_str())
+    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)

@@ -143,11 +143,13 @@ async fn insert_renewal_attempt(
             billing_first_name, billing_last_name, billing_email,
             subscription_expected_payment_method_id,
             subscription_expected_initial_transaction_id,
-            subscription_expected_status, required_gateway_account_mode
+            subscription_expected_status, required_gateway_account_mode,
+            billing_address_line1, billing_address_line2, billing_address_city,
+            billing_address_region, billing_address_postal_code, billing_address_country
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'subscription_renewal', 'pending',
             $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-            $18, $19, $20, $21, $22
+            $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -174,6 +176,7 @@ async fn insert_renewal_attempt(
     .bind(expected.initial_transaction_id().expose())
     .bind(expected.status().as_str())
     .bind(identity.required_gateway_account_mode().as_str())
+    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -207,7 +210,46 @@ fn map_renewal_store_error(error: crate::RenewalStoreError) -> PaymentAttemptSto
     }
 }
 
+/// Reads the selected payment method's billing address with renewal
+/// admission's active-method filter. A missing active row yields no address;
+/// admission's existing active-method check then rejects the reservation.
+async fn locked_renewal_method_address(
+    transaction: &mut Transaction<'_, Postgres>,
+    billing_scope_id: BillingScopeId,
+    subscriber_id: SubscriberId,
+    gateway_account_id: GatewayAccountId,
+    payment_method_id: PaymentMethodId,
+) -> Result<Option<BillingAddress>, PaymentAttemptStoreError> {
+    let row = sqlx::query(
+        r#"
+        SELECT billing_address_line1, billing_address_line2, billing_address_city,
+            billing_address_region, billing_address_postal_code, billing_address_country
+        FROM billing_payment_methods
+        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+            AND gateway_account_id = $4 AND status = 'active'
+        FOR SHARE
+        "#,
+    )
+    .bind(payment_method_id.as_uuid())
+    .bind(billing_scope_id.as_uuid())
+    .bind(subscriber_id.as_uuid())
+    .bind(gateway_account_id.as_uuid())
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.as_ref()
+        .map(billing_address_from_row)
+        .transpose()
+        .map(Option::flatten)
+}
+
 /// Locks one exact due subscription and inserts its automatic-renewal attempt.
+///
+/// Callers must hold no subscription aggregate lock and no billing row locks
+/// when calling this function. It enters the subscriber's payment-method
+/// domain for the subscription's gateway account before the subscription
+/// aggregate, matching approval writers and the subscriber scrub, then reads
+/// the selected active method's billing address into the attempt snapshot.
+/// Admission and submission use only that snapshot.
 pub async fn reserve_subscription_renewal_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: syrup_rail::ChargeRenewal,
@@ -215,9 +257,9 @@ pub async fn reserve_subscription_renewal_in_transaction(
     required_gateway_account_mode: GatewayAccountMode,
 ) -> Result<SubscriptionRenewalReservationOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
-    let locator = sqlx::query_as::<_, (Uuid, String)>(
+    let locator = sqlx::query_as::<_, (Uuid, String, Uuid)>(
         r#"
-        SELECT subscriber_id, plan_key
+        SELECT subscriber_id, plan_key, gateway_account_id
         FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND id = $2
         "#,
@@ -226,13 +268,21 @@ pub async fn reserve_subscription_renewal_in_transaction(
     .bind(command.subscription_id().as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
-    let Some((subscriber_id, plan_key)) = locator else {
+    let Some((subscriber_id, plan_key, locator_account_id)) = locator else {
         return Ok(SubscriptionRenewalReservationOutcome::Rejected(
             SubscriptionRenewalReservationRejection::SubscriptionNotFound,
         ));
     };
     let subscriber_id = SubscriberId::new(subscriber_id);
     let plan_key = PlanKey::new(plan_key).map_err(|_| invalid_state())?;
+    // Global order: scrub domain, approval domain, subscription aggregate,
+    // then rows. No path takes a payment-method domain after the aggregate.
+    crate::enrollment_application::lock_payment_method_domain(
+        transaction,
+        subscriber_id,
+        &locator_account_id,
+    )
+    .await?;
     lock_subscription_aggregate(transaction, subscriber_id, &plan_key).await?;
 
     let row = sqlx::query(
@@ -288,7 +338,11 @@ pub async fn reserve_subscription_renewal_in_transaction(
         gateway.gateway_configuration_id(),
         gateway,
     );
-    if gateway_account_id != expected_gateway.gateway_account_id()
+    // The domain entered above belongs to the locator's account. An account
+    // that changed before the aggregate lock is rejected like any other
+    // gateway-identity change.
+    if gateway_account_id.into_uuid() != locator_account_id
+        || gateway_account_id != expected_gateway.gateway_account_id()
         || !gateway_identity_matches_subscription(
             transaction,
             command.subscription_id(),
@@ -335,6 +389,18 @@ pub async fn reserve_subscription_renewal_in_transaction(
         &status_value,
         attempt_state.attempt_sequence_count,
     )?;
+    let billing_address = locked_renewal_method_address(
+        transaction,
+        command.billing_scope_id(),
+        subscriber_id,
+        gateway_account_id,
+        PaymentMethodId::new(row.try_get("payment_method_id")?),
+    )
+    .await?;
+    let terms = match billing_address {
+        Some(address) => terms.with_billing_address(address),
+        None => terms,
+    };
     let reservation = SubscriptionRenewalReservation::from_locked_subscription_terms(
         command,
         gateway,

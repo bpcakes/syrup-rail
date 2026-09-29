@@ -412,6 +412,52 @@ mod tests {
     }
 
     #[test]
+    fn renewal_locked_terms_snapshot_only_the_reserved_address() {
+        let gateway = test_gateway(Arc::new(TestReferenceFactory));
+        let subscription_id = SubscriptionId::new(Uuid::from_u128(60));
+        let start_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let terms = crate::SubscriptionRenewalLockedTerms::new(
+            gateway.gateway_account_id(),
+            SubscriptionPaymentStateSnapshot::new(
+                subscription_id,
+                PaymentMethodId::new(Uuid::from_u128(61)),
+                GatewayTransactionId::new("renewal-initial").unwrap(),
+                SubscriptionStatus::Active,
+            )
+            .unwrap(),
+            BillingPeriod::new(start_at, start_at + Duration::days(30)).unwrap(),
+            ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap(),
+            0,
+        );
+        let address = crate::BillingAddress::new("1 Main St".to_owned(), "US".to_owned()).unwrap();
+        let reserve = |terms| {
+            crate::SubscriptionRenewalReservation::from_locked_subscription_terms(
+                crate::ChargeRenewal::new(gateway.billing_scope_id(), subscription_id, start_at),
+                &gateway,
+                PaymentAttemptId::new(Uuid::from_u128(62)),
+                SubscriberId::new(Uuid::from_u128(63)),
+                PlanKey::new("renewal-plan").unwrap(),
+                terms,
+                GatewayAccountMode::Live,
+            )
+            .unwrap()
+        };
+
+        let addressless = reserve(terms.clone());
+        let addressed = reserve(terms.with_billing_address(address.clone()));
+        assert!(addressless.request().billing_contact().is_empty());
+        let snapshot = addressed.request().billing_contact();
+        assert_eq!(snapshot.address(), Some(&address));
+        assert_eq!(snapshot.first_name(), None);
+        assert_eq!(snapshot.email(), None);
+        assert_eq!(
+            addressed.request().fingerprint(),
+            addressless.request().fingerprint()
+        );
+        assert_ne!(addressed.request(), addressless.request());
+    }
+
+    #[test]
     fn billing_address_is_snapshotted_and_retry_bound_without_changing_fingerprints() {
         let gateway = test_gateway(Arc::new(TestReferenceFactory));
         let subscriber_id = SubscriberId::new(Uuid::from_u128(40));

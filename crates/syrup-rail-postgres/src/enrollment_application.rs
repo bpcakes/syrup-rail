@@ -18,9 +18,10 @@ use uuid::Uuid;
 use crate::{
     BillingTransaction, BillingTransactionError,
     attempts::{
-        AttemptApproval, AttemptResolutionStatus, AttemptTransition, PaymentAttemptStoreError,
-        find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
-        lock_subscription_aggregate, persist_attempt_transition,
+        AttemptApproval, AttemptResolutionStatus, AttemptTransition, BindBillingAddress,
+        PaymentAttemptStoreError, find_payment_attempt_by_id_on_connection,
+        lock_payment_attempt_by_id_on_connection, lock_subscription_aggregate,
+        persist_attempt_transition,
     },
     processor_charges::{
         LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, observe_processor_charge,
@@ -1311,6 +1312,28 @@ pub(crate) async fn lock_payment_method_domain(
     Ok(())
 }
 
+/// Enters every listed payment-method domain in ascending, deduplicated
+/// gateway-account order so concurrent multi-account callers cannot invert it.
+pub(crate) async fn lock_payment_method_domains(
+    connection: &mut PgConnection,
+    subscriber_id: SubscriberId,
+    gateway_account_ids: impl IntoIterator<Item = Uuid>,
+) -> Result<(), sqlx::Error> {
+    for gateway_account_id in ordered_payment_method_domains(gateway_account_ids) {
+        lock_payment_method_domain(connection, subscriber_id, &gateway_account_id).await?;
+    }
+    Ok(())
+}
+
+fn ordered_payment_method_domains(
+    gateway_account_ids: impl IntoIterator<Item = Uuid>,
+) -> Vec<Uuid> {
+    let mut gateway_account_ids = gateway_account_ids.into_iter().collect::<Vec<_>>();
+    gateway_account_ids.sort_unstable();
+    gateway_account_ids.dedup();
+    gateway_account_ids
+}
+
 async fn upsert_payment_method(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
@@ -1321,13 +1344,23 @@ async fn upsert_payment_method(
         SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE),
     )?;
     let descriptor = evidence.descriptor();
+    // The address is one value that belongs to the stored card. An approval
+    // that carries an address replaces all six columns; a same-reference
+    // approval without one keeps all six. A shared predicate, rather than
+    // per-column COALESCE, can never splice fields from two addresses. Names
+    // and email keep their overwrite-on-conflict behavior.
     let row_id: Uuid = sqlx::query_scalar(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
             gateway_payment_method_reference, status, payment_type, card_brand,
-            card_last4, card_exp_month, card_exp_year, billing_name, billing_email
-        ) VALUES ($1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11, $12)
+            card_last4, card_exp_month, card_exp_year, billing_name, billing_email,
+            billing_address_line1, billing_address_line2, billing_address_city,
+            billing_address_region, billing_address_postal_code, billing_address_country
+        ) VALUES (
+            $1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11, $12,
+            $13, $14, $15, $16, $17, $18
+        )
         ON CONFLICT (gateway_account_id, subscriber_id, gateway_payment_method_reference)
         DO UPDATE SET status = 'active', payment_type = EXCLUDED.payment_type,
             card_brand = EXCLUDED.card_brand, card_last4 = EXCLUDED.card_last4,
@@ -1335,6 +1368,24 @@ async fn upsert_payment_method(
             card_exp_year = EXCLUDED.card_exp_year,
             billing_name = EXCLUDED.billing_name,
             billing_email = EXCLUDED.billing_email,
+            billing_address_line1 = CASE WHEN EXCLUDED.billing_address_line1 IS NULL
+                THEN billing_payment_methods.billing_address_line1
+                ELSE EXCLUDED.billing_address_line1 END,
+            billing_address_line2 = CASE WHEN EXCLUDED.billing_address_line1 IS NULL
+                THEN billing_payment_methods.billing_address_line2
+                ELSE EXCLUDED.billing_address_line2 END,
+            billing_address_city = CASE WHEN EXCLUDED.billing_address_line1 IS NULL
+                THEN billing_payment_methods.billing_address_city
+                ELSE EXCLUDED.billing_address_city END,
+            billing_address_region = CASE WHEN EXCLUDED.billing_address_line1 IS NULL
+                THEN billing_payment_methods.billing_address_region
+                ELSE EXCLUDED.billing_address_region END,
+            billing_address_postal_code = CASE WHEN EXCLUDED.billing_address_line1 IS NULL
+                THEN billing_payment_methods.billing_address_postal_code
+                ELSE EXCLUDED.billing_address_postal_code END,
+            billing_address_country = CASE WHEN EXCLUDED.billing_address_line1 IS NULL
+                THEN billing_payment_methods.billing_address_country
+                ELSE EXCLUDED.billing_address_country END,
             updated_at = clock_timestamp()
         RETURNING id
         "#,
@@ -1351,6 +1402,7 @@ async fn upsert_payment_method(
     .bind(descriptor.card_exp_year())
     .bind(attempt.request().billing_contact().name())
     .bind(attempt.request().billing_contact().email())
+    .bind_billing_address(attempt.request().billing_contact().address())
     .fetch_one(connection)
     .await?;
     Ok(PaymentMethodId::new(row_id))

@@ -341,13 +341,15 @@ pub(super) async fn insert_initial_attempt(
             subscription_initial_dunning_exhaustion,
             subscription_initial_past_due_access,
             billing_first_name, billing_last_name, billing_email,
-            required_gateway_account_mode
+            required_gateway_account_mode,
+            billing_address_line1, billing_address_line2, billing_address_city,
+            billing_address_region, billing_address_postal_code, billing_address_country
         ) VALUES (
             $1, $2, $3, $4, 'subscription_initial', 'pending',
             $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
             $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
             $28, $29, $30, $31, $32, $33, $34, $35, $36, $37,
-            $38
+            $38, $39, $40, $41, $42, $43, $44
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
@@ -390,6 +392,7 @@ pub(super) async fn insert_initial_attempt(
     .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
     .bind(identity.required_gateway_account_mode().as_str())
+    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)

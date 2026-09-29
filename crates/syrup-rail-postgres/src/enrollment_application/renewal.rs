@@ -174,7 +174,15 @@ pub async fn submit_admitted_subscription_renewal(
                 .initial_transaction_id()
                 .clone(),
         },
-        None,
+        // Only the address reserved on the attempt is sent; renewals carry no
+        // names or email, and an addressless reservation sends no contact.
+        admission
+            .attempt
+            .request()
+            .billing_contact()
+            .address()
+            .cloned()
+            .map(syrup_rail::BillingContact::from_address),
     );
     match gateway.sale(request).await {
         Ok(outcome) => apply_subscription_renewal_gateway_outcome(

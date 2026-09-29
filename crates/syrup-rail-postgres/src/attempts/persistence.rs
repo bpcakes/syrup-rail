@@ -43,9 +43,81 @@ pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = r#"
         subscription_initial_recurring_period_count,
         subscription_initial_dunning_retry_delays_seconds,
         subscription_initial_dunning_exhaustion,
-        subscription_initial_past_due_access, billing_last_name
+        subscription_initial_past_due_access, billing_last_name,
+        billing_address_line1, billing_address_line2, billing_address_city,
+        billing_address_region, billing_address_postal_code,
+        billing_address_country
     FROM billing_payment_attempts
 "#;
+
+/// Column values for one optional billing address, in the canonical order
+/// `line1, line2, city, region, postal_code, country` used by every
+/// `billing_address_*` write.
+fn billing_address_columns(address: Option<&BillingAddress>) -> [Option<&str>; 6] {
+    match address {
+        Some(address) => [
+            Some(address.line1()),
+            address.line2(),
+            address.city(),
+            address.region(),
+            address.postal_code(),
+            Some(address.country()),
+        ],
+        None => [None; 6],
+    }
+}
+
+/// Binds the six `billing_address_*` values after a query's other parameters.
+pub(crate) trait BindBillingAddress<'q>: Sized {
+    fn bind_billing_address(self, address: Option<&'q BillingAddress>) -> Self;
+}
+
+impl<'q> BindBillingAddress<'q> for sqlx::query::Query<'q, Postgres, PgArguments> {
+    fn bind_billing_address(self, address: Option<&'q BillingAddress>) -> Self {
+        billing_address_columns(address)
+            .into_iter()
+            .fold(self, |query, value| query.bind(value))
+    }
+}
+
+impl<'q, O> BindBillingAddress<'q> for sqlx::query::QueryScalar<'q, Postgres, O, PgArguments> {
+    fn bind_billing_address(self, address: Option<&'q BillingAddress>) -> Self {
+        billing_address_columns(address)
+            .into_iter()
+            .fold(self, |query, value| query.bind(value))
+    }
+}
+
+/// Reads the six `billing_address_*` columns of an attempt or method row.
+///
+/// The schema-v5 CHECK constraint makes the address all-or-nothing; a stored
+/// value the core type rejects is invalid durable state.
+pub(crate) fn billing_address_from_row(
+    row: &PgRow,
+) -> Result<Option<BillingAddress>, PaymentAttemptStoreError> {
+    let line1: Option<String> = row.try_get("billing_address_line1")?;
+    let line2: Option<String> = row.try_get("billing_address_line2")?;
+    let city: Option<String> = row.try_get("billing_address_city")?;
+    let region: Option<String> = row.try_get("billing_address_region")?;
+    let postal_code: Option<String> = row.try_get("billing_address_postal_code")?;
+    let country: Option<String> = row.try_get("billing_address_country")?;
+    let (line1, country) = match (line1, country) {
+        (Some(line1), Some(country)) => (line1, country),
+        (None, None)
+            if line2.is_none() && city.is_none() && region.is_none() && postal_code.is_none() =>
+        {
+            return Ok(None);
+        }
+        _ => return Err(invalid_state()),
+    };
+    BillingAddress::new(line1, country)
+        .and_then(|address| address.with_line2(line2))
+        .and_then(|address| address.with_city(city))
+        .and_then(|address| address.with_region(region))
+        .and_then(|address| address.with_postal_code(postal_code))
+        .map(Some)
+        .map_err(|_| invalid_state())
+}
 
 /// Loads an attempt by its exact scope and durable identity without locking it.
 pub async fn find_payment_attempt_by_id_in_transaction(
@@ -135,6 +207,20 @@ pub(crate) async fn find_payment_attempt_by_id_on_connection(
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
+fn billing_contact_snapshot_from_row(
+    row: &PgRow,
+) -> Result<BillingContactSnapshot, PaymentAttemptStoreError> {
+    let snapshot = BillingContactSnapshot::from_parts(
+        row.try_get("billing_first_name")?,
+        row.try_get("billing_last_name")?,
+        row.try_get("billing_email")?,
+    );
+    Ok(match billing_address_from_row(row)? {
+        Some(address) => snapshot.with_address(address),
+        None => snapshot,
+    })
+}
+
 pub(crate) fn payment_attempt_from_row(
     row: &PgRow,
 ) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
@@ -175,11 +261,7 @@ pub(crate) fn payment_attempt_from_row(
             .map_err(|_| invalid_state())?,
         amount,
         gateway_order_id,
-        BillingContactSnapshot::from_parts(
-            row.try_get("billing_first_name")?,
-            row.try_get("billing_last_name")?,
-            row.try_get("billing_email")?,
-        ),
+        billing_contact_snapshot_from_row(row)?,
     );
     let state = PaymentAttemptState::new(
         status,

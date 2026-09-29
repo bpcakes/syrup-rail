@@ -245,11 +245,13 @@ async fn insert_recovery_attempt(
             billing_first_name, billing_last_name, billing_email,
             subscription_expected_payment_method_id,
             subscription_expected_initial_transaction_id,
-            subscription_expected_status, required_gateway_account_mode
+            subscription_expected_status, required_gateway_account_mode,
+            billing_address_line1, billing_address_line2, billing_address_city,
+            billing_address_region, billing_address_postal_code, billing_address_country
         ) VALUES (
             $1, $2, $3, $4, $5, $6, 'subscription_recovery', 'pending',
             $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-            $18, $19, $20, $21, $22
+            $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28
         )
         ON CONFLICT DO NOTHING
         "#,
@@ -276,6 +278,7 @@ async fn insert_recovery_attempt(
     .bind(expected.initial_transaction_id().expose())
     .bind(expected.status().as_str())
     .bind(identity.required_gateway_account_mode().as_str())
+    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)

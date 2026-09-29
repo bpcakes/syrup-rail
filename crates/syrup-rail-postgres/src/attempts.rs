@@ -1,12 +1,15 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{
+    PgConnection, Postgres, Row, Transaction,
+    postgres::{PgArguments, PgRow},
+};
 use syrup_rail::{
-    BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, CumulativeRefundCents,
-    CurrencyCode, DiscountClaimId, DiscountCodeId, GatewayAccountId, GatewayAccountMode,
-    GatewayConfigurationId, GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId,
-    GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayProviderKey,
+    BillingAddress, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
+    CumulativeRefundCents, CurrencyCode, DiscountClaimId, DiscountCodeId, GatewayAccountId,
+    GatewayAccountMode, GatewayConfigurationId, GatewayDiagnostic, GatewayLifecycleState,
+    GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentMethodReference, GatewayProviderKey,
     GatewayTransactionId, HostChargeTargetId, IdempotencyKey, LimitedDiscountMonths, Money,
     PaidTrialTerms, PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId,
     PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptLifecycle, PaymentAttemptRequest,
@@ -63,9 +66,9 @@ pub use payment_method_replacement::{
 pub(crate) use persistence::find_payment_attempt_by_idempotency_in_transaction;
 use persistence::map_subscription_persistence_error;
 pub(crate) use persistence::{
-    PAYMENT_ATTEMPT_SELECT, find_payment_attempt_by_id_on_connection,
-    lock_payment_attempt_by_id_on_connection, payment_attempt_from_row,
-    processor_evidence_from_row,
+    BindBillingAddress, PAYMENT_ATTEMPT_SELECT, billing_address_from_row,
+    find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
+    payment_attempt_from_row, processor_evidence_from_row,
 };
 pub use persistence::{
     find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,

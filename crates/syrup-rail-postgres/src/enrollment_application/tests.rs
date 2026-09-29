@@ -112,9 +112,11 @@ struct ScriptedGateway {
     account_mode_results: Mutex<VecDeque<Result<GatewayAccountMode, GatewayError>>>,
     sale_calls: AtomicUsize,
     sale_order_ids: Mutex<Vec<GatewayOrderId>>,
+    sale_contacts: Mutex<Vec<Option<BillingContact>>>,
     sale_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
     store_calls: AtomicUsize,
     store_order_ids: Mutex<Vec<GatewayOrderId>>,
+    store_contacts: Mutex<Vec<Option<BillingContact>>>,
     store_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
 }
 
@@ -253,9 +255,11 @@ impl ScriptedGateway {
             account_mode_results: Mutex::new(VecDeque::new()),
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
+            sale_contacts: Mutex::new(Vec::new()),
             sale_result: Mutex::new(Some(result)),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
+            store_contacts: Mutex::new(Vec::new()),
             store_result: Mutex::new(None),
         }
     }
@@ -266,9 +270,11 @@ impl ScriptedGateway {
             account_mode_results: Mutex::new(VecDeque::new()),
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
+            sale_contacts: Mutex::new(Vec::new()),
             sale_result: Mutex::new(None),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
+            store_contacts: Mutex::new(Vec::new()),
             store_result: Mutex::new(Some(result)),
         }
     }
@@ -282,9 +288,11 @@ impl ScriptedGateway {
             account_mode_results: Mutex::new(readiness.into_iter().collect()),
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
+            sale_contacts: Mutex::new(Vec::new()),
             sale_result: Mutex::new(None),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
+            store_contacts: Mutex::new(Vec::new()),
             store_result: Mutex::new(Some(result)),
         }
     }
@@ -298,9 +306,11 @@ impl ScriptedGateway {
             account_mode_results: Mutex::new(readiness.into_iter().collect()),
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
+            sale_contacts: Mutex::new(Vec::new()),
             sale_result: Mutex::new(Some(result)),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
+            store_contacts: Mutex::new(Vec::new()),
             store_result: Mutex::new(None),
         }
     }
@@ -326,6 +336,10 @@ impl PaymentGateway for ScriptedGateway {
             .lock()
             .await
             .push(request.order_id().clone());
+        self.sale_contacts
+            .lock()
+            .await
+            .push(request.billing_contact().cloned());
         self.sale_result
             .lock()
             .await
@@ -342,6 +356,10 @@ impl PaymentGateway for ScriptedGateway {
             .lock()
             .await
             .push(request.order_id().clone());
+        self.store_contacts
+            .lock()
+            .await
+            .push(request.billing_contact().cloned());
         self.store_result
             .lock()
             .await
@@ -863,5 +881,6 @@ fn approved_outcome_with_optional_reference(
 }
 
 mod application;
+mod billing_address;
 mod foreground;
 mod unit;

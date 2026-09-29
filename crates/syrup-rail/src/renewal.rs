@@ -2,8 +2,8 @@ use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use crate::{
-    BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount, GatewayAccountId,
-    GatewayAccountMode, GatewayProviderKey, IdempotencyKey, PaymentAttempt,
+    BillingAddress, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
+    GatewayAccountId, GatewayAccountMode, GatewayProviderKey, IdempotencyKey, PaymentAttempt,
     PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
     PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PlanKey, RenewalFailurePolicy,
     ResolvedGateway, SubscriberId, SubscriptionId, SubscriptionPaymentStateSnapshot,
@@ -311,7 +311,10 @@ pub enum SubscriptionRenewalReservationBuildError {
 /// The PostgreSQL owner constructs this from a locked subscription row before
 /// creating the secret-free reservation. Keeping the exact optimistic payment
 /// state together with the charge period prevents individual row fields from
-/// being reconstructed by each caller.
+/// being reconstructed by each caller. The optional billing address is the
+/// selected payment method's address read at reservation; it becomes the
+/// attempt's durable contact snapshot, so a later method change cannot alter
+/// what this renewal submits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SubscriptionRenewalLockedTerms {
     gateway_account_id: GatewayAccountId,
@@ -319,6 +322,7 @@ pub struct SubscriptionRenewalLockedTerms {
     period: BillingPeriod,
     charge: ChargeAmount,
     attempt_sequence_count: i64,
+    billing_address: Option<BillingAddress>,
 }
 
 impl SubscriptionRenewalLockedTerms {
@@ -335,7 +339,15 @@ impl SubscriptionRenewalLockedTerms {
             period,
             charge,
             attempt_sequence_count,
+            billing_address: None,
         }
+    }
+
+    /// Records the selected payment method's billing address for the renewal
+    /// snapshot, replacing any address already present.
+    pub fn with_billing_address(mut self, billing_address: BillingAddress) -> Self {
+        self.billing_address = Some(billing_address);
+        self
     }
 }
 
@@ -450,6 +462,7 @@ impl SubscriptionRenewalReservation {
             period,
             charge,
             attempt_sequence_count,
+            billing_address,
         } = terms;
         if gateway.billing_scope_id() != command.billing_scope_id()
             || gateway_account_id != gateway.gateway_account_id()
@@ -494,7 +507,11 @@ impl SubscriptionRenewalReservation {
             gateway
                 .mutation_reference_factory()
                 .for_attempt(PaymentAttemptKind::SubscriptionRenewal, attempt_id),
-            BillingContactSnapshot::new(None, None),
+            // Renewals carry no names or email, only the reserved address.
+            match billing_address {
+                Some(address) => BillingContactSnapshot::new(None, None).with_address(address),
+                None => BillingContactSnapshot::new(None, None),
+            },
         );
         Ok(Self {
             identity,

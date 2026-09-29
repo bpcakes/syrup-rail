@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     attempts::{
-        AttemptReplayDisposition, attempt_replay_disposition,
+        AttemptReplayDisposition, BindBillingAddress, attempt_replay_disposition,
         find_payment_attempt_by_idempotency_in_transaction, prepared_replay_required_mode_changed,
     },
     host_error::{BoxError, RedactedHostErrorSource},
@@ -422,10 +422,13 @@ pub async fn reserve_host_charge_in_transaction(
             amount_cents, currency, gateway_account_id,
             gateway_configuration_id, gateway_order_id,
             billing_first_name, billing_last_name, billing_email,
-            required_gateway_account_mode
+            required_gateway_account_mode,
+            billing_address_line1, billing_address_line2, billing_address_city,
+            billing_address_region, billing_address_postal_code, billing_address_country
         ) VALUES (
             $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
-            $7, $8, $9, $10, $11, $12, $13, $14, $15
+            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
+            $20, $21
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
@@ -445,6 +448,7 @@ pub async fn reserve_host_charge_in_transaction(
     .bind(request.billing_contact().last_name())
     .bind(request.billing_contact().email())
     .bind(identity.required_gateway_account_mode().as_str())
+    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     let attempt_id = if inserted.rows_affected() == 1 {

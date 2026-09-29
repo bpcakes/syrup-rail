@@ -398,3 +398,15 @@ fn not_submitted_surface_requires_a_flow_with_prepared_replay() {
         PreparedAttemptReplay::Unsupported,
     ));
 }
+
+#[test]
+fn payment_method_domains_are_deduplicated_in_uuid_order() {
+    let first = Uuid::from_u128(1);
+    let middle = Uuid::from_u128(2);
+    let last = Uuid::from_u128(3);
+
+    assert_eq!(
+        crate::enrollment_application::ordered_payment_method_domains([last, first, middle, first]),
+        vec![first, middle, last]
+    );
+}
