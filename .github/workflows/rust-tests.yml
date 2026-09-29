@@ -25,8 +25,8 @@ on:
       - "docs/security/dependency-advisories.md"
   push:
     branches:
-      - "main"
       - "master"
+      - "dev/0.6.0"
     paths:
       - "crates/**"
       - "tools/**"
