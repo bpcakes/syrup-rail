@@ -267,3 +267,36 @@ fn oversized_action_types_cannot_normalize_into_a_sale() {
     assert!(!parts.malformed);
     assert_eq!(exposed(&parts.actions[0].action_type), Some("sale"));
 }
+
+#[test]
+fn every_duplicate_code_occurrence_is_bounded_before_resolution() {
+    // Each oversized spelling normalizes to the same value as a valid
+    // duplicate, so it can only be caught before duplicates are resolved.
+    let oversized_type = format!("s{}ale", "-".repeat(MAX_NMI_DIAGNOSTIC_CODE_BYTES));
+    for types in [
+        format!("<action_type>sale</action_type><action_type>{oversized_type}</action_type>"),
+        format!("<action_type>{oversized_type}</action_type><action_type>sale</action_type>"),
+    ] {
+        let parts = found(&format!(
+            "<nm_response><transaction><transaction_id>a</transaction_id>\
+             <action>{types}<amount>1.00</amount></action>\
+             </transaction></nm_response>"
+        ));
+        assert!(parts.malformed, "{types}");
+        assert!(parts.actions.is_empty());
+    }
+    let padded_code = format!("59{}", " ".repeat(MAX_NMI_DIAGNOSTIC_CODE_BYTES));
+    let parts = found(&format!(
+        "<nm_response><transaction><transaction_id>a</transaction_id>\
+         <action><action_type>sale</action_type><action_type>Sale</action_type>\
+         <amount>1.00</amount>\
+         <processor_response_code>59</processor_response_code>\
+         <processor_response_code>{padded_code}</processor_response_code></action>\
+         </transaction></nm_response>"
+    ));
+    assert!(!parts.malformed, "equivalent bounded types still resolve");
+    let sale = &parts.actions[0];
+    assert_eq!(exposed(&sale.action_type), Some("sale"));
+    assert_eq!(exposed(&sale.processor_response_code), Some("59"));
+    assert!(!sale.incomplete, "trimmed padding is not an oversized code");
+}

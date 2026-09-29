@@ -368,21 +368,21 @@ pub(in crate::client) fn query_diagnostics_from_xml(
     if !malformed {
         for action in element_children_named(transaction, "action") {
             // Resolution preserves a provider spelling; selection compares
-            // the canonical forms. The action type is a code: bound it before
-            // normalization removes separators, and treat an oversized type
-            // like a conflicting one, because an unclassifiable action makes
-            // exactly one match unprovable.
-            let action_type = report_field(
-                collect_xml_scalar(action, &["action_type"], false)
-                    .finish_normalized(normalize_gateway_state),
-                &mut malformed,
-            );
-            let action_type = match action_type {
-                Some(value) if value.trim().len() > MAX_NMI_DIAGNOSTIC_CODE_BYTES => {
-                    malformed = true;
-                    None
-                }
-                value => value.map(|value| normalize_gateway_state(&value)),
+            // the canonical forms. The action type is a code: bound every
+            // occurrence before normalization removes separators or duplicate
+            // resolution picks an equivalent spelling, and treat an oversized
+            // type like a conflicting one, because an unclassifiable action
+            // makes exactly one match unprovable.
+            let action_type = if diagnostic_code_oversized(action, "action_type") {
+                malformed = true;
+                None
+            } else {
+                report_field(
+                    collect_xml_scalar(action, &["action_type"], false)
+                        .finish_normalized(normalize_gateway_state),
+                    &mut malformed,
+                )
+                .map(|value| normalize_gateway_state(&value))
             };
             let amount = report_field(
                 collect_xml_scalar(action, &["amount"], false)
@@ -449,11 +449,31 @@ fn optional_diagnostic_code(
     if all_diagnostic_occurrences_empty(node, name)? {
         return None;
     }
+    if diagnostic_code_oversized(node, name) {
+        *incomplete = true;
+        return None;
+    }
     let (value, invalid) =
         resolve_optional_scalar(collect_xml_scalar(node, &[name], false).finish());
-    let value = value.filter(|value| value.trim().len() <= MAX_NMI_DIAGNOSTIC_CODE_BYTES);
     *incomplete |= invalid || value.is_none();
     value.map(SensitiveText::new)
+}
+
+/// Whether any occurrence of a code element exceeds
+/// [`MAX_NMI_DIAGNOSTIC_CODE_BYTES`] after trimming. Checked on every raw
+/// occurrence before duplicate resolution, which may select a different,
+/// equivalent spelling and so hide an oversized one.
+fn diagnostic_code_oversized(node: roxmltree::Node<'_, '_>, name: &'static str) -> bool {
+    element_children_named(node, name).any(|occurrence| {
+        occurrence
+            .children()
+            .filter(|child| child.is_text())
+            .filter_map(|child| child.text())
+            .collect::<String>()
+            .trim()
+            .len()
+            > MAX_NMI_DIAGNOSTIC_CODE_BYTES
+    })
 }
 
 /// Returns `None` when the element is absent and whether every occurrence is
