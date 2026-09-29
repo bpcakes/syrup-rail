@@ -7,7 +7,8 @@ use crate::{
     BillingScopeId, GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayError,
     GatewayLifecycleQueryPolicy, GatewayMutationError, GatewayMutationReferenceFactory,
     GatewayPaymentMethodMetadata, GatewayPaymentOutcome, GatewayProviderKey, GatewayQueryRequest,
-    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionReport,
+    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionDiagnostics,
+    GatewayTransactionDiagnosticsRequest, GatewayTransactionReport,
     GatewayTransactionReportRequest, PaymentGateway,
 };
 
@@ -105,6 +106,15 @@ impl ResolvedGateway {
         request: GatewayQueryRequest,
     ) -> Result<Option<GatewayPaymentMethodMetadata>, GatewayError> {
         self.gateway.query_payment_method_metadata(request).await
+    }
+
+    /// Reads read-only processor and verification diagnostics for one
+    /// historical transaction through the resolved provider.
+    pub async fn query_transaction_diagnostics(
+        &self,
+        request: GatewayTransactionDiagnosticsRequest,
+    ) -> Result<GatewayTransactionDiagnostics, GatewayError> {
+        self.gateway.query_transaction_diagnostics(request).await
     }
 }
 

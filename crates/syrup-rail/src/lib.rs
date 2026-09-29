@@ -72,7 +72,9 @@ pub use event::{
 };
 pub use gateway::{
     ApprovedProcessorEvidence, CardLastFour, GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS,
-    GatewayAccountMode, GatewayAccountModeParseError, GatewayError, GatewayLifecycleEvidence,
+    GatewayAccountMode, GatewayAccountModeParseError, GatewayDiagnosticOperation,
+    GatewayDiagnosticsCompleteness, GatewayDiagnosticsSource, GatewayDiagnosticsSourceError,
+    GatewayDiagnosticsUnavailableReason, GatewayError, GatewayLifecycleEvidence,
     GatewayLifecycleEvidenceError, GatewayLifecycleQuarantine, GatewayLifecycleQuarantineError,
     GatewayLifecycleQuarantineReason, GatewayLifecycleQuarantineResolutionReason,
     GatewayLifecycleQuarantineResolutionReasonError, GatewayLifecycleQueryPolicy,
@@ -80,10 +82,11 @@ pub use gateway::{
     GatewayMutationReferenceFactory, GatewayNotSubmittedError, GatewayPaymentDescriptor,
     GatewayPaymentDiagnostic, GatewayPaymentMethodMetadata, GatewayPaymentOutcome,
     GatewayPaymentStatus, GatewayQueryRequest, GatewayRequestError, GatewaySaleIntent,
-    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionReport,
-    GatewayTransactionReportRequest, MutationCertainty, PaymentCardBrand, PaymentGateway,
-    PaymentReversalKind, ProcessorEvidence, SharedGatewayMutationReferenceFactory,
-    SharedPaymentGateway,
+    GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionDiagnostics,
+    GatewayTransactionDiagnosticsObservation, GatewayTransactionDiagnosticsRequest,
+    GatewayTransactionReport, GatewayTransactionReportRequest, MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES,
+    MutationCertainty, PaymentCardBrand, PaymentGateway, PaymentReversalKind, ProcessorEvidence,
+    SharedGatewayMutationReferenceFactory, SharedPaymentGateway,
 };
 pub use gateway_value::{
     BillingAddress, BillingAddressError, BillingContact, BillingContactError, BillingContactParts,

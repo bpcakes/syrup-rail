@@ -5,7 +5,9 @@ use thiserror::Error;
 
 use super::{
     GatewayAccountMode, GatewayPaymentOutcome, GatewayQueryRequest, GatewaySaleRequest,
-    GatewayStorePaymentMethodRequest, GatewayTransactionReport, GatewayTransactionReportRequest,
+    GatewayStorePaymentMethodRequest, GatewayTransactionDiagnostics,
+    GatewayTransactionDiagnosticsRequest, GatewayTransactionReport,
+    GatewayTransactionReportRequest,
 };
 use crate::{GatewayDiagnostic, GatewayOrderId, PaymentAttemptId, PaymentAttemptKind};
 
@@ -245,6 +247,25 @@ pub trait PaymentGateway: Send + Sync {
         &self,
         request: GatewayTransactionReportRequest,
     ) -> Result<Vec<GatewayTransactionReport>, GatewayError>;
+
+    /// Reads processor and verification diagnostics for one historical
+    /// transaction without changing any payment or provider state.
+    ///
+    /// Implementations must perform at most one read-only exact lookup by the
+    /// requested transaction ID, never search by order ID, never submit a
+    /// payment or vault mutation, and select exactly one original action as
+    /// documented on [`GatewayTransactionDiagnosticsRequest`]. The default
+    /// returns [`GatewayTransactionDiagnostics::Unsupported`] without I/O so
+    /// existing providers keep compiling. Gateway decorators must forward this
+    /// method to their wrapped gateway; inheriting the default hides the
+    /// provider's diagnostics.
+    async fn query_transaction_diagnostics(
+        &self,
+        request: GatewayTransactionDiagnosticsRequest,
+    ) -> Result<GatewayTransactionDiagnostics, GatewayError> {
+        let _ = request;
+        Ok(GatewayTransactionDiagnostics::Unsupported)
+    }
 }
 
 pub trait GatewayMutationReferenceFactory: Send + Sync {

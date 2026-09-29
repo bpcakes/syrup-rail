@@ -25,10 +25,17 @@ pub use self::port::{
     MutationCertainty, PaymentGateway, SharedGatewayMutationReferenceFactory, SharedPaymentGateway,
 };
 
+mod diagnostics;
 mod lifecycle;
 mod metadata;
 mod port;
 
+pub use self::diagnostics::{
+    GatewayDiagnosticOperation, GatewayDiagnosticsCompleteness, GatewayDiagnosticsSource,
+    GatewayDiagnosticsSourceError, GatewayDiagnosticsUnavailableReason,
+    GatewayTransactionDiagnostics, GatewayTransactionDiagnosticsObservation,
+    GatewayTransactionDiagnosticsRequest, MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES,
+};
 pub use self::metadata::GatewayPaymentMethodMetadata;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
