@@ -49,6 +49,12 @@ pub const V3_TO_V4_INDEX_SQL: &str = include_str!("../schema/v4/index_from_v3.sq
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The final version-3-to-version-4 cutover artifact.
 pub const V3_TO_V4_UPGRADE_SQL: &str = include_str!("../schema/v4/upgrade_from_v3.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The current version-5 fresh-install artifact.
+pub const V5_INSTALL_SQL: &str = include_str!("../schema/v5/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The one-transaction, stopped-writer version-4-to-version-5 upgrade artifact.
+pub const V4_TO_V5_UPGRADE_SQL: &str = include_str!("../schema/v5/upgrade_from_v4.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
@@ -59,6 +65,7 @@ const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
 const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
+const V5_CATALOG_FINGERPRINT: u64 = 0xfe31_5b97_ddbf_a4d0;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
@@ -356,9 +363,12 @@ const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
     "unpaid_at",
     "required_gateway_account_mode",
 ];
+// Version 5 changes only stored payment methods and attempts.
+const V5_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V4_CURRENT_SUBSCRIPTION_COLUMNS;
 
 /// Why a host database does not satisfy a canonical schema contract.
 ///
+/// [`crate::assert_runtime_schema_v5_compatible`] reports version `5` and
 /// [`crate::assert_runtime_schema_v4_compatible`] reports version `4` in its
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
 /// or commit the read-only catalog snapshot.
@@ -401,7 +411,7 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 /// `schema-contract-test-support` feature.
 ///
 /// This function is not part of the ordinary production facade because the
-/// 0.4 runtime requires schema v4. It does not install, upgrade, preflight,
+/// current runtime requires schema v5. It does not install, upgrade, preflight,
 /// audit, or otherwise mutate the schema. It runs the full canonical v3 catalog conformance
 /// and fingerprint check used by the schema-contract tests in one
 /// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
@@ -429,12 +439,34 @@ pub async fn assert_runtime_schema_v3_compatible(
     .await
 }
 
-/// Asserts that a host database is compatible with the canonical schema-v4
+/// Asserts that a host database is compatible with the canonical schema-v5
 /// contract before the host accepts billing work.
 ///
 /// Call this after the host has applied its immutable Syrup Rail install or
 /// forward-only upgrade migration through its normal migration deployment.
-/// This function is read-only and requires PostgreSQL major version 18.
+/// This function is read-only and requires PostgreSQL major version 18. It
+/// rejects a schema-v4 database: 0.5.4 persists billing addresses and must not
+/// accept billing work until `schema/v5/upgrade_from_v4.sql` has committed.
+pub async fn assert_runtime_schema_v5_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        5,
+        V5_CURRENT_SUBSCRIPTION_COLUMNS,
+        V5_CATALOG_FINGERPRINT,
+    )
+    .await
+}
+
+/// Asserts that a host database still matches the canonical schema-v4
+/// contract.
+///
+/// The 0.5.4 runtime requires schema v5; use
+/// [`assert_runtime_schema_v5_compatible`] before accepting billing work. This
+/// read-only check remains available so hosts can confirm the pre-cutover
+/// state before applying `schema/v5/upgrade_from_v4.sql`. It requires
+/// PostgreSQL major version 18.
 pub async fn assert_runtime_schema_v4_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -477,6 +509,13 @@ pub async fn assert_v3_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
 /// objects without exposing a production runtime migrator.
 pub async fn assert_v4_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
     assert_runtime_schema_v4_compatible(pool).await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v5
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v5_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v5_compatible(pool).await
 }
 
 #[cfg(any(test, feature = "schema-contract-test-support"))]

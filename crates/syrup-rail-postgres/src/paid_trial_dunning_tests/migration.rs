@@ -7,6 +7,7 @@ use syrup_rail::{
 
 use crate::schema_contract::{
     V1_TO_V2_UPGRADE_SQL, assert_v2_conforms, assert_v3_conforms, assert_v4_conforms,
+    assert_v5_conforms,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +77,8 @@ async fn v1_active_recovery_authority_survives_v2_v3_and_v4_cutovers() -> Result
         assert_v3_conforms(&database.pool).await?;
         database.upgrade_v3_to_v4().await?;
         assert_v4_conforms(&database.pool).await?;
+        database.upgrade_v4_to_v5().await?;
+        assert_v5_conforms(&database.pool).await?;
 
         let events = Arc::new(Mutex::new(Vec::new()));
         let coordinator = TestCoordinator {
