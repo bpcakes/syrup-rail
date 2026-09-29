@@ -278,3 +278,12 @@ async fn padded_codes_are_never_shortened_into_a_verification_result() {
         GatewayDiagnosticsCompleteness::Partial
     );
 }
+
+#[tokio::test]
+async fn separator_padded_action_types_are_not_selected_as_sales() {
+    let body = transaction(&action(&format!("s{}ale", "-".repeat(64)), "10.00", "100"));
+    assert_eq!(
+        diagnose(body, sale(1_000)).await.unwrap(),
+        GatewayTransactionDiagnostics::Unavailable(Reason::MalformedResponse)
+    );
+}

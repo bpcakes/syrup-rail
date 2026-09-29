@@ -368,13 +368,22 @@ pub(in crate::client) fn query_diagnostics_from_xml(
     if !malformed {
         for action in element_children_named(transaction, "action") {
             // Resolution preserves a provider spelling; selection compares
-            // the canonical forms.
+            // the canonical forms. The action type is a code: bound it before
+            // normalization removes separators, and treat an oversized type
+            // like a conflicting one, because an unclassifiable action makes
+            // exactly one match unprovable.
             let action_type = report_field(
                 collect_xml_scalar(action, &["action_type"], false)
                     .finish_normalized(normalize_gateway_state),
                 &mut malformed,
-            )
-            .map(|value| normalize_gateway_state(&value));
+            );
+            let action_type = match action_type {
+                Some(value) if value.trim().len() > MAX_NMI_DIAGNOSTIC_CODE_BYTES => {
+                    malformed = true;
+                    None
+                }
+                value => value.map(|value| normalize_gateway_state(&value)),
+            };
             let amount = report_field(
                 collect_xml_scalar(action, &["amount"], false)
                     .finish_normalized(normalize_report_amount),

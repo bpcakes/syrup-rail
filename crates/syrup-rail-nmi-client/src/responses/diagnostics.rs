@@ -48,8 +48,8 @@ pub struct TransactionDiagnosticsParts {
     /// Actions in response order. Empty when `malformed` is set.
     pub actions: Vec<TransactionDiagnosticsActionParts>,
     /// An identifier, the currency, or an action's type or amount was
-    /// malformed or conflicting, or the action structure was invalid. No
-    /// action can then be selected safely.
+    /// malformed or conflicting, an action type exceeded 64 bytes, or the
+    /// action structure was invalid. No action can then be selected safely.
     pub malformed: bool,
     /// A transaction-level verification field was present but unusable and
     /// was omitted.

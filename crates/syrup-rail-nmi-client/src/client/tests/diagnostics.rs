@@ -244,3 +244,26 @@ fn codes_are_bounded_before_any_truncation() {
     assert_eq!(exposed(&sale.processor_response_code), None);
     assert!(sale.incomplete);
 }
+
+#[test]
+fn oversized_action_types_cannot_normalize_into_a_sale() {
+    for action_type in [
+        format!("s{}ale", "-".repeat(MAX_NMI_DIAGNOSTIC_CODE_BYTES)),
+        "sale".repeat(MAX_NMI_DIAGNOSTIC_CODE_BYTES),
+    ] {
+        let parts = found(&format!(
+            "<nm_response><transaction><transaction_id>a</transaction_id>\
+             <action><action_type>{action_type}</action_type><amount>1.00</amount></action>\
+             </transaction></nm_response>"
+        ));
+        assert!(parts.malformed, "{action_type}");
+        assert!(parts.actions.is_empty());
+    }
+    let parts = found(
+        "<nm_response><transaction><transaction_id>a</transaction_id>\
+         <action><action_type> Sale </action_type><amount>1.00</amount></action>\
+         </transaction></nm_response>",
+    );
+    assert!(!parts.malformed);
+    assert_eq!(exposed(&parts.actions[0].action_type), Some("sale"));
+}
