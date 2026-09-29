@@ -24,13 +24,16 @@ pub use configuration::{
 pub use errors::{MutationCertainty, MutationError, QueryError};
 pub use requests::{
     BillingAddress, BillingContact, PaymentSource, ReportQuery, SaleRequest,
-    StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
+    StorePaymentMethodRequest, StoredCredential, TransactionDiagnosticsQuery, TransactionQuery,
+    VaultAction,
 };
 pub use responses::{
     AccountMode, PaymentDescriptor, PaymentDescriptorParts, PaymentMethodMetadata,
     PaymentMethodMetadataParts, PaymentOutcome, PaymentOutcomeDiagnostic, PaymentOutcomeParts,
-    PaymentStatus, SensitiveText, TransactionAction, TransactionActionParts, TransactionReport,
-    TransactionReportDiagnostic, TransactionReportParts,
+    PaymentStatus, SensitiveText, TransactionAction, TransactionActionParts,
+    TransactionDiagnostics, TransactionDiagnosticsActionParts, TransactionDiagnosticsLookup,
+    TransactionDiagnosticsParts, TransactionReport, TransactionReportDiagnostic,
+    TransactionReportParts,
 };
 
 #[cfg(test)]

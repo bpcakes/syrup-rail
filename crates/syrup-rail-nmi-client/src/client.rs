@@ -8,8 +8,9 @@ use crate::configuration::{
 };
 use crate::{
     AccountMode, MutationError, PaymentOutcome, PaymentSource, PaymentStatus, QueryError,
-    ReportQuery, SaleRequest, StorePaymentMethodRequest, TransactionAction, TransactionQuery,
-    TransactionReport, VaultAction,
+    ReportQuery, SaleRequest, StorePaymentMethodRequest, TransactionAction,
+    TransactionDiagnosticsLookup, TransactionDiagnosticsQuery, TransactionQuery, TransactionReport,
+    VaultAction,
 };
 
 use self::form::{
@@ -20,7 +21,7 @@ use self::response::common::{ApprovedIdentityRequirement, require_approved_ident
 use self::response::form::classic_payment_outcome_from_form;
 use self::response::json::payment_outcome_from_json;
 use self::response::xml::{
-    query_account_mode_from_xml, query_metadata_for_request_from_xml,
+    query_account_mode_from_xml, query_diagnostics_from_xml, query_metadata_for_request_from_xml,
     query_outcome_for_request_from_xml, query_transaction_reports_from_xml,
 };
 use self::v5::{amount_value, sale_body_json};
@@ -51,6 +52,9 @@ const _: () = assert!(
     MAX_NMI_REPORT_ACTIONS * size_of::<TransactionAction>() <= MAX_NMI_REPORT_RESPONSE_BYTES,
     "TransactionAction grew; lower MAX_NMI_REPORT_ACTIONS instead of deriving it from the layout",
 );
+// A diagnostic lookup returns one transaction; its action history (sale,
+// settlement, refunds, voids) is far smaller than this bound.
+const MAX_NMI_DIAGNOSTIC_ACTIONS: usize = 100;
 const MAX_NMI_FIELD_CHARS: usize = 512;
 const MAX_NMI_PAYMENT_TOKEN_BYTES: usize = 4_096;
 const MAX_NMI_IDENTIFIER_BYTES: usize = 512;
@@ -402,6 +406,22 @@ impl Client {
     ) -> Result<Option<crate::PaymentMethodMetadata>, QueryError> {
         let text = self.query_transaction_text(&request).await?;
         query_metadata_for_request_from_xml(&text, &request).map_err(WireError::into_query)
+    }
+
+    /// Queries read-only processor and verification diagnostics for one exact
+    /// transaction ID. Uses the same bounds, credentials, and one-shot query
+    /// transport as `query_transaction`; it never searches by order ID and
+    /// never submits a mutation. The caller selects the original action.
+    pub async fn query_transaction_diagnostics(
+        &self,
+        request: TransactionDiagnosticsQuery,
+    ) -> Result<TransactionDiagnosticsLookup, QueryError> {
+        let query = TransactionQuery {
+            transaction_id: Some(request.transaction_id),
+            order_id: None,
+        };
+        let text = self.query_transaction_text(&query).await?;
+        query_diagnostics_from_xml(&text).map_err(WireError::into_query)
     }
 
     async fn query_transaction_text(

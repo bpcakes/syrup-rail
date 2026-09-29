@@ -135,6 +135,23 @@ impl fmt::Debug for StorePaymentMethodRequest {
     }
 }
 
+/// Exact read-only diagnostic lookup by NMI transaction ID.
+///
+/// The client never searches by order ID for diagnostics.
+#[derive(Clone)]
+pub struct TransactionDiagnosticsQuery {
+    pub transaction_id: String,
+}
+
+impl fmt::Debug for TransactionDiagnosticsQuery {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransactionDiagnosticsQuery")
+            .field("transaction_id", &"[redacted]")
+            .finish()
+    }
+}
+
 #[derive(Clone)]
 pub struct TransactionQuery {
     pub transaction_id: Option<String>,

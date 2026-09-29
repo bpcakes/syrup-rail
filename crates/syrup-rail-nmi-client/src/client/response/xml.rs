@@ -2,12 +2,14 @@ use std::borrow::Cow;
 
 use crate::{
     AccountMode, PaymentDescriptor, PaymentOutcome, PaymentOutcomeDiagnostic, PaymentStatus,
-    SensitiveText, TransactionAction, TransactionQuery, TransactionReport,
+    SensitiveText, TransactionAction, TransactionDiagnostics, TransactionDiagnosticsActionParts,
+    TransactionDiagnosticsLookup, TransactionDiagnosticsParts, TransactionQuery, TransactionReport,
     TransactionReportDiagnostic,
 };
 
 use super::super::{
-    MAX_NMI_REPORT_ACTIONS, MAX_NMI_REPORT_RESPONSE_BYTES, MAX_NMI_TRANSACTION_REPORTS, WireError,
+    MAX_NMI_DIAGNOSTIC_ACTIONS, MAX_NMI_REPORT_ACTIONS, MAX_NMI_REPORT_RESPONSE_BYTES,
+    MAX_NMI_TRANSACTION_REPORTS, WireError,
     text::{last4, parse_expiry, sensitive_gateway_field},
     validation::trimmed_optional,
 };
@@ -303,6 +305,151 @@ fn exact_query_response_from_xml(
         transaction_id: response_transaction_identifier,
         order_id: order_identifier,
     }))
+}
+
+/// Parses an exact diagnostic lookup. Structural envelope problems and
+/// `error_response` keep their ordinary query error classification; problems
+/// inside the one returned transaction are reported through the `malformed`
+/// and `incomplete` flags so the adapter can decline to select an action.
+pub(in crate::client) fn query_diagnostics_from_xml(
+    text: &str,
+) -> Result<TransactionDiagnosticsLookup, WireError> {
+    let document = parse_transaction_report_xml(text)?;
+    let envelope = successful_query_response_root(&document, "diagnostic query")?;
+    let transaction_count = direct_element_count_without_nested_matches(
+        envelope,
+        "transaction",
+        "diagnostic query response",
+    )?;
+    let transaction = match transaction_count {
+        0 => return Ok(TransactionDiagnosticsLookup::NotFound),
+        1 => element_children_named(envelope, "transaction")
+            .next()
+            .ok_or_else(|| {
+                WireError::MalformedResponse(
+                    "NMI diagnostic query response lost its transaction.".to_owned(),
+                )
+            })?,
+        _ => return Ok(TransactionDiagnosticsLookup::MultipleTransactions),
+    };
+    let mut malformed = false;
+    let mut incomplete = false;
+    let transaction_id = report_field(
+        collect_xml_identifier(
+            transaction,
+            &["transaction_id"],
+            IdentifierPresence::Required,
+        ),
+        &mut malformed,
+    );
+    let order_id = report_field(
+        collect_xml_identifier(transaction, &["order_id"], IdentifierPresence::Optional),
+        &mut malformed,
+    );
+    let currency = report_field(
+        collect_xml_scalar(transaction, &["currency"], false).finish(),
+        &mut malformed,
+    );
+    let avs_response = optional_diagnostic_field(transaction, "avs_response", &mut incomplete);
+    let csc_response = optional_diagnostic_field(transaction, "csc_response", &mut incomplete);
+    let action_count = direct_element_count_without_nested_matches(
+        transaction,
+        "action",
+        "diagnostic query response",
+    )
+    .unwrap_or_else(|_| {
+        malformed = true;
+        0
+    });
+    if action_count > MAX_NMI_DIAGNOSTIC_ACTIONS {
+        malformed = true;
+    }
+    let mut actions = Vec::new();
+    if !malformed {
+        for action in element_children_named(transaction, "action") {
+            // Resolution preserves a provider spelling; selection compares
+            // the canonical forms.
+            let action_type = report_field(
+                collect_xml_scalar(action, &["action_type"], false)
+                    .finish_normalized(normalize_gateway_state),
+                &mut malformed,
+            )
+            .map(|value| normalize_gateway_state(&value));
+            let amount = report_field(
+                collect_xml_scalar(action, &["amount"], false)
+                    .finish_normalized(normalize_report_amount),
+                &mut malformed,
+            )
+            .map(|value| normalize_report_amount(&value));
+            let mut action_incomplete = false;
+            actions.push(TransactionDiagnosticsActionParts {
+                action_type: action_type.map(SensitiveText::new),
+                amount: amount.map(SensitiveText::new),
+                response_code: optional_diagnostic_field(
+                    action,
+                    "response_code",
+                    &mut action_incomplete,
+                ),
+                response_text: optional_diagnostic_field(
+                    action,
+                    "response_text",
+                    &mut action_incomplete,
+                ),
+                processor_response_code: optional_diagnostic_field(
+                    action,
+                    "processor_response_code",
+                    &mut action_incomplete,
+                ),
+                processor_response_text: optional_diagnostic_field(
+                    action,
+                    "processor_response_text",
+                    &mut action_incomplete,
+                ),
+                incomplete: action_incomplete,
+            });
+        }
+    }
+    if malformed {
+        // No partial action may escape a transaction whose selection fields
+        // cannot be trusted.
+        actions = Vec::new();
+    }
+    Ok(TransactionDiagnosticsLookup::Found(
+        TransactionDiagnostics::new(TransactionDiagnosticsParts {
+            transaction_id: transaction_id.map(SensitiveText::new),
+            order_id: order_id.map(SensitiveText::new),
+            currency: currency.map(SensitiveText::new),
+            avs_response,
+            csc_response,
+            actions,
+            malformed,
+            incomplete,
+        }),
+    ))
+}
+
+/// Reads one optional, bounded diagnostic text field. Empty elements are
+/// absent; a conflicting, nested, or otherwise unusable value is omitted and
+/// marks the observation incomplete.
+fn optional_diagnostic_field(
+    node: roxmltree::Node<'_, '_>,
+    name: &'static str,
+    incomplete: &mut bool,
+) -> Option<SensitiveText> {
+    let mut occurrences = element_children_named(node, name).peekable();
+    occurrences.peek()?;
+    let all_empty = occurrences.all(|occurrence| {
+        occurrence
+            .children()
+            .all(|child| child.is_text() && child.text().is_none_or(|text| text.trim().is_empty()))
+    });
+    if all_empty {
+        return None;
+    }
+    let (value, invalid) =
+        resolve_optional_scalar(collect_xml_scalar(node, &[name], true).finish());
+    *incomplete |= invalid;
+    value.map(SensitiveText::new)
 }
 
 pub(in crate::client) fn query_account_mode_from_xml(text: &str) -> Result<AccountMode, WireError> {

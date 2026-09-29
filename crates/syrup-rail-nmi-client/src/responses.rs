@@ -2,7 +2,12 @@ use std::fmt;
 
 use zeroize::Zeroizing;
 
+mod diagnostics;
 mod metadata;
+pub use diagnostics::{
+    TransactionDiagnostics, TransactionDiagnosticsActionParts, TransactionDiagnosticsLookup,
+    TransactionDiagnosticsParts,
+};
 pub use metadata::{PaymentMethodMetadata, PaymentMethodMetadataParts};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -55,6 +55,7 @@ mod card_metadata;
 mod classic_response;
 mod concurrency;
 mod customer_receipts;
+mod diagnostics;
 mod form_requests;
 mod identity_contract;
 mod json_decision;
