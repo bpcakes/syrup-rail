@@ -5,9 +5,9 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use syrup_rail::{
-    ChargeAmount, DunningExhaustion, DunningSchedule, PastDueAccessPolicy, PlanKey,
-    RecurringSubscriptionTerms, RenewalFailurePolicy, SubscriptionOffer, SubscriptionPeriodRule,
-    SubscriptionStart,
+    BillingAddress, BillingScopeId, ChargeAmount, DunningExhaustion, DunningSchedule,
+    PastDueAccessPolicy, PaymentAttempt, PaymentAttemptId, PlanKey, RecurringSubscriptionTerms,
+    RenewalFailurePolicy, SubscriptionOffer, SubscriptionPeriodRule, SubscriptionStart,
 };
 
 use crate::schema_contract::{
@@ -27,6 +27,62 @@ pub(crate) struct GatewayAccountFixture {
     pub(crate) billing_scope_id: Uuid,
     pub(crate) gateway_account_id: Uuid,
     pub(crate) gateway_configuration_id: Uuid,
+}
+
+pub(crate) fn billing_address(line1: &str) -> BillingAddress {
+    BillingAddress::new(line1.to_owned(), "US".to_owned())
+        .unwrap()
+        .with_line2(Some("Suite 2".to_owned()))
+        .unwrap()
+        .with_city(Some("Boston".to_owned()))
+        .unwrap()
+        .with_region(Some("MA".to_owned()))
+        .unwrap()
+        .with_postal_code(Some("02110".to_owned()))
+        .unwrap()
+}
+
+pub(crate) async fn assert_attempt_billing_address(
+    pool: &PgPool,
+    scope: BillingScopeId,
+    attempt_id: PaymentAttemptId,
+    expected: &BillingAddress,
+) -> Result<PaymentAttempt, Box<dyn Error>> {
+    let stored: (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) = sqlx::query_as(
+        "SELECT billing_address_line1, billing_address_line2, billing_address_city, \
+             billing_address_region, billing_address_postal_code, billing_address_country \
+             FROM billing_payment_attempts WHERE billing_scope_id = $1 AND id = $2",
+    )
+    .bind(scope.as_uuid())
+    .bind(attempt_id.as_uuid())
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(
+        stored,
+        (
+            expected.line1().to_owned(),
+            expected.line2().map(ToOwned::to_owned),
+            expected.city().map(ToOwned::to_owned),
+            expected.region().map(ToOwned::to_owned),
+            expected.postal_code().map(ToOwned::to_owned),
+            expected.country().to_owned(),
+        )
+    );
+    let mut transaction = pool.begin().await?;
+    let loaded =
+        crate::find_payment_attempt_by_id_in_transaction(&mut transaction, scope, attempt_id)
+            .await?
+            .expect("reserved attempt must be durable");
+    transaction.commit().await?;
+    assert_eq!(loaded.request().billing_contact().address(), Some(expected));
+    Ok(loaded)
 }
 
 pub(crate) fn immediate_offer(plan_key: PlanKey, charge: ChargeAmount) -> SubscriptionOffer {

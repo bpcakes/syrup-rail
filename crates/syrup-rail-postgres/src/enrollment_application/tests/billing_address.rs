@@ -1,5 +1,7 @@
-//! Schema-v5 billing-address persistence across enrollment, replacement,
+//! Schema-v5 billing-address persistence across enrollment, recovery, replacement,
 //! renewal reservation and submission, replay, and subscriber scrubbing.
+
+mod recovery;
 
 use std::time::Duration;
 
@@ -8,7 +10,7 @@ use syrup_rail::{BillingAddress, ScrubSubscriberBillingData, SubscriptionId};
 use super::*;
 use crate::{
     SubscriptionRenewalAdmissionOutcome, admit_subscription_renewal_submission,
-    scrub_subscriber_billing_data,
+    scrub_subscriber_billing_data, test_support::billing_address as address,
 };
 
 type AddressColumns = (
@@ -19,19 +21,6 @@ type AddressColumns = (
     Option<String>,
     Option<String>,
 );
-
-fn address(line1: &str) -> BillingAddress {
-    BillingAddress::new(line1.to_owned(), "US".to_owned())
-        .unwrap()
-        .with_line2(Some("Suite 2".to_owned()))
-        .unwrap()
-        .with_city(Some("Boston".to_owned()))
-        .unwrap()
-        .with_region(Some("MA".to_owned()))
-        .unwrap()
-        .with_postal_code(Some("02110".to_owned()))
-        .unwrap()
-}
 
 fn columns(address: &BillingAddress) -> AddressColumns {
     (
