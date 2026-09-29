@@ -227,9 +227,9 @@ impl GatewayDiagnosticsSource {
 /// Every value is sanitized provider text with value-free ordinary
 /// formatting; read it through [`GatewayDiagnostic::expose`] only at a
 /// protected operator boundary. Provider codes longer than
-/// [`MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES`] are omitted, and free text is
-/// sanitized and truncated like other gateway diagnostics. Absent values are
-/// never invented.
+/// [`MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES`] as received or after sanitization are
+/// omitted, and free text is sanitized and truncated like other gateway
+/// diagnostics. Absent values are never invented.
 #[derive(Clone, Eq, PartialEq)]
 pub struct GatewayTransactionDiagnosticsObservation {
     operation: GatewayDiagnosticOperation,
@@ -305,13 +305,20 @@ impl GatewayTransactionDiagnosticsObservation {
         self
     }
 
+    /// Bounds both the provider's code and the retained sanitized code, since
+    /// redaction can lengthen a code that fit on arrival.
     fn bounded_code(&mut self, value: Option<&str>) -> Option<GatewayDiagnostic> {
         let value = value.map(str::trim).filter(|value| !value.is_empty())?;
         if value.len() > MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES {
             self.marked_partial = true;
             return None;
         }
-        sanitized_text(Some(value))
+        let code = sanitized_text(Some(value))?;
+        if code.expose().len() > MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES {
+            self.marked_partial = true;
+            return None;
+        }
+        Some(code)
     }
 
     pub const fn operation(&self) -> GatewayDiagnosticOperation {
@@ -548,6 +555,30 @@ mod tests {
         assert_eq!(
             marked.completeness(),
             GatewayDiagnosticsCompleteness::Partial
+        );
+
+        // Redaction can lengthen a code that fits the limit on arrival; the
+        // retained code must fit too.
+        let expanding = "cvv=1 ".repeat(10);
+        assert!(expanding.trim().len() <= MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES);
+        assert!(
+            GatewayDiagnostic::new(&expanding).expose().len() > MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES
+        );
+        let expanded = complete.clone().with_avs_response(Some(&expanding));
+        assert_eq!(expanded.avs_response(), None);
+        assert_eq!(
+            expanded.completeness(),
+            GatewayDiagnosticsCompleteness::Partial
+        );
+        let redacted = complete.clone().with_avs_response(Some("cvv=1"));
+        assert!(
+            redacted
+                .avs_response()
+                .is_some_and(|code| !code.expose().contains('1'))
+        );
+        assert_eq!(
+            redacted.completeness(),
+            GatewayDiagnosticsCompleteness::Complete
         );
 
         let debug = format!("{complete:?}");

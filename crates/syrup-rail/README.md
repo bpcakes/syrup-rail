@@ -92,8 +92,8 @@ names the transaction ID, the original operation (`Sale` or `Validate`), its
 amount, and the expected order ID; providers must look up only that transaction
 and select exactly one matching original action. Results are observations, not
 payment evidence: `GatewayTransactionDiagnosticsObservation` omits provider codes
-longer than 64 bytes, sanitizes free text, and reports partial completeness when
-a field is missing. The default returns `Unsupported` without I/O, and gateway
+longer than 64 bytes as received or after sanitization, sanitizes free text, and
+reports partial completeness when a field is missing. The default returns `Unsupported` without I/O, and gateway
 decorators must forward the method.
 
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
