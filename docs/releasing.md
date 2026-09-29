@@ -18,6 +18,25 @@ diagnostic routing. In particular, the Postgres and NMI packages can use APIs
 and policy added in the matching core release and must not claim compatibility
 with an older or newer core package.
 
+## Branches
+
+- `master` is the default branch and the active 0.5.x release line.
+- `dev/0.6.0` contains unfinished 0.6.0 development.
+- `main` and `integration/0.6.0` are historical references; target new work at
+  one of the two active branches above.
+
+Fix stable issues on `master` and carry applicable fixes forward into
+`dev/0.6.0`. Both active branches run push CI. Publishing is restricted to
+`master`; developing on the default branch does not publish a release.
+
+When 0.6.0 is ready, integrate it into `master`. First preserve the shipped
+0.5.x schema artifacts and provide forward upgrades for the 0.6.0 schema
+changes. Both development lines currently have different unreleased v5
+artifacts; whichever ships first establishes the immutable v5 schema.
+Create `release/0.5` before the 0.6.0 integration if 0.5.x still needs support.
+Publishing from a maintenance branch requires an explicit update to the
+workflow ref check and the `release` environment's allowed branches.
+
 ## Preflight
 
 Update the workspace version, internal dependency requirements, `Cargo.lock`,
@@ -52,10 +71,8 @@ fails if that dependency becomes reachable from a workspace build.
 
 Commit the release preparation, push the release branch, wait for required CI
 to pass, and rerun `scripts/check-release.sh VERSION` from the clean release
-commit. Normally the release branch is `main`. When `main` has advanced to the
-next minor version, keep patch releases on a dedicated `release/VERSION` branch
-based on the prior release. Dispatch the Rust tests and Repository policy
-workflows on that branch; do not merge unreleased features into a patch release.
+commit. Release the active stable series from `master`. Keep unfinished
+0.6.0 features on `dev/0.6.0` until that version is ready for release.
 
 ## Trusted publishing
 
@@ -65,7 +82,7 @@ do not add a long-lived crates.io token to repository secrets.
 
 One-time setup:
 
-1. Create a GitHub environment named `release` and restrict it to the `main`
+1. Create a GitHub environment named `release` and restrict it to the `master`
    deployment branch. Require a reviewer when the repository's GitHub plan
    supports deployment reviewers.
 2. In the crates.io settings for each publishable crate, add the same GitHub
@@ -74,7 +91,7 @@ One-time setup:
    - repository: `syrup-rail`
    - workflow: `release.yml`
    - environment: `release`
-3. In GitHub Actions, run `Publish crates.io` from `main` and enter the version
+3. In GitHub Actions, run `Publish crates.io` from `master` and enter the version
    already recorded in the release commit.
 
 The workflow validates metadata and package contents, runs the repository
