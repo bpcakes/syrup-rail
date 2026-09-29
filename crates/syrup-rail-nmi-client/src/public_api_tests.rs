@@ -163,6 +163,7 @@ fn request_and_error_formatting_redacts_values() {
             first_name: Some("name-debug-sentinel".to_owned()),
             last_name: None,
             email: Some("email-debug-sentinel".to_owned()),
+            address: None,
         }),
     };
     let debug = format!("{request:?}");

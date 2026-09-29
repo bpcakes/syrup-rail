@@ -4,12 +4,13 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::{
-    BillingContact, BillingPeriod, BillingScopeId, GatewayAccountId, GatewayAccountMode,
-    GatewayConfigurationId, GatewayDiagnostic, GatewayLifecycleState, GatewayOrderId,
-    GatewayTransactionId, HostChargeTargetId, IdempotencyKey, Money, PaymentAttemptId,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey,
-    ProcessorEvidence, SubscriberId, SubscriptionDiscountDuration, SubscriptionDiscountKind,
-    SubscriptionEnrollmentDiscountSnapshot, SubscriptionId, SubscriptionOffer, SubscriptionStatus,
+    BillingAddress, BillingContact, BillingPeriod, BillingScopeId, GatewayAccountId,
+    GatewayAccountMode, GatewayConfigurationId, GatewayDiagnostic, GatewayLifecycleState,
+    GatewayOrderId, GatewayTransactionId, HostChargeTargetId, IdempotencyKey, Money,
+    PaymentAttemptId, PaymentAttemptKind, PaymentAttemptStatus, PaymentMethodId,
+    PaymentResolutionCode, PlanKey, ProcessorEvidence, SubscriberId, SubscriptionDiscountDuration,
+    SubscriptionDiscountKind, SubscriptionEnrollmentDiscountSnapshot, SubscriptionId,
+    SubscriptionOffer, SubscriptionStatus,
 };
 
 pub use fingerprint::{PaymentAttemptFingerprint, PaymentAttemptFingerprintError};

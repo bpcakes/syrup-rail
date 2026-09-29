@@ -4,6 +4,7 @@ pub struct BillingContact {
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub email: Option<String>,
+    pub address: Option<BillingAddress>,
 }
 
 impl fmt::Debug for BillingContact {
@@ -13,6 +14,43 @@ impl fmt::Debug for BillingContact {
             .field("has_first_name", &self.first_name.is_some())
             .field("has_last_name", &self.last_name.is_some())
             .field("has_email", &self.email.is_some())
+            .field("has_address", &self.address.is_some())
+            .finish()
+    }
+}
+
+/// Billing address sent with Classic sale/validate and v5 sale requests.
+///
+/// Values are trimmed on the wire, and optional fields that are blank after
+/// trimming are omitted. Requests are rejected before network I/O unless
+/// `address1` is non-blank and at most 100 bytes, `address2` is at most 100
+/// bytes, `city` is at most 50 bytes, a non-blank `state` is exactly two ASCII
+/// letters or digits, a `zip` is at most 20 bytes of ASCII letters, digits,
+/// spaces or hyphens, and `country` is exactly two uppercase ASCII letters.
+/// Byte limits apply to the untrimmed UTF-8 value, so `state` and `country`
+/// cannot carry surrounding whitespace.
+///
+/// These are this library's conservative local rules. NMI documents 100, 100,
+/// 50, 50, 20 and 2 character limits for the v5 sale billing address and no
+/// maximum lengths for the Classic fields. Passing local validation does not
+/// mean NMI or the processor will accept the address or the payment.
+pub struct BillingAddress {
+    pub address1: String,
+    pub address2: Option<String>,
+    pub city: Option<String>,
+    pub state: Option<String>,
+    pub zip: Option<String>,
+    pub country: String,
+}
+
+impl fmt::Debug for BillingAddress {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BillingAddress")
+            .field("has_address2", &self.address2.is_some())
+            .field("has_city", &self.city.is_some())
+            .field("has_state", &self.state.is_some())
+            .field("has_zip", &self.zip.is_some())
             .finish()
     }
 }

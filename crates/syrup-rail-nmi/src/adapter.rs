@@ -1,13 +1,13 @@
 use async_trait::async_trait;
 use chrono::Duration;
 use syrup_rail::{
-    BillingContact, GatewayAccountMode, GatewayDiagnostic, GatewayError, GatewayLifecycleCursorKey,
-    GatewayLifecycleQueryPolicy, GatewayMutationError, GatewayNotSubmittedError, GatewayOrderId,
-    GatewayPaymentDescriptor, GatewayPaymentDiagnostic, GatewayPaymentMethodMetadata,
-    GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest,
-    GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest, GatewayTransactionId,
-    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway,
-    ProcessorEvidence,
+    BillingAddress, BillingContact, BillingContactParts, GatewayAccountMode, GatewayDiagnostic,
+    GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy, GatewayMutationError,
+    GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentDiagnostic,
+    GatewayPaymentMethodMetadata, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
+    GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
+    GatewayTransactionId, GatewayTransactionReport, GatewayTransactionReportRequest,
+    PaymentAttemptId, PaymentGateway, ProcessorEvidence,
 };
 use syrup_rail_nmi_client::{
     AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeDiagnostic,
@@ -214,11 +214,31 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
 }
 
 fn map_billing_contact(contact: BillingContact) -> syrup_rail_nmi_client::BillingContact {
-    let (first_name, last_name, email) = contact.into_parts();
+    let BillingContactParts {
+        first_name,
+        last_name,
+        email,
+        address,
+    } = contact.into_parts();
     syrup_rail_nmi_client::BillingContact {
         first_name,
         last_name,
         email,
+        address: address.as_ref().map(map_billing_address),
+    }
+}
+
+/// Maps the provider-neutral address onto NMI's field names. The raw client
+/// applies NMI's stricter local rules before any request is sent; a value the
+/// core accepts but those rules reject is a known non-submission.
+fn map_billing_address(address: &BillingAddress) -> syrup_rail_nmi_client::BillingAddress {
+    syrup_rail_nmi_client::BillingAddress {
+        address1: address.line1().to_owned(),
+        address2: address.line2().map(ToOwned::to_owned),
+        city: address.city().map(ToOwned::to_owned),
+        state: address.region().map(ToOwned::to_owned),
+        zip: address.postal_code().map(ToOwned::to_owned),
+        country: address.country().to_owned(),
     }
 }
 

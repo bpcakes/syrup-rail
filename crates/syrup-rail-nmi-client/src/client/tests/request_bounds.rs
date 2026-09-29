@@ -100,6 +100,7 @@ fn billing_contact_fields_enforce_inclusive_byte_limits() {
         first_name: Some("f".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         last_name: Some("l".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         email: Some("e".repeat(MAX_NMI_EMAIL_BYTES)),
+        address: None,
     });
     assert!(validate_sale_request(&sale, "private_key").is_ok());
 
@@ -108,16 +109,19 @@ fn billing_contact_fields_enforce_inclusive_byte_limits() {
             first_name: Some("f".repeat(MAX_NMI_CONTACT_NAME_BYTES + 1)),
             last_name: None,
             email: None,
+            address: None,
         },
         BillingContact {
             first_name: None,
             last_name: Some("l".repeat(MAX_NMI_CONTACT_NAME_BYTES + 1)),
             email: None,
+            address: None,
         },
         BillingContact {
             first_name: None,
             last_name: None,
             email: Some("e".repeat(MAX_NMI_EMAIL_BYTES + 1)),
+            address: None,
         },
     ] {
         let mut request = test_store_payment_method_request();
@@ -154,6 +158,7 @@ fn encoded_request_budget_rejects_individually_bounded_aggregate_data() {
         first_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         last_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         email: None,
+        address: None,
     });
     assert!(matches!(
         validate_sale_request(&request, "private_key"),
@@ -195,6 +200,7 @@ async fn oversized_public_requests_are_rejected_without_network_io() {
         first_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         last_name: Some("%".repeat(MAX_NMI_CONTACT_NAME_BYTES)),
         email: None,
+        address: None,
     });
     let aggregate_form_error = client
         .sale(aggregate_form_request)

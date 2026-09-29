@@ -60,6 +60,7 @@ fn sale_customer_vault_form_adds_payment_method_to_vault() {
             first_name: Some(" Ada ".to_owned()),
             last_name: Some(" Lovelace ".to_owned()),
             email: Some(" ada@example.test ".to_owned()),
+            address: None,
         }),
     };
     let params = classic_sale_params(
@@ -138,6 +139,7 @@ fn store_payment_method_uses_validate_without_amount() {
             first_name: Some(" Ada ".to_owned()),
             last_name: Some(" Lovelace ".to_owned()),
             email: Some(" ada@example.test ".to_owned()),
+            address: None,
         }),
     };
     let params = classic_store_payment_method_params("private_key", &request);
@@ -184,6 +186,7 @@ fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
             first_name: Some(" Ada ".to_owned()),
             last_name: Some(" Lovelace ".to_owned()),
             email: Some(" ada@example.test ".to_owned()),
+            address: None,
         }),
     };
     let params = classic_sale_params(

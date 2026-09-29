@@ -132,6 +132,46 @@ fn billing_contact_snapshot_preserves_structure_while_deriving_display_name() {
 }
 
 #[test]
+fn billing_contact_snapshot_carries_address_structurally_and_value_free() {
+    let address = BillingAddress::new("1 Secret St".to_owned(), "us".to_owned())
+        .unwrap()
+        .with_postal_code(Some("02110".to_owned()))
+        .unwrap();
+    let historical = BillingContactSnapshot::new(None, None);
+    assert!(historical.is_empty());
+    assert_eq!(historical.address(), None);
+
+    let address_only = BillingContactSnapshot::from_billing_contact(&BillingContact::from_address(
+        address.clone(),
+    ));
+    assert!(!address_only.is_empty());
+    assert_eq!(address_only.name(), None);
+    assert_eq!(address_only.address(), Some(&address));
+    assert_eq!(
+        address_only,
+        BillingContactSnapshot::from_parts(None, None, None).with_address(address.clone())
+    );
+    assert_ne!(address_only, historical);
+
+    let named = BillingContact::new(Some("Ada".to_owned()), None, None).unwrap();
+    let with_address =
+        BillingContactSnapshot::from_billing_contact(&named.clone().with_address(address.clone()));
+    let without_address = BillingContactSnapshot::from_billing_contact(&named);
+    assert_eq!(with_address.first_name(), Some("Ada"));
+    assert_eq!(
+        with_address.address().map(BillingAddress::country),
+        Some("US")
+    );
+    assert_ne!(with_address, without_address);
+
+    let debug = format!("{with_address:?}");
+    assert!(debug.contains("has_address: true"));
+    for value in ["Secret", "02110", "Ada"] {
+        assert!(!debug.contains(value), "{value} leaked into {debug}");
+    }
+}
+
+#[test]
 fn payment_state_snapshots_are_typed_and_redact_transaction_identity() {
     let transaction = GatewayTransactionId::new("txn-secret").unwrap();
     let update = PaymentMethodUpdateSnapshot::new(subscription(1), method(2), transaction.clone());

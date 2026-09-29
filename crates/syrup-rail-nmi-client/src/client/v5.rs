@@ -97,5 +97,21 @@ fn billing_address_json(contact: &BillingContact) -> Value {
     if let Some(email) = trimmed_optional(&contact.email) {
         value["email"] = json!(email);
     }
+    if let Some(address) = &contact.address {
+        value["address1"] = json!(address.address1.trim());
+        if let Some(address2) = trimmed_optional(&address.address2) {
+            value["address2"] = json!(address2);
+        }
+        if let Some(city) = trimmed_optional(&address.city) {
+            value["city"] = json!(city);
+        }
+        if let Some(state) = trimmed_optional(&address.state) {
+            value["state"] = json!(state);
+        }
+        if let Some(zip) = trimmed_optional(&address.zip) {
+            value["zip"] = json!(zip);
+        }
+        value["country"] = json!(address.country.trim());
+    }
     value
 }

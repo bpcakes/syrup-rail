@@ -86,10 +86,10 @@ pub use gateway::{
     SharedPaymentGateway,
 };
 pub use gateway_value::{
-    BillingContact, BillingContactError, GatewayDiagnostic, GatewayOrderId,
-    GatewayPaymentMethodReference, GatewayReferenceValueError, GatewayTransactionId,
-    MAX_BILLING_CONTACT_FIELD_BYTES, MAX_GATEWAY_TEXT_BYTES, PaymentToken, PaymentTokenError,
-    canonical_gateway_transaction_id, canonical_gateway_transaction_ids_equal,
+    BillingAddress, BillingAddressError, BillingContact, BillingContactError, BillingContactParts,
+    GatewayDiagnostic, GatewayOrderId, GatewayPaymentMethodReference, GatewayReferenceValueError,
+    GatewayTransactionId, MAX_BILLING_CONTACT_FIELD_BYTES, MAX_GATEWAY_TEXT_BYTES, PaymentToken,
+    PaymentTokenError, canonical_gateway_transaction_id, canonical_gateway_transaction_ids_equal,
     sanitize_gateway_detail, truncate_gateway_detail_to_length,
 };
 pub use host_charge::{

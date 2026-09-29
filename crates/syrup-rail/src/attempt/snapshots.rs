@@ -58,14 +58,18 @@ impl PaymentAttemptTimestamps {
 ///
 /// First and last name remain separate because this value participates in
 /// immutable replay identity and provider request reconstruction. `name` is a
-/// derived receipt/support projection only. Ordinary formatting remains
-/// value-free.
+/// derived receipt/support projection only. The optional billing address is
+/// part of the same structural identity: a same-key request whose address
+/// differs, including an address added to a historical addressless attempt, is
+/// a different request. Attempt fingerprints exclude the whole contact.
+/// Ordinary formatting remains value-free.
 #[derive(Clone, Eq, PartialEq)]
 pub struct BillingContactSnapshot {
     first_name: Option<String>,
     last_name: Option<String>,
     name: Option<String>,
     email: Option<String>,
+    address: Option<BillingAddress>,
 }
 
 impl BillingContactSnapshot {
@@ -95,15 +99,27 @@ impl BillingContactSnapshot {
             last_name,
             name: (!name.is_empty()).then_some(name),
             email: normalize_optional(email),
+            address: None,
         }
     }
 
+    /// Copies a command contact, including its billing address.
     pub fn from_billing_contact(contact: &BillingContact) -> Self {
-        Self::from_parts(
+        let snapshot = Self::from_parts(
             contact.first_name().map(ToOwned::to_owned),
             contact.last_name().map(ToOwned::to_owned),
             contact.email().map(ToOwned::to_owned),
-        )
+        );
+        match contact.address() {
+            Some(address) => snapshot.with_address(address.clone()),
+            None => snapshot,
+        }
+    }
+
+    /// Attaches a billing address, replacing any address already present.
+    pub fn with_address(mut self, address: BillingAddress) -> Self {
+        self.address = Some(address);
+        self
     }
 
     pub fn first_name(&self) -> Option<&str> {
@@ -122,8 +138,18 @@ impl BillingContactSnapshot {
         self.email.as_deref()
     }
 
+    /// Returns the snapshotted billing address, from which a host can rebuild
+    /// an address-only continuation contact with
+    /// [`BillingContact::from_address`].
+    pub const fn address(&self) -> Option<&BillingAddress> {
+        self.address.as_ref()
+    }
+
     pub const fn is_empty(&self) -> bool {
-        self.first_name.is_none() && self.last_name.is_none() && self.email.is_none()
+        self.first_name.is_none()
+            && self.last_name.is_none()
+            && self.email.is_none()
+            && self.address.is_none()
     }
 }
 
@@ -135,6 +161,7 @@ impl fmt::Debug for BillingContactSnapshot {
             .field("has_last_name", &self.last_name.is_some())
             .field("has_name", &self.name.is_some())
             .field("has_email", &self.email.is_some())
+            .field("has_address", &self.address.is_some())
             .finish()
     }
 }

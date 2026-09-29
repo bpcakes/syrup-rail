@@ -57,6 +57,11 @@ const MAX_NMI_IDENTIFIER_BYTES: usize = 512;
 const MAX_NMI_ORDER_ID_BYTES: usize = 512;
 const MAX_NMI_CONTACT_NAME_BYTES: usize = 256;
 const MAX_NMI_EMAIL_BYTES: usize = 320;
+// Conservative local address caps in UTF-8 bytes. NMI documents these as v5
+// sale character limits; Classic publishes none. They do not prove acceptance.
+const MAX_NMI_ADDRESS_LINE_BYTES: usize = 100;
+const MAX_NMI_CITY_BYTES: usize = 50;
+const MAX_NMI_ZIP_BYTES: usize = 20;
 const MAX_NMI_REPORT_DATE_BYTES: usize = 64;
 const MAX_NMI_OUTBOUND_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_NMI_FIXED_REQUEST_BYTES: usize = 1_024;
@@ -251,6 +256,17 @@ impl WireError {
     }
 }
 
+/// Vault-creating sales and merchant-initiated renewals use the Classic form;
+/// every other sale uses the v5 JSON API. Request validation measures the
+/// encoded size with this same routing.
+fn sale_uses_classic_form(request: &SaleRequest) -> bool {
+    request.vault_action == Some(VaultAction::AddCustomer)
+        || matches!(
+            request.stored_credential,
+            Some(crate::StoredCredential::RecurringMerchant { .. })
+        )
+}
+
 impl Client {
     /// Explicitly disables NMI customer receipts for every payment mutation.
     ///
@@ -303,12 +319,7 @@ impl Client {
     }
 
     async fn sale_wire(&self, request: SaleRequest) -> Result<PaymentOutcome, WireError> {
-        if request.vault_action == Some(VaultAction::AddCustomer)
-            || matches!(
-                request.stored_credential,
-                Some(crate::StoredCredential::RecurringMerchant { .. })
-            )
-        {
+        if sale_uses_classic_form(&request) {
             return self.classic_sale(request).await;
         }
         ensure_supported_sale_currency(&request.currency)?;

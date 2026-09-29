@@ -3,8 +3,8 @@ use std::fmt;
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
-    DuplicateCheck, PaymentSource, ReportQuery, SaleRequest, StorePaymentMethodRequest,
-    StoredCredential, TransactionQuery, VaultAction,
+    BillingContact, DuplicateCheck, PaymentSource, ReportQuery, SaleRequest,
+    StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
 };
 
 use super::WireError;
@@ -160,15 +160,7 @@ pub(super) fn classic_sale_params<'a>(
         }
     }
     if let Some(contact) = &request.billing_contact {
-        if let Some(first_name) = trimmed_optional(&contact.first_name) {
-            params.push_borrowed("first_name", first_name);
-        }
-        if let Some(last_name) = trimmed_optional(&contact.last_name) {
-            params.push_borrowed("last_name", last_name);
-        }
-        if let Some(email) = trimmed_optional(&contact.email) {
-            params.push_borrowed("email", email);
-        }
+        push_classic_billing_contact(&mut params, contact);
     }
     params
 }
@@ -189,17 +181,39 @@ pub(super) fn classic_store_payment_method_params<'a>(
     params.push_borrowed("initiated_by", "customer");
     params.push_borrowed("stored_credential_indicator", "stored");
     if let Some(contact) = &request.billing_contact {
-        if let Some(first_name) = trimmed_optional(&contact.first_name) {
-            params.push_borrowed("first_name", first_name);
-        }
-        if let Some(last_name) = trimmed_optional(&contact.last_name) {
-            params.push_borrowed("last_name", last_name);
-        }
-        if let Some(email) = trimmed_optional(&contact.email) {
-            params.push_borrowed("email", email);
-        }
+        push_classic_billing_contact(&mut params, contact);
     }
     params
+}
+
+/// Classic sale and validate share these contact and address field names.
+/// None of them is on the `Debug` allowlist.
+fn push_classic_billing_contact<'a>(params: &mut NmiFormParams<'a>, contact: &'a BillingContact) {
+    if let Some(first_name) = trimmed_optional(&contact.first_name) {
+        params.push_borrowed("first_name", first_name);
+    }
+    if let Some(last_name) = trimmed_optional(&contact.last_name) {
+        params.push_borrowed("last_name", last_name);
+    }
+    if let Some(email) = trimmed_optional(&contact.email) {
+        params.push_borrowed("email", email);
+    }
+    if let Some(address) = &contact.address {
+        params.push_borrowed("address1", address.address1.trim());
+        if let Some(address2) = trimmed_optional(&address.address2) {
+            params.push_borrowed("address2", address2);
+        }
+        if let Some(city) = trimmed_optional(&address.city) {
+            params.push_borrowed("city", city);
+        }
+        if let Some(state) = trimmed_optional(&address.state) {
+            params.push_borrowed("state", state);
+        }
+        if let Some(zip) = trimmed_optional(&address.zip) {
+            params.push_borrowed("zip", zip);
+        }
+        params.push_borrowed("country", address.country.trim());
+    }
 }
 
 pub(super) fn query_transaction_params<'a>(

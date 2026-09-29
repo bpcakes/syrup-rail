@@ -412,6 +412,218 @@ mod tests {
     }
 
     #[test]
+    fn billing_address_is_snapshotted_and_retry_bound_without_changing_fingerprints() {
+        let gateway = test_gateway(Arc::new(TestReferenceFactory));
+        let subscriber_id = SubscriberId::new(Uuid::from_u128(40));
+        let subscription_id = SubscriptionId::new(Uuid::from_u128(41));
+        let payment_method_id = PaymentMethodId::new(Uuid::from_u128(42));
+        let initial_transaction_id =
+            GatewayTransactionId::new("address-initial").expect("valid transaction ID");
+        let plan_key = PlanKey::new("address-plan").expect("valid plan key");
+        let charge = ChargeAmount::new(1_000, CurrencyCode::new("USD").unwrap()).unwrap();
+        let start_at = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let period = BillingPeriod::new(start_at, start_at + Duration::days(30)).unwrap();
+        let address = |line1: &str| {
+            crate::BillingAddress::new(line1.to_owned(), "US".to_owned())
+                .unwrap()
+                .with_postal_code(Some("02110".to_owned()))
+                .unwrap()
+        };
+        let names =
+            || BillingContact::new(Some("Ada".to_owned()), None, None).expect("valid contact");
+        // Names only (a historical addressless request), an address, a
+        // changed address, and an address-only contact.
+        let contacts = [
+            names(),
+            names().with_address(address("1 Main St")),
+            names().with_address(address("2 Main St")),
+            BillingContact::from_address(address("1 Main St")),
+        ];
+        let context = |attempt_id: u128, key: &str, contact: BillingContact| {
+            crate::SubscriptionPaymentContext::new(
+                PaymentAttemptId::new(Uuid::from_u128(attempt_id)),
+                gateway.billing_scope_id(),
+                subscriber_id,
+                gateway.gateway_configuration_id(),
+                IdempotencyKey::new(key).expect("valid idempotency key"),
+                PaymentToken::new("address-token").expect("valid payment token"),
+                contact,
+            )
+        };
+
+        let recovery = |contact: &BillingContact| {
+            crate::RecoverSubscriptionPayment::new(
+                context(43, "address-recovery-key", contact.clone()),
+                plan_key.clone(),
+            )
+        };
+        let recovery_reservations = contacts
+            .iter()
+            .map(|contact| {
+                let command = recovery(contact);
+                crate::SubscriptionRecoveryReservation::from_locked_subscription(
+                    &command,
+                    &gateway,
+                    command.attempt_id(),
+                    subscription_id,
+                    payment_method_id,
+                    initial_transaction_id.clone(),
+                    SubscriptionStatus::PastDue,
+                    period.clone(),
+                    charge,
+                    GatewayAccountMode::Live,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let replacement = |contact: &BillingContact| {
+            crate::ReplaceSubscriptionPaymentMethod::new(
+                context(44, "address-replacement-key", contact.clone()),
+                plan_key.clone(),
+            )
+        };
+        let replacement_reservations = contacts
+            .iter()
+            .map(|contact| {
+                crate::SubscriptionPaymentMethodReplacement::from_locked_subscription(
+                    &replacement(contact),
+                    &gateway,
+                    subscription_id,
+                    payment_method_id,
+                    initial_transaction_id.clone(),
+                    CurrencyCode::new("USD").unwrap(),
+                    GatewayAccountMode::Live,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let target_id = crate::HostChargeTargetId::new(Uuid::from_u128(45));
+        let host_charge_reservations = contacts
+            .iter()
+            .map(|contact| {
+                crate::HostChargeReservation::from_command(
+                    &crate::ChargeHostTarget::new(
+                        gateway.billing_scope_id(),
+                        subscriber_id,
+                        target_id,
+                        gateway.gateway_configuration_id(),
+                        PaymentToken::new("address-token").unwrap(),
+                        IdempotencyKey::new("address-charge-key").unwrap(),
+                        Some(contact.clone()),
+                    ),
+                    crate::HostChargeTargetSnapshot::new(target_id, charge),
+                    &gateway,
+                    PaymentAttemptId::new(Uuid::from_u128(46)),
+                    GatewayAccountMode::Live,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let enrollment_contacts = contacts
+            .iter()
+            .map(|contact| {
+                crate::SubscriptionEnrollmentReservation::from_command(
+                    &crate::EnrollSubscription::new(
+                        context(47, "address-enrollment-key", contact.clone()),
+                        crate::SubscriptionEnrollmentExpectedTerms::full_price(
+                            crate::SubscriptionOffer::new(
+                                plan_key.clone(),
+                                crate::RecurringSubscriptionTerms::new(
+                                    charge,
+                                    crate::SubscriptionPeriodRule::calendar_months(1).unwrap(),
+                                ),
+                                crate::SubscriptionStart::RecurringImmediately,
+                                crate::RenewalFailurePolicy::new(
+                                    crate::DunningSchedule::default(),
+                                    crate::DunningExhaustion::RemainPastDue,
+                                    crate::PastDueAccessPolicy::SuspendImmediately,
+                                ),
+                            )
+                            .unwrap(),
+                        ),
+                    ),
+                    &gateway,
+                    GatewayAccountMode::Live,
+                )
+                .unwrap()
+                .billing_contact()
+                .clone()
+            })
+            .collect::<Vec<_>>();
+
+        let requests = [
+            recovery_reservations
+                .iter()
+                .map(|reservation| reservation.request().clone())
+                .collect::<Vec<_>>(),
+            replacement_reservations
+                .iter()
+                .map(|reservation| reservation.request().clone())
+                .collect(),
+            host_charge_reservations
+                .iter()
+                .map(|reservation| reservation.request().clone())
+                .collect(),
+        ];
+        let snapshots = requests
+            .iter()
+            .map(|requests| {
+                requests
+                    .iter()
+                    .map(|request| request.billing_contact().clone())
+                    .collect::<Vec<_>>()
+            })
+            .chain([enrollment_contacts]);
+        for snapshots in snapshots {
+            assert_eq!(snapshots[0].address(), None);
+            assert_eq!(snapshots[1].address(), Some(&address("1 Main St")));
+            assert_eq!(snapshots[2].address(), Some(&address("2 Main St")));
+            assert_eq!(snapshots[3].address(), Some(&address("1 Main St")));
+            assert_eq!(snapshots[3].first_name(), None);
+            assert!(!snapshots[3].is_empty());
+            for (left, right) in [(0, 1), (1, 2), (1, 3), (0, 3)] {
+                assert_ne!(snapshots[left], snapshots[right], "{left} vs {right}");
+            }
+        }
+        for requests in requests {
+            for request in &requests[1..] {
+                assert_eq!(
+                    request.fingerprint().expose(),
+                    requests[0].fingerprint().expose(),
+                    "contacts, including addresses, never enter fingerprints"
+                );
+            }
+        }
+
+        // Retry matching binds the whole snapshot: an added, removed, or
+        // changed address is a different request for the same key.
+        for (stored, retry, matches) in [
+            (0, 0, true),
+            (1, 1, true),
+            (0, 1, false),
+            (1, 0, false),
+            (1, 2, false),
+            (1, 3, false),
+        ] {
+            assert_eq!(
+                recovery_reservations[stored]
+                    .matches_submission(&recovery(&contacts[retry]), &gateway),
+                matches,
+                "recovery {stored} retried with {retry}"
+            );
+            assert_eq!(
+                replacement_reservations[stored]
+                    .matches_submission(&replacement(&contacts[retry]), &gateway),
+                matches,
+                "replacement {stored} retried with {retry}"
+            );
+        }
+    }
+
+    #[test]
     fn retry_submission_matching_binds_durable_fields_but_not_one_shot_inputs() {
         let gateway = test_gateway(Arc::new(TestReferenceFactory));
         let subscriber_id = SubscriberId::new(Uuid::from_u128(20));

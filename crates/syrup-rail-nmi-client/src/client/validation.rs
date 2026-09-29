@@ -1,13 +1,14 @@
 use crate::{
-    BillingContact, MutationError, PaymentSource, QueryError, ReportQuery, SaleRequest,
-    StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
+    BillingAddress, BillingContact, MutationError, PaymentSource, QueryError, ReportQuery,
+    SaleRequest, StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
 };
 
 use super::request_budget::{OutboundRequestValidator, RequestEncoding};
 use super::{
-    MAX_NMI_CONTACT_NAME_BYTES, MAX_NMI_EMAIL_BYTES, MAX_NMI_IDENTIFIER_BYTES,
-    MAX_NMI_ORDER_ID_BYTES, MAX_NMI_PAYMENT_TOKEN_BYTES, MAX_NMI_REPORT_DATE_BYTES,
-    MAX_NMI_TRANSACTION_REPORTS, SUPPORTED_NMI_CURRENCY, WireError,
+    MAX_NMI_ADDRESS_LINE_BYTES, MAX_NMI_CITY_BYTES, MAX_NMI_CONTACT_NAME_BYTES,
+    MAX_NMI_EMAIL_BYTES, MAX_NMI_IDENTIFIER_BYTES, MAX_NMI_ORDER_ID_BYTES,
+    MAX_NMI_PAYMENT_TOKEN_BYTES, MAX_NMI_REPORT_DATE_BYTES, MAX_NMI_TRANSACTION_REPORTS,
+    MAX_NMI_ZIP_BYTES, SUPPORTED_NMI_CURRENCY, WireError, sale_uses_classic_form,
 };
 
 pub(super) fn validate_sale_request(
@@ -159,6 +160,72 @@ fn validate_billing_contact(
             "billing email exceeds the supported size",
         )?;
     }
+    if let Some(address) = &contact.address {
+        validate_billing_address(validator, address)?;
+    }
+    Ok(())
+}
+
+fn validate_billing_address(
+    validator: &mut OutboundRequestValidator,
+    address: &BillingAddress,
+) -> Result<(), &'static str> {
+    validator.trimmed_field(
+        &address.address1,
+        MAX_NMI_ADDRESS_LINE_BYTES,
+        "billing address line 1 exceeds the supported size",
+    )?;
+    if address.address1.trim().is_empty() {
+        return Err("billing address line 1 is required");
+    }
+    if let Some(value) = &address.address2 {
+        validator.trimmed_field(
+            value,
+            MAX_NMI_ADDRESS_LINE_BYTES,
+            "billing address line 2 exceeds the supported size",
+        )?;
+    }
+    if let Some(value) = &address.city {
+        validator.trimmed_field(
+            value,
+            MAX_NMI_CITY_BYTES,
+            "billing city exceeds the supported size",
+        )?;
+    }
+    if let Some(value) = &address.state {
+        const ERROR: &str = "billing state must be two ASCII letters or digits";
+        validator.trimmed_field(value, 2, ERROR)?;
+        let state = value.trim();
+        if !state.is_empty()
+            && (state.len() != 2 || !state.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        {
+            return Err(ERROR);
+        }
+    }
+    if let Some(value) = &address.zip {
+        validator.trimmed_field(
+            value,
+            MAX_NMI_ZIP_BYTES,
+            "billing ZIP code exceeds the supported size",
+        )?;
+        if !value
+            .trim()
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b' ' | b'-'))
+        {
+            return Err("billing ZIP code contains unsupported characters");
+        }
+    }
+    const COUNTRY_ERROR: &str = "billing country must be two uppercase ASCII letters";
+    validator.field(&address.country, 2, COUNTRY_ERROR)?;
+    if address.country.len() != 2
+        || !address
+            .country
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase())
+    {
+        return Err(COUNTRY_ERROR);
+    }
     Ok(())
 }
 
@@ -166,7 +233,7 @@ fn validate_sale_request_size(
     request: &SaleRequest,
     private_api_key: &str,
 ) -> Result<(), &'static str> {
-    let encoding = if request.vault_action == Some(VaultAction::AddCustomer) {
+    let encoding = if sale_uses_classic_form(request) {
         RequestEncoding::Form
     } else {
         RequestEncoding::Json

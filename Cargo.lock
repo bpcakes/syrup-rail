@@ -2798,12 +2798,14 @@ version = "0.5.3"
 dependencies = [
  "async-trait",
  "chrono",
+ "serde_json",
  "syrup-rail",
  "syrup-rail-nmi-client",
  "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
