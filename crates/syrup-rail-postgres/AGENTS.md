@@ -193,7 +193,10 @@ and transaction orchestration.
   that ends before resolution or provider I/O, resolve the account's current
   canonical configuration, bound the single query by 10 seconds and by the
   caller's deadline less the bookkeeping reserve, and revalidate ownership,
-  configuration, transaction ID, and status afterwards. Never write attempts,
+  configuration, transaction ID, and status after every completed provider
+  response, errors included. Post-query transactions must finish within the
+  caller's deadline through bounded connection waits and statement timeouts,
+  never by cancelling a write midway. Never write attempts,
   charges, subscriptions, methods, or contacts; a rate limit may only extend
   the shared provider cooldown through `record_provider_cooldown`.
 - Change due-renewal pagination in `src/renewal.rs`. Preserve every current

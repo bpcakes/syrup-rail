@@ -417,12 +417,15 @@ pub async fn payment_attempt_diagnostic_eligibility(
 /// `deadline` bounds the whole call. The provider query receives the earlier
 /// of 10 seconds and the time left after reserving about 3 seconds for
 /// revalidation and cooldown bookkeeping; when less than one second would
-/// remain, the call returns `TimedOut` without provider I/O. Post-query
-/// revalidation and any cooldown write are bounded by the billing database
-/// lock and statement timeouts rather than by the deadline, so a very slow
-/// database can extend the call past it; the cooldown write after a rate limit
-/// is never abandoned. Callers should not wrap this future in a shorter timeout
-/// of their own.
+/// remain, the call returns `TimedOut` without provider I/O. Every completed
+/// provider response, including an error, is revalidated. Post-query
+/// revalidation and a rate limit's cooldown write run within the remaining
+/// deadline: their connection wait is bounded and the database aborts an
+/// overrunning statement, so the call never abandons the cooldown write
+/// midway. A revalidation that cannot finish in time yields `TimedOut` (or
+/// `RateLimited` once the cooldown is recorded), and a cooldown that cannot be
+/// recorded in time is `RateLimitCooldownPersistenceFailed`. Callers should
+/// not wrap this future in a shorter timeout of their own.
 ///
 /// Side effects: when the provider rate-limits the query, this extends the
 /// shared 60-second provider cooldown, the only write it can perform. During
@@ -448,10 +451,10 @@ pub async fn query_payment_attempt_diagnostics(
 ) -> Result<PaymentAttemptDiagnosticsOutcome, PaymentAttemptDiagnosticsError> {
     use PaymentAttemptDiagnosticsOutcome as Outcome;
 
-    let io_deadline = Instant::now()
-        + deadline
-            .min(MAX_DIAGNOSTIC_DEADLINE)
-            .saturating_sub(DIAGNOSTIC_POST_QUERY_RESERVE);
+    let deadline = Instant::now() + deadline.min(MAX_DIAGNOSTIC_DEADLINE);
+    let io_deadline = deadline
+        .checked_sub(DIAGNOSTIC_POST_QUERY_RESERVE)
+        .unwrap_or_else(Instant::now);
     // Pre-query reads are read-only, so abandoning them at the deadline is
     // safe and precedes any provider I/O.
     let Ok(prepared) = tokio::time::timeout_at(io_deadline, storage::prepare(pool, &target)).await
@@ -506,40 +509,46 @@ pub async fn query_payment_attempt_diagnostics(
     else {
         return Ok(Outcome::TimedOut);
     };
-    let diagnostics = match result {
-        Ok(diagnostics) => diagnostics,
+    // Every completed provider response is revalidated. A rate limit first
+    // records the shared cooldown; nothing else is ever written.
+    let response = match result {
+        Ok(diagnostics) => ProviderResponse::Diagnostics(diagnostics),
         Err(error @ GatewayError::RateLimited(_)) => {
-            return match crate::payment_method_metadata::record_provider_cooldown(
-                pool,
-                target.billing_scope_id,
-                candidate.account_id,
-                &candidate.provider_key,
-            )
-            .await
+            if let Err(storage) =
+                storage::record_provider_cooldown_before(pool, deadline, &target, &candidate).await
             {
-                Ok(()) => Ok(Outcome::RateLimited),
-                Err(storage) => Err(
+                return Err(
                     PaymentAttemptDiagnosticsError::RateLimitCooldownPersistenceFailed {
                         query: error,
                         storage,
                     },
-                ),
-            };
+                );
+            }
+            ProviderResponse::RateLimited
         }
-        Err(error) => {
-            return Ok(Outcome::Unavailable(
-                GatewayDiagnosticsUnavailableReason::for_query_error(&error)
-                    .unwrap_or(GatewayDiagnosticsUnavailableReason::ProviderUnavailable),
-            ));
-        }
+        Err(error) => ProviderResponse::Unavailable(
+            GatewayDiagnosticsUnavailableReason::for_query_error(&error)
+                .unwrap_or(GatewayDiagnosticsUnavailableReason::ProviderUnavailable),
+        ),
     };
-    let observed_at = match storage::revalidate(pool, &target, &candidate).await? {
+    let observed_at = match storage::revalidate(pool, &target, &candidate, deadline).await? {
         storage::Revalidation::Unchanged { observed_at } => observed_at,
         storage::Revalidation::ConfigurationChanged => return Ok(Outcome::ConfigurationChanged),
         storage::Revalidation::TargetChanged => return Ok(Outcome::TargetChanged),
+        // The recorded cooldown is the more important signal to the host.
+        storage::Revalidation::DeadlineExceeded => {
+            return Ok(match response {
+                ProviderResponse::RateLimited => Outcome::RateLimited,
+                ProviderResponse::Diagnostics(_) | ProviderResponse::Unavailable(_) => {
+                    Outcome::TimedOut
+                }
+            });
+        }
     };
-    Ok(match diagnostics {
-        GatewayTransactionDiagnostics::Observed(observation) => {
+    Ok(match response {
+        ProviderResponse::RateLimited => Outcome::RateLimited,
+        ProviderResponse::Unavailable(reason) => Outcome::Unavailable(reason),
+        ProviderResponse::Diagnostics(GatewayTransactionDiagnostics::Observed(observation)) => {
             Outcome::Observed(Box::new(PaymentAttemptDiagnostics {
                 target,
                 attempt_kind: candidate.attempt_kind,
@@ -550,11 +559,21 @@ pub async fn query_payment_attempt_diagnostics(
                 observed_at,
             }))
         }
-        GatewayTransactionDiagnostics::NotFound => Outcome::ProviderTransactionNotFound,
-        GatewayTransactionDiagnostics::Unavailable(reason) => Outcome::Unavailable(reason),
-        GatewayTransactionDiagnostics::Unsupported => Outcome::Unsupported,
-        _ => Outcome::Unsupported,
+        ProviderResponse::Diagnostics(GatewayTransactionDiagnostics::NotFound) => {
+            Outcome::ProviderTransactionNotFound
+        }
+        ProviderResponse::Diagnostics(GatewayTransactionDiagnostics::Unavailable(reason)) => {
+            Outcome::Unavailable(reason)
+        }
+        ProviderResponse::Diagnostics(_) => Outcome::Unsupported,
     })
+}
+
+/// A completed provider response awaiting revalidation.
+enum ProviderResponse {
+    Diagnostics(GatewayTransactionDiagnostics),
+    RateLimited,
+    Unavailable(GatewayDiagnosticsUnavailableReason),
 }
 
 /// Stored identity of an eligible attempt, captured before provider I/O.

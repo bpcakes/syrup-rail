@@ -314,7 +314,8 @@ host charges are an unsupported kind. A query reads the target in a short
 timed transaction, honors durable account and provider cooldowns before I/O,
 resolves the account's current canonical configuration, makes one exact query
 bounded by 10 seconds and by the caller's deadline less a bookkeeping reserve,
-and revalidates ownership, configuration, transaction ID, and status afterwards.
+and revalidates ownership, configuration, transaction ID, and status after every
+completed provider response, keeping that work within the caller's deadline.
 It never writes attempts, charges, subscriptions, methods, or contacts. The only
 possible write is the shared provider cooldown after a rate limit, which pauses
 renewals and enrollments for that provider; hosts bound diagnostic volume, do

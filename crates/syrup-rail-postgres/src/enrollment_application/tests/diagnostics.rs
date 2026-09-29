@@ -1064,3 +1064,170 @@ async fn provider_results_and_failures_map_to_typed_outcomes() -> Result<(), Box
     assert_eq!(Eligibility::Eligible.as_str(), "eligible");
     fixture.cleanup().await
 }
+
+#[tokio::test]
+async fn provider_errors_are_revalidated_before_they_are_reported() -> Result<(), Box<dyn Error>> {
+    let fixture = enrollment_fixture("diag_err_reval", false, false, false).await?;
+    let pool = fixture.database.pool.clone();
+    let initial = enroll(&fixture, "diag-err", approved_outcome("txn_err_initial")).await?;
+    let attempt_id = initial.attempt().identity().attempt_id();
+    let account_id = fixture.gateway_account.gateway_account_id;
+    let rotate = |pool: sqlx::PgPool| -> Hook {
+        Box::pin(async move {
+            sqlx::query(
+                "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2 WHERE id = $1",
+            )
+            .bind(account_id)
+            .bind(Uuid::now_v7())
+            .execute(&pool)
+            .await
+            .expect("rotation during query");
+        })
+    };
+
+    // Old credentials failing during a rotation report the rotation.
+    let failing = DiagnosticsGateway::with(
+        Err(GatewayError::Unavailable(GatewayDiagnostic::new(
+            "rejected key",
+        ))),
+        Duration::ZERO,
+        Some(rotate(pool.clone())),
+    );
+    assert_eq!(
+        diagnose(&fixture, &failing, attempt_id, DEADLINE).await?,
+        Outcome::ConfigurationChanged
+    );
+
+    // A rate limit during a rotation still records the provider cooldown.
+    let current = crate::test_support::GatewayAccountFixture {
+        gateway_configuration_id: sqlx::query_scalar(
+            "SELECT gateway_configuration_id FROM billing_gateway_accounts WHERE id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await?,
+        ..fixture.gateway_account
+    };
+    let throttled = DiagnosticsGateway::with(
+        Err(GatewayError::RateLimited(GatewayDiagnostic::new(
+            "HTTP 429",
+        ))),
+        Duration::ZERO,
+        Some(rotate(pool.clone())),
+    );
+    assert_eq!(
+        query_payment_attempt_diagnostics(
+            &pool,
+            &resolver_for(current, &throttled),
+            target(&fixture, attempt_id),
+            DEADLINE,
+        )
+        .await?,
+        Outcome::ConfigurationChanged
+    );
+    assert!(provider_cooldown_remaining(&pool).await? > 50.0);
+    sqlx::query(
+        "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'",
+    )
+    .execute(&pool)
+    .await?;
+
+    // A late-approval rewrite during a failed query is a target change.
+    let current = crate::test_support::GatewayAccountFixture {
+        gateway_configuration_id: sqlx::query_scalar(
+            "SELECT gateway_configuration_id FROM billing_gateway_accounts WHERE id = $1",
+        )
+        .bind(account_id)
+        .fetch_one(&pool)
+        .await?,
+        ..fixture.gateway_account
+    };
+    let hook_pool = pool.clone();
+    let rewritten = DiagnosticsGateway::with(
+        Err(GatewayError::Malformed(GatewayDiagnostic::new("bad xml"))),
+        Duration::ZERO,
+        Some(Box::pin(async move {
+            sqlx::query(
+                "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+            )
+            .bind(attempt_id.as_uuid())
+            .execute(&hook_pool)
+            .await
+            .expect("rewrite during query");
+        })),
+    );
+    assert_eq!(
+        query_payment_attempt_diagnostics(
+            &pool,
+            &resolver_for(current, &rewritten),
+            target(&fixture, attempt_id),
+            DEADLINE,
+        )
+        .await?,
+        Outcome::TargetChanged
+    );
+    fixture.cleanup().await
+}
+
+/// Holds every pool connection from inside the provider query so that
+/// post-query database work cannot start before the caller's deadline.
+fn exhaust_pool(
+    pool: sqlx::PgPool,
+    held: Arc<Mutex<Vec<sqlx::pool::PoolConnection<sqlx::Postgres>>>>,
+) -> Hook {
+    Box::pin(async move {
+        for _ in 0..4 {
+            let connection = pool.acquire().await.expect("idle test connection");
+            held.lock().await.push(connection);
+        }
+    })
+}
+
+#[tokio::test]
+async fn post_query_work_never_outlives_the_caller_deadline() -> Result<(), Box<dyn Error>> {
+    let fixture = enrollment_fixture("diag_deadline", false, false, false).await?;
+    let pool = fixture.database.pool.clone();
+    let initial = enroll(
+        &fixture,
+        "diag-deadline",
+        approved_outcome("txn_deadline_initial"),
+    )
+    .await?;
+    let attempt_id = initial.attempt().identity().attempt_id();
+    let deadline = Duration::from_secs(5);
+
+    let held = Arc::new(Mutex::new(Vec::new()));
+    let observed_gateway = DiagnosticsGateway::with(
+        Ok(observed(GatewayDiagnosticOperation::Sale)),
+        Duration::ZERO,
+        Some(exhaust_pool(pool.clone(), Arc::clone(&held))),
+    );
+    let started = std::time::Instant::now();
+    assert_eq!(
+        diagnose(&fixture, &observed_gateway, attempt_id, deadline).await?,
+        Outcome::TimedOut
+    );
+    assert!(started.elapsed() < deadline + Duration::from_millis(500));
+    held.lock().await.clear();
+
+    let throttled_gateway = DiagnosticsGateway::with(
+        Err(GatewayError::RateLimited(GatewayDiagnostic::new(
+            "HTTP 429",
+        ))),
+        Duration::ZERO,
+        Some(exhaust_pool(pool.clone(), Arc::clone(&held))),
+    );
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        diagnose(&fixture, &throttled_gateway, attempt_id, deadline).await,
+        Err(
+            PaymentAttemptDiagnosticsError::RateLimitCooldownPersistenceFailed {
+                storage: sqlx::Error::PoolTimedOut,
+                ..
+            }
+        )
+    ));
+    assert!(started.elapsed() < deadline + Duration::from_millis(500));
+    held.lock().await.clear();
+    fixture.cleanup().await
+}

@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use syrup_rail::{BillingScopeId, PlanKey, SubscriberId};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::{
@@ -110,9 +111,51 @@ pub(super) enum Prepared {
 }
 
 pub(super) enum Revalidation {
-    Unchanged { observed_at: DateTime<Utc> },
+    Unchanged {
+        observed_at: DateTime<Utc>,
+    },
     ConfigurationChanged,
     TargetChanged,
+    /// The caller's deadline left no time to finish revalidation.
+    DeadlineExceeded,
+}
+
+/// Begins a post-query transaction that cannot outlive `deadline`: the
+/// connection wait is bounded by the remaining time, and each of the
+/// `statements` still to run, including `COMMIT`, receives an equal share as
+/// its statement timeout. The database aborts an overrunning statement, so
+/// callers never have to cancel a write midway.
+pub(super) async fn begin_before(
+    pool: &PgPool,
+    deadline: Instant,
+    statements: u32,
+) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(sqlx::Error::PoolTimedOut);
+    }
+    let mut transaction = tokio::time::timeout(remaining, pool.begin())
+        .await
+        .map_err(|_| sqlx::Error::PoolTimedOut)??;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let statement_ms = (remaining.as_millis() / u128::from(statements.max(1))).clamp(1, 5_000);
+    sqlx::query(
+        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
+    )
+    .bind(format!("{statement_ms}ms"))
+    .bind(format!("{}ms", statement_ms.min(250)))
+    .execute(&mut *transaction)
+    .await?;
+    Ok(transaction)
+}
+
+/// Whether an error came from the deadline bound rather than from storage.
+fn exceeded_deadline(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::PoolTimedOut)
+        || error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .is_some_and(|code| matches!(code.as_ref(), "57014" | "55P03"))
 }
 
 pub(super) async fn load_eligibility(
@@ -133,6 +176,25 @@ pub(super) async fn load_eligibility(
         .await?;
     transaction.commit().await?;
     Ok(rows)
+}
+
+/// Records the shared provider cooldown after a rate-limited query within the
+/// caller's deadline.
+pub(super) async fn record_provider_cooldown_before(
+    pool: &PgPool,
+    deadline: Instant,
+    target: &PaymentAttemptDiagnosticTarget,
+    candidate: &DiagnosticCandidate,
+) -> Result<(), sqlx::Error> {
+    // Lock the account row, update the provider row, and commit.
+    let transaction = begin_before(pool, deadline, 3).await?;
+    crate::payment_method_metadata::persist_provider_cooldown(
+        transaction,
+        target.billing_scope_id,
+        candidate.account_id,
+        &candidate.provider_key,
+    )
+    .await
 }
 
 /// Reads the target and its cooldowns in one short transaction that ends
@@ -182,23 +244,33 @@ pub(super) async fn prepare(
     Ok(Prepared::Query(candidate))
 }
 
-/// Confirms after provider I/O that the queried identity still describes the
-/// target, and reads the observation time from the database clock.
+/// Confirms after provider I/O, within the caller's deadline, that the queried
+/// identity still describes the target, and reads the observation time from
+/// the database clock.
 pub(super) async fn revalidate(
     pool: &PgPool,
     target: &PaymentAttemptDiagnosticTarget,
     candidate: &DiagnosticCandidate,
+    deadline: Instant,
 ) -> Result<Revalidation, sqlx::Error> {
-    let mut transaction = pool.begin().await?;
-    set_application_timeouts(&mut transaction).await?;
-    let row: Option<RevalidationRow> = sqlx::query_as(REVALIDATE_SQL)
-        .bind(target.billing_scope_id.as_uuid())
-        .bind(target.subscriber_id.as_uuid())
-        .bind(target.plan_key.as_str())
-        .bind(target.attempt_id.as_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
+    let row = async {
+        let mut transaction = begin_before(pool, deadline, 2).await?;
+        let row: Option<RevalidationRow> = sqlx::query_as(REVALIDATE_SQL)
+            .bind(target.billing_scope_id.as_uuid())
+            .bind(target.subscriber_id.as_uuid())
+            .bind(target.plan_key.as_str())
+            .bind(target.attempt_id.as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok::<_, sqlx::Error>(row)
+    }
+    .await;
+    let row = match row {
+        Ok(row) => row,
+        Err(error) if exceeded_deadline(&error) => return Ok(Revalidation::DeadlineExceeded),
+        Err(error) => return Err(error),
+    };
     let Some(row) = row else {
         return Ok(Revalidation::TargetChanged);
     };

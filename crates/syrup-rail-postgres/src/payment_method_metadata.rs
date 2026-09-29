@@ -10,7 +10,7 @@ use syrup_rail::{
 };
 use thiserror::Error;
 
-pub(crate) use self::storage::record_provider_cooldown;
+pub(crate) use self::storage::persist_provider_cooldown;
 use self::storage::{fill_missing_fields, load_candidate, lock_candidate};
 use crate::GatewayMutationCooldownScope;
 
