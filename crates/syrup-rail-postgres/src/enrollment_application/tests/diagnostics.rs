@@ -279,7 +279,19 @@ async fn diagnostics_observe_an_owned_attempt_without_writes_at_database_time()
         GatewayDiagnosticsCompleteness::Partial
     );
     assert!(before <= diagnostics.observed_at() && diagnostics.observed_at() <= after);
-    assert!(!format!("{diagnostics:?}").contains("253"));
+    // Only the observation carries provider values. Identifiers and the
+    // timestamp are random and may contain any digit run, so check just it.
+    let debug = format!("{diagnostics:?}");
+    let (_, observation) = debug
+        .split_once("observation: ")
+        .expect("the observation is formatted");
+    let (observation, _) = observation
+        .split_once(", observed_at: ")
+        .expect("the timestamp follows the observation");
+    assert!(observation.contains("has_gateway_response_code: true"));
+    for value in ["253", "59"] {
+        assert!(!observation.contains(value), "{value} leaked into {debug}");
+    }
 
     let requests = gateway.requests.lock().await;
     let [request] = requests.as_slice() else {
