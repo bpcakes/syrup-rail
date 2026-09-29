@@ -1,7 +1,7 @@
 use std::{io, time::Duration};
 
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{FromRow, PgConnection, PgPool, Postgres, Transaction, pool::PoolConnection};
 use syrup_rail::{BillingScopeId, PlanKey, SubscriberId};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -127,23 +127,31 @@ pub(super) enum Revalidation {
 /// bound abandons a stalled connection at the deadline itself.
 const SERVER_TIMEOUT_MARGIN: Duration = Duration::from_millis(100);
 
-/// Begins a post-query transaction whose server-side work ends before
-/// `deadline`: the connection wait is bounded by the remaining time, and each
-/// of the `statements` still to run, including `COMMIT`, receives an equal
-/// share of it as its statement timeout. Callers also bound the client-side
-/// wait with the same deadline for a connection that stops responding.
-pub(super) async fn begin_before(
+/// Acquires a dedicated post-query connection within the caller's deadline.
+async fn acquire_before(
     pool: &PgPool,
     deadline: Instant,
-    statements: u32,
-) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+) -> Result<PoolConnection<Postgres>, sqlx::Error> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(sqlx::Error::PoolTimedOut);
     }
-    let mut transaction = tokio::time::timeout(remaining, pool.begin())
+    tokio::time::timeout(remaining, pool.acquire())
         .await
-        .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        .map_err(|_| sqlx::Error::PoolTimedOut)?
+}
+
+/// Begins a post-query transaction whose server-side work ends before
+/// `deadline`: each of the `statements` still to run, including `COMMIT`,
+/// receives an equal share of the remaining time as its statement timeout.
+/// Callers bound the client-side wait with the same deadline for a connection
+/// that stops responding, and [`discard`] such a connection.
+async fn begin_bounded(
+    connection: &mut PgConnection,
+    deadline: Instant,
+    statements: u32,
+) -> Result<Transaction<'_, Postgres>, sqlx::Error> {
+    let mut transaction = sqlx::Connection::begin(connection).await?;
     let remaining = deadline
         .saturating_duration_since(Instant::now())
         .saturating_sub(SERVER_TIMEOUT_MARGIN);
@@ -156,6 +164,13 @@ pub(super) async fn begin_before(
     .execute(&mut *transaction)
     .await?;
     Ok(transaction)
+}
+
+/// Removes a connection that was still busy at the deadline from the pool
+/// and closes its socket. Returning it would run the pool's unbounded
+/// liveness ping, letting a stalled socket hold a pool slot indefinitely.
+fn discard(connection: PoolConnection<Postgres>) {
+    drop(connection.detach());
 }
 
 /// Whether an error came from the deadline bound rather than from storage.
@@ -199,8 +214,9 @@ pub(super) async fn record_provider_cooldown_before(
     // connection that stops responding is abandoned at the deadline; the
     // caller then reports a cooldown persistence failure so the host still
     // backs off.
-    tokio::time::timeout_at(deadline, async {
-        let transaction = begin_before(pool, deadline, 3).await?;
+    let mut connection = acquire_before(pool, deadline).await?;
+    let written = tokio::time::timeout_at(deadline, async {
+        let transaction = begin_bounded(&mut connection, deadline, 3).await?;
         crate::payment_method_metadata::persist_provider_cooldown(
             transaction,
             target.billing_scope_id,
@@ -209,8 +225,9 @@ pub(super) async fn record_provider_cooldown_before(
         )
         .await
     })
-    .await
-    .unwrap_or_else(|_| {
+    .await;
+    written.unwrap_or_else(|_| {
+        discard(connection);
         Err(sqlx::Error::Io(io::Error::new(
             io::ErrorKind::TimedOut,
             "diagnostic cooldown write did not finish before the deadline",
@@ -274,8 +291,13 @@ pub(super) async fn revalidate(
     candidate: &DiagnosticCandidate,
     deadline: Instant,
 ) -> Result<Revalidation, sqlx::Error> {
+    let mut connection = match acquire_before(pool, deadline).await {
+        Ok(connection) => connection,
+        Err(error) if exceeded_deadline(&error) => return Ok(Revalidation::DeadlineExceeded),
+        Err(error) => return Err(error),
+    };
     let row = tokio::time::timeout_at(deadline, async {
-        let mut transaction = begin_before(pool, deadline, 2).await?;
+        let mut transaction = begin_bounded(&mut connection, deadline, 2).await?;
         let row: Option<RevalidationRow> = sqlx::query_as(REVALIDATE_SQL)
             .bind(target.billing_scope_id.as_uuid())
             .bind(target.subscriber_id.as_uuid())
@@ -289,7 +311,10 @@ pub(super) async fn revalidate(
     .await;
     let row = match row {
         Ok(Ok(row)) => row,
-        Err(_) => return Ok(Revalidation::DeadlineExceeded),
+        Err(_) => {
+            discard(connection);
+            return Ok(Revalidation::DeadlineExceeded);
+        }
         Ok(Err(error)) if exceeded_deadline(&error) => {
             return Ok(Revalidation::DeadlineExceeded);
         }

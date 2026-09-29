@@ -1239,7 +1239,7 @@ async fn post_query_work_never_outlives_the_caller_deadline() -> Result<(), Box<
 async fn stalling_pool(
     database_url: &str,
     stall_marker: &'static str,
-) -> Result<sqlx::PgPool, Box<dyn Error>> {
+) -> Result<(sqlx::PgPool, Arc<std::sync::atomic::AtomicBool>), Box<dyn Error>> {
     use std::str::FromStr;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -1248,6 +1248,7 @@ async fn stalling_pool(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let proxy_port = listener.local_addr()?.port();
     let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let switch = Arc::clone(&stalled);
     tokio::spawn(async move {
         while let Ok((client, _)) = listener.accept().await {
             let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else {
@@ -1287,10 +1288,35 @@ async fn stalling_pool(
             });
         }
     });
-    Ok(sqlx::postgres::PgPoolOptions::new()
+    let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
         .connect_with(options.host("127.0.0.1").port(proxy_port))
-        .await?)
+        .await?;
+    Ok((pool, switch))
+}
+
+/// A stalled connection must leave the pool when the call returns, and the
+/// pool must serve new work once the database responds again.
+async fn assert_pool_recovers(
+    pool: &sqlx::PgPool,
+    stalled: &std::sync::atomic::AtomicBool,
+) -> Result<(), Box<dyn Error>> {
+    // Healthy idle connections may remain; nothing may stay checked out or
+    // stuck in the pool's return path on the stalled socket.
+    assert_eq!(
+        pool.size(),
+        pool.num_idle() as u32,
+        "the stalled connection must not hold a pool slot"
+    );
+    stalled.store(false, Ordering::SeqCst);
+    let one: i32 = tokio::time::timeout(
+        Duration::from_secs(5),
+        sqlx::query_scalar("SELECT 1").fetch_one(pool),
+    )
+    .await
+    .expect("the pool serves new work")?;
+    assert_eq!(one, 1);
+    Ok(())
 }
 
 #[tokio::test]
@@ -1306,7 +1332,7 @@ async fn a_stalled_connection_cannot_hold_post_query_work_past_the_deadline()
     let attempt_id = initial.attempt().identity().attempt_id();
     let deadline = Duration::from_secs(5);
 
-    let revalidation_pool =
+    let (revalidation_pool, revalidation_stall) =
         stalling_pool(fixture.database.database_url(), "AS observed_at").await?;
     let gateway = DiagnosticsGateway::new(Ok(observed(GatewayDiagnosticOperation::Sale)));
     let started = std::time::Instant::now();
@@ -1323,8 +1349,9 @@ async fn a_stalled_connection_cannot_hold_post_query_work_past_the_deadline()
     .expect("a stalled revalidation must not hang the call")?;
     assert_eq!(outcome, Outcome::TimedOut);
     assert!(started.elapsed() < deadline + Duration::from_millis(500));
+    assert_pool_recovers(&revalidation_pool, &revalidation_stall).await?;
 
-    let cooldown_pool = stalling_pool(
+    let (cooldown_pool, cooldown_stall) = stalling_pool(
         fixture.database.database_url(),
         "UPDATE billing_gateway_provider_rate_limits",
     )
@@ -1353,5 +1380,6 @@ async fn a_stalled_connection_cannot_hold_post_query_work_past_the_deadline()
         }
     ));
     assert!(started.elapsed() < deadline + Duration::from_millis(500));
+    assert_pool_recovers(&cooldown_pool, &cooldown_stall).await?;
     fixture.cleanup().await
 }
