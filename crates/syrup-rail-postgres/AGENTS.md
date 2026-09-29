@@ -81,6 +81,10 @@ and transaction orchestration.
 - `src/payment_method_metadata.rs` — independent bounded exact-query refresh of
   missing current saved-card display; `payment_method_metadata/storage.rs`
   revalidates ownership and identity under the approval and scrub domains.
+- `src/payment_attempt_diagnostics.rs` — DB-only diagnostic eligibility and
+  the deadline-bounded, read-only provider diagnostic query for owned
+  subscription attempts; `payment_attempt_diagnostics/storage.rs` owns its
+  target, eligibility, and revalidation SQL.
 - `src/grants.rs` — caller-transaction grant admission, creation, and
   revocation.
 - `src/discounts.rs` — exact-plan durable discount operations and the host
@@ -184,6 +188,14 @@ and transaction orchestration.
   Ignore lifecycle-only attempt timestamp changes, while preserving the method
   and subscription timestamp fences. The gateway-account share lock must span
   revalidation through commit and can briefly delay configuration/cooldown writes.
+- Change payment diagnostics in `src/payment_attempt_diagnostics.rs` and its
+  storage module. Keep target and cooldown reads in a short timed transaction
+  that ends before resolution or provider I/O, resolve the account's current
+  canonical configuration, bound the single query by 10 seconds and by the
+  caller's deadline less the bookkeeping reserve, and revalidate ownership,
+  configuration, transaction ID, and status afterwards. Never write attempts,
+  charges, subscriptions, methods, or contacts; a rate limit may only extend
+  the shared provider cooldown through `record_provider_cooldown`.
 - Change due-renewal pagination in `src/renewal.rs`. Preserve every current
   eligibility gate, bind the first page's database-observed timestamp into all
   time-dependent gates on every continuation, retain strict ascending

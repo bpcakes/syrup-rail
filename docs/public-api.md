@@ -63,6 +63,26 @@ exposes it for hosts that rebuild continuation contacts. Subscriber scrubbing
 clears addresses and now also holds the payment-method approval domain, so the
 host's own subject lock must still come first.
 
+0.5.4 also adds optional, read-only payment diagnostics for operators.
+`payment_attempt_diagnostic_eligibility` lists which owned subscription attempts
+of one plan can be diagnosed, using only the database and never returning
+provider identifiers. `query_payment_attempt_diagnostics` takes an authorized
+`PaymentAttemptDiagnosticTarget` and a total deadline (the IdentityPro host
+passes 15 seconds), makes at most one exact provider query by the recorded
+transaction ID, and returns a `PaymentAttemptDiagnosticsOutcome`. An observation
+reports the selected original action's gateway and processor response codes and
+text, AVS and CSC results, completeness, and a database-clock `observed_at`;
+values are sanitized, bounded, and value-free in ordinary formatting. Missing
+fields never mean a match, a mismatch, or a financial decision. The functions
+write nothing except the shared provider cooldown after a rate-limited query,
+which pauses every account sharing that provider: renewals already reserved are
+recorded as provider-rate-limited readiness failures, new renewals are skipped,
+and enrollments are refused until it expires. Hosts must bound diagnostic
+volume, must not diagnose subscribers that are scrubbed or being scrubbed, and
+must purge cached observations in the same transaction as their own scrub.
+Custom gateways inherit a default `query_transaction_diagnostics` that returns
+`Unsupported`; decorators must forward it.
+
 The compiled `syrup-rail-postgres` `host_integration` example is the canonical
 composition guide. `SubscriptionBillingServiceError::disposition()` is the
 stable operational classification boundary; callers retain a wildcard because

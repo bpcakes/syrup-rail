@@ -17,6 +17,8 @@ transaction queries, and report parsing.
   `src/requests.rs`, `src/responses.rs`, and `src/errors.rs`; `src/lib.rs` is the
   stable re-export facade.
 - Private wire and lossless-JSON modules own protocol encoding and parsing.
+  `client/response/xml.rs` also parses exact diagnostic lookups into
+  `responses/diagnostics.rs` types without changing financial query parsing.
 
 ## Edit here for X
 

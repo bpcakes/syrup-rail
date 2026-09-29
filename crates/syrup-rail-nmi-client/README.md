@@ -257,6 +257,16 @@ redacted from request `Debug` output. The field breaks existing
 `BillingContact` struct literals; add `address: None` to keep sending no
 address.
 
+`Client::query_transaction_diagnostics` performs the same bounded one-shot query
+as `query_transaction`, selected only by transaction ID, and returns
+`TransactionDiagnosticsLookup`: not found, more than one transaction, or one
+transaction's transaction and order IDs, currency, AVS and CSC results, and each
+action's type, amount, gateway and processor response codes and text. Values
+are untrusted `SensitiveText`. Conflicting identifiers, currency, action types,
+or amounts mark the transaction malformed and drop its actions; unusable
+optional fields are omitted and flagged incomplete. The caller selects the
+original action. Existing financial query parsing is unchanged.
+
 Mutation futures are not cancellation-safe. Once a mutation future has been
 polled, dropping it does not prove that NMI did not receive or process the
 request. The caller must reconcile that mutation and must not blindly retry it.

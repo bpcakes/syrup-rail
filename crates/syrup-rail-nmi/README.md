@@ -101,6 +101,17 @@ idempotency key, hosts must pre-validate addresses to these rules before
 reserving a payment. Passing them does not prove that NMI or the processor will
 accept the address or the payment.
 
+`query_transaction_diagnostics` makes one exact Query API lookup by transaction
+ID and never searches by order ID. It requires exactly one returned transaction
+whose ID matches, rejects a returned order ID or currency that differs from the
+request, and selects exactly one original `sale` (enrollment, recovery,
+renewal, host charge) or `validate` (payment-method replacement) action whose
+amount matches; settlement, refund, and void actions are never selected, and
+ambiguous or missing matches are reported as unavailable rather than chosen by
+recency. The observation keeps NMI's gateway `response_code` separate from the
+processor's `processor_response_code`, with source `nmi_query_api`. Name,
+address, email, card, and signature fields in the response are never extracted.
+
 The raw client and adapter never retry a payment mutation. Indeterminate
 outcomes must be reconciled from the durable attempt identity before any
 replacement charge is considered. Unknown lifecycle vocabulary is quarantined

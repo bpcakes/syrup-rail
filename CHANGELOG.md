@@ -77,6 +77,24 @@ The release manager dates this heading when the release is tagged.
   and an uppercase two-letter country. Requests without an address keep their
   previous wire fields. Local validation does not prove that NMI or the
   processor accepts the address or the payment.
+- Add read-only payment diagnostics. `payment_attempt_diagnostic_eligibility`
+  reports, without provider I/O, which owned subscription attempts can be
+  diagnosed, and `query_payment_attempt_diagnostics` makes one exact provider
+  query by the recorded transaction ID to return the original action's gateway
+  and processor response codes and text, AVS and CSC results, with typed,
+  stably spelled outcomes for ineligible, missing, unsupported, throttled,
+  timed-out, changed, and unavailable results. They never write payment,
+  contact, or subscription state; a rate-limited query extends the shared
+  provider cooldown, which pauses renewals and enrollments for that provider,
+  so hosts must bound diagnostic volume and must not diagnose scrubbed
+  subscribers.
+- Add `PaymentGateway::query_transaction_diagnostics` with a default that
+  returns `Unsupported` without I/O, a `ResolvedGateway` passthrough, the
+  provider-neutral `GatewayTransactionDiagnostics*` types, and the NMI
+  implementation (`Client::query_transaction_diagnostics`), which selects
+  exactly one original sale or validate action by type and amount and treats
+  ambiguous, mismatched, or settlement-only responses as unavailable. Gateway
+  decorators must forward the new method.
 - Add `Client::with_customer_receipts_disabled` to explicitly send
   `customer_receipt=false` on every Classic payment and v5 sale, including
   existing-vault renewals.

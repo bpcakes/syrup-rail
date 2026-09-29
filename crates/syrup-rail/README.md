@@ -86,6 +86,16 @@ the attempt has been reserved, and a corrected retry needs a new idempotency
 key, so hosts must pre-validate to their adapter's documented rules. Local
 validation never proves that a provider or processor accepts the address.
 
+`PaymentGateway::query_transaction_diagnostics` reads processor and verification
+results for one historical transaction. A `GatewayTransactionDiagnosticsRequest`
+names the transaction ID, the original operation (`Sale` or `Validate`), its
+amount, and the expected order ID; providers must look up only that transaction
+and select exactly one matching original action. Results are observations, not
+payment evidence: `GatewayTransactionDiagnosticsObservation` omits provider codes
+longer than 64 bytes, sanitizes free text, and reports partial completeness when
+a field is missing. The default returns `Unsupported` without I/O, and gateway
+decorators must forward the method.
+
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
 define a transport wire format for billing events. Those remain host
 responsibilities. See the workspace `subscription_terms`, `entitlement_access`,

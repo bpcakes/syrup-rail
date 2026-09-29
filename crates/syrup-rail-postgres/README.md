@@ -306,6 +306,21 @@ the owned transaction, including any earlier host writes. Perform and commit
 the host-owned protected mutation only through the admitted value, and finish
 any nested savepoint before consuming that value with `commit` or `rollback`.
 
+`payment_attempt_diagnostic_eligibility` and `query_payment_attempt_diagnostics`
+are optional, read-only operator tools for historical initial, recovery,
+replacement, and renewal attempts, including unpaid history. Eligibility
+requires submission, a non-pending status, and a recorded transaction ID;
+host charges are an unsupported kind. A query reads the target in a short
+timed transaction, honors durable account and provider cooldowns before I/O,
+resolves the account's current canonical configuration, makes one exact query
+bounded by 10 seconds and by the caller's deadline less a bookkeeping reserve,
+and revalidates ownership, configuration, transaction ID, and status afterwards.
+It never writes attempts, charges, subscriptions, methods, or contacts. The only
+possible write is the shared provider cooldown after a rate limit, which pauses
+renewals and enrollments for that provider; hosts bound diagnostic volume, do
+not diagnose scrubbed subscribers, and purge cached observations in their own
+scrub transaction.
+
 Schema v5 stores an optional customer-confirmed billing address on payment
 methods and all five attempt kinds. Approved enrollment, recovery, and
 payment-method replacement write the command's address to the stored method;

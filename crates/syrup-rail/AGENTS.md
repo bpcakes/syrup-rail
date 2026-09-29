@@ -25,7 +25,9 @@ command/outcome types for application-independent subscription billing.
   sources and policies; `src/subscription.rs` retains subscription lifecycle
   and cancellation facts while re-exporting the established public paths.
 - `src/{gateway,gateway_value,resolver}.rs` own the provider port with five required
-  operations and a default metadata-only query,
+  operations, a default metadata-only query, and a default read-only
+  diagnostics query whose provider-neutral values live in
+  `src/gateway/diagnostics.rs`,
   typed evidence, sensitive values, provider-I/O-free host resolver contract,
   and diagnostic boundary. `src/gateway_value/contact.rs` owns the redacted
   billing contact, billing address, and contact-parts values.
