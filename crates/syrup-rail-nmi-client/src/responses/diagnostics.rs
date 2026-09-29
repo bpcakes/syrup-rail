@@ -34,7 +34,9 @@ impl TransactionDiagnostics {
     }
 }
 
-/// Transaction-level diagnostic fields.
+/// Transaction-level diagnostic fields. Codes (AVS, CSC, and the actions'
+/// gateway and processor response codes) are at most 64 bytes; a longer code
+/// is omitted and flagged incomplete rather than truncated.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TransactionDiagnosticsParts {

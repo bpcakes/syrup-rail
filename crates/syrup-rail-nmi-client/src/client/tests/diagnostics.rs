@@ -218,3 +218,29 @@ async fn diagnostic_queries_select_only_by_transaction_id() {
         .contains("txn-secret")
     );
 }
+
+#[test]
+fn codes_are_bounded_before_any_truncation() {
+    let padded = format!("Y{}N", " ".repeat(600));
+    let at_limit = "7".repeat(MAX_NMI_DIAGNOSTIC_CODE_BYTES);
+    let over_limit = "7".repeat(MAX_NMI_DIAGNOSTIC_CODE_BYTES + 1);
+    let parts = found(&format!(
+        "<nm_response><transaction><transaction_id>a</transaction_id>\
+         <avs_response>{padded}</avs_response><csc_response>{at_limit}</csc_response>\
+         <action><action_type>sale</action_type><amount>1.00</amount>\
+         <response_code>{at_limit}</response_code>\
+         <processor_response_code>{over_limit}</processor_response_code></action>\
+         </transaction></nm_response>"
+    ));
+    assert_eq!(
+        exposed(&parts.avs_response),
+        None,
+        "a padded code is not shortened to Y"
+    );
+    assert!(parts.incomplete);
+    assert_eq!(exposed(&parts.csc_response), Some(at_limit.as_str()));
+    let sale = &parts.actions[0];
+    assert_eq!(exposed(&sale.response_code), Some(at_limit.as_str()));
+    assert_eq!(exposed(&sale.processor_response_code), None);
+    assert!(sale.incomplete);
+}

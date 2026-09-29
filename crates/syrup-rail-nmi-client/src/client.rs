@@ -55,6 +55,9 @@ const _: () = assert!(
 // A diagnostic lookup returns one transaction; its action history (sale,
 // settlement, refunds, voids) is far smaller than this bound.
 const MAX_NMI_DIAGNOSTIC_ACTIONS: usize = 100;
+// Response, processor, AVS, and CSC codes are short; longer values are
+// omitted rather than truncated.
+const MAX_NMI_DIAGNOSTIC_CODE_BYTES: usize = 64;
 const MAX_NMI_FIELD_CHARS: usize = 512;
 const MAX_NMI_PAYMENT_TOKEN_BYTES: usize = 4_096;
 const MAX_NMI_IDENTIFIER_BYTES: usize = 512;

@@ -256,3 +256,25 @@ async fn oversized_codes_are_omitted_and_hostile_text_is_sanitized() {
             <= syrup_rail::MAX_GATEWAY_TEXT_BYTES
     );
 }
+
+#[tokio::test]
+async fn padded_codes_are_never_shortened_into_a_verification_result() {
+    let body = transaction(&format!(
+        "<avs_response>Y{}N</avs_response><csc_response>M</csc_response>\
+         <action><amount>10.00</amount><action_type>sale</action_type>\
+         <response_code>100</response_code><response_text>Approved</response_text>\
+         <processor_response_code>00</processor_response_code>\
+         <processor_response_text>Approved</processor_response_text></action>",
+        " ".repeat(600)
+    ));
+    let GatewayTransactionDiagnostics::Observed(observation) =
+        diagnose(body, sale(1_000)).await.unwrap()
+    else {
+        panic!("the sale should be observed");
+    };
+    assert_eq!(observation.avs_response(), None);
+    assert_eq!(
+        observation.completeness(),
+        GatewayDiagnosticsCompleteness::Partial
+    );
+}

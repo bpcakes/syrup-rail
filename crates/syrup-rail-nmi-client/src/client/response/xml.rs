@@ -8,8 +8,8 @@ use crate::{
 };
 
 use super::super::{
-    MAX_NMI_DIAGNOSTIC_ACTIONS, MAX_NMI_REPORT_ACTIONS, MAX_NMI_REPORT_RESPONSE_BYTES,
-    MAX_NMI_TRANSACTION_REPORTS, WireError,
+    MAX_NMI_DIAGNOSTIC_ACTIONS, MAX_NMI_DIAGNOSTIC_CODE_BYTES, MAX_NMI_REPORT_ACTIONS,
+    MAX_NMI_REPORT_RESPONSE_BYTES, MAX_NMI_TRANSACTION_REPORTS, WireError,
     text::{last4, parse_expiry, sensitive_gateway_field},
     validation::trimmed_optional,
 };
@@ -350,8 +350,8 @@ pub(in crate::client) fn query_diagnostics_from_xml(
         collect_xml_scalar(transaction, &["currency"], false).finish(),
         &mut malformed,
     );
-    let avs_response = optional_diagnostic_field(transaction, "avs_response", &mut incomplete);
-    let csc_response = optional_diagnostic_field(transaction, "csc_response", &mut incomplete);
+    let avs_response = optional_diagnostic_code(transaction, "avs_response", &mut incomplete);
+    let csc_response = optional_diagnostic_code(transaction, "csc_response", &mut incomplete);
     let action_count = direct_element_count_without_nested_matches(
         transaction,
         "action",
@@ -385,7 +385,7 @@ pub(in crate::client) fn query_diagnostics_from_xml(
             actions.push(TransactionDiagnosticsActionParts {
                 action_type: action_type.map(SensitiveText::new),
                 amount: amount.map(SensitiveText::new),
-                response_code: optional_diagnostic_field(
+                response_code: optional_diagnostic_code(
                     action,
                     "response_code",
                     &mut action_incomplete,
@@ -395,7 +395,7 @@ pub(in crate::client) fn query_diagnostics_from_xml(
                     "response_text",
                     &mut action_incomplete,
                 ),
-                processor_response_code: optional_diagnostic_field(
+                processor_response_code: optional_diagnostic_code(
                     action,
                     "processor_response_code",
                     &mut action_incomplete,
@@ -428,6 +428,40 @@ pub(in crate::client) fn query_diagnostics_from_xml(
     ))
 }
 
+/// Reads one optional provider code without lossy truncation. A code longer
+/// than [`MAX_NMI_DIAGNOSTIC_CODE_BYTES`] after trimming, or one too long to
+/// parse at all, is omitted and marks the observation incomplete rather than
+/// being shortened into a different, apparently valid code.
+fn optional_diagnostic_code(
+    node: roxmltree::Node<'_, '_>,
+    name: &'static str,
+    incomplete: &mut bool,
+) -> Option<SensitiveText> {
+    if all_diagnostic_occurrences_empty(node, name)? {
+        return None;
+    }
+    let (value, invalid) =
+        resolve_optional_scalar(collect_xml_scalar(node, &[name], false).finish());
+    let value = value.filter(|value| value.trim().len() <= MAX_NMI_DIAGNOSTIC_CODE_BYTES);
+    *incomplete |= invalid || value.is_none();
+    value.map(SensitiveText::new)
+}
+
+/// Returns `None` when the element is absent and whether every occurrence is
+/// empty otherwise.
+fn all_diagnostic_occurrences_empty(
+    node: roxmltree::Node<'_, '_>,
+    name: &'static str,
+) -> Option<bool> {
+    let mut occurrences = element_children_named(node, name).peekable();
+    occurrences.peek()?;
+    Some(occurrences.all(|occurrence| {
+        occurrence
+            .children()
+            .all(|child| child.is_text() && child.text().is_none_or(|text| text.trim().is_empty()))
+    }))
+}
+
 /// Reads one optional, bounded diagnostic text field. Empty elements are
 /// absent; a conflicting, nested, or otherwise unusable value is omitted and
 /// marks the observation incomplete.
@@ -436,14 +470,7 @@ fn optional_diagnostic_field(
     name: &'static str,
     incomplete: &mut bool,
 ) -> Option<SensitiveText> {
-    let mut occurrences = element_children_named(node, name).peekable();
-    occurrences.peek()?;
-    let all_empty = occurrences.all(|occurrence| {
-        occurrence
-            .children()
-            .all(|child| child.is_text() && child.text().is_none_or(|text| text.trim().is_empty()))
-    });
-    if all_empty {
+    if all_diagnostic_occurrences_empty(node, name)? {
         return None;
     }
     let (value, invalid) =
