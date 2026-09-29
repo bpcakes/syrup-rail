@@ -48,6 +48,12 @@ store PAN/CVV or issue a provider mutation to obtain diagnostic information.
   NMI client and adapter tests pass; PostgreSQL passes single-threaded
   (`scripts/jig check test-locked`), while the parallel run hits Docker
   harness startup timeouts in this environment. Synthetic wire tests only.
+- [x] T-02 (2026-09-29): schema v5, address persistence, renewal snapshots and
+  the approval-exclusive scrub implemented and reviewed at
+  `f3bf955b89df5756a1cd4230c6cd4de4106843c7` (review base `1cb1252`).
+  `scripts/jig check test-locked` and `scripts/jig check sqlx` pass; v1–v4
+  artifacts are unchanged. The 0.5.4 CHANGELOG heading stays undated until the
+  release manager tags the release.
 
 Restart checkpoint (2026-09-28): the main checkout
 `/home/aa/Documents/syrup-rail` is on `feature/billing-address-diagnostics-0.5.4`
