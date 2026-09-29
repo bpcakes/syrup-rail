@@ -458,11 +458,10 @@ pub async fn query_payment_attempt_diagnostics(
         .unwrap_or_else(Instant::now);
     // Pre-query reads are read-only, so abandoning them at the deadline is
     // safe and precedes any provider I/O.
-    let Ok(prepared) = tokio::time::timeout_at(io_deadline, storage::prepare(pool, &target)).await
-    else {
+    let Some(prepared) = storage::prepare_before(pool, &target, io_deadline).await? else {
         return Ok(Outcome::TimedOut);
     };
-    let candidate = match prepared? {
+    let candidate = match prepared {
         storage::Prepared::Done(outcome) => return Ok(outcome),
         storage::Prepared::Query(candidate) => candidate,
     };

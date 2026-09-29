@@ -235,15 +235,37 @@ pub(super) async fn record_provider_cooldown_before(
     })
 }
 
+/// Reads the target and its cooldowns before `deadline`, ahead of gateway
+/// resolution or provider I/O. `None` means the deadline passed first. The
+/// reads are read-only, so a connection still busy at the deadline is
+/// [`discard`]ed rather than returned to the pool.
+pub(super) async fn prepare_before(
+    pool: &PgPool,
+    target: &PaymentAttemptDiagnosticTarget,
+    deadline: Instant,
+) -> Result<Option<Prepared>, PaymentAttemptDiagnosticsError> {
+    let Ok(connection) = tokio::time::timeout_at(deadline, pool.acquire()).await else {
+        return Ok(None);
+    };
+    let mut connection = connection?;
+    match tokio::time::timeout_at(deadline, prepare(&mut connection, target)).await {
+        Ok(prepared) => prepared.map(Some),
+        Err(_) => {
+            discard(connection);
+            Ok(None)
+        }
+    }
+}
+
 /// Reads the target and its cooldowns in one short transaction that ends
 /// before gateway resolution or provider I/O.
-pub(super) async fn prepare(
-    pool: &PgPool,
+async fn prepare(
+    connection: &mut PgConnection,
     target: &PaymentAttemptDiagnosticTarget,
 ) -> Result<Prepared, PaymentAttemptDiagnosticsError> {
     use PaymentAttemptDiagnosticsOutcome as Outcome;
 
-    let mut transaction = pool.begin().await?;
+    let mut transaction = sqlx::Connection::begin(connection).await?;
     set_application_timeouts(&mut transaction).await?;
     let row: Option<TargetRow> = sqlx::query_as(TARGET_SQL)
         .bind(target.billing_scope_id.as_uuid())

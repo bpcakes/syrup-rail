@@ -1320,7 +1320,7 @@ async fn assert_pool_recovers(
 }
 
 #[tokio::test]
-async fn a_stalled_connection_cannot_hold_post_query_work_past_the_deadline()
+async fn a_stalled_connection_cannot_hold_diagnostic_database_work_past_the_deadline()
 -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("diag_stall", false, false, false).await?;
     let initial = enroll(
@@ -1331,6 +1331,28 @@ async fn a_stalled_connection_cannot_hold_post_query_work_past_the_deadline()
     .await?;
     let attempt_id = initial.attempt().identity().attempt_id();
     let deadline = Duration::from_secs(5);
+
+    // The target read stalls before any provider I/O; the call gives up when
+    // the query budget ends, ahead of the post-query reserve.
+    let (target_pool, target_stall) =
+        stalling_pool(fixture.database.database_url(), "attempts.amount_cents").await?;
+    let gateway = DiagnosticsGateway::new(Ok(observed(GatewayDiagnosticOperation::Sale)));
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        deadline * 2,
+        query_payment_attempt_diagnostics(
+            &target_pool,
+            &resolver_for(fixture.gateway_account, &gateway),
+            target(&fixture, attempt_id),
+            deadline,
+        ),
+    )
+    .await
+    .expect("a stalled target read must not hang the call")?;
+    assert_eq!(outcome, Outcome::TimedOut);
+    assert!(started.elapsed() < deadline);
+    assert_eq!(gateway.calls.load(Ordering::SeqCst), 0);
+    assert_pool_recovers(&target_pool, &target_stall).await?;
 
     let (revalidation_pool, revalidation_stall) =
         stalling_pool(fixture.database.database_url(), "AS observed_at").await?;
