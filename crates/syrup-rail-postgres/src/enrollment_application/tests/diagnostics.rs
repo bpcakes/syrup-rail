@@ -234,7 +234,8 @@ async fn diagnostics_observe_an_owned_attempt_without_writes_at_database_time()
     let gateway = DiagnosticsGateway::new(Ok(observed(GatewayDiagnosticOperation::Sale)));
 
     let before = database_now(&fixture.database.pool).await?;
-    let outcome = diagnose(&fixture, &gateway, attempt_id, DEADLINE).await?;
+    // An effectively unbounded caller deadline is clamped, not overflowed.
+    let outcome = diagnose(&fixture, &gateway, attempt_id, Duration::MAX).await?;
     let after = database_now(&fixture.database.pool).await?;
     assert_eq!(outcome.as_str(), "observed");
     let Outcome::Observed(diagnostics) = outcome else {

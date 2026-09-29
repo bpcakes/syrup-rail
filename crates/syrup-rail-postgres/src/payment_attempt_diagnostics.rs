@@ -29,6 +29,9 @@ const DIAGNOSTIC_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAGNOSTIC_POST_QUERY_RESERVE: Duration = Duration::from_secs(3);
 /// A provider query with less time than this is not started.
 const MIN_DIAGNOSTIC_QUERY_BUDGET: Duration = Duration::from_secs(1);
+/// Longer caller deadlines add nothing: the query and database work are
+/// independently bounded. Clamping keeps deadline arithmetic from overflowing.
+const MAX_DIAGNOSTIC_DEADLINE: Duration = Duration::from_secs(3_600);
 
 /// One owned subscription payment attempt to diagnose.
 ///
@@ -414,9 +417,12 @@ pub async fn payment_attempt_diagnostic_eligibility(
 /// `deadline` bounds the whole call. The provider query receives the earlier
 /// of 10 seconds and the time left after reserving about 3 seconds for
 /// revalidation and cooldown bookkeeping; when less than one second would
-/// remain, the call returns `TimedOut` without provider I/O. The cooldown
-/// write after a rate limit is never abandoned for the deadline, so callers
-/// should not wrap this future in a shorter timeout of their own.
+/// remain, the call returns `TimedOut` without provider I/O. Post-query
+/// revalidation and any cooldown write are bounded by the billing database
+/// lock and statement timeouts rather than by the deadline, so a very slow
+/// database can extend the call past it; the cooldown write after a rate limit
+/// is never abandoned. Callers should not wrap this future in a shorter timeout
+/// of their own.
 ///
 /// Side effects: when the provider rate-limits the query, this extends the
 /// shared 60-second provider cooldown, the only write it can perform. During
@@ -442,7 +448,10 @@ pub async fn query_payment_attempt_diagnostics(
 ) -> Result<PaymentAttemptDiagnosticsOutcome, PaymentAttemptDiagnosticsError> {
     use PaymentAttemptDiagnosticsOutcome as Outcome;
 
-    let io_deadline = Instant::now() + deadline.saturating_sub(DIAGNOSTIC_POST_QUERY_RESERVE);
+    let io_deadline = Instant::now()
+        + deadline
+            .min(MAX_DIAGNOSTIC_DEADLINE)
+            .saturating_sub(DIAGNOSTIC_POST_QUERY_RESERVE);
     // Pre-query reads are read-only, so abandoning them at the deadline is
     // safe and precedes any provider I/O.
     let Ok(prepared) = tokio::time::timeout_at(io_deadline, storage::prepare(pool, &target)).await
