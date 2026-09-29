@@ -42,7 +42,7 @@ store PAN/CVV or issue a provider mutation to obtain diagnostic information.
 - [x] Define ownership, compatibility, tasks and verification.
 - [x] Independent audit of the first draft against code (2026-09-28); findings integrated below.
 - [x] Address the revised-plan audit's NMI limit/source correction (2026-09-28).
-- [ ] Implement and verify T-01 through T-03; planning is not implementation.
+- [x] Implement and verify T-01 through T-03; planning is not implementation.
 - [x] T-01 (2026-09-29): address transport implemented and reviewed at
   `bb75a4ab5da09b87341dc5481f113cbb7c29c42b` (review base `bd9c551`). Core,
   NMI client and adapter tests pass; PostgreSQL passes single-threaded
@@ -54,6 +54,15 @@ store PAN/CVV or issue a provider mutation to obtain diagnostic information.
   `scripts/jig check test-locked` and `scripts/jig check sqlx` pass; v1–v4
   artifacts are unchanged. The 0.5.4 CHANGELOG heading stays undated until the
   release manager tags the release.
+- [x] T-03 (2026-09-29): provider-neutral diagnostics port, NMI exact-query
+  parsing and action selection, and the PostgreSQL eligibility and
+  deadline-bounded diagnostic query implemented and reviewed at
+  `73fea49257035eeeeed96a5ea73571863bcb9a03` (review base `f7636eb`) after six
+  review rounds. Repairs bound codes before truncation, normalization and
+  duplicate resolution and after sanitization, revalidate every completed
+  provider response, and keep pre- and post-query database work within the
+  caller's deadline, discarding connections that stall. `scripts/jig check
+  test-locked` passes. Synthetic wire fixtures only.
 
 Restart checkpoint (2026-09-28): the main checkout
 `/home/aa/Documents/syrup-rail` is on `feature/billing-address-diagnostics-0.5.4`
