@@ -10,6 +10,7 @@ use syrup_rail::{
 };
 use thiserror::Error;
 
+pub(crate) use self::storage::record_provider_cooldown;
 use self::storage::{fill_missing_fields, load_candidate, lock_candidate};
 use crate::GatewayMutationCooldownScope;
 
@@ -214,8 +215,13 @@ pub async fn refresh_payment_method_metadata(
         Ok(observation) => observation,
         Err(error) => {
             if matches!(&error, GatewayError::RateLimited(_))
-                && let Err(storage) =
-                    storage::record_provider_cooldown(pool, command, account_id, &provider).await
+                && let Err(storage) = storage::record_provider_cooldown(
+                    pool,
+                    command.billing_scope_id,
+                    account_id,
+                    &provider,
+                )
+                .await
             {
                 return Err(
                     PaymentMethodMetadataRefreshError::RateLimitCooldownPersistenceFailed {

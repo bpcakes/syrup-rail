@@ -46,7 +46,7 @@ fn columns(address: &BillingAddress) -> AddressColumns {
 
 const NO_ADDRESS: AddressColumns = (None, None, None, None, None, None);
 
-fn named_contact(address: Option<BillingAddress>) -> BillingContact {
+pub(super) fn named_contact(address: Option<BillingAddress>) -> BillingContact {
     let contact = BillingContact::new(
         Some("Ada".to_owned()),
         Some("Lovelace".to_owned()),
@@ -75,7 +75,7 @@ fn context(
     )
 }
 
-fn enroll_command(
+pub(super) fn enroll_command(
     fixture: &ApplicationFixture,
     key: &str,
     contact: BillingContact,
@@ -86,7 +86,7 @@ fn enroll_command(
     )
 }
 
-fn replacement_command(
+pub(super) fn replacement_command(
     fixture: &ApplicationFixture,
     key: &str,
     contact: BillingContact,
@@ -97,7 +97,7 @@ fn replacement_command(
     )
 }
 
-fn service(
+pub(super) fn service(
     fixture: &ApplicationFixture,
     gateway: &Arc<ScriptedGateway>,
 ) -> SubscriptionBillingService {
@@ -161,7 +161,7 @@ async fn current_method(
 }
 
 /// Makes the subscription's next renewal due and returns its period start.
-async fn make_renewal_due(
+pub(super) async fn make_renewal_due(
     pool: &sqlx::PgPool,
     subscription_id: SubscriptionId,
 ) -> Result<DateTime<Utc>, sqlx::Error> {

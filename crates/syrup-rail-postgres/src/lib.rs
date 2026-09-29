@@ -25,6 +25,7 @@ mod mode_verified_gateway;
 mod operator_review;
 #[cfg(test)]
 mod paid_trial_dunning_tests;
+mod payment_attempt_diagnostics;
 mod payment_method_metadata;
 mod processor_charge_persistence;
 mod processor_charges;
@@ -145,6 +146,12 @@ pub use operator_review::{
     OperatorReviewError, attempt_review_page, attest_external_reversal,
     fail_review_required_attempt, fail_review_required_renewal_for_retry,
     processor_charge_review_page,
+};
+pub use payment_attempt_diagnostics::{
+    PaymentAttemptDiagnosticEligibility, PaymentAttemptDiagnosticEligibilityItem,
+    PaymentAttemptDiagnosticIneligibility, PaymentAttemptDiagnosticTarget,
+    PaymentAttemptDiagnostics, PaymentAttemptDiagnosticsError, PaymentAttemptDiagnosticsOutcome,
+    payment_attempt_diagnostic_eligibility, query_payment_attempt_diagnostics,
 };
 pub use payment_method_metadata::{
     PaymentMethodMetadataRefreshError, PaymentMethodMetadataRefreshOutcome,

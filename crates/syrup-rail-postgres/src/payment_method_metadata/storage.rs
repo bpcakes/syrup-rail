@@ -157,9 +157,12 @@ pub(super) async fn fill_missing_fields(
     Ok(Outcome::Updated)
 }
 
-pub(super) async fn record_provider_cooldown(
+/// Extends the shared provider cooldown after a read-only query was
+/// rate-limited. Used by saved-card metadata repair and payment diagnostics;
+/// the only write either read-only query may perform.
+pub(crate) async fn record_provider_cooldown(
     pool: &PgPool,
-    command: RefreshPaymentMethodMetadata,
+    billing_scope_id: syrup_rail::BillingScopeId,
     account_id: syrup_rail::GatewayAccountId,
     provider: &syrup_rail::GatewayProviderKey,
 ) -> Result<(), sqlx::Error> {
@@ -171,7 +174,7 @@ pub(super) async fn record_provider_cooldown(
     set_application_timeouts(&mut transaction).await?;
     match persist_bound_provider_rate_limit_cooldown(
         &mut transaction,
-        command.billing_scope_id,
+        billing_scope_id,
         account_id,
         provider,
     )

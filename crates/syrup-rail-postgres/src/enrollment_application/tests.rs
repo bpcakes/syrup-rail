@@ -882,5 +882,6 @@ fn approved_outcome_with_optional_reference(
 
 mod application;
 mod billing_address;
+mod diagnostics;
 mod foreground;
 mod unit;
