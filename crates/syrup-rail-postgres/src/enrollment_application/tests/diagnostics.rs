@@ -1231,3 +1231,127 @@ async fn post_query_work_never_outlives_the_caller_deadline() -> Result<(), Box<
     held.lock().await.clear();
     fixture.cleanup().await
 }
+
+/// A TCP proxy to PostgreSQL that stops delivering server replies, without
+/// closing the connection, once the client sends a statement containing
+/// `stall_marker`. It simulates a connection that stops responding mid
+/// transaction, which server-side timeouts cannot bound.
+async fn stalling_pool(
+    database_url: &str,
+    stall_marker: &'static str,
+) -> Result<sqlx::PgPool, Box<dyn Error>> {
+    use std::str::FromStr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let options = sqlx::postgres::PgConnectOptions::from_str(database_url)?;
+    let upstream = format!("{}:{}", options.get_host(), options.get_port());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_port = listener.local_addr()?.port();
+    let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let Ok(server) = tokio::net::TcpStream::connect(&upstream).await else {
+                return;
+            };
+            let (mut client_read, mut client_write) = client.into_split();
+            let (mut server_read, mut server_write) = server.into_split();
+            let requests_stalled = Arc::clone(&stalled);
+            tokio::spawn(async move {
+                let mut buffer = vec![0_u8; 16 * 1024];
+                while let Ok(read) = client_read.read(&mut buffer).await {
+                    if read == 0 {
+                        break;
+                    }
+                    if String::from_utf8_lossy(&buffer[..read]).contains(stall_marker) {
+                        requests_stalled.store(true, Ordering::SeqCst);
+                    }
+                    if server_write.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            let replies_stalled = Arc::clone(&stalled);
+            tokio::spawn(async move {
+                let mut buffer = vec![0_u8; 16 * 1024];
+                while let Ok(read) = server_read.read(&mut buffer).await {
+                    if read == 0 {
+                        break;
+                    }
+                    while replies_stalled.load(Ordering::SeqCst) {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    if client_write.write_all(&buffer[..read]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    Ok(sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options.host("127.0.0.1").port(proxy_port))
+        .await?)
+}
+
+#[tokio::test]
+async fn a_stalled_connection_cannot_hold_post_query_work_past_the_deadline()
+-> Result<(), Box<dyn Error>> {
+    let fixture = enrollment_fixture("diag_stall", false, false, false).await?;
+    let initial = enroll(
+        &fixture,
+        "diag-stall",
+        approved_outcome("txn_stall_initial"),
+    )
+    .await?;
+    let attempt_id = initial.attempt().identity().attempt_id();
+    let deadline = Duration::from_secs(5);
+
+    let revalidation_pool =
+        stalling_pool(fixture.database.database_url(), "AS observed_at").await?;
+    let gateway = DiagnosticsGateway::new(Ok(observed(GatewayDiagnosticOperation::Sale)));
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        deadline * 2,
+        query_payment_attempt_diagnostics(
+            &revalidation_pool,
+            &resolver_for(fixture.gateway_account, &gateway),
+            target(&fixture, attempt_id),
+            deadline,
+        ),
+    )
+    .await
+    .expect("a stalled revalidation must not hang the call")?;
+    assert_eq!(outcome, Outcome::TimedOut);
+    assert!(started.elapsed() < deadline + Duration::from_millis(500));
+
+    let cooldown_pool = stalling_pool(
+        fixture.database.database_url(),
+        "UPDATE billing_gateway_provider_rate_limits",
+    )
+    .await?;
+    let throttled = DiagnosticsGateway::new(Err(GatewayError::RateLimited(
+        GatewayDiagnostic::new("HTTP 429"),
+    )));
+    let started = std::time::Instant::now();
+    let error = tokio::time::timeout(
+        deadline * 2,
+        query_payment_attempt_diagnostics(
+            &cooldown_pool,
+            &resolver_for(fixture.gateway_account, &throttled),
+            target(&fixture, attempt_id),
+            deadline,
+        ),
+    )
+    .await
+    .expect("a stalled cooldown write must not hang the call")
+    .expect_err("an unconfirmed cooldown is reported");
+    assert!(matches!(
+        error,
+        PaymentAttemptDiagnosticsError::RateLimitCooldownPersistenceFailed {
+            storage: sqlx::Error::Io(_),
+            ..
+        }
+    ));
+    assert!(started.elapsed() < deadline + Duration::from_millis(500));
+    fixture.cleanup().await
+}

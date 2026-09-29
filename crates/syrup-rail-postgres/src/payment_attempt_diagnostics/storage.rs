@@ -1,3 +1,5 @@
+use std::{io, time::Duration};
+
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use syrup_rail::{BillingScopeId, PlanKey, SubscriberId};
@@ -120,11 +122,16 @@ pub(super) enum Revalidation {
     DeadlineExceeded,
 }
 
-/// Begins a post-query transaction that cannot outlive `deadline`: the
-/// connection wait is bounded by the remaining time, and each of the
-/// `statements` still to run, including `COMMIT`, receives an equal share as
-/// its statement timeout. The database aborts an overrunning statement, so
-/// callers never have to cancel a write midway.
+/// Server statement timeouts end this long before the caller's deadline, so
+/// an overrunning statement normally fails cleanly before the client-side
+/// bound abandons a stalled connection at the deadline itself.
+const SERVER_TIMEOUT_MARGIN: Duration = Duration::from_millis(100);
+
+/// Begins a post-query transaction whose server-side work ends before
+/// `deadline`: the connection wait is bounded by the remaining time, and each
+/// of the `statements` still to run, including `COMMIT`, receives an equal
+/// share of it as its statement timeout. Callers also bound the client-side
+/// wait with the same deadline for a connection that stops responding.
 pub(super) async fn begin_before(
     pool: &PgPool,
     deadline: Instant,
@@ -137,7 +144,9 @@ pub(super) async fn begin_before(
     let mut transaction = tokio::time::timeout(remaining, pool.begin())
         .await
         .map_err(|_| sqlx::Error::PoolTimedOut)??;
-    let remaining = deadline.saturating_duration_since(Instant::now());
+    let remaining = deadline
+        .saturating_duration_since(Instant::now())
+        .saturating_sub(SERVER_TIMEOUT_MARGIN);
     let statement_ms = (remaining.as_millis() / u128::from(statements.max(1))).clamp(1, 5_000);
     sqlx::query(
         "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
@@ -186,15 +195,27 @@ pub(super) async fn record_provider_cooldown_before(
     target: &PaymentAttemptDiagnosticTarget,
     candidate: &DiagnosticCandidate,
 ) -> Result<(), sqlx::Error> {
-    // Lock the account row, update the provider row, and commit.
-    let transaction = begin_before(pool, deadline, 3).await?;
-    crate::payment_method_metadata::persist_provider_cooldown(
-        transaction,
-        target.billing_scope_id,
-        candidate.account_id,
-        &candidate.provider_key,
-    )
+    // Lock the account row, update the provider row, and commit. Only a
+    // connection that stops responding is abandoned at the deadline; the
+    // caller then reports a cooldown persistence failure so the host still
+    // backs off.
+    tokio::time::timeout_at(deadline, async {
+        let transaction = begin_before(pool, deadline, 3).await?;
+        crate::payment_method_metadata::persist_provider_cooldown(
+            transaction,
+            target.billing_scope_id,
+            candidate.account_id,
+            &candidate.provider_key,
+        )
+        .await
+    })
     .await
+    .unwrap_or_else(|_| {
+        Err(sqlx::Error::Io(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "diagnostic cooldown write did not finish before the deadline",
+        )))
+    })
 }
 
 /// Reads the target and its cooldowns in one short transaction that ends
@@ -253,7 +274,7 @@ pub(super) async fn revalidate(
     candidate: &DiagnosticCandidate,
     deadline: Instant,
 ) -> Result<Revalidation, sqlx::Error> {
-    let row = async {
+    let row = tokio::time::timeout_at(deadline, async {
         let mut transaction = begin_before(pool, deadline, 2).await?;
         let row: Option<RevalidationRow> = sqlx::query_as(REVALIDATE_SQL)
             .bind(target.billing_scope_id.as_uuid())
@@ -264,12 +285,15 @@ pub(super) async fn revalidate(
             .await?;
         transaction.commit().await?;
         Ok::<_, sqlx::Error>(row)
-    }
+    })
     .await;
     let row = match row {
-        Ok(row) => row,
-        Err(error) if exceeded_deadline(&error) => return Ok(Revalidation::DeadlineExceeded),
-        Err(error) => return Err(error),
+        Ok(Ok(row)) => row,
+        Err(_) => return Ok(Revalidation::DeadlineExceeded),
+        Ok(Err(error)) if exceeded_deadline(&error) => {
+            return Ok(Revalidation::DeadlineExceeded);
+        }
+        Ok(Err(error)) => return Err(error),
     };
     let Some(row) = row else {
         return Ok(Revalidation::TargetChanged);

@@ -420,12 +420,13 @@ pub async fn payment_attempt_diagnostic_eligibility(
 /// remain, the call returns `TimedOut` without provider I/O. Every completed
 /// provider response, including an error, is revalidated. Post-query
 /// revalidation and a rate limit's cooldown write run within the remaining
-/// deadline: their connection wait is bounded and the database aborts an
-/// overrunning statement, so the call never abandons the cooldown write
-/// midway. A revalidation that cannot finish in time yields `TimedOut` (or
-/// `RateLimited` once the cooldown is recorded), and a cooldown that cannot be
-/// recorded in time is `RateLimitCooldownPersistenceFailed`. Callers should
-/// not wrap this future in a shorter timeout of their own.
+/// deadline: their connection wait is bounded, the database aborts an
+/// overrunning statement shortly before the deadline, and only a connection
+/// that stops responding is abandoned at the deadline itself. A revalidation
+/// that cannot finish in time yields `TimedOut` (or `RateLimited` once the
+/// cooldown is recorded), and a cooldown that cannot be confirmed in time is
+/// `RateLimitCooldownPersistenceFailed`, after which the host must still back
+/// off. Callers should not wrap this future in a shorter timeout of their own.
 ///
 /// Side effects: when the provider rate-limits the query, this extends the
 /// shared 60-second provider cooldown, the only write it can perform. During

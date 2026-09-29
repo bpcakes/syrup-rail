@@ -179,6 +179,10 @@ impl TestDatabase {
         })
     }
 
+    pub(crate) fn database_url(&self) -> &str {
+        self.lease.database_url()
+    }
+
     pub(crate) async fn cleanup(self) -> Result<(), Box<dyn Error>> {
         self.pool.close().await;
         self.lease.cleanup().await?;
