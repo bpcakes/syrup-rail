@@ -1,1 +1,0 @@
-Use expires_at as the only pending-evidence clock. Remove the no-match check counter write pass while retaining both bounded expiry cleanup passes and public cleaned-count timing. Keep shipped v3 columns and indexes unchanged. Validate 25 no-match drains followed by late application, expiry cleanup counts, and bounded plans on representative backlog data.
