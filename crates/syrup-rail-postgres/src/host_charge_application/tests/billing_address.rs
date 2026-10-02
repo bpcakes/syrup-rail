@@ -7,7 +7,7 @@ use crate::{
 #[tokio::test]
 async fn host_charge_persists_billing_address_and_rejects_changed_address_replay()
 -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("address_host_charge").await?;
+    let database = TestDatabase::start("address_host").await?;
     let result = async {
         sqlx::query(
             "CREATE TABLE host_charge_targets (id uuid PRIMARY KEY, \
