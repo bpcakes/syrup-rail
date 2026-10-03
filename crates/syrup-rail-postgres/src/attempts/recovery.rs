@@ -297,6 +297,9 @@ async fn reject_locked_recovery(
         SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged => {
             PaymentResolutionCode::GatewayConfigurationBeforeSubmission
         }
+        SubscriptionRecoverySubmissionRejection::BillingPeriodExpired => {
+            PaymentResolutionCode::SubscriptionPeriodExpiredBeforeCharge
+        }
     };
     let attempt = reject_prepared_attempt(transaction, &attempt, resolution_code, message).await?;
     Ok(SubscriptionRecoverySubmissionOutcome::Rejected { attempt, reason })

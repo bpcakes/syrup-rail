@@ -372,6 +372,9 @@ pub enum SubscriptionRecoveryPreflightOutcome {
 pub enum SubscriptionRecoverySubmissionRejection {
     BillingStateChanged,
     GatewayConfigurationChanged,
+    /// The reserved billing period ended before final admission. Only produced
+    /// under [`crate::SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods`].
+    BillingPeriodExpired,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

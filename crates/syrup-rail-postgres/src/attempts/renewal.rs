@@ -195,6 +195,9 @@ async fn reject_locked_renewal(
         SubscriptionRenewalSubmissionRejection::GatewayConfigurationChanged => {
             PaymentResolutionCode::GatewayConfigurationBeforeSubmission
         }
+        SubscriptionRenewalSubmissionRejection::BillingPeriodExpired => {
+            PaymentResolutionCode::SubscriptionPeriodExpiredBeforeCharge
+        }
     };
     let attempt = reject_prepared_attempt(transaction, &attempt, resolution_code, message).await?;
     Ok(SubscriptionRenewalSubmissionOutcome::Rejected { attempt, reason })

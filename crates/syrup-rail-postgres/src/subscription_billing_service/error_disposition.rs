@@ -308,6 +308,9 @@ const fn recovery_submission_rejection_disposition(
         | SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged => {
             SubscriptionBillingServiceErrorDisposition::Conflict
         }
+        SubscriptionRecoverySubmissionRejection::BillingPeriodExpired => {
+            SubscriptionBillingServiceErrorDisposition::Rejected
+        }
     }
 }
 
@@ -319,7 +322,8 @@ const fn renewal_reservation_rejection_disposition(
         | SubscriptionRenewalReservationRejection::PaymentNotDue
         | SubscriptionRenewalReservationRejection::AttemptInProgress
         | SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress
-        | SubscriptionRenewalReservationRejection::RetryBlocked => {
+        | SubscriptionRenewalReservationRejection::RetryBlocked
+        | SubscriptionRenewalReservationRejection::BillingPeriodExpired => {
             SubscriptionBillingServiceErrorDisposition::Rejected
         }
         SubscriptionRenewalReservationRejection::GatewayAccountModeChanged

@@ -26,6 +26,13 @@ pub enum PaymentResolutionCode {
     SubscriptionApprovedPaymentMethodUpdateSubscriptionIneligible,
     SubscriptionApprovedPaymentMethodUpdateStaleState,
     SubscriptionApprovedPaymentMethodUpdateInactiveReplacementMethod,
+    /// A prepared renewal or recovery was rejected before provider submission
+    /// because its billing period had already ended.
+    SubscriptionPeriodExpiredBeforeCharge,
+    /// A provider-approved renewal, recovery, or initial charge arrived after
+    /// its billing period ended. The charge is parked for external reversal
+    /// and never applied to the subscription.
+    SubscriptionApprovedPeriodExpired,
 }
 
 impl PaymentResolutionCode {
@@ -54,6 +61,8 @@ impl PaymentResolutionCode {
         Self::SubscriptionApprovedPaymentMethodUpdateSubscriptionIneligible,
         Self::SubscriptionApprovedPaymentMethodUpdateStaleState,
         Self::SubscriptionApprovedPaymentMethodUpdateInactiveReplacementMethod,
+        Self::SubscriptionPeriodExpiredBeforeCharge,
+        Self::SubscriptionApprovedPeriodExpired,
     ];
 
     pub const RENEWAL_INFRASTRUCTURE_RETRY_CODES: &'static [Self] = &[
@@ -145,6 +154,10 @@ impl PaymentResolutionCode {
             Self::SubscriptionApprovedPaymentMethodUpdateInactiveReplacementMethod => {
                 "subscription_approved_payment_method_update_inactive_replacement_method"
             }
+            Self::SubscriptionPeriodExpiredBeforeCharge => {
+                "subscription_period_expired_before_charge"
+            }
+            Self::SubscriptionApprovedPeriodExpired => "subscription_approved_period_expired",
         }
     }
 }
@@ -220,6 +233,10 @@ impl TryFrom<&str> for PaymentResolutionCode {
             "subscription_approved_payment_method_update_inactive_replacement_method" => {
                 Ok(Self::SubscriptionApprovedPaymentMethodUpdateInactiveReplacementMethod)
             }
+            "subscription_period_expired_before_charge" => {
+                Ok(Self::SubscriptionPeriodExpiredBeforeCharge)
+            }
+            "subscription_approved_period_expired" => Ok(Self::SubscriptionApprovedPeriodExpired),
             _ => Err(PaymentResolutionCodeParseError),
         }
     }
@@ -240,13 +257,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_twenty_four_canonical_values_round_trip_exhaustively() {
-        assert_eq!(PaymentResolutionCode::ALL.len(), 24);
+    fn all_twenty_six_canonical_values_round_trip_exhaustively() {
+        assert_eq!(PaymentResolutionCode::ALL.len(), 26);
         let values = PaymentResolutionCode::ALL
             .iter()
             .map(|code| code.as_str())
             .collect::<HashSet<_>>();
-        assert_eq!(values.len(), 24);
+        assert_eq!(values.len(), 26);
         for code in PaymentResolutionCode::ALL {
             assert_eq!(PaymentResolutionCode::try_from(code.as_str()), Ok(*code));
         }

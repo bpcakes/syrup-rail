@@ -368,6 +368,9 @@ pub enum SubscriptionRenewalReservationRejection {
     RetryBlocked,
     GatewayAccountModeChanged,
     GatewayConfigurationChanged,
+    /// The due billing period ended before a charge could be reserved. Only
+    /// produced under [`crate::SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods`].
+    BillingPeriodExpired,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -380,6 +383,9 @@ pub enum SubscriptionRenewalReservationOutcome {
 pub enum SubscriptionRenewalSubmissionRejection {
     BillingStateChanged,
     GatewayConfigurationChanged,
+    /// The reserved billing period ended before final admission. Only produced
+    /// under [`crate::SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods`].
+    BillingPeriodExpired,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

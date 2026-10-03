@@ -94,6 +94,8 @@ pub enum BillingEventKey {
     SubscriptionPaymentFailed(PaymentAttemptId),
     /// The terminal nonpayment event for a subscription lifecycle.
     SubscriptionEnded(SubscriptionId),
+    /// The terminal expired-period event for a subscription lifecycle.
+    SubscriptionPeriodExpired(SubscriptionId),
     /// The voluntary cancellation event for a subscription lifecycle.
     SubscriptionCanceled(SubscriptionId),
     /// The stored-payment-method change event produced by an attempt.
@@ -231,6 +233,25 @@ pub enum BillingEvent {
         /// Causal boundary at which product access ends.
         access_ends_at: DateTime<Utc>,
     },
+    /// An unpaid due billing period expired and its retirement made the
+    /// subscription lifecycle terminal.
+    ///
+    /// Unlike [`Self::SubscriptionEnded`], no payment attempt caused this
+    /// boundary: collection of the expired period was refused and the obsolete
+    /// cycle was retired without a charge, catch-up sale, or synthesized
+    /// decline. Original dates and payment history are unchanged.
+    SubscriptionPeriodExpired {
+        /// Terminal subscription lifecycle.
+        subscription_id: SubscriptionId,
+        /// Exact plan owned by the subscription.
+        plan_key: PlanKey,
+        /// The unpaid due billing period that expired.
+        period: BillingPeriod,
+        /// Time the financial lifecycle became terminal.
+        ended_at: DateTime<Utc>,
+        /// Causal boundary at which product access ends.
+        access_ends_at: DateTime<Utc>,
+    },
     /// A subscriber voluntarily canceled a subscription lifecycle.
     SubscriptionCanceled {
         /// Canceled subscription.
@@ -278,6 +299,9 @@ impl BillingEvent {
             Self::SubscriptionEnded {
                 subscription_id, ..
             } => BillingEventKey::SubscriptionEnded(*subscription_id),
+            Self::SubscriptionPeriodExpired {
+                subscription_id, ..
+            } => BillingEventKey::SubscriptionPeriodExpired(*subscription_id),
             Self::SubscriptionCanceled {
                 subscription_id, ..
             } => BillingEventKey::SubscriptionCanceled(*subscription_id),
@@ -331,7 +355,7 @@ mod tests {
                     subscription_id: subscription(2),
                     plan_key: plan_key.clone(),
                     charge,
-                    period,
+                    period: period.clone(),
                 },
                 BillingEventKey::SubscriptionRenewed(attempt(3)),
             ),
@@ -357,6 +381,16 @@ mod tests {
                     access_ends_at: end,
                 },
                 BillingEventKey::SubscriptionEnded(subscription(2)),
+            ),
+            (
+                BillingEvent::SubscriptionPeriodExpired {
+                    subscription_id: subscription(8),
+                    plan_key: plan_key.clone(),
+                    period,
+                    ended_at: end,
+                    access_ends_at: start,
+                },
+                BillingEventKey::SubscriptionPeriodExpired(subscription(8)),
             ),
             (
                 BillingEvent::SubscriptionCanceled {

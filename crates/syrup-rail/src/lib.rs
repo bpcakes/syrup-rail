@@ -20,6 +20,7 @@ mod identity;
 mod money;
 mod operator_review;
 mod payment_method_update;
+mod period_expiry;
 mod policy;
 mod reconciliation;
 mod recovery;
@@ -135,6 +136,11 @@ pub use payment_method_update::{
     SubscriptionPaymentMethodReplacementReservationOutcome,
     SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection,
+};
+pub use period_expiry::{
+    ChangeSubscriptionPastDueAccess, RetireExpiredSubscriptionPeriod,
+    SubscriptionPastDueAccessChangeOutcome, SubscriptionPeriodExpiryPolicy,
+    SubscriptionPeriodRetirementOutcome,
 };
 pub use policy::{
     BillingPeriodPolicyError, gateway_response_is_approved, gateway_state_is_approved,
