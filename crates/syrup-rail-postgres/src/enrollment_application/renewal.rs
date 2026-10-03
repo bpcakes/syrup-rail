@@ -26,14 +26,15 @@ use super::{
     OutcomeResolutionCommand, PreparedAttemptReplay, RENEWAL_APPROVED_STORAGE_FAILURE_TEXT,
     RENEWAL_INCOMPLETE_APPROVAL_TEXT, RENEWAL_STALE_STATE_TEXT, RateLimitCooldown,
     SubscriptionEnrollmentApplicationError, advance_subscription_discount_after_successful_charge,
-    append_subscription_observation_diagnostics, clear_resolved_attempt_submission,
-    commit_rate_limit_cooldown, finalize_approved_application, is_retryable_evidence_error,
-    load_applied_subscription, load_subscription, lock_expected_reservation_attempt,
-    lock_payment_method_domain, lock_subscription_aggregate, map_attempt_transition_error,
-    mark_attempt_approved, mutation_error_evidence, park_locked_attempt,
-    payment_result_for_attempt, payment_result_for_reservation_attempt, persist_attempt_transition,
-    reconcile_non_approved_evidence, renewal_subscription_matches, resolve_pool_outcome,
-    set_application_timeouts, stop_conflicting_subscription_approval,
+    append_subscription_observation_diagnostics, charge_is_externally_reversed,
+    clear_resolved_attempt_submission, commit_rate_limit_cooldown, finalize_approved_application,
+    is_parked_expired_period_approval, is_retryable_evidence_error, load_applied_subscription,
+    load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
+    lock_subscription_aggregate, map_attempt_transition_error, mark_attempt_approved,
+    mutation_error_evidence, observe_parked_expired_period_approval, park_expired_period_approval,
+    park_locked_attempt, payment_result_for_attempt, payment_result_for_reservation_attempt,
+    persist_attempt_transition, reconcile_non_approved_evidence, renewal_subscription_matches,
+    resolve_pool_outcome, set_application_timeouts, stop_conflicting_subscription_approval,
 };
 
 /// One committed final-admission result authorizing exactly one immediate
@@ -84,14 +85,35 @@ pub enum SubscriptionRenewalProviderResult {
 }
 
 /// Commits final automatic-renewal admission and captures the exact stored credential.
+///
+/// This historical entrypoint admits with
+/// [`syrup_rail::SubscriptionPeriodExpiryPolicy::Disabled`].
 pub async fn admit_subscription_renewal_submission(
     pool: &PgPool,
     reservation: &SubscriptionRenewalReservation,
 ) -> Result<SubscriptionRenewalAdmissionOutcome, SubscriptionEnrollmentApplicationError> {
+    admit_subscription_renewal_submission_with_policy(
+        pool,
+        reservation,
+        syrup_rail::SubscriptionPeriodExpiryPolicy::Disabled,
+    )
+    .await
+}
+
+/// Final automatic-renewal admission under an explicit expiry policy.
+pub(crate) async fn admit_subscription_renewal_submission_with_policy(
+    pool: &PgPool,
+    reservation: &SubscriptionRenewalReservation,
+    expiry_policy: syrup_rail::SubscriptionPeriodExpiryPolicy,
+) -> Result<SubscriptionRenewalAdmissionOutcome, SubscriptionEnrollmentApplicationError> {
     let mut transaction = pool.begin().await?;
     let outcome =
-        crate::admit_subscription_renewal_submission_in_transaction(&mut transaction, reservation)
-            .await?;
+        crate::attempts::admit_subscription_renewal_submission_with_policy_in_transaction(
+            &mut transaction,
+            reservation,
+            expiry_policy,
+        )
+        .await?;
     let outcome = match outcome {
         SubscriptionRenewalSubmissionOutcome::Admitted(attempt) => {
             let identity = reservation.identity();
@@ -380,11 +402,13 @@ async fn apply_renewal_approved_outcome(
         )
         .await?;
     let subject_state = transaction.subject_state();
+    let expiry_policy = coordinator.subscription_period_expiry_policy();
     let application = apply_renewal_approved_on_connection(
         transaction.connection(),
         subject_state,
         reservation,
         approved_evidence,
+        expiry_policy,
     )
     .await;
     finalize_approved_application(transaction, application).await
@@ -395,6 +419,7 @@ async fn apply_renewal_approved_on_connection(
     subject_state: BillingTransactionSubjectState,
     reservation: &SubscriptionRenewalReservation,
     approved_evidence: &ApprovedProcessorEvidence,
+    expiry_policy: syrup_rail::SubscriptionPeriodExpiryPolicy,
 ) -> Result<
     (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
     SubscriptionEnrollmentApplicationError,
@@ -437,6 +462,9 @@ async fn apply_renewal_approved_on_connection(
             None,
         ));
     }
+    if is_parked_expired_period_approval(&attempt) {
+        return observe_parked_expired_period_approval(connection, attempt, evidence).await;
+    }
     if subject_state != BillingTransactionSubjectState::LiveRecipient {
         return Err(SubscriptionEnrollmentApplicationError::InvalidState(
             "a subscription renewal event requires a live recipient",
@@ -450,6 +478,14 @@ async fn apply_renewal_approved_on_connection(
             ProcessorChargeProgression::ExternalReversalRequired,
         )
         .await?;
+        if let ObservedCharge::Owned(charge) = &observation
+            && charge_is_externally_reversed(connection, charge.id).await?
+        {
+            let payment = payment_result_for_attempt(connection, attempt)
+                .await?
+                .with_observation_diagnostics(conflict_diagnostics);
+            return Ok((payment, None));
+        }
         if let ObservedCharge::Owned(charge) = observation {
             transition_charge(
                 connection,
@@ -528,6 +564,15 @@ async fn apply_renewal_approved_on_connection(
             SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
             None,
         ));
+    }
+    if expiry_policy.rejects_expired_periods()
+        && crate::period_expiry::period_has_expired_at_database_time(
+            connection,
+            *reservation.period().end_at(),
+        )
+        .await?
+    {
+        return park_expired_period_approval(connection, &attempt, charge.id, evidence).await;
     }
     let expected = reservation.expected_state();
     let updated = sqlx::query(

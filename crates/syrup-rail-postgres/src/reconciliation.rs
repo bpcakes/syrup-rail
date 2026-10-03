@@ -204,6 +204,27 @@ pub async fn claim_exact_reconciliation_attempts(
                     'subscription_initial_externally_refunded'
                 AND attempts.resolution_code IS DISTINCT FROM
                     'subscription_initial_externally_voided'
+                -- An approval parked because its billing period expired awaits
+                -- operator reversal; re-querying cannot change that disposition.
+                AND NOT (
+                    attempts.status = 'review_required'
+                    AND attempts.resolution_code IS NOT DISTINCT FROM
+                        'subscription_approved_period_expired'
+                )
+                -- A verified external reversal is terminal financial history.
+                AND NOT (
+                    attempts.attempt_kind IN (
+                        'subscription_renewal',
+                        'subscription_recovery'
+                    )
+                    AND COALESCE(
+                        attempts.resolution_code IN (
+                            'processor_charge_externally_refunded',
+                            'processor_charge_externally_voided'
+                        ),
+                        false
+                    )
+                )
             ORDER BY attempts.created_at, attempts.id
             LIMIT $5
             FOR UPDATE OF attempts SKIP LOCKED

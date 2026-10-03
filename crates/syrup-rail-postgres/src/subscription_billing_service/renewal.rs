@@ -9,10 +9,25 @@ impl SubscriptionBillingService {
     /// route it to the matching service rather than silently discard it. The
     /// operation never invokes end-user admission or the live offer store and
     /// never holds a database lock across provider I/O.
+    ///
+    /// When the coordinator's expiry policy rejects expired periods, a due
+    /// period that has ended makes no sale: reservation and final admission
+    /// refuse it, and [`Self::retire_expired_period`] retires it unless
+    /// payment outcomes are still unresolved. That work is also a no-op
+    /// result; the retirement event is the observable change.
     pub async fn renew(
         &self,
         command: ChargeRenewal,
     ) -> Result<SubscriptionRenewalOutcome, SubscriptionBillingServiceError> {
+        let expiry_policy = self.coordinator.subscription_period_expiry_policy();
+        if expiry_policy.rejects_expired_periods()
+            && let Some((subscriber_id, plan_key)) =
+                self.expired_renewal_period_owner(command).await?
+        {
+            self.retire_after_expired_renewal(command, subscriber_id, plan_key)
+                .await?;
+            return Ok(SubscriptionRenewalOutcome::Noop);
+        }
         let Some(account) = self.renewal_gateway_account(command).await? else {
             return Ok(SubscriptionRenewalOutcome::Noop);
         };
@@ -60,9 +75,23 @@ impl SubscriptionBillingService {
                     return Err(SubscriptionBillingServiceError::GatewayReadiness(error));
                 }
             };
-        let (reservation, attempt) = match self.reserve_renewal(command, &gateway).await? {
+        let (reservation, attempt) = match self
+            .reserve_renewal_with_policy(command, &gateway, expiry_policy)
+            .await?
+        {
             SubscriptionRenewalReservationOutcome::Reserved(reservation, attempt) => {
                 (*reservation, *attempt)
+            }
+            SubscriptionRenewalReservationOutcome::Rejected(
+                SubscriptionRenewalReservationRejection::BillingPeriodExpired,
+            ) => {
+                if let Some((subscriber_id, plan_key)) =
+                    self.expired_renewal_period_owner(command).await?
+                {
+                    self.retire_after_expired_renewal(command, subscriber_id, plan_key)
+                        .await?;
+                }
+                return Ok(SubscriptionRenewalOutcome::Noop);
             }
             SubscriptionRenewalReservationOutcome::Rejected(
                 SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress,
@@ -94,7 +123,12 @@ impl SubscriptionBillingService {
                 .await?;
             return Ok(SubscriptionRenewalOutcome::Noop);
         }
-        let admission = match admit_subscription_renewal_submission(&self.pool, &reservation).await
+        let admission = match admit_subscription_renewal_submission_with_policy(
+            &self.pool,
+            &reservation,
+            expiry_policy,
+        )
+        .await
         {
             Err(error) if is_retryable_renewal_admission_error(&error) => {
                 self.resolve_renewal_readiness_failure(
@@ -112,6 +146,22 @@ impl SubscriptionBillingService {
             Ok(outcome) => match outcome {
                 SubscriptionRenewalAdmissionOutcome::Admitted(admission) => *admission,
                 SubscriptionRenewalAdmissionOutcome::AlreadyAdmitted(attempt) => {
+                    return self
+                        .payment_result(attempt)
+                        .await
+                        .map(Box::new)
+                        .map(SubscriptionRenewalOutcome::Payment);
+                }
+                SubscriptionRenewalAdmissionOutcome::Rejected {
+                    attempt,
+                    reason: SubscriptionRenewalSubmissionRejection::BillingPeriodExpired,
+                } => {
+                    self.retire_after_expired_renewal(
+                        command,
+                        reservation.identity().subscriber_id(),
+                        reservation.plan_key().clone(),
+                    )
+                    .await?;
                     return self
                         .payment_result(attempt)
                         .await
@@ -156,17 +206,19 @@ impl SubscriptionBillingService {
         }
     }
 
-    pub(super) async fn reserve_renewal(
+    pub(super) async fn reserve_renewal_with_policy(
         &self,
         command: ChargeRenewal,
         gateway: &syrup_rail::ResolvedGateway,
+        expiry_policy: syrup_rail::SubscriptionPeriodExpiryPolicy,
     ) -> Result<SubscriptionRenewalReservationOutcome, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
-        let outcome = reserve_subscription_renewal_in_transaction(
+        let outcome = crate::attempts::reserve_subscription_renewal_with_policy_in_transaction(
             &mut transaction,
             command,
             gateway,
             self.required_gateway_account_mode,
+            expiry_policy,
         )
         .await?;
         transaction.commit().await?;

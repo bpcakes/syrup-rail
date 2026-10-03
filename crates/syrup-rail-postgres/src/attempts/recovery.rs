@@ -509,9 +509,32 @@ pub async fn reserve_subscription_recovery_in_transaction(
 
 /// Revalidates the exact locked snapshot and commits one-shot provider
 /// admission. Every semantic rejection terminalizes the prepared attempt.
+///
+/// This historical entrypoint never rejects an expired billing period; it is
+/// [`SubscriptionPeriodExpiryPolicy::Disabled`] admission.
 pub async fn admit_subscription_recovery_submission_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     reservation: &SubscriptionRecoveryReservation,
+) -> Result<SubscriptionRecoverySubmissionOutcome, PaymentAttemptStoreError> {
+    admit_subscription_recovery_submission_with_policy_in_transaction(
+        transaction,
+        reservation,
+        SubscriptionPeriodExpiryPolicy::Disabled,
+    )
+    .await
+}
+
+/// Final recovery admission under an explicit billing-period expiry policy.
+///
+/// Under [`SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods`], a reserved
+/// period whose end is at or before the database clock terminalizes the
+/// prepared attempt with
+/// [`PaymentResolutionCode::SubscriptionPeriodExpiredBeforeCharge`] instead of
+/// admitting it.
+pub(crate) async fn admit_subscription_recovery_submission_with_policy_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionRecoveryReservation,
+    expiry_policy: SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionRecoverySubmissionOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
     let identity = reservation.identity();
@@ -560,6 +583,21 @@ pub async fn admit_subscription_recovery_submission_in_transaction(
             attempt,
             SubscriptionRecoverySubmissionRejection::BillingStateChanged,
             RECOVERY_STATE_CHANGED_TEXT,
+        )
+        .await;
+    }
+    if expiry_policy.rejects_expired_periods()
+        && crate::period_expiry::period_has_expired_at_database_time(
+            transaction,
+            *reservation.period().end_at(),
+        )
+        .await?
+    {
+        return reject_locked_recovery(
+            transaction,
+            attempt,
+            SubscriptionRecoverySubmissionRejection::BillingPeriodExpired,
+            RECOVERY_PERIOD_EXPIRED_TEXT,
         )
         .await;
     }

@@ -527,6 +527,7 @@ mod consumer_edges;
 mod enrollment;
 mod infrastructure;
 mod migration;
+mod period_expiry;
 mod reclassification;
 mod recovery;
 mod terminal;

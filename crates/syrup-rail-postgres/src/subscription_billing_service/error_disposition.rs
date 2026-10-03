@@ -35,6 +35,7 @@ impl SubscriptionBillingServiceError {
             | Self::InvalidState(_) => SubscriptionBillingServiceErrorDisposition::Internal,
             Self::Cancellation(error) => cancellation_error_disposition(error),
             Self::Discount(error) => discount_error_disposition(error),
+            Self::PeriodExpiry(_) => SubscriptionBillingServiceErrorDisposition::Internal,
             Self::HostChargeUnavailable => {
                 SubscriptionBillingServiceErrorDisposition::Misconfigured
             }
@@ -124,6 +125,7 @@ impl SubscriptionBillingServiceError {
             | Self::HostChargeStore(_)
             | Self::Cancellation(_)
             | Self::Discount(_)
+            | Self::PeriodExpiry(_)
             | Self::BillingTransaction(_)
             | Self::BillingEvent(_)
             | Self::HostChargeUnavailable

@@ -25,6 +25,7 @@ use syrup_rail::{
     SubscriptionRecoveryReservationRejection, SubscriptionRecoverySubmissionRejection,
     SubscriptionRenewalOutcome, SubscriptionRenewalReservation,
     SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
+    SubscriptionRenewalSubmissionRejection,
 };
 use thiserror::Error;
 
@@ -44,7 +45,6 @@ use crate::{
     SubscriptionRecoveryProviderResult, SubscriptionRenewalAdmissionOutcome,
     SubscriptionRenewalProviderResult, admit_host_charge_submission,
     admit_subscription_enrollment_submission, admit_subscription_payment_method_replacement,
-    admit_subscription_recovery_submission, admit_subscription_renewal_submission,
     apply_reconciled_host_charge_gateway_outcome,
     apply_reconciled_subscription_enrollment_gateway_outcome,
     apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
@@ -54,6 +54,7 @@ use crate::{
         AttemptReplayDisposition, AttemptResolutionStatus, LocalAttemptPolicy,
         attempt_replay_disposition,
     },
+    enrollment_application::admit_subscription_renewal_submission_with_policy,
     enrollment_application::{
         OutcomeApplication, OutcomeResolutionBoundary, OutcomeResolutionCommand, RateLimitCooldown,
         RateLimitCooldownPersistence, payment_result_for_attempt,
@@ -67,8 +68,8 @@ use crate::{
     preflight_subscription_recovery_in_transaction, reserve_host_charge_in_transaction,
     reserve_subscription_enrollment_in_transaction,
     reserve_subscription_payment_method_replacement_in_transaction,
-    reserve_subscription_recovery_in_transaction, reserve_subscription_renewal_in_transaction,
-    submit_admitted_host_charge, submit_admitted_subscription_enrollment,
+    reserve_subscription_recovery_in_transaction, submit_admitted_host_charge,
+    submit_admitted_subscription_enrollment,
     submit_admitted_subscription_payment_method_replacement, submit_admitted_subscription_recovery,
     submit_admitted_subscription_renewal, verify_gateway_account_mode,
 };
@@ -78,6 +79,7 @@ mod error_disposition;
 mod host_charge;
 mod payment_method_metadata;
 mod payment_method_replacement;
+mod period_expiry;
 mod reconciliation;
 mod recovery;
 mod renewal;
@@ -179,6 +181,9 @@ pub enum SubscriptionBillingServiceError {
     /// Subscriber discount mutation failed.
     #[error("subscription discount operation failed")]
     Discount(#[source] crate::SubscriptionDiscountOperationError),
+    /// Billing-period retirement or past-due access policy storage failed.
+    #[error("subscription period expiry operation failed")]
+    PeriodExpiry(#[source] crate::SubscriptionPeriodExpiryError),
     /// The host-prepared billing transaction failed.
     #[error("host billing transaction failed")]
     BillingTransaction(#[from] crate::BillingTransactionError),
@@ -285,6 +290,9 @@ impl fmt::Debug for SubscriptionBillingServiceError {
                 formatter.write_str("SubscriptionBillingServiceError::Cancellation")
             }
             Self::Discount(_) => formatter.write_str("SubscriptionBillingServiceError::Discount"),
+            Self::PeriodExpiry(_) => {
+                formatter.write_str("SubscriptionBillingServiceError::PeriodExpiry")
+            }
             Self::BillingTransaction(_) => {
                 formatter.write_str("SubscriptionBillingServiceError::BillingTransaction")
             }
@@ -385,6 +393,19 @@ impl From<crate::SubscriptionCancellationError> for SubscriptionBillingServiceEr
                 Self::StorageTemporarilyUnavailable(source)
             }
             error => Self::Cancellation(error),
+        }
+    }
+}
+
+impl From<crate::SubscriptionPeriodExpiryError> for SubscriptionBillingServiceError {
+    fn from(error: crate::SubscriptionPeriodExpiryError) -> Self {
+        match error {
+            crate::SubscriptionPeriodExpiryError::Sql(source)
+                if is_retryable_provider_free_transaction_error(&source) =>
+            {
+                Self::StorageTemporarilyUnavailable(source)
+            }
+            error => Self::PeriodExpiry(error),
         }
     }
 }

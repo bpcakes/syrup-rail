@@ -37,6 +37,19 @@ async fn gateway_identity_matches_subscription(
     )
 }
 
+fn renewal_period_from_row(
+    row: &PgRow,
+    period_start_at: DateTime<Utc>,
+) -> Result<BillingPeriod, PaymentAttemptStoreError> {
+    let recurring_period_kind: String = row.try_get("recurring_period_kind")?;
+    let recurring_period_count: i32 = row.try_get("recurring_period_count")?;
+    let recurring_period = subscription_period_rule_from_scalars(
+        SubscriptionPeriodRuleScalars::new(&recurring_period_kind, recurring_period_count),
+    )
+    .map_err(map_subscription_persistence_error)?;
+    syrup_rail::next_billing_period(period_start_at, recurring_period).map_err(|_| invalid_state())
+}
+
 fn locked_renewal_terms_from_row(
     row: &PgRow,
     subscription_id: SubscriptionId,
@@ -55,14 +68,7 @@ fn locked_renewal_terms_from_row(
     let status = status_value
         .parse::<SubscriptionStatus>()
         .map_err(|_| invalid_state())?;
-    let recurring_period_kind: String = row.try_get("recurring_period_kind")?;
-    let recurring_period_count: i32 = row.try_get("recurring_period_count")?;
-    let recurring_period = subscription_period_rule_from_scalars(
-        SubscriptionPeriodRuleScalars::new(&recurring_period_kind, recurring_period_count),
-    )
-    .map_err(map_subscription_persistence_error)?;
-    let period = syrup_rail::next_billing_period(period_start_at, recurring_period)
-        .map_err(|_| invalid_state())?;
+    let period = renewal_period_from_row(row, period_start_at)?;
     let payment_method_id = PaymentMethodId::new(row.try_get("payment_method_id")?);
     let expected_state = locked_subscription_payment_state(
         subscription_id,
@@ -253,11 +259,37 @@ async fn locked_renewal_method_address(
 /// aggregate, matching approval writers and the subscriber scrub, then reads
 /// the selected active method's billing address into the attempt snapshot.
 /// Admission and submission use only that snapshot.
+///
+/// This historical entrypoint never rejects an expired billing period; it is
+/// [`SubscriptionPeriodExpiryPolicy::Disabled`] reservation.
 pub async fn reserve_subscription_renewal_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     command: syrup_rail::ChargeRenewal,
     gateway: &syrup_rail::ResolvedGateway,
     required_gateway_account_mode: GatewayAccountMode,
+) -> Result<SubscriptionRenewalReservationOutcome, PaymentAttemptStoreError> {
+    reserve_subscription_renewal_with_policy_in_transaction(
+        transaction,
+        command,
+        gateway,
+        required_gateway_account_mode,
+        SubscriptionPeriodExpiryPolicy::Disabled,
+    )
+    .await
+}
+
+/// Renewal reservation under an explicit billing-period expiry policy.
+///
+/// Under [`SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods`], a due period
+/// whose end is at or before the database clock is rejected as
+/// [`SubscriptionRenewalReservationRejection::BillingPeriodExpired`] before
+/// any attempt is inserted.
+pub(crate) async fn reserve_subscription_renewal_with_policy_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    command: syrup_rail::ChargeRenewal,
+    gateway: &syrup_rail::ResolvedGateway,
+    required_gateway_account_mode: GatewayAccountMode,
+    expiry_policy: SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionRenewalReservationOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
     let locator = sqlx::query_as::<_, (Uuid, String, Uuid)>(
@@ -331,6 +363,16 @@ pub async fn reserve_subscription_renewal_in_transaction(
         return Ok(SubscriptionRenewalReservationOutcome::Rejected(
             SubscriptionRenewalReservationRejection::GatewayAccountModeChanged,
         ));
+    }
+    if expiry_policy.rejects_expired_periods() {
+        let period = renewal_period_from_row(&row, period_start_at)?;
+        if crate::period_expiry::period_has_expired_at_database_time(transaction, *period.end_at())
+            .await?
+        {
+            return Ok(SubscriptionRenewalReservationOutcome::Rejected(
+                SubscriptionRenewalReservationRejection::BillingPeriodExpired,
+            ));
+        }
     }
 
     fail_stale_unsubmitted_payment_method_updates(transaction, command.subscription_id()).await?;
@@ -433,9 +475,32 @@ pub async fn reserve_subscription_renewal_in_transaction(
 }
 
 /// Revalidates one exact renewal snapshot and commits one-shot submission admission.
+///
+/// This historical entrypoint never rejects an expired billing period; it is
+/// [`SubscriptionPeriodExpiryPolicy::Disabled`] admission.
 pub async fn admit_subscription_renewal_submission_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     reservation: &SubscriptionRenewalReservation,
+) -> Result<SubscriptionRenewalSubmissionOutcome, PaymentAttemptStoreError> {
+    admit_subscription_renewal_submission_with_policy_in_transaction(
+        transaction,
+        reservation,
+        SubscriptionPeriodExpiryPolicy::Disabled,
+    )
+    .await
+}
+
+/// Final renewal admission under an explicit billing-period expiry policy.
+///
+/// Under [`SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods`], a reserved
+/// period whose end is at or before the database clock terminalizes the
+/// prepared attempt with
+/// [`PaymentResolutionCode::SubscriptionPeriodExpiredBeforeCharge`]. That code
+/// is not qualifying dunning history and consumes no retry step.
+pub(crate) async fn admit_subscription_renewal_submission_with_policy_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    reservation: &SubscriptionRenewalReservation,
+    expiry_policy: SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionRenewalSubmissionOutcome, PaymentAttemptStoreError> {
     set_enrollment_timeouts(transaction).await?;
     let identity = reservation.identity();
@@ -493,6 +558,21 @@ pub async fn admit_subscription_renewal_submission_in_transaction(
             attempt,
             SubscriptionRenewalSubmissionRejection::BillingStateChanged,
             RENEWAL_STATE_CHANGED_TEXT,
+        )
+        .await;
+    }
+    if expiry_policy.rejects_expired_periods()
+        && crate::period_expiry::period_has_expired_at_database_time(
+            transaction,
+            *reservation.period().end_at(),
+        )
+        .await?
+    {
+        return reject_locked_renewal(
+            transaction,
+            attempt,
+            SubscriptionRenewalSubmissionRejection::BillingPeriodExpired,
+            RENEWAL_PERIOD_EXPIRED_TEXT,
         )
         .await;
     }
