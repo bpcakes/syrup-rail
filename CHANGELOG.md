@@ -2,6 +2,77 @@
 
 All notable changes to the Syrup Rail crates are documented in this file.
 
+## [0.5.5] - Unreleased
+
+Schema-v6 release on the 0.5.x line. Like 0.5.4 it is not a drop-in patch:
+hosts must complete a stopped-writer schema cutover and adapt to the source
+breaks below. Every new behavior is opt-in, so existing code paths behave as
+in 0.5.4 until a host enables the billing-period expiry policy or calls a new
+operation. The release manager dates this heading when the release is tagged.
+
+### Action required for hosts
+
+- Apply the schema-v6 cutover before starting 0.5.5. Existing schema-v5 hosts
+  stop every billing writer, commit `schema/v6/upgrade_from_v5.sql` in one
+  transaction, and start 0.5.5 only after the new
+  `assert_runtime_schema_v6_compatible` passes; new hosts install
+  `schema/v6/install.sql`. Rehearse the constraint-validation scans of
+  `billing_payment_attempts` and `billing_external_reversal_attestations` on a
+  production-sized copy first. 0.5.4 binaries fail their v5 startup assertion
+  after the upgrade commits, and recovery after commit is roll-forward only.
+  See `crates/syrup-rail-postgres/schema/v6/README.md`.
+- `BillingEvent` gains `SubscriptionPeriodExpired` and `BillingEventKey` gains
+  its key. Exhaustive host event mappers must choose a durable representation.
+- `PaymentResolutionCode` gains `SubscriptionPeriodExpiredBeforeCharge` and
+  `SubscriptionApprovedPeriodExpired`; `SubscriptionRenewalReservationRejection`,
+  `SubscriptionRenewalSubmissionRejection`, and
+  `SubscriptionRecoverySubmissionRejection` gain `BillingPeriodExpired`.
+  Exhaustive matches must handle them.
+
+### Added
+
+- Add schema v6 (`schema/v6/install.sql`, `schema/v6/upgrade_from_v5.sql`),
+  which only widens the attempt resolution-code list and the external-reversal
+  prior-resolution list, plus `assert_runtime_schema_v6_compatible`.
+  `assert_runtime_schema_v5_compatible` remains for confirming the pre-cutover
+  state.
+- Add `SubscriptionPeriodExpiryPolicy`, selected by the host through the new
+  defaulted `BillingTransactionCoordinator::subscription_period_expiry_policy`.
+  Under `RejectExpiredPeriods`, every initial, renewal, and recovery approval,
+  foreground or reconciled, parks an approval whose period ended at or before
+  the database clock for external reversal with the typed
+  `subscription_approved_period_expired` code instead of applying it; the
+  service's renewal and recovery final admission reject an expired period
+  before provider I/O; and `renew` retires an expired due period instead of
+  selling it. A parked attempt is never applied afterwards, whatever the
+  policy, and exact reconciliation no longer claims it.
+- Add `admit_subscription_recovery_submission_with_transaction`, which runs
+  recovery final admission on a caller-owned transaction, commits it, and only
+  then returns one-shot submission authority. The pool wrapper delegates to it
+  with the policy disabled.
+- Add `retire_expired_subscription_period_in_transaction`,
+  `SubscriptionBillingService::retire_expired_period`,
+  `RetireExpiredSubscriptionPeriod`, and `SubscriptionPeriodRetirementOutcome`
+  to retire one exact obsolete due period as terminal `unpaid` once no payment
+  outcome or charge for the subscription is unresolved, rejecting the period's
+  remaining unsubmitted authority and emitting `SubscriptionPeriodExpired`.
+- Add `change_subscription_past_due_access_in_transaction`,
+  `ChangeSubscriptionPastDueAccess`, and
+  `SubscriptionPastDueAccessChangeOutcome` to move an existing active or
+  past-due subscription to another persisted past-due access policy.
+- Add `SubscriptionPeriodExpiryError` and the non-exhaustive
+  `SubscriptionBillingServiceError::PeriodExpiry` variant.
+- `attest_external_reversal` records `subscription_approved_period_expired` as
+  the prior resolution for a charge parked by the expiry policy.
+
+### Fixed
+
+- Treat a verified external reversal of a renewal or recovery charge as stable
+  terminal history. Exact reconciliation no longer reclaims the reversed
+  attempt as a recent terminal attempt, and a later observation of the
+  original approval no longer fails while trying to move the reversed charge
+  back to review or reopens a terminal initial attempt.
+
 ## [0.5.4] - Unreleased
 
 Schema-v5 release on the 0.5.x line. It is not a drop-in patch: hosts must

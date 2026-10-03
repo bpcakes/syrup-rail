@@ -9,9 +9,13 @@ and transaction orchestration.
 
 - `src/lib.rs` — the public PostgreSQL operation facade and crate-private
   module ownership map.
-- `schema/v5/install.sql` — current authoritative fresh-install DDL;
-  `schema/v5/upgrade_from_v4.sql` is the one-transaction, stopped-writer
-  forward-only v4 cutover that appends the billing-address columns.
+- `schema/v6/install.sql` — current authoritative fresh-install DDL;
+  `schema/v6/upgrade_from_v5.sql` is the one-transaction, stopped-writer
+  forward-only v5 cutover that widens the attempt resolution-code and
+  external-reversal prior-resolution CHECK lists for billing-period expiry.
+- `schema/v5/**` — immutable shipped version-5 distribution artifacts,
+  including the one-transaction v4 cutover (`upgrade_from_v4.sql`) that
+  appends the billing-address columns.
 - `schema/v4/**` — immutable shipped version-4 distribution artifacts,
   including the staged v3 cutover (`prepare_from_v3.sql`,
   `validate_from_v3.sql`, the non-transactional `index_from_v3.sql`, and
@@ -23,9 +27,9 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v5 runtime compatibility
-  assertion, the retained v4 pre-cutover assertion, and canonical catalog
-  conformance. Version-specific, upgrade, and
+- `src/schema_contract.rs` — production read-only v6 runtime compatibility
+  assertion, the retained v5 and v4 pre-cutover assertions, and canonical
+  catalog conformance. Version-specific, upgrade, and
   shared fixture tests live under `src/schema_contract/tests/`; checked-in
   install/upgrade SQL constants remain behind tests or the explicit
   `schema-contract-test-support` feature.
@@ -48,6 +52,11 @@ and transaction orchestration.
   approval mutations live in their nested `approval.rs` modules.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
+- `src/period_expiry.rs` — the database-clock billing-period expiry check,
+  canonical retirement of an obsolete due period as `unpaid`, and the
+  existing-subscription past-due access policy change. The service wrapper and
+  `renew` integration live in `src/subscription_billing_service/period_expiry.rs`
+  and `renewal.rs`.
 - `src/renewal.rs` — deterministic due-renewal selection and stable
   cursor-paginated dispatch pages. The scan timestamp is observed by
   PostgreSQL; host queue/outbox persistence and eventual renewal submission
@@ -118,9 +127,9 @@ and transaction orchestration.
 - Change canonical tables, constraints, functions, triggers, or views in the
   current versioned schema artifact and supply a forward-only upgrade for any
   materialized version. Never edit shipped `schema/v1/**` through
-  `schema/v4/**`.
+  `schema/v5/**`.
 - Change host conformance or schema behavior tests in the matching
-  `src/schema_contract/tests/{v1,v2,v3,v4,v5,upgrade}` module, keep shared setup in the
+  `src/schema_contract/tests/{v1,v2,v3,v4,v5,v6,upgrade}` module, keep shared setup in the
   fixture modules, and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
@@ -162,7 +171,7 @@ and transaction orchestration.
   Pass selected presentation fields to the core conversion before deciding
   presence; normalized absence must remain `None`. Keep the exact-plan
   identity prefix plus descending `(created_at, id)` keyset aligned with
-  `billing_payment_attempts_subscription_history_idx` in the current schema-v5
+  `billing_payment_attempts_subscription_history_idx` in the current schema-v6
   artifacts and the runtime schema contract. Keep first-page and continuation
   SQL as separate physical statements, with the continuation keyset as an
   unconditional index condition; the PostgreSQL generic-plan regression must
@@ -208,13 +217,16 @@ and transaction orchestration.
   fold so it is not unconditionally materialized before the outer page limit,
   and keep that keyset aligned with `billing_subscriptions_due_idx` for all-mode
   scans and `billing_subscriptions_due_mode_idx` for mode-specific scans in
-  the current schema-v5 install artifact and the complete runtime index contract. Folding and
+  the current schema-v6 install artifact and the complete runtime index contract. Folding and
   aligned indexes make early stopping available; PostgreSQL still chooses plans
   by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
   remain host-owned. This freezes eligibility time rather than holding a
   cross-page MVCC snapshot, so concurrent candidates behind a cursor can wait
   for a fresh scan.
+- Change billing-period expiry checks, retirement, or the past-due access
+  policy change in `src/period_expiry.rs`; change where the policy applies in
+  the owning attempt admission and `enrollment_application` workflow modules.
 - Change grant mutation policy in `src/grants.rs`; keep host user existence,
   actor authorization, and actor presentation in the host transaction.
 - Change reusable discount operations or the offer-store port in
@@ -264,16 +276,17 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
-- `assert_runtime_schema_v5_compatible` must reuse the complete canonical v5
+- `assert_runtime_schema_v6_compatible` must reuse the complete canonical v6
   catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
   major other than 18, and run no DDL; hosts apply versioned install and
   forward-only upgrade artifacts through their own migrations. The retained
-  `assert_runtime_schema_v4_compatible` checks only the pre-cutover v4 state.
+  `assert_runtime_schema_v5_compatible` and `assert_runtime_schema_v4_compatible`
+  check only their pre-cutover states.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
-  `assert_v3_conforms`, `assert_v4_conforms`, and `assert_v5_conforms`
-  wrappers are also read-only;
+  `assert_v3_conforms`, `assert_v4_conforms`, `assert_v5_conforms`, and
+  `assert_v6_conforms` wrappers are also read-only;
   mutation and locking
   behavior belongs in package fixtures and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;
@@ -361,6 +374,37 @@ and transaction orchestration.
 - Discount-code list and disable operations administer durable records without
   consulting the current offer. Only active create/update, validation, and
   claim paths lock the host offer and construct current pricing.
+- Billing-period expiry is host-selected through
+  `BillingTransactionCoordinator::subscription_period_expiry_policy` and
+  defaults to `Disabled`; with it disabled, admission and approval
+  application keep their historical behavior.
+  Compare a period end with the database clock (`end <= clock_timestamp()` is
+  expired) under the workflow's locks, never with application time. An
+  approval for an expired period moves its primary charge to
+  `external_reversal_required` and its attempt to `review_required`, both with
+  `subscription_approved_period_expired`, without changing the subscription,
+  method, discount, or events. An attempt parked with that code is never
+  applied again regardless of the current policy, and exact reconciliation
+  never claims it. Final admission rejects an expired period with
+  `subscription_period_expired_before_charge`, which is not qualifying dunning
+  history.
+- Retirement of an obsolete due period is the only expiry transition to
+  `unpaid`. It requires the exact owner, plan, subscription, `active` or
+  `past_due` status, unchanged `next_renewal_at`, and an expired period, and it
+  refuses while any submitted, unknown, review-required, or same-period
+  approved renewal/recovery attempt or any pending, reconciliation-required,
+  or external-reversal-required charge remains. It rejects the period's
+  unsubmitted authority in the same transaction, preserves every date, amount,
+  identifier, and payment record, never touches a canceled lifecycle, and
+  emits `SubscriptionPeriodExpired`.
+- A verified external reversal is terminal financial history. Reconciliation
+  excludes reversed renewal/recovery attempts, and an observation of the
+  original approval for a terminal attempt whose charge is externally reversed
+  returns the terminal result without transitioning the charge or reopening
+  the attempt.
+- The past-due access policy change touches only an `active` or `past_due`
+  row's persisted `past_due_access` under the aggregate and row locks; access
+  is always derived from that policy and durable failure history, never stored.
 - `unpaid` is terminal financial history: it grants no entitlement, permits no
   renewal or recovery, and cannot keep a payment method enabled as collection
   authority. It is not rewritten to canceled during deletion cleanup.

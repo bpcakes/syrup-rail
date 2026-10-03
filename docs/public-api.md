@@ -1,4 +1,4 @@
-# Syrup Rail 0.5.4 public API
+# Syrup Rail 0.5.5 public API
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -171,6 +171,41 @@ are shared, and cancellation/deletion blockers remain mode-neutral. Hosts that
 need test work to have no effect on live subscriber lifecycle must isolate the
 tenant/database or use synthetic test subscribers.
 
+0.5.5 adds an opt-in billing-period expiry policy and the operations around
+it. `SubscriptionPeriodExpiryPolicy` defaults to `Disabled`, which keeps the
+historical behavior. A host enables `RejectExpiredPeriods` by overriding the
+defaulted `BillingTransactionCoordinator::subscription_period_expiry_policy`.
+Because foreground application and reconciliation share the coordinator, every
+subscription payment application then refuses to apply a period whose end is
+at or before the database clock: the approval keeps its exact processor
+evidence, its charge moves to external-reversal review and its attempt to
+review-required with `PaymentResolutionCode::SubscriptionApprovedPeriodExpired`,
+and the subscription is never activated, renewed, or rescheduled. Initial
+approvals are included because activating an ended initial period would make
+the first recurring charge immediately due. The parked attempt is never applied
+afterwards, whatever the policy. The service's renewal and recovery final
+admission refuse an expired period with `BillingPeriodExpired`, and `renew`
+retires an expired due period instead of selling it.
+
+`admit_subscription_recovery_submission_with_transaction` consumes a
+caller-owned transaction, runs recovery final admission on it, commits, and
+only then returns the one-shot authority accepted by
+`submit_admitted_subscription_recovery`; a failed admission or commit rolls the
+transaction back and yields none. `retire_expired_subscription_period_in_transaction`
+and `SubscriptionBillingService::retire_expired_period` retire one exact
+obsolete due period as terminal `unpaid` after rechecking owner, plan, period,
+expiry, and every unresolved payment outcome or unreversed charge; they reject
+that period's remaining unsubmitted authority, preserve dates and payment
+history, never touch a canceled lifecycle, emit
+`BillingEvent::SubscriptionPeriodExpired`, and replay as `AlreadyUnpaid`.
+`attest_external_reversal` records `subscription_approved_period_expired` as
+the prior resolution of a parked charge, and a verified renewal or recovery
+reversal is stable terminal history for reconciliation and later observations.
+`change_subscription_past_due_access_in_transaction` moves an existing active
+or past-due subscription to another persisted past-due access policy under the
+aggregate lock; canceled and unpaid lifecycles keep their terms. These
+resolution codes require schema v6.
+
 ## Read and scheduler surface
 
 Use `subscription_billing_portal` and `subscription_payment_history_page` for
@@ -221,12 +256,13 @@ than being expired automatically.
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v5_compatible` after host migrations and before
-serving billing traffic. Version 0.5.4 supports PostgreSQL 18 and schema v5 only;
+Use `assert_runtime_schema_v6_compatible` after host migrations and before
+serving billing traffic. Version 0.5.5 supports PostgreSQL 18 and schema v6 only;
 the assertion is read-only and does not install or upgrade a schema.
-`assert_runtime_schema_v4_compatible` remains for confirming the pre-cutover
-state before a host commits `schema/v5/upgrade_from_v4.sql` with every billing
-writer stopped. It
+`assert_runtime_schema_v5_compatible` remains for confirming the pre-cutover
+state before a host commits `schema/v6/upgrade_from_v5.sql` with every billing
+writer stopped, and `assert_runtime_schema_v4_compatible` likewise before
+`schema/v5/upgrade_from_v4.sql`. The runtime assertion
 tolerates concurrent-reindex shadows only when the validating role can observe
 the matching `pg_stat_progress_create_index` details; cross-role maintenance is
 fail-closed unless the observer has PostgreSQL statistics privileges.

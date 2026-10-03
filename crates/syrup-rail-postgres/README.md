@@ -1,23 +1,25 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.5.4
-supports PostgreSQL 18 only and uses schema v5.
+SQLx operations, and high-level subscription billing service. Version 0.5.5
+supports PostgreSQL 18 only and uses schema v6.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.4"
-syrup-rail-postgres = "0.5.4"
+syrup-rail = "0.5.5"
+syrup-rail-postgres = "0.5.5"
 ```
 
-New hosts install `schema/v5/install.sql` through their normal migration
-system. Existing schema-v4 hosts stop every billing writer and commit
-`schema/v5/upgrade_from_v4.sql` in one transaction, following
-`schema/v5/README.md`; old v4 binaries must not restart after that commit.
-Hosts still on schema v3 first complete the staged v4 cutover
-(`schema/v4/prepare_from_v3.sql`, `schema/v4/validate_from_v3.sql`,
-`schema/v4/index_from_v3.sql` outside a transaction, and
-`schema/v4/upgrade_from_v3.sql`). Schemas v1 through v4 are immutable. The
+New hosts install `schema/v6/install.sql` through their normal migration
+system. Existing schema-v5 hosts stop every billing writer and commit
+`schema/v6/upgrade_from_v5.sql` in one transaction, following
+`schema/v6/README.md`; old 0.5.4 binaries must not restart after that commit.
+Schema-v4 hosts first commit `schema/v5/upgrade_from_v4.sql` the same way,
+following `schema/v5/README.md`. Hosts still on schema v3 first complete the
+staged v4 cutover (`schema/v4/prepare_from_v3.sql`,
+`schema/v4/validate_from_v3.sql`, `schema/v4/index_from_v3.sql` outside a
+transaction, and `schema/v4/upgrade_from_v3.sql`). Schemas v1 through v5 are
+immutable. The
 detailed versioned guides explain the required lock, maintenance, and
 rehearsal boundaries.
 
@@ -26,7 +28,7 @@ verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v5_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v6_compatible(pool).await?;
 # Ok(())
 # }
 ```
@@ -321,6 +323,62 @@ possible write is the shared provider cooldown after a rate limit, which pauses
 renewals and enrollments for that provider; hosts bound diagnostic volume, do
 not diagnose scrubbed subscribers, and purge cached observations in their own
 scrub transaction.
+
+## Billing-period expiry
+
+`SubscriptionPeriodExpiryPolicy::Disabled` is the default and keeps the
+historical behavior. A host opts in by returning `RejectExpiredPeriods` from
+its coordinator's `subscription_period_expiry_policy`. Because foreground
+application and
+reconciliation share that coordinator, every subscription payment application
+then compares the period it would apply with the database clock; a period whose
+end is at or before that time has expired. A late approval keeps its exact
+processor evidence, moves its charge to external-reversal review and its
+attempt to review-required, both with the typed code
+`subscription_approved_period_expired`, and never activates, renews, or
+reschedules the subscription. A parked attempt is never applied afterwards,
+whatever the policy, and exact reconciliation no longer claims it. Initial
+approvals are covered too, because activating an initial period that already
+ended would make its first recurring charge immediately due.
+
+The high-level service's renewal and recovery final admission reject an
+expired period before provider I/O with `BillingPeriodExpired` and the
+attempt code `subscription_period_expired_before_charge`, which is not dunning
+history. `renew` then retires the expired due period instead of selling it.
+Hosts that compose recovery themselves use
+`admit_subscription_recovery_submission_with_transaction`: it runs final
+admission on the host's own transaction, after the host's same-lock checks,
+commits it, and only then returns one-shot submission authority; any error or
+failed commit rolls everything back and yields none.
+
+`retire_expired_subscription_period_in_transaction` (or
+`SubscriptionBillingService::retire_expired_period`) retires one exact obsolete
+due period as terminal `unpaid`. Under the aggregate and row locks it rechecks
+owner, plan, the exact period start, and expiry, and refuses while any
+submitted, unknown, review-required, or same-period approved renewal or
+recovery attempt, or any pending, reconciliation-required, or
+external-reversal-required charge remains. Declined, failed, and fully reversed
+history does not block it. It rejects the period's still-unsubmitted renewal
+and recovery authority in the same transaction, preserves dates, amounts,
+identifiers, and payment records, never touches a canceled lifecycle, emits
+`BillingEvent::SubscriptionPeriodExpired`, and replays as `AlreadyUnpaid`. Its
+`access_ends_at` is the retirement time when access was still open, and
+otherwise the cycle's causal failure boundary.
+
+An operator resolves a parked late approval by refunding or voiding the exact
+charge outside Syrup Rail, verifying the full original amount, and calling
+`attest_external_reversal`; the attestation records
+`subscription_approved_period_expired` as its prior resolution. A verified
+renewal or recovery reversal is stable terminal history: reconciliation no
+longer reclaims it, and a later observation of the original approval neither
+fails nor reopens review. The period can then be retired.
+
+`change_subscription_past_due_access_in_transaction` moves an existing active
+or past-due subscription to another persisted past-due access policy under the
+aggregate lock. Entitlement and later failure events derive access from the
+persisted policy, so a past-due row moved to `SuspendImmediately` loses access
+at once with its first qualifying failure as the boundary. Canceled and unpaid
+lifecycles keep their historical terms, and a repeated change is `Unchanged`.
 
 Schema v5 stores an optional customer-confirmed billing address on payment
 methods and all five attempt kinds. Approved enrollment, recovery, and
