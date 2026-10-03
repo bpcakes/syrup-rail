@@ -54,6 +54,12 @@ operation. The release manager dates this heading when the release is tagged.
   it, and only then returns one-shot submission authority; a nested
   transaction is rejected. The pool wrapper delegates to it with the policy
   disabled.
+- Add `resolve_subscription_recovery_readiness_failure` and
+  `SubscriptionRecoveryReadinessResolution` so a host that reserves and admits
+  a recovery itself records a failed `verify_gateway_account_mode` with the
+  same policy as `SubscriptionBillingService::recover`: a transient outage
+  keeps the prepared attempt, a rate limit records the provider cooldown and
+  resolves the attempt, and any other failure resolves it terminally.
 - Add `retire_expired_subscription_period_in_transaction`,
   `SubscriptionBillingService::retire_expired_period`,
   `RetireExpiredSubscriptionPeriod`, and `SubscriptionPeriodRetirementOutcome`

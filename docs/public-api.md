@@ -191,7 +191,12 @@ retires an expired due period instead of selling it.
 caller-owned transaction, runs recovery final admission on it, commits, and
 only then returns the one-shot authority accepted by
 `submit_admitted_subscription_recovery`; a failed admission or commit rolls the
-transaction back and yields none. `retire_expired_subscription_period_in_transaction`
+transaction back and yields none. A host composing that flow passes a failed
+`verify_gateway_account_mode` to `resolve_subscription_recovery_readiness_failure`
+instead of discarding it: it applies `SubscriptionBillingService::recover`'s
+readiness policy to the prepared reservation, returning `Retained` for a
+transient outage and `Resolved` (with the provider cooldown recorded for a rate
+limit) otherwise. `retire_expired_subscription_period_in_transaction`
 and `SubscriptionBillingService::retire_expired_period` retire one exact
 obsolete due period as terminal `unpaid` after rechecking owner, plan, period,
 expiry, and every unresolved payment outcome or unreversed charge; they reject

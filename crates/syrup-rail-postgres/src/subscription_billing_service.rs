@@ -84,6 +84,9 @@ mod reconciliation;
 mod recovery;
 mod renewal;
 mod subscriber;
+pub use subscriber::{
+    SubscriptionRecoveryReadinessResolution, resolve_subscription_recovery_readiness_failure,
+};
 mod subscriber_mutation;
 
 const INVALID_SERVICE_STATE: &str = "canonical subscription billing service state is invalid";

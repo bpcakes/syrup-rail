@@ -186,7 +186,8 @@ pub use schema_contract::{
 };
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,
-    SubscriptionBillingServiceErrorDisposition,
+    SubscriptionBillingServiceErrorDisposition, SubscriptionRecoveryReadinessResolution,
+    resolve_subscription_recovery_readiness_failure,
 };
 pub use transactions::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,
