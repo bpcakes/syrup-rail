@@ -2142,3 +2142,67 @@ async fn compensation_parks_a_late_approval_of_a_declined_restart() -> Result<()
     result?;
     cleanup
 }
+
+#[tokio::test]
+async fn evidence_only_late_approval_of_an_old_declined_restart_reaches_operator_reversal()
+-> Result<(), Box<dyn Error>> {
+    let harness = Harness::start("pe_old_declined").await?;
+    let result = async {
+        // Declined 40 days ago, so exact reconciliation no longer rescans it.
+        let (subscriber_id, enrollment) =
+            expired_restart(&harness, "old-declined-restart", true).await?;
+        let attempt_id = enrollment.identity().attempt_id();
+        let mut holder = harness.pool().begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        )
+        .bind(subscriber_id.as_uuid())
+        .bind("identity_pro")
+        .execute(&mut *holder)
+        .await?;
+        for _ in 0..2 {
+            let observed = apply_subscription_enrollment_gateway_outcome(
+                harness.pool(),
+                &UnavailableCoordinator,
+                &enrollment,
+                &approved_outcome("old_declined_restart_sale"),
+            )
+            .await?;
+            assert!(observed.subscription().is_none());
+        }
+        holder.rollback().await?;
+        // The terminal attempt keeps its status, but its approved money is
+        // queued for operator reversal with the typed expiry reason.
+        assert_eq!(
+            attempt_disposition(harness.pool(), attempt_id).await?.0,
+            "declined"
+        );
+        let charges = attempt_charges(harness.pool(), attempt_id).await?;
+        assert_eq!(charges.len(), 1);
+        assert_eq!(
+            (charges[0].1.as_str(), charges[0].2.as_deref()),
+            ("external_reversal_required", Some(EXPIRED_APPROVAL))
+        );
+        let ExternalReversalAttestationOutcome::Attested {
+            attestation,
+            attempt,
+        } = attest_refund(&harness, charges[0].0, "old_declined_restart_sale").await?
+        else {
+            return Err("expected attestation".into());
+        };
+        assert_eq!(attestation.prior_resolution_code(), EXPIRED_APPROVAL);
+        assert_eq!(attempt.status(), PaymentAttemptStatus::Declined);
+        let lifecycles: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
+        )
+        .bind(subscriber_id.as_uuid())
+        .fetch_one(harness.pool())
+        .await?;
+        assert_eq!(lifecycles, 0);
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = harness.cleanup().await;
+    result?;
+    cleanup
+}

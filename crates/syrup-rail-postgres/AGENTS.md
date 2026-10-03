@@ -385,12 +385,15 @@ and transaction orchestration.
   `subscription_approved_period_expired`, without changing the subscription,
   method, discount, or events; the storage-failure compensation path, the
   attempt-locked evidence-only fallback, and the reopening of a terminal
-  initial attempt for review apply the same disposition. An attempt parked with that code is never applied,
+  initial attempt for review apply the same disposition. The evidence-only
+  fallback never reopens a terminal attempt; it moves that attempt's primary
+  charge to external-reversal review with the expiry code instead. An attempt parked with that code is never applied,
   resolved by a later non-approved observation, or re-parked generically,
   regardless of the current policy, and exact reconciliation never claims it.
-  The lock-free last-resort evidence write cannot lock the attempt, so it
-  leaves the attempt submitted for reconciliation, whose next application
-  parks it under the policy. Hosts keep the policy enabled once they enable
+  The lock-free last-resort evidence write cannot lock the attempt: it leaves
+  the attempt untouched, but under the policy a new identified primary charge
+  for an expired period starts in external-reversal review with the expiry
+  code, and a nonterminal attempt's next reconciled application parks it. Hosts keep the policy enabled once they enable
   it; disabling it returns approvals that were not yet parked to historical
   application. The transaction-consuming recovery admission accepts only a
   top-level transaction so its commit cannot be a savepoint release. Final admission rejects an expired period with

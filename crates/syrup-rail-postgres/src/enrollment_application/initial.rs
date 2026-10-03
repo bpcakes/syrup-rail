@@ -607,10 +607,34 @@ async fn observe_approved_evidence_with_retry(
         }
     }
     let _ = last_error;
+    // The attempt row stays locked by another transaction, so read it without
+    // a lock only to derive the initial period that the approval would buy.
+    let expired_period = if expiry_policy.rejects_expired_periods() {
+        let mut connection = pool.acquire().await?;
+        match find_payment_attempt_by_id_on_connection(
+            &mut connection,
+            reservation.identity().billing_scope_id(),
+            reservation.identity().attempt_id(),
+        )
+        .await?
+        {
+            Some(attempt) => {
+                crate::period_expiry::period_has_expired_at_database_time(
+                    &mut connection,
+                    initial_period_end(&attempt, reservation)?,
+                )
+                .await?
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
     persist_approved_evidence_without_attempt_lock(
         pool,
         LockFreeApprovedEvidenceTerms::initial(reservation),
         evidence,
+        expired_period,
     )
     .await
 }

@@ -202,6 +202,80 @@ fn lock_free_terms(
 }
 
 #[tokio::test]
+async fn lock_free_expired_primary_evidence_starts_in_typed_external_reversal()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("rail_lock_exp").await?;
+    let result = async {
+        let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
+        for (expired, order, expected) in [
+            (
+                true,
+                "expired-fallback-order",
+                (
+                    "external_reversal_required".to_owned(),
+                    Some("subscription_approved_period_expired".to_owned()),
+                    true,
+                ),
+            ),
+            (
+                false,
+                "unexpired-fallback-order",
+                ("pending".to_owned(), None, false),
+            ),
+        ] {
+            let recovery = insert_subscription_attempt(
+                &database.pool,
+                gateway,
+                PaymentAttemptKind::SubscriptionRecovery,
+                order,
+            )
+            .await?;
+            let evidence = approved_evidence(&format!("txn_{order}"));
+            for outcome in [
+                LockFreeApprovedEvidenceOutcome::Persisted,
+                LockFreeApprovedEvidenceOutcome::ExactReplay,
+            ] {
+                assert_eq!(
+                    persist_approved_evidence_without_attempt_lock_with_expiry(
+                        &database.pool,
+                        lock_free_terms(&recovery, PaymentAttemptKind::SubscriptionRecovery),
+                        &evidence,
+                        expired,
+                    )
+                    .await?,
+                    outcome
+                );
+            }
+            let charge: (String, Option<String>, bool) = sqlx::query_as(
+                r#"
+                SELECT progression_state, state_code,
+                    external_reversal_required_at IS NOT NULL
+                FROM billing_processor_charges WHERE attempt_id = $1
+                "#,
+            )
+            .bind(recovery.identity.attempt_id().as_uuid())
+            .fetch_one(&database.pool)
+            .await?;
+            assert_eq!(charge, expected);
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
+                    .bind(recovery.identity.attempt_id().as_uuid())
+                    .fetch_one(&database.pool)
+                    .await?;
+            assert_eq!(
+                status, "pending",
+                "the lock-free write never touches the attempt"
+            );
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
 async fn lock_free_subscription_evidence_preserves_replay_and_ownership()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("rail_lock_fb").await?;

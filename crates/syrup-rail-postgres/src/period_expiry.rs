@@ -77,6 +77,18 @@ pub(crate) async fn period_has_expired_at_database_time(
         .await
 }
 
+/// Pool form of [`period_has_expired_at_database_time`] for paths that cannot
+/// lock the attempt.
+pub(crate) async fn period_has_expired_on_pool(
+    pool: &sqlx::PgPool,
+    period_end_at: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT $1::timestamptz <= clock_timestamp()")
+        .bind(period_end_at)
+        .fetch_one(pool)
+        .await
+}
+
 /// Retires one exact obsolete due period inside the caller's transaction.
 ///
 /// The caller must acquire its host recipient lock first and append a

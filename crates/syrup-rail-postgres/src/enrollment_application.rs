@@ -1263,9 +1263,13 @@ async fn persist_approved_evidence_without_attempt_lock(
     pool: &PgPool,
     terms: LockFreeApprovedEvidenceTerms<'_>,
     evidence: &ProcessorEvidence,
+    expired_period: bool,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    match crate::processor_charges::persist_approved_evidence_without_attempt_lock(
-        pool, terms, evidence,
+    match crate::processor_charges::persist_approved_evidence_without_attempt_lock_with_expiry(
+        pool,
+        terms,
+        evidence,
+        expired_period,
     )
     .await?
     {
@@ -1602,10 +1606,15 @@ pub(crate) async fn park_compensated_approved_attempt(
 /// that holds the attempt lock, and returns the parked attempt.
 ///
 /// It acts only when `expired_period_end` is supplied because the host's
-/// expiry policy applies, the attempt is neither approved, terminal, nor
-/// already parked, the evidence identifies its transaction, the observed
-/// charge is the attempt's primary charge, and the period ended at or before
-/// the database clock. Otherwise it changes nothing and returns `None`.
+/// expiry policy applies, the attempt is neither approved nor already parked,
+/// the evidence identifies its transaction, the observed charge is the
+/// attempt's primary charge, and the period ended at or before the database
+/// clock. A nonterminal attempt is parked with its charge. A terminal attempt
+/// is reopened only under the subscription aggregate lock, so here it keeps
+/// its status while its charge moves to external-reversal review with the
+/// typed expiry code; the operator reversal path can then resolve it even
+/// when reconciliation no longer rescans that terminal attempt. Otherwise, or
+/// for a terminal attempt, it returns `None`.
 pub(crate) async fn park_observed_approval_if_period_expired(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
@@ -1617,7 +1626,6 @@ pub(crate) async fn park_observed_approval_if_period_expired(
         return Ok(None);
     };
     if attempt.status() == PaymentAttemptStatus::Approved
-        || attempt.status().is_terminal()
         || is_parked_expired_period_approval(attempt)
         || evidence.transaction_id().is_none()
     {
@@ -1630,6 +1638,25 @@ pub(crate) async fn park_observed_approval_if_period_expired(
         || !crate::period_expiry::period_has_expired_at_database_time(connection, period_end_at)
             .await?
     {
+        return Ok(None);
+    }
+    if attempt.status().is_terminal() {
+        if !charge_is_externally_reversed(connection, charge.id).await? {
+            transition_processor_charge_in_transaction(
+                connection,
+                syrup_rail::ProcessorChargeId::new(charge.id),
+                &[
+                    ProcessorChargeProgression::Pending,
+                    ProcessorChargeProgression::ReconciliationRequired,
+                    ProcessorChargeProgression::ExternalReversalRequired,
+                ],
+                ProcessorChargeProgression::ExternalReversalRequired,
+                Some(syrup_rail::ProcessorChargeStateCode::PaymentResolution(
+                    PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
+                )),
+            )
+            .await?;
+        }
         return Ok(None);
     }
     let (payment, _) =

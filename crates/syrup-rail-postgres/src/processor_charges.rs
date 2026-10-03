@@ -196,10 +196,27 @@ pub(crate) enum LockFreeApprovedEvidenceOutcome {
 /// Database foreign keys and uniqueness constraints remain the authority, so
 /// this path can retain processor evidence without mutating or locking the
 /// attempt itself.
+#[cfg(test)]
 pub(crate) async fn persist_approved_evidence_without_attempt_lock(
     pool: &PgPool,
     terms: LockFreeApprovedEvidenceTerms<'_>,
     evidence: &ProcessorEvidence,
+) -> Result<LockFreeApprovedEvidenceOutcome, sqlx::Error> {
+    persist_approved_evidence_without_attempt_lock_with_expiry(pool, terms, evidence, false).await
+}
+
+/// The last-resort evidence write with a billing-period expiry decision.
+///
+/// When `expired_period` is true because the caller's expiry policy applies
+/// and the approval's period ended at the database clock, a newly inserted,
+/// identified primary charge starts in external-reversal review with the
+/// typed expiry code, so the operator reversal path can resolve it even if
+/// the attempt is never applied again. The attempt itself is never touched.
+pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_expiry(
+    pool: &PgPool,
+    terms: LockFreeApprovedEvidenceTerms<'_>,
+    evidence: &ProcessorEvidence,
+    expired_period: bool,
 ) -> Result<LockFreeApprovedEvidenceOutcome, sqlx::Error> {
     let identity = terms.identity;
     let descriptor = evidence.descriptor();
@@ -227,11 +244,22 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock(
                 gateway_response, gateway_response_code, gateway_response_text,
                 gateway_condition, payment_type, card_brand, card_last4,
                 card_exp_month, card_exp_year, charge_role, progression_state,
+                state_code, external_reversal_required_at,
                 attempt_kind, plan_key, host_charge_target_id, amount_cents, currency
-            ) VALUES (
+            ) SELECT
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, $15, $16, $17, 'pending', $18, $19, $20, $21, $22
-            )
+                $14, $15, $16, $17,
+                CASE WHEN expiry.reversal THEN 'external_reversal_required' ELSE 'pending' END,
+                CASE WHEN expiry.reversal THEN 'subscription_approved_period_expired' END,
+                CASE WHEN expiry.reversal THEN clock_timestamp() END,
+                $18, $19, $20, $21, $22
+            FROM (
+                SELECT $23::boolean
+                    AND $17 = 'primary'
+                    AND $21 > 0
+                    AND public.billing_canonical_gateway_transaction_id($6) IS NOT NULL
+                    AS reversal
+            ) AS expiry
             ON CONFLICT DO NOTHING
             RETURNING id
             "#,
@@ -262,6 +290,7 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock(
         .bind(terms.host_charge_target_id)
         .bind(terms.amount_cents)
         .bind(terms.currency.as_str())
+        .bind(expired_period)
         .fetch_optional(&mut *transaction)
         .await?;
         if inserted.is_some() {

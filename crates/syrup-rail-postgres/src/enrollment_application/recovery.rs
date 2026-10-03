@@ -871,10 +871,14 @@ async fn observe_recovery_approved_evidence_with_retry(
             Err(error) => return Err(error),
         }
     }
+    let expired_period = expiry_policy.rejects_expired_periods()
+        && crate::period_expiry::period_has_expired_on_pool(pool, *reservation.period().end_at())
+            .await?;
     persist_approved_evidence_without_attempt_lock(
         pool,
         LockFreeApprovedEvidenceTerms::recovery(reservation),
         evidence,
+        expired_period,
     )
     .await
 }

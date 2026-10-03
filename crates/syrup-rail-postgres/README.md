@@ -341,8 +341,9 @@ whatever the policy, and exact reconciliation no longer claims it. Initial
 approvals are covered too, because activating an initial period that already
 ended would make its first recurring charge immediately due. Keep the policy
 enabled once it is enabled: an approval whose evidence could only be stored
-without the attempt lock is parked by its next reconciled application, and
-disabling the policy would return it to historical application.
+without the attempt lock is queued for external reversal with the expiry code
+and its attempt is parked by the next reconciled application, while disabling
+the policy would return an unparked attempt to historical application.
 
 The high-level service's renewal and recovery final admission reject an
 expired period before provider I/O with `BillingPeriodExpired` and the
