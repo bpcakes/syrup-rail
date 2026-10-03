@@ -35,10 +35,10 @@ use super::{
     is_parked_expired_period_approval, is_retryable_evidence_error, load_applied_subscription,
     load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
     lock_subscription_aggregate, mark_attempt_approved, mutation_error_evidence,
-    observe_parked_expired_period_approval, park_expired_period_approval, park_locked_attempt,
-    payment_result_for_attempt, persist_approved_evidence_without_attempt_lock,
-    resolve_pool_outcome, set_application_timeouts, stop_conflicting_subscription_approval,
-    upsert_payment_method,
+    observe_parked_expired_period_approval, park_compensated_approved_attempt,
+    park_expired_period_approval, park_locked_attempt, payment_result_for_attempt,
+    persist_approved_evidence_without_attempt_lock, resolve_pool_outcome, set_application_timeouts,
+    stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 mod approval;
@@ -271,6 +271,7 @@ async fn apply_subscription_enrollment_gateway_decision(
                     reservation,
                     &approved_evidence,
                     INCOMPLETE_APPROVAL_TEXT,
+                    coordinator.subscription_period_expiry_policy(),
                 )
                 .await;
             }
@@ -289,6 +290,7 @@ async fn apply_subscription_enrollment_gateway_decision(
                 reservation,
                 &approved_evidence,
                 APPROVED_STORAGE_FAILURE_TEXT,
+                coordinator.subscription_period_expiry_policy(),
             )
             .await
         }
@@ -415,9 +417,10 @@ async fn park_approved_outcome(
     reservation: &SubscriptionEnrollmentReservation,
     approved_evidence: &ApprovedProcessorEvidence,
     message: &'static str,
+    expiry_policy: syrup_rail::SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let evidence = approved_evidence.evidence();
-    match try_park_approved_outcome(pool, reservation, evidence, message).await {
+    match try_park_approved_outcome(pool, reservation, evidence, message, expiry_policy).await {
         Ok(result) => Ok(result),
         Err(_) => {
             observe_approved_evidence_with_retry(pool, reservation, evidence).await?;
@@ -445,11 +448,35 @@ async fn park_approved_outcome(
     }
 }
 
+/// Returns the end of the initial period that an approval of `attempt` would
+/// activate: the accepted initial rule from the durable attempt, anchored at
+/// its submission time.
+fn initial_period_end(
+    attempt: &PaymentAttempt,
+    reservation: &SubscriptionEnrollmentReservation,
+) -> Result<DateTime<Utc>, SubscriptionEnrollmentApplicationError> {
+    let durable = SubscriptionEnrollmentReservation::from_attempt(
+        attempt,
+        reservation.provider_key().clone(),
+    )
+    .map_err(|_| SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE))?;
+    let rule = durable
+        .expected_terms()
+        .activation_projection()
+        .initial_period_rule();
+    next_billing_period(attempt.state().timestamps().submitted_or_created_at(), rule)
+        .map(|period| *period.end_at())
+        .map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })
+}
+
 async fn try_park_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionEnrollmentReservation,
     evidence: &ProcessorEvidence,
     message: &'static str,
+    expiry_policy: syrup_rail::SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
@@ -483,14 +510,19 @@ async fn try_park_approved_outcome(
         observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
         attempt
     } else {
-        observe_processor_charge(
+        let expired_period_end = if expiry_policy.rejects_expired_periods() {
+            Some(initial_period_end(&attempt, reservation)?)
+        } else {
+            None
+        };
+        park_compensated_approved_attempt(
             &mut transaction,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Pending,
+            message,
+            expired_period_end,
         )
-        .await?;
-        park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
+        .await?
     };
     let result = payment_result_for_attempt(&mut transaction, attempt).await?;
     transaction.commit().await?;

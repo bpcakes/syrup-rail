@@ -1,6 +1,6 @@
 use std::fmt;
 
-use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction, TransactionManager};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
@@ -31,12 +31,15 @@ use super::{
     finalize_approved_application, is_parked_expired_period_approval, is_retryable_evidence_error,
     load_applied_subscription, load_subscription, lock_expected_reservation_attempt,
     lock_payment_method_domain, lock_subscription_aggregate, mark_attempt_approved,
-    mutation_error_evidence, observe_parked_expired_period_approval, park_expired_period_approval,
-    park_locked_attempt, payment_result_for_attempt,
-    persist_approved_evidence_without_attempt_lock, recovery_subscription_matches,
-    resolve_pool_outcome, set_application_timeouts, stop_conflicting_subscription_approval,
-    upsert_payment_method,
+    mutation_error_evidence, observe_parked_expired_period_approval,
+    park_compensated_approved_attempt, park_expired_period_approval, park_locked_attempt,
+    payment_result_for_attempt, persist_approved_evidence_without_attempt_lock,
+    recovery_subscription_matches, resolve_pool_outcome, set_application_timeouts,
+    stop_conflicting_subscription_approval, upsert_payment_method,
 };
+
+const NESTED_RECOVERY_ADMISSION_TEXT: &str =
+    "subscription recovery admission requires a top-level transaction";
 
 /// One committed final-admission result authorizing exactly one immediate
 /// subscription-recovery submission.
@@ -125,6 +128,10 @@ pub async fn admit_subscription_recovery_submission(
 /// happens here, and an already-admitted attempt never yields another
 /// capability.
 ///
+/// `transaction` must be a top-level transaction. A nested transaction would
+/// commit only a savepoint, so its outer transaction could still roll back
+/// after authority was returned; it is rejected before any admission work.
+///
 /// As with [`admit_subscription_recovery_submission`], a semantic rejection
 /// terminalizes the prepared attempt and commits that rejection. Under
 /// [`SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods`], a reserved period
@@ -135,6 +142,11 @@ pub async fn admit_subscription_recovery_submission_with_transaction(
     reservation: &SubscriptionRecoveryReservation,
     expiry_policy: SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionRecoveryAdmissionOutcome, SubscriptionEnrollmentApplicationError> {
+    if <Postgres as sqlx::Database>::TransactionManager::get_transaction_depth(&transaction) != 1 {
+        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
+            NESTED_RECOVERY_ADMISSION_TEXT,
+        ));
+    }
     let outcome =
         crate::attempts::admit_subscription_recovery_submission_with_policy_in_transaction(
             &mut transaction,
@@ -281,6 +293,7 @@ async fn apply_subscription_recovery_gateway_decision(
                     reservation,
                     &approved_evidence,
                     RECOVERY_INCOMPLETE_APPROVAL_TEXT,
+                    coordinator.subscription_period_expiry_policy(),
                 )
                 .await;
             }
@@ -300,6 +313,7 @@ async fn apply_subscription_recovery_gateway_decision(
                 reservation,
                 &approved_evidence,
                 RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
+                coordinator.subscription_period_expiry_policy(),
             )
             .await
         }
@@ -711,9 +725,12 @@ async fn park_recovery_approved_outcome(
     reservation: &SubscriptionRecoveryReservation,
     approved_evidence: &ApprovedProcessorEvidence,
     message: &'static str,
+    expiry_policy: syrup_rail::SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let evidence = approved_evidence.evidence();
-    match try_park_recovery_approved_outcome(pool, reservation, evidence, message).await {
+    match try_park_recovery_approved_outcome(pool, reservation, evidence, message, expiry_policy)
+        .await
+    {
         Ok(result) => Ok(result),
         Err(_) => {
             observe_recovery_approved_evidence_with_retry(pool, reservation, evidence).await?;
@@ -746,6 +763,7 @@ async fn try_park_recovery_approved_outcome(
     reservation: &SubscriptionRecoveryReservation,
     evidence: &ProcessorEvidence,
     message: &'static str,
+    expiry_policy: syrup_rail::SubscriptionPeriodExpiryPolicy,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
@@ -779,14 +797,17 @@ async fn try_park_recovery_approved_outcome(
         observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
         attempt
     } else {
-        observe_processor_charge(
+        let expired_period_end = expiry_policy
+            .rejects_expired_periods()
+            .then_some(*reservation.period().end_at());
+        park_compensated_approved_attempt(
             &mut transaction,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Pending,
+            message,
+            expired_period_end,
         )
-        .await?;
-        park_locked_attempt(&mut transaction, &attempt, evidence, None, message).await?
+        .await?
     };
     let result = payment_result_for_attempt(&mut transaction, attempt).await?;
     transaction.commit().await?;

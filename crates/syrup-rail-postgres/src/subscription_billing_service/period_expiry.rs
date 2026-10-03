@@ -52,7 +52,10 @@ impl SubscriptionBillingService {
 
     /// Reads, without billing locks, whether the exact due renewal period has
     /// ended at the database clock. Final admission repeats the check under
-    /// locks; this probe only avoids gateway work for obsolete periods.
+    /// locks; this probe only avoids gateway work for obsolete periods. A
+    /// lifecycle bound to the other gateway account mode is never retired by
+    /// this service: it returns `None` so ordinary renewal routing reports
+    /// the mode mismatch.
     pub(super) async fn expired_renewal_period_owner(
         &self,
         command: ChargeRenewal,
@@ -66,11 +69,13 @@ impl SubscriptionBillingService {
             WHERE billing_scope_id = $1 AND id = $2
                 AND status IN ('active', 'past_due')
                 AND next_renewal_at = $3
+                AND required_gateway_account_mode = $4
             "#,
         )
         .bind(command.billing_scope_id().as_uuid())
         .bind(command.subscription_id().as_uuid())
         .bind(command.period_start_at())
+        .bind(self.required_gateway_account_mode.as_str())
         .fetch_optional(&mut *transaction)
         .await?;
         transaction.commit().await?;

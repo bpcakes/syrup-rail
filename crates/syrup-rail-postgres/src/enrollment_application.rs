@@ -24,8 +24,8 @@ use crate::{
         persist_attempt_transition,
     },
     processor_charges::{
-        LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, observe_processor_charge,
-        promote_conflicting_charge_to_external_reversal,
+        LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, ObservedCharge,
+        observe_processor_charge, promote_conflicting_charge_to_external_reversal,
         transition_processor_charge_in_transaction,
     },
     renewal_failure::RenewalFailureStoreError,
@@ -1085,10 +1085,13 @@ async fn resolve_locked_outcome(
     }
     let evidence = &reconciled.evidence;
     let prepared_attempt_replay = reservation.prepared_attempt_replay();
-    let applied = resolution.may_resolve(
-        attempt.status(),
-        attempt.state().timestamps().submitted_at().is_some(),
-    );
+    // An approval parked for an expired period keeps its typed reversal
+    // disposition; a later non-approved observation never resolves it.
+    let applied = !is_parked_expired_period_approval(&attempt)
+        && resolution.may_resolve(
+            attempt.status(),
+            attempt.state().timestamps().submitted_at().is_some(),
+        );
     if applied {
         let status = resolution.resolved_status(reservation.operation(), attempt.status());
         persist_attempt_transition(
@@ -1548,6 +1551,51 @@ pub(crate) async fn park_expired_period_approval(
         SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
         None,
     ))
+}
+
+/// Parks approved evidence on the storage-failure compensation path.
+///
+/// An attempt already parked for an expired period keeps that disposition;
+/// only the evidence is re-observed. Otherwise, when `expired_period_end` is
+/// supplied because the host's expiry policy applies, an identified primary
+/// charge whose period ended at or before the database clock receives the
+/// typed expiry disposition instead of generic storage-failure review.
+pub(crate) async fn park_compensated_approved_attempt(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    message: &'static str,
+    expired_period_end: Option<DateTime<Utc>>,
+) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    if is_parked_expired_period_approval(attempt) {
+        observe_processor_charge(
+            connection,
+            attempt,
+            evidence,
+            ProcessorChargeProgression::ExternalReversalRequired,
+        )
+        .await?;
+        return Ok(attempt.clone());
+    }
+    let observation = observe_processor_charge(
+        connection,
+        attempt,
+        evidence,
+        ProcessorChargeProgression::Pending,
+    )
+    .await?;
+    if let Some(period_end_at) = expired_period_end
+        && evidence.transaction_id().is_some()
+        && let ObservedCharge::Owned(charge) = &observation
+        && charge.role == syrup_rail::ProcessorChargeRole::Primary
+        && crate::period_expiry::period_has_expired_at_database_time(connection, period_end_at)
+            .await?
+    {
+        let (payment, _) =
+            park_expired_period_approval(connection, attempt, charge.id, evidence).await?;
+        return Ok(payment.attempt().clone());
+    }
+    park_locked_attempt(connection, attempt, evidence, None, message).await
 }
 
 /// Returns whether a charge has already been externally reversed. A verified

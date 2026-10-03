@@ -45,11 +45,14 @@ operation. The release manager dates this heading when the release is tagged.
   service's renewal and recovery final admission reject an expired period
   before provider I/O; and `renew` retires an expired due period instead of
   selling it. A parked attempt is never applied afterwards, whatever the
-  policy, and exact reconciliation no longer claims it.
+  policy, a later non-approved observation never resolves it, and exact
+  reconciliation no longer claims it. The storage-failure compensation path
+  applies the same typed disposition.
 - Add `admit_subscription_recovery_submission_with_transaction`, which runs
-  recovery final admission on a caller-owned transaction, commits it, and only
-  then returns one-shot submission authority. The pool wrapper delegates to it
-  with the policy disabled.
+  recovery final admission on a caller-owned top-level transaction, commits
+  it, and only then returns one-shot submission authority; a nested
+  transaction is rejected. The pool wrapper delegates to it with the policy
+  disabled.
 - Add `retire_expired_subscription_period_in_transaction`,
   `SubscriptionBillingService::retire_expired_period`,
   `RetireExpiredSubscriptionPeriod`, and `SubscriptionPeriodRetirementOutcome`

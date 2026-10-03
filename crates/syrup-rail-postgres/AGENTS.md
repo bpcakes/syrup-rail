@@ -383,14 +383,18 @@ and transaction orchestration.
   approval for an expired period moves its primary charge to
   `external_reversal_required` and its attempt to `review_required`, both with
   `subscription_approved_period_expired`, without changing the subscription,
-  method, discount, or events. An attempt parked with that code is never
-  applied again regardless of the current policy, and exact reconciliation
-  never claims it. Final admission rejects an expired period with
+  method, discount, or events; the storage-failure compensation path applies
+  the same disposition. An attempt parked with that code is never applied,
+  resolved by a later non-approved observation, or re-parked generically,
+  regardless of the current policy, and exact reconciliation never claims it.
+  The transaction-consuming recovery admission accepts only a top-level
+  transaction so its commit cannot be a savepoint release. Final admission rejects an expired period with
   `subscription_period_expired_before_charge`, which is not qualifying dunning
   history.
 - Retirement of an obsolete due period is the only expiry transition to
   `unpaid`. It requires the exact owner, plan, subscription, `active` or
-  `past_due` status, unchanged `next_renewal_at`, and an expired period, and it
+  `past_due` status, unchanged `next_renewal_at`, and an expired period (the
+  service's `renew` retires only lifecycles in its own gateway account mode), and it
   refuses while any submitted, unknown, review-required, or same-period
   approved renewal/recovery attempt or any pending, reconciliation-required,
   or external-reversal-required charge remains. It rejects the period's
