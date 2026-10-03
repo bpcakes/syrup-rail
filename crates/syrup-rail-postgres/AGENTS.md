@@ -387,7 +387,8 @@ and transaction orchestration.
   attempt-locked evidence-only fallback, and the reopening of a terminal
   initial attempt for review apply the same disposition. The evidence-only
   fallback never reopens a terminal attempt; it moves that attempt's primary
-  charge to external-reversal review with the expiry code instead. An attempt parked with that code is never applied,
+  charge to external-reversal review with the expiry code instead, as do the
+  terminal-attempt branches of renewal and recovery application. An attempt parked with that code is never applied,
   resolved by a later non-approved observation, or re-parked generically,
   regardless of the current policy, and exact reconciliation never claims it.
   The lock-free last-resort evidence write cannot lock the attempt: it leaves

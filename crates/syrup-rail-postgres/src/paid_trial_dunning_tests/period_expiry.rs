@@ -2206,3 +2206,98 @@ async fn evidence_only_late_approval_of_an_old_declined_restart_reaches_operator
     result?;
     cleanup
 }
+
+#[tokio::test]
+async fn late_approvals_of_declined_renewal_and_recovery_keep_history_and_type_the_charge()
+-> Result<(), Box<dyn Error>> {
+    let harness = Harness::start("pe_term_renew").await?;
+    let result = async {
+        let (subscriber_id, subscription_id) =
+            harness.trial(suspend_policy()?, "terminal_typed").await?;
+        let start = harness
+            .due_period_ending_in(subscription_id, ChronoDuration::seconds(4))
+            .await?;
+        // A renewal decline is terminal history and opens dunning.
+        let renewal = reserve_and_admit_renewal(
+            harness.pool(),
+            &harness.gateway,
+            harness.renewal(subscription_id, start),
+        )
+        .await?;
+        apply_subscription_renewal_gateway_outcome(
+            harness.pool(),
+            &harness.permissive,
+            &renewal,
+            &declined_outcome("terminal_typed_renewal_decline"),
+        )
+        .await?;
+        // A recovery attempt for the same period is declined too.
+        let command = harness.recovery(subscriber_id, "terminal-typed-recovery")?;
+        let recovery =
+            reserve_and_admit_recovery(harness.pool(), &harness.gateway, &command).await?;
+        apply_subscription_recovery_gateway_outcome(
+            harness.pool(),
+            &harness.permissive,
+            &recovery,
+            &declined_outcome("terminal_typed_recovery_decline"),
+        )
+        .await?;
+        harness.wait_until_ended(*renewal.period().end_at()).await?;
+        let before = subscription_projection(harness.pool(), subscription_id).await?;
+
+        // Late approvals arrive after the period ended: foreground for the
+        // renewal, storage-failure compensation for the recovery.
+        apply_subscription_renewal_gateway_outcome(
+            harness.pool(),
+            &harness.enforcing,
+            &renewal,
+            &approved_outcome("terminal_typed_renewal_sale"),
+        )
+        .await?;
+        apply_subscription_recovery_gateway_outcome(
+            harness.pool(),
+            &UnavailableCoordinator,
+            &recovery,
+            &approved_outcome("terminal_typed_recovery_sale"),
+        )
+        .await?;
+        for (attempt_id, status, transaction_id) in [
+            (
+                renewal.identity().attempt_id(),
+                "declined",
+                "terminal_typed_renewal_sale",
+            ),
+            (
+                recovery.identity().attempt_id(),
+                "declined",
+                "terminal_typed_recovery_sale",
+            ),
+        ] {
+            assert_eq!(
+                attempt_disposition(harness.pool(), attempt_id).await?.0,
+                status
+            );
+            let charges = attempt_charges(harness.pool(), attempt_id).await?;
+            assert_eq!(charges.len(), 1);
+            assert_eq!(
+                (charges[0].1.as_str(), charges[0].2.as_deref()),
+                ("external_reversal_required", Some(EXPIRED_APPROVAL))
+            );
+            let ExternalReversalAttestationOutcome::Attested { attestation, .. } =
+                attest_refund(&harness, charges[0].0, transaction_id).await?
+            else {
+                return Err("expected attestation".into());
+            };
+            assert_eq!(attestation.prior_resolution_code(), EXPIRED_APPROVAL);
+        }
+        assert_eq!(
+            subscription_projection(harness.pool(), subscription_id).await?,
+            before
+        );
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = harness.cleanup().await;
+    result?;
+    cleanup
+}

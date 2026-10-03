@@ -499,6 +499,18 @@ async fn apply_recovery_approved_on_connection(
             )
             .await?;
         }
+        // The terminal attempt keeps its failure history; an approval for an
+        // expired period still gives its primary charge the typed reason.
+        park_observed_approval_if_period_expired(
+            connection,
+            &attempt,
+            &observation,
+            evidence,
+            expiry_policy
+                .rejects_expired_periods()
+                .then_some(*reservation.period().end_at()),
+        )
+        .await?;
         let payment = SubscriptionEnrollmentPaymentResult::confirmation_pending(
             attempt,
             approved_evidence.clone(),
@@ -803,7 +815,18 @@ async fn try_park_recovery_approved_outcome(
             } else {
                 ProcessorChargeProgression::ReconciliationRequired
             };
-        observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
+        let observation =
+            observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
+        park_observed_approval_if_period_expired(
+            &mut transaction,
+            &attempt,
+            &observation,
+            evidence,
+            expiry_policy
+                .rejects_expired_periods()
+                .then_some(*reservation.period().end_at()),
+        )
+        .await?;
         attempt
     } else {
         let expired_period_end = expiry_policy
