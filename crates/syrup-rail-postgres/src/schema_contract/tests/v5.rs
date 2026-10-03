@@ -13,7 +13,7 @@ const ADDRESS_COLUMNS: [&str; 6] = [
     "billing_address_country",
 ];
 
-struct PopulatedV4 {
+pub(super) struct PopulatedV4 {
     account: GatewayAccountFixture,
     payment_method_id: Uuid,
     initial_attempt_id: Uuid,
@@ -23,7 +23,7 @@ struct PopulatedV4 {
 /// the shipped v3-to-v4 cutover: a stored method with contact and card
 /// display, a subscription, an initial attempt with contact, and an approved
 /// host charge with immutable processor-charge evidence.
-async fn populated_v4(database: &TestDatabase) -> Result<PopulatedV4, Box<dyn Error>> {
+pub(super) async fn populated_v4(database: &TestDatabase) -> Result<PopulatedV4, Box<dyn Error>> {
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let subscriber_id = Uuid::now_v7();
     let (payment_method_id, _, _) =
@@ -103,7 +103,7 @@ async fn runtime_schema_v5_accepts_fresh_install_and_populated_v4_upgrade()
     if V5_INSTALL_SQL.trim().is_empty() || V4_TO_V5_UPGRADE_SQL.trim().is_empty() {
         return Err(io::Error::other("schema-v5 artifacts must not be empty").into());
     }
-    let fresh = TestDatabase::start("sr_fresh_v5").await?;
+    let fresh = TestDatabase::start_v5("sr_fresh_v5").await?;
     let upgraded = TestDatabase::start_v3("sr_upgrade_v5").await?;
     let result = async {
         let populated = populated_v4(&upgraded).await?;
@@ -178,9 +178,9 @@ async fn runtime_schema_v5_accepts_fresh_install_and_populated_v4_upgrade()
 async fn schema_v5_and_v4_assertions_reject_each_other_and_address_drift()
 -> Result<(), Box<dyn Error>> {
     let v4 = TestDatabase::start_v4("sr_v5_reject_v4").await?;
-    let v5 = TestDatabase::start("sr_v5_reject_v5").await?;
-    let dropped = TestDatabase::start("sr_v5_drop_check").await?;
-    let unvalidated = TestDatabase::start("sr_v5_not_valid").await?;
+    let v5 = TestDatabase::start_v5("sr_v5_reject_v5").await?;
+    let dropped = TestDatabase::start_v5("sr_v5_drop_check").await?;
+    let unvalidated = TestDatabase::start_v5("sr_v5_not_valid").await?;
     let result = async {
         assert!(matches!(
             crate::assert_runtime_schema_v5_compatible(&v4.pool).await,
@@ -250,7 +250,7 @@ async fn schema_v5_and_v4_assertions_reject_each_other_and_address_drift()
 #[tokio::test]
 async fn v5_address_constraints_accept_only_whole_bounded_addresses() -> Result<(), Box<dyn Error>>
 {
-    let database = TestDatabase::start("sr_v5_addr_chk").await?;
+    let database = TestDatabase::start_v5("sr_v5_addr_chk").await?;
     let result = async {
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
