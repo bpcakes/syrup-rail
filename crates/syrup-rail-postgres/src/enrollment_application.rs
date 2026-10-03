@@ -1584,18 +1584,57 @@ pub(crate) async fn park_compensated_approved_attempt(
         ProcessorChargeProgression::Pending,
     )
     .await?;
-    if let Some(period_end_at) = expired_period_end
-        && evidence.transaction_id().is_some()
-        && let ObservedCharge::Owned(charge) = &observation
-        && charge.role == syrup_rail::ProcessorChargeRole::Primary
-        && crate::period_expiry::period_has_expired_at_database_time(connection, period_end_at)
-            .await?
+    if let Some(parked) = park_observed_approval_if_period_expired(
+        connection,
+        attempt,
+        &observation,
+        evidence,
+        expired_period_end,
+    )
+    .await?
     {
-        let (payment, _) =
-            park_expired_period_approval(connection, attempt, charge.id, evidence).await?;
-        return Ok(payment.attempt().clone());
+        return Ok(parked);
     }
     park_locked_attempt(connection, attempt, evidence, None, message).await
+}
+
+/// Applies the typed expiry disposition to a just-observed approval on a path
+/// that holds the attempt lock, and returns the parked attempt.
+///
+/// It acts only when `expired_period_end` is supplied because the host's
+/// expiry policy applies, the attempt is neither approved, terminal, nor
+/// already parked, the evidence identifies its transaction, the observed
+/// charge is the attempt's primary charge, and the period ended at or before
+/// the database clock. Otherwise it changes nothing and returns `None`.
+pub(crate) async fn park_observed_approval_if_period_expired(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    observation: &ObservedCharge,
+    evidence: &ProcessorEvidence,
+    expired_period_end: Option<DateTime<Utc>>,
+) -> Result<Option<PaymentAttempt>, SubscriptionEnrollmentApplicationError> {
+    let Some(period_end_at) = expired_period_end else {
+        return Ok(None);
+    };
+    if attempt.status() == PaymentAttemptStatus::Approved
+        || attempt.status().is_terminal()
+        || is_parked_expired_period_approval(attempt)
+        || evidence.transaction_id().is_none()
+    {
+        return Ok(None);
+    }
+    let ObservedCharge::Owned(charge) = observation else {
+        return Ok(None);
+    };
+    if charge.role != syrup_rail::ProcessorChargeRole::Primary
+        || !crate::period_expiry::period_has_expired_at_database_time(connection, period_end_at)
+            .await?
+    {
+        return Ok(None);
+    }
+    let (payment, _) =
+        park_expired_period_approval(connection, attempt, charge.id, evidence).await?;
+    Ok(Some(payment.attempt().clone()))
 }
 
 /// Returns whether a charge has already been externally reversed. A verified

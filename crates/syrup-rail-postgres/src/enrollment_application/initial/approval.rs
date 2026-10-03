@@ -102,6 +102,25 @@ async fn apply_approved_on_connection(
                 .with_observation_diagnostics(conflict_diagnostics);
             return Ok((payment, None));
         }
+        // Reopening a terminal attempt for review must not leave an expired
+        // initial period applicable later, whatever the policy is by then.
+        if expiry_policy.rejects_expired_periods()
+            && evidence.transaction_id().is_some()
+            && let ObservedCharge::Owned(charge) = &observation
+            && charge.role == ProcessorChargeRole::Primary
+            && crate::period_expiry::period_has_expired_at_database_time(
+                connection,
+                super::initial_period_end(&attempt, reservation)?,
+            )
+            .await?
+        {
+            let (payment, event) =
+                park_expired_period_approval(connection, &attempt, charge.id, evidence).await?;
+            return Ok((
+                payment.with_observation_diagnostics(conflict_diagnostics),
+                event,
+            ));
+        }
         let parked = park_locked_attempt(
             connection,
             &attempt,

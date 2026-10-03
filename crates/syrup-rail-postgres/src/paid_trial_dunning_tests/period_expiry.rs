@@ -1795,3 +1795,175 @@ async fn wrong_mode_service_never_retires_an_expired_period() -> Result<(), Box<
     result?;
     cleanup
 }
+
+#[tokio::test]
+async fn evidence_only_fallback_still_records_the_expiry_disposition() -> Result<(), Box<dyn Error>>
+{
+    let harness = Harness::start("pe_evidence").await?;
+    let result = async {
+        let (subscriber_id, subscription_id) =
+            harness.trial(suspend_policy()?, "evidence_only").await?;
+        let start = harness
+            .due_period_ending_in(subscription_id, ChronoDuration::seconds(3))
+            .await?;
+        let reservation = reserve_and_admit_renewal(
+            harness.pool(),
+            &harness.gateway,
+            harness.renewal(subscription_id, start),
+        )
+        .await?;
+        harness
+            .wait_until_ended(*reservation.period().end_at())
+            .await?;
+        // Another writer holds the subscriber/plan aggregate, so application
+        // and compensation parking both time out and only the attempt-locked
+        // evidence path can record the approval.
+        let mut holder = harness.pool().begin().await?;
+        sqlx::query(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        )
+        .bind(subscriber_id.as_uuid())
+        .bind("identity_pro")
+        .execute(&mut *holder)
+        .await?;
+        let observed = apply_subscription_renewal_gateway_outcome(
+            harness.pool(),
+            &UnavailableCoordinator,
+            &reservation,
+            &approved_outcome("evidence_only_sale"),
+        )
+        .await?;
+        holder.rollback().await?;
+        assert!(observed.subscription().is_none());
+        let attempt_id = reservation.identity().attempt_id();
+        assert_eq!(
+            attempt_disposition(harness.pool(), attempt_id).await?,
+            (
+                "review_required".to_owned(),
+                Some(EXPIRED_APPROVAL.to_owned())
+            )
+        );
+        let charges = attempt_charges(harness.pool(), attempt_id).await?;
+        assert_eq!(charges.len(), 1);
+        assert_eq!(
+            (charges[0].1.as_str(), charges[0].2.as_deref()),
+            ("external_reversal_required", Some(EXPIRED_APPROVAL))
+        );
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = harness.cleanup().await;
+    result?;
+    cleanup
+}
+
+#[tokio::test]
+async fn late_approval_of_a_declined_restart_is_parked_for_its_expired_period()
+-> Result<(), Box<dyn Error>> {
+    let harness = Harness::start("pe_terminal_init").await?;
+    let result = async {
+        let offer = immediate_offer(
+            PlanKey::new("identity_pro")?,
+            ChargeAmount::new(2_699, CurrencyCode::new("USD")?)?,
+        );
+        let offers = StaticOfferStore {
+            offer: offer.clone(),
+        };
+        let subscriber_id = SubscriberId::new(Uuid::now_v7());
+        let enrollment = SubscriptionEnrollmentReservation::from_command(
+            &syrup_rail::EnrollSubscription::new(
+                syrup_rail::SubscriptionPaymentContext::new(
+                    PaymentAttemptId::new(Uuid::now_v7()),
+                    harness.scope,
+                    subscriber_id,
+                    GatewayConfigurationId::new(harness.account.gateway_configuration_id),
+                    IdempotencyKey::new("declined-restart")?,
+                    PaymentToken::new("opaque-restart-token")?,
+                    BillingContact::new(None, None, Some("restart@example.test".to_owned()))?,
+                ),
+                SubscriptionEnrollmentExpectedTerms::full_price(offer),
+            ),
+            &harness.gateway,
+            GatewayAccountMode::Live,
+        )?;
+        let mut transaction = harness.pool().begin().await?;
+        assert!(matches!(
+            reserve_subscription_enrollment_in_transaction(&mut transaction, &offers, &enrollment)
+                .await?,
+            SubscriptionEnrollmentReservationOutcome::Reserved(_)
+        ));
+        transaction.commit().await?;
+        assert!(matches!(
+            admit_subscription_enrollment_submission(harness.pool(), &offers, &enrollment).await?,
+            SubscriptionEnrollmentAdmissionOutcome::Admitted(_)
+        ));
+        apply_subscription_enrollment_gateway_outcome(
+            harness.pool(),
+            &harness.enforcing,
+            &enrollment,
+            &declined_outcome("declined_restart"),
+        )
+        .await?;
+        let attempt_id = enrollment.identity().attempt_id();
+        assert_eq!(
+            attempt_disposition(harness.pool(), attempt_id).await?.0,
+            "declined"
+        );
+        sqlx::query(
+            r#"
+            UPDATE billing_payment_attempts
+            SET created_at = created_at - interval '40 days',
+                submitted_at = submitted_at - interval '40 days',
+                resolved_at = resolved_at - interval '40 days'
+            WHERE id = $1
+            "#,
+        )
+        .bind(attempt_id.as_uuid())
+        .execute(harness.pool())
+        .await?;
+
+        // The approval arrives after the declined attempt became terminal and
+        // after the month it would have bought ended.
+        let late = apply_subscription_enrollment_gateway_outcome(
+            harness.pool(),
+            &harness.enforcing,
+            &enrollment,
+            &approved_outcome("late_declined_restart_sale"),
+        )
+        .await?;
+        assert!(late.subscription().is_none());
+        let parked = (
+            "review_required".to_owned(),
+            Some(EXPIRED_APPROVAL.to_owned()),
+        );
+        assert_eq!(
+            attempt_disposition(harness.pool(), attempt_id).await?,
+            parked
+        );
+        // Replaying with the policy disabled still never activates it.
+        let replay = apply_subscription_enrollment_gateway_outcome(
+            harness.pool(),
+            &harness.permissive,
+            &enrollment,
+            &approved_outcome("late_declined_restart_sale"),
+        )
+        .await?;
+        assert!(replay.subscription().is_none());
+        assert_eq!(
+            attempt_disposition(harness.pool(), attempt_id).await?,
+            parked
+        );
+        let lifecycles: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
+        )
+        .bind(subscriber_id.as_uuid())
+        .fetch_one(harness.pool())
+        .await?;
+        assert_eq!(lifecycles, 0);
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = harness.cleanup().await;
+    result?;
+    cleanup
+}

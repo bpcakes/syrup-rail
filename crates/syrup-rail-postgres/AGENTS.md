@@ -383,8 +383,9 @@ and transaction orchestration.
   approval for an expired period moves its primary charge to
   `external_reversal_required` and its attempt to `review_required`, both with
   `subscription_approved_period_expired`, without changing the subscription,
-  method, discount, or events; the storage-failure compensation path applies
-  the same disposition. An attempt parked with that code is never applied,
+  method, discount, or events; the storage-failure compensation path, the
+  attempt-locked evidence-only fallback, and the reopening of a terminal
+  initial attempt for review apply the same disposition. An attempt parked with that code is never applied,
   resolved by a later non-approved observation, or re-parked generically,
   regardless of the current policy, and exact reconciliation never claims it.
   The transaction-consuming recovery admission accepts only a top-level
