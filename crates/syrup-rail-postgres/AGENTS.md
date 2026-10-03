@@ -388,8 +388,12 @@ and transaction orchestration.
   initial attempt for review apply the same disposition. An attempt parked with that code is never applied,
   resolved by a later non-approved observation, or re-parked generically,
   regardless of the current policy, and exact reconciliation never claims it.
-  The transaction-consuming recovery admission accepts only a top-level
-  transaction so its commit cannot be a savepoint release. Final admission rejects an expired period with
+  The lock-free last-resort evidence write cannot lock the attempt, so it
+  leaves the attempt submitted for reconciliation, whose next application
+  parks it under the policy. Hosts keep the policy enabled once they enable
+  it; disabling it returns approvals that were not yet parked to historical
+  application. The transaction-consuming recovery admission accepts only a
+  top-level transaction so its commit cannot be a savepoint release. Final admission rejects an expired period with
   `subscription_period_expired_before_charge`, which is not qualifying dunning
   history.
 - Retirement of an obsolete due period is the only expiry transition to

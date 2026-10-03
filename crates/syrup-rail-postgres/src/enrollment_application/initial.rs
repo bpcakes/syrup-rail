@@ -511,8 +511,28 @@ async fn try_park_approved_outcome(
             } else {
                 ProcessorChargeProgression::ReconciliationRequired
             };
-        observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
-        attempt
+        let observation =
+            observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
+        // As in foreground application, a late approval of a terminal initial
+        // attempt whose period ended receives the permanent expiry disposition.
+        if progression == ProcessorChargeProgression::ExternalReversalRequired
+            && expiry_policy.rejects_expired_periods()
+            && let ObservedCharge::Owned(charge) = &observation
+            && charge.role == syrup_rail::ProcessorChargeRole::Primary
+            && !charge_is_externally_reversed(&mut transaction, charge.id).await?
+            && crate::period_expiry::period_has_expired_at_database_time(
+                &mut transaction,
+                initial_period_end(&attempt, reservation)?,
+            )
+            .await?
+        {
+            let (payment, _) =
+                park_expired_period_approval(&mut transaction, &attempt, charge.id, evidence)
+                    .await?;
+            payment.attempt().clone()
+        } else {
+            attempt
+        }
     } else {
         let expired_period_end = if expiry_policy.rejects_expired_periods() {
             Some(initial_period_end(&attempt, reservation)?)

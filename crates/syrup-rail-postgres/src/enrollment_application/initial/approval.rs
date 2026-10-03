@@ -186,6 +186,33 @@ async fn apply_approved_on_connection(
         ));
     }
 
+    let period_start_at = attempt.state().timestamps().submitted_or_created_at();
+    // Initial application intentionally retains its historical partial
+    // reservation match, so the locked attempt remains the sole authority for
+    // accepted financial and lifecycle terms.
+    let durable_reservation = SubscriptionEnrollmentReservation::from_attempt(
+        &attempt,
+        reservation.provider_key().clone(),
+    )
+    .map_err(|_| SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE))?;
+    let activation = durable_reservation.expected_terms().activation_projection();
+    let period =
+        next_billing_period(period_start_at, activation.initial_period_rule()).map_err(|_| {
+            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+        })?;
+    // Activating an initial period that already ended would make its first
+    // recurring charge immediately due, so the expiry policy covers every
+    // initial approval, including a full-price restart and a paid trial. It
+    // precedes the current-subscription and grant conflicts, which can later
+    // clear, so an expired period always receives its permanent disposition.
+    if expiry_policy.rejects_expired_periods()
+        && evidence.transaction_id().is_some()
+        && crate::period_expiry::period_has_expired_at_database_time(connection, *period.end_at())
+            .await?
+    {
+        return park_expired_period_approval(connection, &attempt, charge.id, evidence).await;
+    }
+
     if current_subscription_exists(connection, reservation).await? {
         transition_charge(
             connection,
@@ -235,29 +262,6 @@ async fn apply_approved_on_connection(
             .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
                 INVALID_APPLICATION_STATE,
             ))?;
-    let period_start_at = attempt.state().timestamps().submitted_or_created_at();
-    // Initial application intentionally retains its historical partial
-    // reservation match, so the locked attempt remains the sole authority for
-    // accepted financial and lifecycle terms.
-    let durable_reservation = SubscriptionEnrollmentReservation::from_attempt(
-        &attempt,
-        reservation.provider_key().clone(),
-    )
-    .map_err(|_| SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE))?;
-    let activation = durable_reservation.expected_terms().activation_projection();
-    let period =
-        next_billing_period(period_start_at, activation.initial_period_rule()).map_err(|_| {
-            SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
-        })?;
-    // Activating an initial period that already ended would make its first
-    // recurring charge immediately due, so the expiry policy covers every
-    // initial approval, including a full-price restart and a paid trial.
-    if expiry_policy.rejects_expired_periods()
-        && crate::period_expiry::period_has_expired_at_database_time(connection, *period.end_at())
-            .await?
-    {
-        return park_expired_period_approval(connection, &attempt, charge.id, evidence).await;
-    }
     let method_id = upsert_payment_method(connection, &attempt, evidence).await?;
     let subscription_id = SubscriptionId::new(Uuid::now_v7());
     insert_subscription(
