@@ -16,6 +16,8 @@ on:
       - "rust-toolchain.toml"
       - ".clippy.toml"
       - "clippy.toml"
+      - ".jig/runtime-version"
+      - ".github/actions/setup-jig/**"
       - ".jig.toml"
       - ".agent/jig-contract.json"
       - "scripts/jig"
@@ -46,6 +48,8 @@ on:
       - "rust-toolchain.toml"
       - ".clippy.toml"
       - "clippy.toml"
+      - ".jig/runtime-version"
+      - ".github/actions/setup-jig/**"
       - ".jig.toml"
       - ".agent/jig-contract.json"
       - "scripts/jig"
@@ -144,6 +148,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up pinned Jig
+        uses: ./.github/actions/setup-jig
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
@@ -167,6 +173,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up pinned Jig
+        uses: ./.github/actions/setup-jig
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:
@@ -192,6 +200,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up pinned Jig
+        uses: ./.github/actions/setup-jig
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:

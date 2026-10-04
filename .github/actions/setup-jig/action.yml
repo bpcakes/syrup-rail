@@ -1,0 +1,47 @@
+name: Set up pinned Jig
+description: Cache only the pinned runtime executable and install the verified release on a miss.
+runs:
+  using: composite
+  steps:
+    - name: Locate the pinned runtime cache
+      id: runtime
+      shell: bash
+      run: |
+        python3 - <<'PY'
+        import json
+        import os
+        from pathlib import Path
+
+        root = Path.cwd()
+        version = (root / '.jig/runtime-version').read_text().strip()
+        contract = json.loads((root / '.agent/jig-contract.json').read_text())['contract_version']
+        # Match the tagged installer's layout: linked worktrees have a .git file.
+        base = root / ('.git/jig-tools' if (root / '.git').is_dir() else '.agent/.cache/jig')
+        binary = base / f'release-{version}-contract-{contract}-runtime/bin/jig'
+        with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+            output.write(f'binary={binary}\n')
+        PY
+    - name: Cache pinned Jig executable
+      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: ${{ steps.runtime.outputs.binary }}
+        key: jig-release-runtime-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.jig/runtime-version', '.jig.toml', '.agent/jig-contract.json', 'scripts/jig', 'scripts/install-jig.sh', '.github/actions/setup-jig/action.yml') }}
+    - name: Install or reuse the verified Jig release
+      shell: bash
+      env:
+        JIG_DEV_BIN: ""
+        JIG_INSTALL_SOURCE: "0"
+      run: |
+        set -euo pipefail
+        # Block the official installer's source fallback in CI. This PATH only
+        # applies to Jig setup; subsequent application checks keep real Cargo.
+        guard="$(mktemp -d "$RUNNER_TEMP/jig-binary-only.XXXXXX")"
+        trap 'rm -rf "$guard"' EXIT
+        cat > "$guard/cargo" <<'SH'
+        #!/bin/sh
+        echo "Prebuilt Jig installation unavailable on $(uname -s)/$(uname -m); CI refuses to compile Jig. See the installer output above." >&2
+        exit 1
+        SH
+        chmod +x "$guard/cargo"
+        PATH="$guard:$PATH" scripts/install-jig.sh --profile runtime --repository-scope
+        scripts/jig --version

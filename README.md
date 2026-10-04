@@ -234,6 +234,12 @@ compile the integration boundary without contacting a database or provider.
 
 ## Development
 
+Jig is pinned in `.jig/runtime-version`. The launcher downloads the official
+release executable and verifies its SHA-256 checksum; CI caches only that
+executable and refuses source compilation. Rust is still required for the
+application checks. CI uses `scripts/check-rust-policy.py` to retain the Rust
+file-size and `mod.rs` policies removed from Jig's native checks in 0.7.1.
+
 - `scripts/jig doctor`
 - `scripts/jig check test`
 - `scripts/check-public-api.sh`
