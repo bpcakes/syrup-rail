@@ -6,10 +6,14 @@ on:
 
       - "crates/**"
 
+      - ".jig/runtime-version"
+      - ".github/actions/setup-jig/**"
       - ".jig.toml"
       - ".agent/jig-contract.json"
       - "scripts/jig"
       - "scripts/install-jig.sh"
+      - "scripts/check-rust-policy.py"
+      - "scripts/tests/check-rust-policy.py"
 
       - "crates/syrup-rail-postgres/schema/**"
       - "scripts/check-schema-immutability.sh"
@@ -24,10 +28,14 @@ on:
 
       - "crates/**"
 
+      - ".jig/runtime-version"
+      - ".github/actions/setup-jig/**"
       - ".jig.toml"
       - ".agent/jig-contract.json"
       - "scripts/jig"
       - "scripts/install-jig.sh"
+      - "scripts/check-rust-policy.py"
+      - "scripts/tests/check-rust-policy.py"
 
       - "crates/syrup-rail-postgres/schema/**"
       - "scripts/check-schema-immutability.sh"
@@ -56,14 +64,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          cache: false
-          rustflags: ""
+      - name: Set up pinned Jig
+        uses: ./.github/actions/setup-jig
+      - name: Check repository contract
+        run: scripts/jig check contract
       - name: Detect disallowed mod.rs files
         run: |
-          scripts/jig check no-mod-rs
+          python3 scripts/check-rust-policy.py no-mod-rs
 
   rust-file-loc:
     name: Enforce agentic-first Rust file size policy
@@ -76,11 +83,10 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
-        with:
-          cache: false
-          rustflags: ""
+      - name: Set up pinned Jig
+        uses: ./.github/actions/setup-jig
+      - name: Test retained Rust policies
+        run: python3 scripts/tests/check-rust-policy.py
       - name: Check Rust file LOC policy
         env:
           JIG_DEFAULT_BRANCH: ${{ github.base_ref || github.ref_name }}
@@ -94,7 +100,7 @@ jobs:
             base_ref="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
           fi
           echo "Using Rust LOC base ref: $base_ref"
-          scripts/jig check rust-file-loc --changed-against "$base_ref"
+          python3 scripts/check-rust-policy.py rust-file-loc --changed-against "$base_ref"
 
 
   sqlx-metadata:
@@ -106,6 +112,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Set up pinned Jig
+        uses: ./.github/actions/setup-jig
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1
         with:

@@ -40,6 +40,7 @@ build/
 .agent/.cache/*
 !.agent/.cache/.gitignore
 .agent/tmp/
+.agent/state/runs.jsonl
 
 # Local logs and scratch files
 *.log
