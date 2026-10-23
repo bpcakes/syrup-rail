@@ -393,7 +393,7 @@ async fn store_once(
     let mut transaction = pool.begin().await?;
     set_enrollment_timeouts(&mut transaction).await?;
     let query = format!("{PAYMENT_ATTEMPT_SELECT} WHERE id = $1");
-    let row = sqlx::query(&query)
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(attempt_id.as_uuid())
         .fetch_optional(&mut *transaction)
         .await?;
@@ -504,7 +504,7 @@ pub async fn observe_processor_charge_in_transaction(
     initial_progression: ProcessorChargeProgression,
 ) -> Result<ProcessorChargeObservationOutcome, ProcessorChargeStoreError> {
     let query = format!("{PAYMENT_ATTEMPT_SELECT} WHERE id = $1");
-    let row = sqlx::query(&query)
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(attempt_id.as_uuid())
         .fetch_optional(&mut *connection)
         .await?;
@@ -644,7 +644,7 @@ pub(crate) async fn observe_processor_charge(
         {conflict_clause}
         "#
     );
-    let inserted = sqlx::query_scalar::<_, Uuid>(&insert)
+    let inserted = sqlx::query_scalar::<_, Uuid>(sqlx::AssertSqlSafe(insert))
         .bind(Uuid::now_v7())
         .bind(identity.attempt_id().as_uuid())
         .bind(identity.billing_scope_id().as_uuid())

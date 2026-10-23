@@ -2,7 +2,7 @@
 name = "syrup-rail-postgres"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.88"
+rust-version.workspace = true
 license-file.workspace = true
 repository.workspace = true
 description = "Canonical provider-neutral PostgreSQL schema contract and SQLx orchestration for Syrup Rail"
@@ -23,6 +23,7 @@ async-trait.workspace = true
 chrono.workspace = true
 syrup-rail.workspace = true
 sqlx.workspace = true
+sqlx-core.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -5,8 +5,8 @@ gateway and lifecycle-evidence contracts.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.5"
-syrup-rail-nmi = "0.5.5"
+syrup-rail = "0.6.0"
+syrup-rail-nmi = "0.6.0"
 ```
 
 The adapter re-exports the matching raw client as

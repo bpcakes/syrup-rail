@@ -20,8 +20,9 @@ with an older or newer core package.
 
 ## Branches
 
-- `master` is the default branch and the active 0.5.x release line.
-- `dev/0.6.0` contains unfinished 0.6.0 development.
+- `master` is the default branch and prepares the 0.6.0 SQLx upgrade.
+- `dev/0.6.0` contains separate unfinished development; its historical branch
+  name no longer reserves the 0.6.0 release number.
 - `main` and `integration/0.6.0` are historical references; target new work at
   one of the two active branches above.
 
@@ -29,13 +30,18 @@ Fix stable issues on `master` and carry applicable fixes forward into
 `dev/0.6.0`. Both active branches run push CI. Publishing is restricted to
 `master`; developing on the default branch does not publish a release.
 
-When 0.6.0 is ready, integrate it into `master`. First preserve the shipped
-0.5.x schema artifacts and provide forward upgrades for the 0.6.0 schema
-changes. The 0.5.x line owns schema v5 (v4 plus billing addresses) and
-schema v6 (v5 plus typed billing-period expiry codes). `dev/0.6.0` must
-renumber its unreleased schemas to v7 or later and provide an upgrade from
-this v6; it must not ship a different schema under the v5 or v6 version.
-Create `release/0.5` before the 0.6.0 integration if 0.5.x still needs support.
+Version 0.6.0 upgrades SQLx to 0.9.0 and Rust to 1.94, starting from the
+IdentityPro-consumed `3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a` behavior.
+The public SQLx pool, connection, transaction, and error types make this a
+breaking package release. It preserves schema v6 byte-for-byte; hosts already
+on v6 need no database migration for this upgrade.
+
+Before integrating `dev/0.6.0`, assign its unfinished features a later release
+number. Preserve the shipped schema v5 (billing addresses) and v6 (typed
+billing-period expiry codes) artifacts. Renumber that branch's unreleased
+schemas to v7 or later and provide an upgrade from v6; do not ship a different
+schema under v5 or v6. If 0.5.x needs maintenance, branch from the last 0.5.x
+revision.
 Publishing from a maintenance branch requires an explicit update to the
 workflow ref check and the `release` environment's allowed branches.
 
@@ -46,7 +52,8 @@ and `CHANGELOG.md`. Install the exact additional release tools when they are
 not already available:
 
 ```console
-rustup toolchain install 1.88.0 --profile minimal
+rustup toolchain install 1.94.0 --profile minimal
+cargo install sqlx-cli --version 0.9.0 --no-default-features --features postgres,rustls
 cargo install cargo-audit --version 0.22.2 --locked
 ```
 
@@ -57,7 +64,7 @@ scripts/check-release.sh VERSION --allow-dirty
 scripts/check-schema-immutability.sh
 scripts/check-advisories.sh
 scripts/check-public-api.sh
-cargo +1.88.0 check --workspace --all-targets --locked
+cargo +1.94.0 check --workspace --all-targets --locked
 scripts/jig check contract
 scripts/jig check fmt
 scripts/jig check clippy
@@ -66,15 +73,16 @@ scripts/jig check sqlx
 ```
 
 Replace `VERSION` with the exact stable semantic version recorded in the
-workspace, such as `0.3.0`. The advisory check permits only the documented,
-unreachable SQLx-MySQL advisory described in
-[`security/dependency-advisories.md`](security/dependency-advisories.md), and
-fails if that dependency becomes reachable from a workspace build.
+workspace, such as `0.6.0`. The advisory check follows
+[`security/dependency-advisories.md`](security/dependency-advisories.md).
+Use SQLx CLI 0.9.0 for both metadata preparation and checks. To regenerate
+metadata against the disposable PostgreSQL 18 schema-v6 database, run
+`scripts/check-sqlx.sh --prepare` and review the `.sqlx` diff.
 
 Commit the release preparation, push the release branch, wait for required CI
 to pass, and rerun `scripts/check-release.sh VERSION` from the clean release
-commit. Release the active stable series from `master`. Keep unfinished
-0.6.0 features on `dev/0.6.0` until that version is ready for release.
+commit. Release the active stable series from `master`. Keep the separate
+unfinished features on `dev/0.6.0` until their later release is ready.
 
 ## Trusted publishing
 

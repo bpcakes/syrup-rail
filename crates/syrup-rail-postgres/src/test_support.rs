@@ -232,7 +232,10 @@ impl TestDatabase {
         Ok(())
     }
 
-    async fn start_with_install(project: &str, install_sql: &str) -> Result<Self, Box<dyn Error>> {
+    async fn start_with_install(
+        project: &str,
+        install_sql: &'static str,
+    ) -> Result<Self, Box<dyn Error>> {
         let harness =
             PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await?;
         let lease = harness.empty_database().await?;

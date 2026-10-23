@@ -338,7 +338,7 @@ pub(super) async fn insert_v1_terminal_subscription_attempt(
         )
         "#
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
         .bind(attempt_id)
         .bind(gateway.billing_scope_id)
         .bind(subscriber_id)

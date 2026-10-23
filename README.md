@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.5"
-syrup-rail-postgres = "0.5.5"
-syrup-rail-nmi = "0.5.5" # only for NMI-backed hosts
+syrup-rail = "0.6.0"
+syrup-rail-postgres = "0.6.0"
+syrup-rail-nmi = "0.6.0" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.5.5"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.6.0"`
 directly.
 
 ## Subscription terms
@@ -237,6 +237,10 @@ Run `cargo check -p syrup-rail-postgres --example host_integration --locked` to
 compile the integration boundary without contacting a database or provider.
 
 ## Development
+
+The workspace requires Rust 1.94 or later. PostgreSQL host integrations use
+SQLx 0.9.0, including their pools, transactions, and error types. Install SQLx
+CLI 0.9.0 for metadata work; see [the release guide](docs/releasing.md).
 
 Jig is pinned in `.jig/runtime-version`. The launcher downloads the official
 release executable and verifies its SHA-256 checksum; CI caches only that

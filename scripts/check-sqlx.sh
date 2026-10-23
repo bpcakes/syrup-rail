@@ -13,6 +13,13 @@ elif [[ -n "${1:-}" ]]; then
   exit 2
 fi
 
+sqlx_version="$(cargo sqlx --version)"
+if [[ "${sqlx_version##* }" != "0.9.0" ]]; then
+  echo "SQLx CLI 0.9.0 is required; found: $sqlx_version" >&2
+  echo "Install with: cargo install sqlx-cli --version 0.9.0 --no-default-features --features postgres,rustls" >&2
+  exit 1
+fi
+
 cargo run \
   --locked \
   --manifest-path tools/sqlx-gate/Cargo.toml \

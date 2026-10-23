@@ -18,7 +18,9 @@ async fn card_metadata_candidate_plans_probe_method_linked_subscriptions()
         .await?;
     for statement in [CANDIDATE_SQL, LOCKED_CANDIDATE_SQL] {
         let explain = format!("EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON) {statement}");
-        let row = sqlx::raw_sql(&explain).fetch_one(&database.pool).await?;
+        let row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain.as_str()))
+            .fetch_one(&database.pool)
+            .await?;
         let plan: Value = row.try_get(0)?;
         let root = explain_plan_root(&plan)?;
         let rendered = serde_json::to_string_pretty(root)?;
@@ -83,7 +85,9 @@ async fn card_metadata_candidate_plans_bound_work_to_one_dense_method_history()
     assert_eq!(history, 1025);
     for statement in [CANDIDATE_SQL, LOCKED_CANDIDATE_SQL] {
         let explain = format!("EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON) {statement}");
-        let row = sqlx::raw_sql(&explain).fetch_one(&database.pool).await?;
+        let row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain.as_str()))
+            .fetch_one(&database.pool)
+            .await?;
         let plan: Value = row.try_get(0)?;
         let root = explain_plan_root(&plan)?;
         assert_supersession_index(root, &serde_json::to_string_pretty(root)?);
@@ -94,7 +98,7 @@ async fn card_metadata_candidate_plans_bound_work_to_one_dense_method_history()
             let mut tx = database.pool.begin().await?;
             crate::enrollment_application::set_application_timeouts(&mut tx).await?;
             let explain = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}");
-            let row = sqlx::query(&explain)
+            let row = sqlx::query(sqlx::AssertSqlSafe(explain.as_str()))
                 .bind(scope)
                 .bind(subscriber)
                 .bind(attempt)

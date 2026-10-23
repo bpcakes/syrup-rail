@@ -283,6 +283,11 @@ and transaction orchestration.
   `assert_runtime_schema_v5_compatible` and `assert_runtime_schema_v4_compatible`
   check only their pre-cutover states.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
+- Use SQLx and SQLx CLI 0.9.0 with Rust 1.94 or later. Regenerate metadata
+  with `scripts/check-sqlx.sh --prepare` against the unchanged schema v6.
+- Recovery admission relies on the exactly pinned `sqlx-core` transaction-depth
+  API to reject nested transactions. Keep this guard and its database tests
+  when upgrading SQLx; `Connection::is_in_transaction` alone is insufficient.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
   `assert_v3_conforms`, `assert_v4_conforms`, `assert_v5_conforms`, and

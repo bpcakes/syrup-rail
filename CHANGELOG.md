@@ -2,6 +2,36 @@
 
 All notable changes to the Syrup Rail crates are documented in this file.
 
+## [0.6.0] - Unreleased
+
+Breaking SQLx upgrade from the IdentityPro-consumed 0.5.5 revision
+`3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`. Billing behavior and every schema-v6
+artifact are preserved. This release does not include the separate unfinished
+features on the historically named `dev/0.6.0` branch.
+
+### Action required for hosts
+
+- Upgrade all four Syrup Rail crates together to 0.6.0 and use Rust 1.94 or
+  later. Public PostgreSQL pools, connections, transactions, errors, and host
+  trait implementations now use SQLx 0.9.0 types; SQLx 0.8 types are incompatible.
+- Upgrade host SQLx dependencies and SQLx CLI to 0.9.0, adapt host queries to
+  its query-string API, and regenerate host query metadata with that CLI.
+- Keep the existing schema-v6 installation and startup assertion. No database
+  migration is required for a host already consuming 0.5.5 on schema v6.
+
+### Changed
+
+- Pin SQLx and SQLx CLI to 0.9.0, declare the shared Rust 1.94 minimum, and
+  update CI and release checks to exercise that toolchain.
+- Adapt assembled queries to SQLx's explicit SQL-safety boundary while
+  retaining bound values, SQL statements, and transaction behavior.
+- Preserve recovery's top-level transaction requirement through the exactly
+  pinned SQLx core transaction-depth API.
+- Regenerate PostgreSQL query metadata against the unchanged schema v6.
+- Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, and
+  `webpki-roots` to compatible patched versions required by the release audit.
+  SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
+
 ## [0.5.5] - Unreleased
 
 Schema-v6 release on the 0.5.x line. Like 0.5.4 it is not a drop-in patch:

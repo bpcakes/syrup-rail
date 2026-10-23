@@ -93,7 +93,7 @@ fn load_install_sql(crate_root: &Path) -> Result<&'static str, String> {
 async fn run_gate(
     crate_root: &Path,
     database_url: &str,
-    install_sql: &str,
+    install_sql: &'static str,
     mode: PrepareMode,
 ) -> Result<ExitStatus, String> {
     let pool = PgPoolOptions::new()
