@@ -440,6 +440,8 @@ async fn schema_v1_upgrade_backfills_legacy_lifecycle_attempt_terms_and_mode()
         assert_v4_conforms(&database.pool).await?;
         database.upgrade_v4_to_v5().await?;
         assert_v5_conforms(&database.pool).await?;
+        database.upgrade_v5_to_v6().await?;
+        assert_v6_conforms(&database.pool).await?;
 
         let active_is_legacy_recurring = sqlx::query_scalar::<_, bool>(
             r#"

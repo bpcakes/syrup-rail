@@ -35,6 +35,7 @@ impl SubscriptionBillingServiceError {
             | Self::InvalidState(_) => SubscriptionBillingServiceErrorDisposition::Internal,
             Self::Cancellation(error) => cancellation_error_disposition(error),
             Self::Discount(error) => discount_error_disposition(error),
+            Self::PeriodExpiry(_) => SubscriptionBillingServiceErrorDisposition::Internal,
             Self::HostChargeUnavailable => {
                 SubscriptionBillingServiceErrorDisposition::Misconfigured
             }
@@ -124,6 +125,7 @@ impl SubscriptionBillingServiceError {
             | Self::HostChargeStore(_)
             | Self::Cancellation(_)
             | Self::Discount(_)
+            | Self::PeriodExpiry(_)
             | Self::BillingTransaction(_)
             | Self::BillingEvent(_)
             | Self::HostChargeUnavailable
@@ -308,6 +310,9 @@ const fn recovery_submission_rejection_disposition(
         | SubscriptionRecoverySubmissionRejection::GatewayConfigurationChanged => {
             SubscriptionBillingServiceErrorDisposition::Conflict
         }
+        SubscriptionRecoverySubmissionRejection::BillingPeriodExpired => {
+            SubscriptionBillingServiceErrorDisposition::Rejected
+        }
     }
 }
 
@@ -319,7 +324,8 @@ const fn renewal_reservation_rejection_disposition(
         | SubscriptionRenewalReservationRejection::PaymentNotDue
         | SubscriptionRenewalReservationRejection::AttemptInProgress
         | SubscriptionRenewalReservationRejection::PaymentMethodUpdateInProgress
-        | SubscriptionRenewalReservationRejection::RetryBlocked => {
+        | SubscriptionRenewalReservationRejection::RetryBlocked
+        | SubscriptionRenewalReservationRejection::BillingPeriodExpired => {
             SubscriptionBillingServiceErrorDisposition::Rejected
         }
         SubscriptionRenewalReservationRejection::GatewayAccountModeChanged

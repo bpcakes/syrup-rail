@@ -115,16 +115,21 @@ impl SubscriptionBillingService {
             }
         };
 
-        let admission =
-            match admit_subscription_recovery_submission(&self.pool, &reservation).await? {
-                SubscriptionRecoveryAdmissionOutcome::Admitted(admission) => *admission,
-                SubscriptionRecoveryAdmissionOutcome::AlreadyAdmitted(attempt) => {
-                    return self.payment_result(attempt).await;
-                }
-                SubscriptionRecoveryAdmissionOutcome::Rejected { attempt, .. } => {
-                    return self.payment_result(attempt).await;
-                }
-            };
+        let admission = match crate::admit_subscription_recovery_submission_with_transaction(
+            self.pool.begin().await?,
+            &reservation,
+            self.coordinator.subscription_period_expiry_policy(),
+        )
+        .await?
+        {
+            SubscriptionRecoveryAdmissionOutcome::Admitted(admission) => *admission,
+            SubscriptionRecoveryAdmissionOutcome::AlreadyAdmitted(attempt) => {
+                return self.payment_result(attempt).await;
+            }
+            SubscriptionRecoveryAdmissionOutcome::Rejected { attempt, .. } => {
+                return self.payment_result(attempt).await;
+            }
+        };
         // Admission can race with a cooldown observed by another request;
         // recheck before the capability performs provider I/O.
         if let Some(scope) = self.active_cooldown(&account).await? {

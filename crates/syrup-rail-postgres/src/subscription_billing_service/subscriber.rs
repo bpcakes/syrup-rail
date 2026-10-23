@@ -114,20 +114,8 @@ impl SubscriptionBillingService {
         }
         let policy = failure.policy();
         let code = policy.resolution_code();
-        let cooldown = policy.cooldown();
         let cooldown_error_scope = policy.cooldown_error_scope();
-        let detail = failure.into_detail();
-        let evidence = ProcessorEvidence::new(
-            None,
-            None,
-            None,
-            None,
-            Some(detail),
-            Some(GatewayDiagnostic::new("failed")),
-            GatewayPaymentDescriptor::default(),
-        );
-        let payment = reservation
-            .resolve_non_approved(&self.pool, &evidence, code, cooldown, boundary)
+        let payment = record_readiness_failure(&self.pool, reservation, failure, boundary)
             .await
             .map_err(SubscriptionBillingServiceError::from)?;
         if let Some(scope) = cooldown_error_scope
@@ -142,4 +130,85 @@ impl SubscriptionBillingService {
         }
         Ok(payment)
     }
+}
+
+/// Records one readiness failure on its prepared or admitted reservation: the
+/// failure's resolution code, the cooldown it implies, and its diagnostic.
+async fn record_readiness_failure(
+    pool: &PgPool,
+    reservation: SubscriberInitiatedReservation<'_>,
+    failure: SubscriberReadinessFailure,
+    boundary: OutcomeResolutionBoundary,
+) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
+    let policy = failure.policy();
+    let evidence = ProcessorEvidence::new(
+        None,
+        None,
+        None,
+        None,
+        Some(failure.into_detail()),
+        Some(GatewayDiagnostic::new("failed")),
+        GatewayPaymentDescriptor::default(),
+    );
+    reservation
+        .resolve_non_approved(
+            pool,
+            &evidence,
+            policy.resolution_code(),
+            policy.cooldown(),
+            boundary,
+        )
+        .await
+}
+
+/// What became of a prepared subscription recovery whose gateway readiness
+/// check failed before admission.
+#[derive(Debug)]
+pub enum SubscriptionRecoveryReadinessResolution {
+    /// A transient provider outage: nothing was recorded, and the prepared
+    /// attempt stays resumable by an exact replay.
+    Retained,
+    /// The attempt resolved before submission with the resolution code
+    /// [`SubscriptionBillingService::recover`] records for the same failure.
+    /// A rate-limited readiness query also recorded the provider-scoped
+    /// cooldown that fences every subscriber mutation on that provider.
+    Resolved(Box<SubscriptionEnrollmentPaymentResult>),
+}
+
+/// Applies [`SubscriptionBillingService::recover`]'s readiness policy to a
+/// host-composed recovery whose [`crate::verify_gateway_account_mode`] failed
+/// before [`crate::admit_subscription_recovery_submission_with_transaction`].
+///
+/// A host that reserves and admits a recovery itself must not discard that
+/// failure: a transient outage keeps the prepared attempt, a rate limit
+/// records the provider cooldown and resolves the attempt, and any other
+/// failure, including an account-mode mismatch, resolves it terminally. An
+/// attempt that is no longer prepared is left as it is and reported as its
+/// current payment.
+pub async fn resolve_subscription_recovery_readiness_failure(
+    pool: &PgPool,
+    reservation: &SubscriptionRecoveryReservation,
+    error: GatewayAccountModeVerificationError,
+) -> Result<SubscriptionRecoveryReadinessResolution, SubscriptionEnrollmentApplicationError> {
+    let failure = match error {
+        GatewayAccountModeVerificationError::AccountModeMismatch { required, .. } => {
+            SubscriberReadinessFailure::AccountMode(required)
+        }
+        GatewayAccountModeVerificationError::Gateway(error) => {
+            if GatewayNotSubmittedPolicy::for_readiness_error(&error)
+                .restores_prepared_attempt_when_supported()
+            {
+                return Ok(SubscriptionRecoveryReadinessResolution::Retained);
+            }
+            SubscriberReadinessFailure::Gateway(error)
+        }
+    };
+    record_readiness_failure(
+        pool,
+        SubscriberInitiatedReservation::Recovery(reservation),
+        failure,
+        OutcomeResolutionBoundary::Prepared,
+    )
+    .await
+    .map(|payment| SubscriptionRecoveryReadinessResolution::Resolved(Box::new(payment)))
 }

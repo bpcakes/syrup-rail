@@ -923,10 +923,12 @@ async fn observe_payment_method_replacement_approved_evidence_with_retry(
             Err(error) => return Err(error),
         }
     }
+    // A payment-method replacement has no billing period to expire.
     persist_approved_evidence_without_attempt_lock(
         pool,
         LockFreeApprovedEvidenceTerms::payment_method_replacement(reservation),
         evidence,
+        false,
     )
     .await
 }

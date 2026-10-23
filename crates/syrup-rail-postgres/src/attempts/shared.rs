@@ -17,6 +17,10 @@ pub(super) const RECOVERY_STATE_CHANGED_TEXT: &str =
     "Subscription recovery was canceled before submission because billing state changed.";
 pub(super) const RECOVERY_CONFIGURATION_CHANGED_TEXT: &str =
     "Subscription recovery was canceled before submission because payment configuration changed.";
+pub(super) const RECOVERY_PERIOD_EXPIRED_TEXT: &str =
+    "Subscription recovery was canceled before submission because its billing period ended.";
+pub(super) const RENEWAL_PERIOD_EXPIRED_TEXT: &str =
+    "Subscription renewal was canceled before submission because its billing period ended.";
 pub(super) const RENEWAL_STATE_CHANGED_TEXT: &str =
     "Subscription renewal was canceled before submission because billing state changed.";
 pub(super) const RENEWAL_CONFIGURATION_CHANGED_TEXT: &str =

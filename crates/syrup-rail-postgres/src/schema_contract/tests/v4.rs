@@ -34,7 +34,17 @@ async fn runtime_schema_v4_accepts_fresh_install_and_v3_upgrade() -> Result<(), 
             )
             .fetch_one(pool)
             .await?;
-            for code in syrup_rail::PaymentResolutionCode::ALL {
+            // Schema v6 introduced the billing-period expiry codes.
+            for code in syrup_rail::PaymentResolutionCode::ALL
+                .iter()
+                .filter(|code| {
+                    !matches!(
+                        code,
+                        syrup_rail::PaymentResolutionCode::SubscriptionPeriodExpiredBeforeCharge
+                            | syrup_rail::PaymentResolutionCode::SubscriptionApprovedPeriodExpired
+                    )
+                })
+            {
                 assert!(
                     definition.contains(code.as_str()),
                     "schema-v4 resolution constraint is missing {}",

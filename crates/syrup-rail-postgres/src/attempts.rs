@@ -29,13 +29,14 @@ use syrup_rail::{
     SubscriptionPaymentMethodReplacementReservationOutcome,
     SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection, SubscriptionPaymentStateSnapshot,
-    SubscriptionRecoveryLockedTerms, SubscriptionRecoveryPreflightOutcome,
-    SubscriptionRecoveryReservation, SubscriptionRecoveryReservationOutcome,
-    SubscriptionRecoveryReservationRejection, SubscriptionRecoverySubmissionOutcome,
-    SubscriptionRecoverySubmissionRejection, SubscriptionRenewalLockedTerms,
-    SubscriptionRenewalReservation, SubscriptionRenewalReservationOutcome,
-    SubscriptionRenewalReservationRejection, SubscriptionRenewalSubmissionOutcome,
-    SubscriptionRenewalSubmissionRejection, SubscriptionStart, SubscriptionStatus,
+    SubscriptionPeriodExpiryPolicy, SubscriptionRecoveryLockedTerms,
+    SubscriptionRecoveryPreflightOutcome, SubscriptionRecoveryReservation,
+    SubscriptionRecoveryReservationOutcome, SubscriptionRecoveryReservationRejection,
+    SubscriptionRecoverySubmissionOutcome, SubscriptionRecoverySubmissionRejection,
+    SubscriptionRenewalLockedTerms, SubscriptionRenewalReservation,
+    SubscriptionRenewalReservationOutcome, SubscriptionRenewalReservationRejection,
+    SubscriptionRenewalSubmissionOutcome, SubscriptionRenewalSubmissionRejection,
+    SubscriptionStart, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -73,6 +74,7 @@ pub(crate) use persistence::{
 pub use persistence::{
     find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,
 };
+pub(crate) use recovery::admit_subscription_recovery_submission_with_policy_in_transaction;
 pub use recovery::{
     admit_subscription_recovery_submission_in_transaction,
     preflight_subscription_recovery_in_transaction, reserve_subscription_recovery_in_transaction,
@@ -80,6 +82,10 @@ pub use recovery::{
 pub use renewal::{
     admit_subscription_renewal_submission_in_transaction,
     reserve_subscription_renewal_in_transaction,
+};
+pub(crate) use renewal::{
+    admit_subscription_renewal_submission_with_policy_in_transaction,
+    reserve_subscription_renewal_with_policy_in_transaction,
 };
 use shared::*;
 pub(crate) use shared::{

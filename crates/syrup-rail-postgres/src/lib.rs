@@ -27,6 +27,7 @@ mod operator_review;
 mod paid_trial_dunning_tests;
 mod payment_attempt_diagnostics;
 mod payment_method_metadata;
+mod period_expiry;
 mod processor_charge_persistence;
 mod processor_charges;
 mod reconciliation;
@@ -86,7 +87,7 @@ pub use enrollment_application::{
     SubscriptionRecoveryProviderResult, SubscriptionRenewalAdmissionOutcome,
     SubscriptionRenewalProviderResult, admit_subscription_enrollment_submission,
     admit_subscription_payment_method_replacement, admit_subscription_recovery_submission,
-    admit_subscription_renewal_submission,
+    admit_subscription_recovery_submission_with_transaction, admit_subscription_renewal_submission,
     apply_reconciled_subscription_enrollment_gateway_outcome,
     apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
     apply_reconciled_subscription_recovery_gateway_outcome,
@@ -157,6 +158,10 @@ pub use payment_method_metadata::{
     PaymentMethodMetadataRefreshError, PaymentMethodMetadataRefreshOutcome,
     RefreshPaymentMethodMetadata, refresh_payment_method_metadata,
 };
+pub use period_expiry::{
+    SubscriptionPeriodExpiryError, change_subscription_past_due_access_in_transaction,
+    retire_expired_subscription_period_in_transaction,
+};
 pub use processor_charges::{
     CompensatingProcessorChargeOutcome, ProcessorChargeObservationOutcome,
     ProcessorChargeStoreError, observe_processor_charge_in_transaction,
@@ -177,11 +182,12 @@ pub use renewal::{
 pub use schema_contract::assert_runtime_schema_v3_compatible;
 pub use schema_contract::{
     SUPPORTED_POSTGRES_MAJOR_VERSION, SchemaConformanceError, assert_runtime_schema_v4_compatible,
-    assert_runtime_schema_v5_compatible,
+    assert_runtime_schema_v5_compatible, assert_runtime_schema_v6_compatible,
 };
 pub use subscription_billing_service::{
     GatewayMutationCooldownScope, SubscriptionBillingService, SubscriptionBillingServiceError,
-    SubscriptionBillingServiceErrorDisposition,
+    SubscriptionBillingServiceErrorDisposition, SubscriptionRecoveryReadinessResolution,
+    resolve_subscription_recovery_readiness_failure,
 };
 pub use transactions::{
     BillingEventWriteError, BillingTransaction, BillingTransactionCoordinator,

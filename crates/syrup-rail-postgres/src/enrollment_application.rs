@@ -24,8 +24,9 @@ use crate::{
         persist_attempt_transition,
     },
     processor_charges::{
-        LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, observe_processor_charge,
-        promote_conflicting_charge_to_external_reversal,
+        LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, ObservedCharge,
+        observe_processor_charge, promote_conflicting_charge_to_external_reversal,
+        transition_processor_charge_in_transaction,
     },
     renewal_failure::RenewalFailureStoreError,
     subscription_persistence::{
@@ -62,15 +63,18 @@ pub(crate) use recovery::resolve_recovery_non_approved_outcome;
 pub use recovery::{
     AdmittedSubscriptionRecovery, SubscriptionRecoveryAdmissionOutcome,
     SubscriptionRecoveryProviderResult, admit_subscription_recovery_submission,
+    admit_subscription_recovery_submission_with_transaction,
     apply_reconciled_subscription_recovery_gateway_outcome,
     apply_subscription_recovery_gateway_outcome, submit_admitted_subscription_recovery,
 };
-pub(crate) use renewal::resolve_renewal_non_approved_outcome;
 pub use renewal::{
     AdmittedSubscriptionRenewal, SubscriptionRenewalAdmissionOutcome,
     SubscriptionRenewalProviderResult, admit_subscription_renewal_submission,
     apply_reconciled_subscription_renewal_gateway_outcome,
     apply_subscription_renewal_gateway_outcome, submit_admitted_subscription_renewal,
+};
+pub(crate) use renewal::{
+    admit_subscription_renewal_submission_with_policy, resolve_renewal_non_approved_outcome,
 };
 
 const BILLING_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
@@ -100,6 +104,7 @@ const RENEWAL_INCOMPLETE_APPROVAL_TEXT: &str =
 const RENEWAL_APPROVED_STORAGE_FAILURE_TEXT: &str =
     "Approved subscription renewal could not be applied; manual review is required.";
 const RENEWAL_STALE_STATE_TEXT: &str = "Approved subscription renewal could not update billing state because the subscription changed.";
+const PERIOD_EXPIRED_APPROVAL_TEXT: &str = "Approved subscription payment arrived after its billing period ended; external reversal is required.";
 const PAYMENT_METHOD_REPLACEMENT_INCOMPLETE_APPROVAL_TEXT: &str =
     "Approved payment method replacement is missing required processor identity.";
 const PAYMENT_METHOD_REPLACEMENT_STORAGE_FAILURE_TEXT: &str =
@@ -1080,10 +1085,13 @@ async fn resolve_locked_outcome(
     }
     let evidence = &reconciled.evidence;
     let prepared_attempt_replay = reservation.prepared_attempt_replay();
-    let applied = resolution.may_resolve(
-        attempt.status(),
-        attempt.state().timestamps().submitted_at().is_some(),
-    );
+    // An approval parked for an expired period keeps its typed reversal
+    // disposition; a later non-approved observation never resolves it.
+    let applied = !is_parked_expired_period_approval(&attempt)
+        && resolution.may_resolve(
+            attempt.status(),
+            attempt.state().timestamps().submitted_at().is_some(),
+        );
     if applied {
         let status = resolution.resolved_status(reservation.operation(), attempt.status());
         persist_attempt_transition(
@@ -1255,9 +1263,13 @@ async fn persist_approved_evidence_without_attempt_lock(
     pool: &PgPool,
     terms: LockFreeApprovedEvidenceTerms<'_>,
     evidence: &ProcessorEvidence,
+    expired_period: bool,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    match crate::processor_charges::persist_approved_evidence_without_attempt_lock(
-        pool, terms, evidence,
+    match crate::processor_charges::persist_approved_evidence_without_attempt_lock_with_expiry(
+        pool,
+        terms,
+        evidence,
+        expired_period,
     )
     .await?
     {
@@ -1469,6 +1481,203 @@ pub(crate) async fn park_locked_attempt(
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
         INVALID_APPLICATION_STATE,
     ))
+}
+
+/// Returns whether the locked attempt is parked because its approval arrived
+/// after the billing period ended. Such an attempt is never applied, whatever
+/// the host's current expiry policy.
+pub(crate) fn is_parked_expired_period_approval(attempt: &PaymentAttempt) -> bool {
+    attempt.status() == PaymentAttemptStatus::ReviewRequired
+        && attempt.state().resolution_code()
+            == Some(PaymentResolutionCode::SubscriptionApprovedPeriodExpired)
+}
+
+/// Re-observes approved evidence for an attempt already parked for an expired
+/// period. The exact charge replays unchanged; different evidence becomes an
+/// additional charge that itself requires external reversal.
+pub(crate) async fn observe_parked_expired_period_approval(
+    connection: &mut PgConnection,
+    attempt: PaymentAttempt,
+    evidence: &ProcessorEvidence,
+) -> Result<
+    (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
+    SubscriptionEnrollmentApplicationError,
+> {
+    observe_processor_charge(
+        connection,
+        &attempt,
+        evidence,
+        ProcessorChargeProgression::ExternalReversalRequired,
+    )
+    .await?;
+    Ok((
+        SubscriptionEnrollmentPaymentResult::not_applied(attempt)?,
+        None,
+    ))
+}
+
+/// Parks an approved primary charge whose billing period ended before it could
+/// be applied. The charge requires external reversal and carries the typed
+/// expiry code, the attempt becomes review-required with the same code, and
+/// no subscription, payment method, discount, or event changes.
+pub(crate) async fn park_expired_period_approval(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    charge_id: Uuid,
+    evidence: &ProcessorEvidence,
+) -> Result<
+    (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
+    SubscriptionEnrollmentApplicationError,
+> {
+    transition_processor_charge_in_transaction(
+        connection,
+        syrup_rail::ProcessorChargeId::new(charge_id),
+        &[
+            ProcessorChargeProgression::Pending,
+            ProcessorChargeProgression::ReconciliationRequired,
+            ProcessorChargeProgression::ExternalReversalRequired,
+        ],
+        ProcessorChargeProgression::ExternalReversalRequired,
+        Some(syrup_rail::ProcessorChargeStateCode::PaymentResolution(
+            PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
+        )),
+    )
+    .await?;
+    let parked = park_locked_attempt(
+        connection,
+        attempt,
+        evidence,
+        Some(PaymentResolutionCode::SubscriptionApprovedPeriodExpired),
+        PERIOD_EXPIRED_APPROVAL_TEXT,
+    )
+    .await?;
+    Ok((
+        SubscriptionEnrollmentPaymentResult::not_applied(parked)?,
+        None,
+    ))
+}
+
+/// Parks approved evidence on the storage-failure compensation path.
+///
+/// An attempt already parked for an expired period keeps that disposition;
+/// only the evidence is re-observed. Otherwise, when `expired_period_end` is
+/// supplied because the host's expiry policy applies, an identified primary
+/// charge whose period ended at or before the database clock receives the
+/// typed expiry disposition instead of generic storage-failure review.
+pub(crate) async fn park_compensated_approved_attempt(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    evidence: &ProcessorEvidence,
+    message: &'static str,
+    expired_period_end: Option<DateTime<Utc>>,
+) -> Result<PaymentAttempt, SubscriptionEnrollmentApplicationError> {
+    if is_parked_expired_period_approval(attempt) {
+        observe_processor_charge(
+            connection,
+            attempt,
+            evidence,
+            ProcessorChargeProgression::ExternalReversalRequired,
+        )
+        .await?;
+        return Ok(attempt.clone());
+    }
+    let observation = observe_processor_charge(
+        connection,
+        attempt,
+        evidence,
+        ProcessorChargeProgression::Pending,
+    )
+    .await?;
+    if let Some(parked) = park_observed_approval_if_period_expired(
+        connection,
+        attempt,
+        &observation,
+        evidence,
+        expired_period_end,
+    )
+    .await?
+    {
+        return Ok(parked);
+    }
+    park_locked_attempt(connection, attempt, evidence, None, message).await
+}
+
+/// Applies the typed expiry disposition to a just-observed approval on a path
+/// that holds the attempt lock, and returns the parked attempt.
+///
+/// It acts only when `expired_period_end` is supplied because the host's
+/// expiry policy applies, the attempt is neither approved nor already parked,
+/// the evidence identifies its transaction, the observed charge is the
+/// attempt's primary charge, and the period ended at or before the database
+/// clock. A nonterminal attempt is parked with its charge. A terminal attempt
+/// is reopened only under the subscription aggregate lock, so here it keeps
+/// its status while its charge moves to external-reversal review with the
+/// typed expiry code; the operator reversal path can then resolve it even
+/// when reconciliation no longer rescans that terminal attempt. Otherwise, or
+/// for a terminal attempt, it returns `None`.
+pub(crate) async fn park_observed_approval_if_period_expired(
+    connection: &mut PgConnection,
+    attempt: &PaymentAttempt,
+    observation: &ObservedCharge,
+    evidence: &ProcessorEvidence,
+    expired_period_end: Option<DateTime<Utc>>,
+) -> Result<Option<PaymentAttempt>, SubscriptionEnrollmentApplicationError> {
+    let Some(period_end_at) = expired_period_end else {
+        return Ok(None);
+    };
+    if attempt.status() == PaymentAttemptStatus::Approved
+        || is_parked_expired_period_approval(attempt)
+        || evidence.transaction_id().is_none()
+    {
+        return Ok(None);
+    }
+    let ObservedCharge::Owned(charge) = observation else {
+        return Ok(None);
+    };
+    if charge.role != syrup_rail::ProcessorChargeRole::Primary
+        || !crate::period_expiry::period_has_expired_at_database_time(connection, period_end_at)
+            .await?
+    {
+        return Ok(None);
+    }
+    if attempt.status().is_terminal() {
+        if !charge_is_externally_reversed(connection, charge.id).await? {
+            transition_processor_charge_in_transaction(
+                connection,
+                syrup_rail::ProcessorChargeId::new(charge.id),
+                &[
+                    ProcessorChargeProgression::Pending,
+                    ProcessorChargeProgression::ReconciliationRequired,
+                    ProcessorChargeProgression::ExternalReversalRequired,
+                ],
+                ProcessorChargeProgression::ExternalReversalRequired,
+                Some(syrup_rail::ProcessorChargeStateCode::PaymentResolution(
+                    PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
+                )),
+            )
+            .await?;
+        }
+        return Ok(None);
+    }
+    let (payment, _) =
+        park_expired_period_approval(connection, attempt, charge.id, evidence).await?;
+    Ok(Some(payment.attempt().clone()))
+}
+
+/// Returns whether a charge has already been externally reversed. A verified
+/// reversal is terminal financial history; a later observation of the
+/// original approval must neither move the charge back to review nor reopen
+/// its attempt.
+pub(crate) async fn charge_is_externally_reversed(
+    connection: &mut PgConnection,
+    charge_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT progression_state = 'externally_reversed' FROM billing_processor_charges WHERE id = $1",
+    )
+    .bind(charge_id)
+    .fetch_one(connection)
+    .await
 }
 
 pub(crate) async fn payment_result_for_attempt(

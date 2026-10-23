@@ -4,7 +4,7 @@ use std::{error::Error, fmt, time::Duration};
 
 use async_trait::async_trait;
 use sqlx::PgConnection;
-use syrup_rail::{BillingEvent, BillingEventSubject};
+use syrup_rail::{BillingEvent, BillingEventSubject, SubscriptionPeriodExpiryPolicy};
 
 use crate::host_error::{BoxError, RedactedHostErrorSource};
 
@@ -92,6 +92,17 @@ pub trait BillingTransactionCoordinator: Send + Sync {
         subject: BillingEventSubject,
         lock_timeout: Duration,
     ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError>;
+
+    /// Returns the host's billing-period expiry policy.
+    ///
+    /// Every subscription payment application that runs through this
+    /// coordinator, foreground or reconciled, and the high-level service's
+    /// renewal and recovery final admission apply it. Because foreground and
+    /// reconciliation share the coordinator, a host enables the policy for all
+    /// of them at once. The default preserves the historical behavior.
+    fn subscription_period_expiry_policy(&self) -> SubscriptionPeriodExpiryPolicy {
+        SubscriptionPeriodExpiryPolicy::Disabled
+    }
 }
 
 /// One host-owned transaction and its typed event projection capability.

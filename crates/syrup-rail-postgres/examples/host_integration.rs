@@ -21,13 +21,16 @@ use async_trait::async_trait;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 use syrup_rail::{
     BillingEvent, BillingEventSubject, CancelSubscription, CancelSubscriptionOutcome,
-    ClearSubscriptionDiscount, EndUserMutationAdmission, EnrollSubscription, EntitlementGuard,
-    GatewayAccountMode, GatewayResolver, PaymentAttemptId, PaymentAttemptStatus,
-    RenewalDispatchPage, RenewalDispatchPageCursor, SubscriptionBillingPortalQuery,
+    ChangeSubscriptionPastDueAccess, ClearSubscriptionDiscount, EndUserMutationAdmission,
+    EnrollSubscription, EntitlementGuard, GatewayAccountMode, GatewayResolver, PaymentAttemptId,
+    PaymentAttemptStatus, RenewalDispatchPage, RenewalDispatchPageCursor,
+    RetireExpiredSubscriptionPeriod, SubscriptionBillingPortalQuery,
     SubscriptionBillingPortalSnapshot, SubscriptionDiscountClaim, SubscriptionDiscountClaimOutcome,
     SubscriptionDiscountClearOutcome, SubscriptionEnrollmentExpectedTerms, SubscriptionId,
-    SubscriptionPaymentContext, SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
-    SubscriptionPaymentHistoryPageLimit,
+    SubscriptionPastDueAccessChangeOutcome, SubscriptionPaymentContext,
+    SubscriptionPaymentHistoryCursor, SubscriptionPaymentHistoryPage,
+    SubscriptionPaymentHistoryPageLimit, SubscriptionPeriodExpiryPolicy,
+    SubscriptionPeriodRetirementOutcome, SubscriptionRecoveryReservation,
 };
 use syrup_rail_postgres::{
     AdmittedEntitlementWriteTransaction, BillingEventWriteError, BillingTransaction,
@@ -35,8 +38,11 @@ use syrup_rail_postgres::{
     EntitlementGuardError, EntitlementWriteTransaction, HostChargeTargetStore, RenewalStoreError,
     SchemaConformanceError, SubscriptionBillingPortalQueryError, SubscriptionBillingService,
     SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
-    SubscriptionOfferStore, assert_runtime_schema_v5_compatible, due_renewals_page_for_mode,
-    require_entitlement_for_update, subscription_billing_portal, subscription_payment_history_page,
+    SubscriptionEnrollmentApplicationError, SubscriptionOfferStore, SubscriptionPeriodExpiryError,
+    SubscriptionRecoveryAdmissionOutcome, admit_subscription_recovery_submission_with_transaction,
+    assert_runtime_schema_v6_compatible, change_subscription_past_due_access_in_transaction,
+    due_renewals_page_for_mode, require_entitlement_for_update, subscription_billing_portal,
+    subscription_payment_history_page,
 };
 
 /// Host-owned implementations required by [`SubscriptionBillingService`].
@@ -93,10 +99,14 @@ pub fn build_subscription_billing_service(
     ports: HostBillingPorts,
     required_gateway_account_mode: GatewayAccountMode,
 ) -> SubscriptionBillingService {
-    let transactions = Arc::new(HostTransactionCoordinator::new(
-        pool.clone(),
-        ports.billing_boundary,
-    ));
+    // Every subscription payment application and the service's renewal and
+    // recovery final admission refuse periods that have already ended.
+    let transactions = Arc::new(
+        HostTransactionCoordinator::new(pool.clone(), ports.billing_boundary)
+            .with_subscription_period_expiry_policy(
+                SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods,
+            ),
+    );
     SubscriptionBillingService::new(
         pool,
         ports.offers,
@@ -116,12 +126,12 @@ pub fn build_subscription_billing_service(
 /// one repeatable-read, read-only catalog snapshot; it never installs,
 /// upgrades, preflights, audits, or otherwise changes the schema. It requires
 /// PostgreSQL 18 and rejects host-specific columns on canonical relations.
-/// Schema v5 is required; a schema-v4 host must first commit
-/// `schema/v5/upgrade_from_v4.sql` with every billing writer stopped.
+/// Schema v6 is required; a schema-v5 host must first commit
+/// `schema/v6/upgrade_from_v5.sql` with every billing writer stopped.
 pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
-    assert_runtime_schema_v5_compatible(pool).await
+    assert_runtime_schema_v6_compatible(pool).await
 }
 
 /// Admits a host-authorized protected write and returns its only valid transaction.
@@ -173,11 +183,26 @@ pub trait HostBillingBoundary: Send + Sync {
 pub struct HostTransactionCoordinator {
     pool: PgPool,
     boundary: Arc<dyn HostBillingBoundary>,
+    expiry_policy: SubscriptionPeriodExpiryPolicy,
 }
 
 impl HostTransactionCoordinator {
     pub fn new(pool: PgPool, boundary: Arc<dyn HostBillingBoundary>) -> Self {
-        Self { pool, boundary }
+        Self {
+            pool,
+            boundary,
+            expiry_policy: SubscriptionPeriodExpiryPolicy::Disabled,
+        }
+    }
+
+    /// Selects the billing-period expiry policy for every application that
+    /// runs through this coordinator, foreground or reconciled.
+    pub fn with_subscription_period_expiry_policy(
+        mut self,
+        expiry_policy: SubscriptionPeriodExpiryPolicy,
+    ) -> Self {
+        self.expiry_policy = expiry_policy;
+        self
     }
 }
 
@@ -213,6 +238,10 @@ impl BillingTransactionCoordinator for HostTransactionCoordinator {
             subject_state,
             boundary: Arc::clone(&self.boundary),
         }))
+    }
+
+    fn subscription_period_expiry_policy(&self) -> SubscriptionPeriodExpiryPolicy {
+        self.expiry_policy
     }
 }
 
@@ -402,6 +431,46 @@ pub async fn read_authorized_subscription_payment_history(
     limit: SubscriptionPaymentHistoryPageLimit,
 ) -> Result<SubscriptionPaymentHistoryPage, SubscriptionBillingPortalQueryError> {
     subscription_payment_history_page(pool, query, cursor, limit).await
+}
+
+/// Admits a reserved recovery after the host's own same-transaction checks.
+///
+/// The host opens `transaction`, takes its user-row lock, rechecks its own
+/// target, accepted terms, and cancellation fence, and then passes the owned
+/// transaction here. Syrup Rail repeats final admission on that transaction
+/// and commits it before returning one-shot authority; any error or failed
+/// commit rolls the whole transaction back and yields none. Release every
+/// other transaction before submitting the returned authority.
+pub async fn admit_authorized_recovery_after_host_checks(
+    transaction: Transaction<'static, Postgres>,
+    reservation: &SubscriptionRecoveryReservation,
+) -> Result<SubscriptionRecoveryAdmissionOutcome, SubscriptionEnrollmentApplicationError> {
+    admit_subscription_recovery_submission_with_transaction(
+        transaction,
+        reservation,
+        SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods,
+    )
+    .await
+}
+
+/// Retires an obsolete due period once its payment outcomes are resolved.
+///
+/// The retirement appends its event through `HostBillingBoundary` and is safe
+/// to replay; unresolved money returns `UnresolvedPayment` without a change.
+pub async fn retire_expired_subscription_period(
+    service: &SubscriptionBillingService,
+    command: RetireExpiredSubscriptionPeriod,
+) -> Result<SubscriptionPeriodRetirementOutcome, SubscriptionBillingServiceError> {
+    service.retire_expired_period(command).await
+}
+
+/// Moves one existing subscription to a different past-due access policy on
+/// the host's transaction, after the host's own row locks.
+pub async fn change_existing_subscription_past_due_access(
+    transaction: &mut Transaction<'static, Postgres>,
+    command: &ChangeSubscriptionPastDueAccess,
+) -> Result<SubscriptionPastDueAccessChangeOutcome, SubscriptionPeriodExpiryError> {
+    change_subscription_past_due_access_in_transaction(transaction, command).await
 }
 
 /// Reads one stable page of automatic renewal dispatch candidates.

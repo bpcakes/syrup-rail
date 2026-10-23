@@ -11,8 +11,9 @@ use super::{
     V2_TO_V3_UPGRADE_SQL, V3_CATALOG_FINGERPRINT, V3_INSTALL_SQL, V3_TO_V4_INDEX_SQL,
     V3_TO_V4_PREPARE_SQL, V3_TO_V4_UPGRADE_SQL, V3_TO_V4_VALIDATE_SQL, V4_CATALOG_FINGERPRINT,
     V4_INSTALL_SQL, V4_TO_V5_UPGRADE_SQL, V5_CATALOG_FINGERPRINT, V5_INSTALL_SQL,
-    active_reindex_shadows, assert_schema_conforms, assert_v1_conforms, assert_v2_conforms,
-    assert_v3_conforms, assert_v4_conforms, assert_v5_conforms,
+    V5_TO_V6_UPGRADE_SQL, V6_CATALOG_FINGERPRINT, V6_INSTALL_SQL, active_reindex_shadows,
+    assert_schema_conforms, assert_v1_conforms, assert_v2_conforms, assert_v3_conforms,
+    assert_v4_conforms, assert_v5_conforms, assert_v6_conforms,
     canonical_catalog_fingerprint_for_pool as canonical_catalog_fingerprint,
     load_billing_index_catalog, require_index_contract, require_supported_postgres_version_num,
     require_unchanged_active_reindex_shadows, retry_reindex_transition_once,
@@ -53,3 +54,4 @@ mod v2;
 mod v3;
 mod v4;
 mod v5;
+mod v6;

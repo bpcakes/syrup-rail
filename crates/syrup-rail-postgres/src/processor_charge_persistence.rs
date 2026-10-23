@@ -153,6 +153,22 @@ pub(crate) fn expected_prior_resolution_code(
                 )))
     {
         PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict.as_str()
+    } else if charge.role() == ProcessorChargeRole::Primary
+        && matches!(
+            charge.attempt_kind(),
+            PaymentAttemptKind::SubscriptionInitial
+                | PaymentAttemptKind::SubscriptionRenewal
+                | PaymentAttemptKind::SubscriptionRecovery
+        )
+        && (attempt.state().resolution_code()
+            == Some(PaymentResolutionCode::SubscriptionApprovedPeriodExpired)
+            || charge.state_code()
+                == Some(ProcessorChargeStateCode::PaymentResolution(
+                    PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
+                )))
+    {
+        // Schema v6 retains the expiry reason through a verified reversal.
+        PaymentResolutionCode::SubscriptionApprovedPeriodExpired.as_str()
     } else {
         "processor_charge_external_reversal_required"
     }

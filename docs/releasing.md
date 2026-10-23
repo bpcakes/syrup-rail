@@ -31,9 +31,10 @@ Fix stable issues on `master` and carry applicable fixes forward into
 
 When 0.6.0 is ready, integrate it into `master`. First preserve the shipped
 0.5.x schema artifacts and provide forward upgrades for the 0.6.0 schema
-changes. The 0.5.x line owns schema v5 (v4 plus billing addresses).
-`dev/0.6.0` must renumber its unreleased schemas and provide an upgrade from
-this v5; it must not ship a different schema under the v5 version.
+changes. The 0.5.x line owns schema v5 (v4 plus billing addresses) and
+schema v6 (v5 plus typed billing-period expiry codes). `dev/0.6.0` must
+renumber its unreleased schemas to v7 or later and provide an upgrade from
+this v6; it must not ship a different schema under the v5 or v6 version.
 Create `release/0.5` before the 0.6.0 integration if 0.5.x still needs support.
 Publishing from a maintenance branch requires an explicit update to the
 workflow ref check and the `release` environment's allowed branches.

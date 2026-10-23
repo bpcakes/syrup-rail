@@ -44,7 +44,7 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             subscription_id: subscription(20),
             plan_key: plan_key.clone(),
             charge,
-            period,
+            period: period.clone(),
         },
         BillingEvent::SubscriptionPaymentFailed {
             attempt_id: attempt(12),
@@ -62,6 +62,13 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             reason: SubscriptionEndReason::NonPayment,
             ended_at,
             access_ends_at: ended_at,
+        },
+        BillingEvent::SubscriptionPeriodExpired {
+            subscription_id: subscription(21),
+            plan_key: plan_key.clone(),
+            period,
+            ended_at,
+            access_ends_at: started_at,
         },
         BillingEvent::SubscriptionCanceled {
             subscription_id: subscription(20),
@@ -127,6 +134,16 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             }
         }),
         serde_json::json!({
+            "type": "subscription_period_expired",
+            "data": {
+                "subscription_id": id(21),
+                "plan_key": "base_subscription",
+                "period": { "start_at": started_at, "end_at": ended_at },
+                "ended_at": ended_at,
+                "access_ends_at": started_at,
+            }
+        }),
+        serde_json::json!({
             "type": "subscription_canceled",
             "data": {
                 "subscription_id": id(20),
@@ -152,7 +169,16 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             }
         }),
     ];
-    let expected_semantic_ids = [id(20), id(11), id(12), id(20), id(20), id(13), id(30)];
+    let expected_semantic_ids = [
+        id(20),
+        id(11),
+        id(12),
+        id(20),
+        id(21),
+        id(20),
+        id(13),
+        id(30),
+    ];
 
     let mut kinds = Vec::new();
     for (index, event) in events.iter().enumerate() {
@@ -229,6 +255,7 @@ fn every_domain_variant_has_an_explicit_redacted_host_mapping() {
             HostBillingEventKindV1::SubscriptionRenewed,
             HostBillingEventKindV1::SubscriptionPaymentFailed,
             HostBillingEventKindV1::SubscriptionEnded,
+            HostBillingEventKindV1::SubscriptionPeriodExpired,
             HostBillingEventKindV1::SubscriptionCanceled,
             HostBillingEventKindV1::PaymentMethodChanged,
             HostBillingEventKindV1::HostChargePaid,
