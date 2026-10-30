@@ -8,7 +8,7 @@ ports used by the adapter crates.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.5"
+syrup-rail = "0.5.6"
 ```
 
 Construct subscription offers from explicit start, recurring, and failure
@@ -85,6 +85,23 @@ stricter formats. An address the adapter rejects fails before submission after
 the attempt has been reserved, and a corrected retry needs a new idempotency
 key, so hosts must pre-validate to their adapter's documented rules. Local
 validation never proves that a provider or processor accepts the address.
+
+A `StatementDescriptor` is the merchant name (at most 25 printable-ASCII
+bytes) with an optional customer-service phone (20 bytes) and URL (40 bytes)
+that a provider may print on the cardholder's statement for one sale where the
+acquirer supports dynamic descriptors. A host builds a
+`StatementDescriptorPolicy` from a default descriptor and, optionally, the
+wording for the first recurring charge after a paid trial, and attaches it to
+its `ResolvedGateway` with `with_statement_descriptors`; `ResolvedGateway::sale`
+then fills `GatewaySaleRequest::descriptor` by intent unless the request
+already carries one. `GatewaySaleIntent::RecurringStoredCredential` names
+that first post-trial charge with `first_charge_after_paid_trial`, which the
+PostgreSQL renewal workflow sets from the subscription phase, and
+`GatewaySaleRequest::into_parts` returns `GatewaySaleRequestParts` so a
+decorator cannot drop the descriptor by accident. The limits are transport
+bounds: the networks print the name in a 25- or 22-character field that the
+acquirer's prefix shares and the phone or URL in 13 characters, and only a
+real statement proves what printed.
 
 `PaymentGateway::query_transaction_diagnostics` reads processor and verification
 results for one historical transaction. A `GatewayTransactionDiagnosticsRequest`

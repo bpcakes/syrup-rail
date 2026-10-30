@@ -165,6 +165,7 @@ fn request_and_error_formatting_redacts_values() {
             email: Some("email-debug-sentinel".to_owned()),
             address: None,
         }),
+        descriptor: None,
     };
     let debug = format!("{request:?}");
     for value in [
@@ -239,6 +240,7 @@ async fn http2_refused_stream_sale_is_indeterminate_and_never_retried() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("protocol NACK should make the sale indeterminate");

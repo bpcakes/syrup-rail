@@ -51,6 +51,7 @@ fn order_ids_are_normalized_consistently_across_mutation_and_query_transports() 
         vault_action: Some(VaultAction::AddCustomer),
         stored_credential: None,
         billing_contact: None,
+        descriptor: None,
     };
     assert!(validate_sale_request(&sale, "private_key").is_ok());
     let sale_params = classic_sale_params(
@@ -160,6 +161,7 @@ async fn json_sale_sends_raw_private_key_authorization_header() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect("sale should parse test response");
@@ -200,6 +202,7 @@ async fn classic_recurring_merchant_sale_sends_scheduled_billing_metadata() {
                 initial_transaction_id: "txn_initial".to_owned(),
             }),
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect("recurring Classic sale should parse");
@@ -262,6 +265,7 @@ async fn http_200_invalid_v5_json_is_an_indeterminate_mutation() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("accepted mutation with invalid JSON must be indeterminate");
@@ -308,6 +312,7 @@ async fn connection_failure_is_known_not_submitted() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("a refused connection must fail before submission");
@@ -393,6 +398,7 @@ async fn established_http1_reset_is_indeterminate_and_never_retried() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("a reset after submission must preserve mutation uncertainty");
@@ -428,6 +434,7 @@ async fn successful_oversized_response_is_an_indeterminate_mutation() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("oversized successful response must be indeterminate");
@@ -478,6 +485,7 @@ fn sale_body_json_applies_the_configured_duplicate_check_policy() {
         vault_action: None,
         stored_credential: None,
         billing_contact: None,
+        descriptor: None,
     };
     let body = sale_body_json(
         &request,
@@ -857,6 +865,7 @@ async fn http_429_sale_remains_indeterminate() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("HTTP 429 must preserve mutation uncertainty");
@@ -891,6 +900,7 @@ async fn non_success_sale_with_payment_decision_evidence_is_indeterminate() {
                 vault_action: None,
                 stored_credential: None,
                 billing_contact: None,
+                descriptor: None,
             })
             .await
             .expect_err("non-success response with payment evidence must be indeterminate");
@@ -924,6 +934,7 @@ async fn documented_v5_validation_error_is_known_not_submitted() {
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("documented validation failure must be surfaced");
@@ -994,6 +1005,7 @@ async fn only_the_documented_v5_validation_envelope_proves_http_400_non_submissi
                 vault_action: None,
                 stored_credential: None,
                 billing_contact: None,
+                descriptor: None,
             })
             .await
             .expect_err("an unproven HTTP 400 envelope must remain reconcilable");
@@ -1028,6 +1040,7 @@ async fn unreadable_http_400_payment_bodies_never_prove_non_submission() {
                 vault_action: None,
                 stored_credential: None,
                 billing_contact: None,
+                descriptor: None,
             })
             .await
             .expect_err("an unreadable HTTP 400 body must remain reconcilable");
@@ -1394,6 +1407,7 @@ async fn undocumented_http_422_sale_without_payment_evidence_is_indeterminate() 
             vault_action: None,
             stored_credential: None,
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("undocumented HTTP 422 must preserve mutation uncertainty");

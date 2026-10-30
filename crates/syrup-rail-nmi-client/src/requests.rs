@@ -93,6 +93,29 @@ impl fmt::Debug for StoredCredential {
     }
 }
 
+/// Dynamic (soft) statement descriptor sent with a Classic sale as
+/// `descriptor`, `descriptor_phone`, and `descriptor_url`.
+///
+/// NMI forwards these fields only on supported processors and silently
+/// ignores them elsewhere; an accepted sale never proves the descriptor was
+/// printed. Values are trimmed on the wire and blank optional fields are
+/// omitted. Requests are rejected before network I/O unless `name` is
+/// non-blank and at most 25 bytes, `phone` is at most 20 bytes of ASCII
+/// digits, spaces, `+`, `-`, `(`, `)` or `.`, `url` is at most 40 bytes
+/// without whitespace, and every field is printable ASCII. These are this
+/// library's conservative local rules; NMI documents no lengths and the card
+/// networks apply their own field sizes and acquirer prefixes. The v5 sale
+/// used for one-time payments does not send a descriptor.
+///
+/// A descriptor is merchant text meant for customer statements, so ordinary
+/// `Debug` formatting shows its values.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatementDescriptor {
+    pub name: String,
+    pub phone: Option<String>,
+    pub url: Option<String>,
+}
+
 pub struct SaleRequest {
     pub amount_cents: i32,
     pub currency: String,
@@ -101,6 +124,7 @@ pub struct SaleRequest {
     pub vault_action: Option<VaultAction>,
     pub stored_credential: Option<StoredCredential>,
     pub billing_contact: Option<BillingContact>,
+    pub descriptor: Option<StatementDescriptor>,
 }
 
 impl fmt::Debug for SaleRequest {
@@ -114,6 +138,7 @@ impl fmt::Debug for SaleRequest {
             .field("vault_action", &self.vault_action)
             .field("stored_credential", &self.stored_credential)
             .field("has_billing_contact", &self.billing_contact.is_some())
+            .field("descriptor", &self.descriptor)
             .finish()
     }
 }

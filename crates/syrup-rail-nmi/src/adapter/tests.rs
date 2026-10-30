@@ -12,6 +12,7 @@ use super::*;
 mod billing_address;
 mod card_metadata;
 mod diagnostics;
+mod statement_descriptor;
 
 fn text(value: &str) -> SensitiveText {
     SensitiveText::new(value)

@@ -113,6 +113,7 @@ struct ScriptedGateway {
     sale_calls: AtomicUsize,
     sale_order_ids: Mutex<Vec<GatewayOrderId>>,
     sale_contacts: Mutex<Vec<Option<BillingContact>>>,
+    sale_requests: Mutex<Vec<GatewaySaleRequest>>,
     sale_result: Mutex<Option<Result<GatewayPaymentOutcome, GatewayMutationError>>>,
     store_calls: AtomicUsize,
     store_order_ids: Mutex<Vec<GatewayOrderId>>,
@@ -256,6 +257,7 @@ impl ScriptedGateway {
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
             sale_contacts: Mutex::new(Vec::new()),
+            sale_requests: Mutex::new(Vec::new()),
             sale_result: Mutex::new(Some(result)),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
@@ -271,6 +273,7 @@ impl ScriptedGateway {
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
             sale_contacts: Mutex::new(Vec::new()),
+            sale_requests: Mutex::new(Vec::new()),
             sale_result: Mutex::new(None),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
@@ -289,6 +292,7 @@ impl ScriptedGateway {
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
             sale_contacts: Mutex::new(Vec::new()),
+            sale_requests: Mutex::new(Vec::new()),
             sale_result: Mutex::new(None),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
@@ -307,6 +311,7 @@ impl ScriptedGateway {
             sale_calls: AtomicUsize::new(0),
             sale_order_ids: Mutex::new(Vec::new()),
             sale_contacts: Mutex::new(Vec::new()),
+            sale_requests: Mutex::new(Vec::new()),
             sale_result: Mutex::new(Some(result)),
             store_calls: AtomicUsize::new(0),
             store_order_ids: Mutex::new(Vec::new()),
@@ -340,6 +345,7 @@ impl PaymentGateway for ScriptedGateway {
             .lock()
             .await
             .push(request.billing_contact().cloned());
+        self.sale_requests.lock().await.push(request);
         self.sale_result
             .lock()
             .await
@@ -884,4 +890,5 @@ mod application;
 mod billing_address;
 mod diagnostics;
 mod foreground;
+mod statement_descriptor;
 mod unit;

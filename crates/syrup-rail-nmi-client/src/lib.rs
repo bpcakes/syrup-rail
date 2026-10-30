@@ -23,7 +23,7 @@ pub use configuration::{
 };
 pub use errors::{MutationCertainty, MutationError, QueryError};
 pub use requests::{
-    BillingAddress, BillingContact, PaymentSource, ReportQuery, SaleRequest,
+    BillingAddress, BillingContact, PaymentSource, ReportQuery, SaleRequest, StatementDescriptor,
     StorePaymentMethodRequest, StoredCredential, TransactionDiagnosticsQuery, TransactionQuery,
     VaultAction,
 };

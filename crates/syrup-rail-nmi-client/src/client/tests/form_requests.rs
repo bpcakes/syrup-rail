@@ -10,6 +10,7 @@ fn classic_sale_applies_the_configured_duplicate_check_policy() {
         vault_action: None,
         stored_credential: None,
         billing_contact: None,
+        descriptor: None,
     };
     let params = classic_sale_params(
         "private_key",
@@ -62,6 +63,7 @@ fn sale_customer_vault_form_adds_payment_method_to_vault() {
             email: Some(" ada@example.test ".to_owned()),
             address: None,
         }),
+        descriptor: None,
     };
     let params = classic_sale_params(
         "private_key",
@@ -108,6 +110,7 @@ fn sale_customer_vault_form_includes_recurring_merchant_flags() {
             initial_transaction_id: "txn_initial_123".to_owned(),
         }),
         billing_contact: None,
+        descriptor: None,
     };
     let params = classic_sale_params(
         "private_key",
@@ -188,6 +191,7 @@ fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
             email: Some(" ada@example.test ".to_owned()),
             address: None,
         }),
+        descriptor: None,
     };
     let params = classic_sale_params(
         private_key.as_str(),
@@ -433,6 +437,7 @@ async fn invalid_mutation_shape_is_rejected_before_transport() {
                 initial_transaction_id: "txn_initial".to_owned(),
             }),
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("invalid source/stored-credential combination must fail locally");
@@ -458,10 +463,191 @@ async fn initial_stored_credential_requires_vault_creation_before_transport() {
             vault_action: None,
             stored_credential: Some(StoredCredential::InitialCustomer),
             billing_contact: None,
+            descriptor: None,
         })
         .await
         .expect_err("initial stored credential without vault creation must fail locally");
 
     assert!(matches!(error, MutationError::InvalidRequest(_)));
     assert_eq!(error.certainty(), crate::MutationCertainty::NotSubmitted);
+}
+
+fn descriptor() -> crate::StatementDescriptor {
+    crate::StatementDescriptor {
+        name: " IDENTITYPRO TRIAL ".to_owned(),
+        phone: Some(" 800-555-0199 ".to_owned()),
+        url: Some(" identitypro.com ".to_owned()),
+    }
+}
+
+fn renewal_with_descriptor(descriptor: Option<crate::StatementDescriptor>) -> SaleRequest {
+    SaleRequest {
+        amount_cents: 2_699,
+        currency: "USD".to_owned(),
+        order_id: "ck_descriptor_renewal".to_owned(),
+        source: PaymentSource::CustomerVault("vault_descriptor".to_owned()),
+        vault_action: None,
+        stored_credential: Some(StoredCredential::RecurringMerchant {
+            initial_transaction_id: "txn_descriptor_initial".to_owned(),
+        }),
+        billing_contact: None,
+        descriptor,
+    }
+}
+
+#[test]
+fn classic_sale_sends_trimmed_descriptor_fields_and_keeps_them_debug_visible() {
+    let request = renewal_with_descriptor(Some(descriptor()));
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "26.99".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
+    let form: std::collections::HashMap<&str, &str> = params.iter().collect();
+    assert_eq!(form.get("descriptor").copied(), Some("IDENTITYPRO TRIAL"));
+    assert_eq!(form.get("descriptor_phone").copied(), Some("800-555-0199"));
+    assert_eq!(form.get("descriptor_url").copied(), Some("identitypro.com"));
+    for key in ["descriptor", "descriptor_phone", "descriptor_url"] {
+        assert!(
+            matches!(params.field(key), Some(NmiFormValue::Borrowed(_))),
+            "{key} must borrow its source"
+        );
+    }
+    // Merchant statement text is configuration, not customer data.
+    let debug = format!("{params:?}");
+    assert!(debug.contains("IDENTITYPRO TRIAL"));
+    assert!(debug.contains("800-555-0199"));
+    assert!(debug.contains("identitypro.com"));
+    assert!(!debug.contains("private_key"));
+    assert!(!debug.contains("vault_descriptor"));
+    let request_debug = format!("{request:?}");
+    assert!(request_debug.contains("IDENTITYPRO TRIAL"));
+    assert!(!request_debug.contains("vault_descriptor"));
+
+    // Blank optional fields are omitted; the sale is otherwise unchanged.
+    let request = renewal_with_descriptor(Some(crate::StatementDescriptor {
+        name: "IDENTITYPRO.COM".to_owned(),
+        phone: Some("  ".to_owned()),
+        url: None,
+    }));
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "26.99".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
+    let form: std::collections::HashMap<&str, &str> = params.iter().collect();
+    assert_eq!(form.get("descriptor").copied(), Some("IDENTITYPRO.COM"));
+    assert!(!form.contains_key("descriptor_phone"));
+    assert!(!form.contains_key("descriptor_url"));
+    assert_eq!(
+        form.get("customer_vault_id").copied(),
+        Some("vault_descriptor")
+    );
+    assert_eq!(form.get("initiated_by").copied(), Some("merchant"));
+
+    // Without a descriptor the wire keeps its previous field set.
+    let request = renewal_with_descriptor(None);
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "26.99".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
+    let form: std::collections::HashMap<&str, &str> = params.iter().collect();
+    for key in ["descriptor", "descriptor_phone", "descriptor_url"] {
+        assert!(
+            !form.contains_key(key),
+            "{key} must be absent without a descriptor"
+        );
+    }
+}
+
+#[test]
+fn v5_one_time_sale_never_sends_descriptor_fields() {
+    let request = SaleRequest {
+        amount_cents: 4_900,
+        currency: "USD".to_owned(),
+        order_id: "ck_v5_soft_text".to_owned(),
+        source: PaymentSource::PaymentToken("tok_v5".to_owned()),
+        vault_action: None,
+        stored_credential: None,
+        billing_contact: None,
+        descriptor: Some(descriptor()),
+    };
+    assert!(!sale_uses_classic_form(&request));
+    let body = sale_body_json(
+        &request,
+        amount_value(request.amount_cents).unwrap(),
+        DuplicateCheck::ProcessorConfigured,
+    );
+    let rendered = body.to_string();
+    assert!(!rendered.contains("descriptor"), "{rendered}");
+    assert!(!rendered.contains("IDENTITYPRO"), "{rendered}");
+}
+
+#[tokio::test]
+async fn descriptor_outside_local_rules_is_rejected_before_transport() {
+    let client = Client::new(
+        "http://127.0.0.1:1",
+        "unused_private_key",
+        "unused_query_key",
+    )
+    .expect("closed-loopback client should construct");
+    let valid = descriptor();
+    let cases = [
+        crate::StatementDescriptor {
+            name: "   ".to_owned(),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            name: "A".repeat(26),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            name: "IDENTITÉ PRO".to_owned(),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            name: "TRIAL\tEND".to_owned(),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            phone: Some("800-555-HELP".to_owned()),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            phone: Some("1".repeat(21)),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            url: Some("identity pro.com".to_owned()),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            url: Some("a".repeat(41)),
+            ..valid.clone()
+        },
+    ];
+    for descriptor in cases {
+        let error = client
+            .sale(renewal_with_descriptor(Some(descriptor.clone())))
+            .await
+            .expect_err("descriptor outside local rules must fail locally");
+        assert!(
+            matches!(error, MutationError::InvalidRequest(_)),
+            "{descriptor:?}: {error:?}"
+        );
+        assert_eq!(error.certainty(), crate::MutationCertainty::NotSubmitted);
+    }
+    // A conforming descriptor reaches transport and fails on the closed port.
+    let error = client
+        .sale(renewal_with_descriptor(Some(valid)))
+        .await
+        .expect_err("closed local port should fail submission");
+    assert!(
+        !matches!(error, MutationError::InvalidRequest(_)),
+        "valid descriptor must pass local validation: {error:?}"
+    );
 }

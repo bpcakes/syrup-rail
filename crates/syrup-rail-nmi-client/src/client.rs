@@ -69,6 +69,13 @@ const MAX_NMI_EMAIL_BYTES: usize = 320;
 const MAX_NMI_ADDRESS_LINE_BYTES: usize = 100;
 const MAX_NMI_CITY_BYTES: usize = 50;
 const MAX_NMI_ZIP_BYTES: usize = 20;
+// Dynamic descriptor bounds: the card networks print the merchant name in a
+// 25-character (Visa) or 22-character (Mastercard) field that the acquirer's
+// fixed prefix shares, and the phone or URL in a 13-character field. NMI
+// documents no lengths for the Classic descriptor fields.
+const MAX_NMI_DESCRIPTOR_BYTES: usize = 25;
+const MAX_NMI_DESCRIPTOR_PHONE_BYTES: usize = 20;
+const MAX_NMI_DESCRIPTOR_URL_BYTES: usize = 40;
 const MAX_NMI_REPORT_DATE_BYTES: usize = 64;
 const MAX_NMI_OUTBOUND_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_NMI_FIXED_REQUEST_BYTES: usize = 1_024;

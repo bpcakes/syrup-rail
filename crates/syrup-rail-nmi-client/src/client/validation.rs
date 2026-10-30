@@ -1,11 +1,13 @@
 use crate::{
     BillingAddress, BillingContact, MutationError, PaymentSource, QueryError, ReportQuery,
-    SaleRequest, StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
+    SaleRequest, StatementDescriptor, StorePaymentMethodRequest, StoredCredential,
+    TransactionQuery, VaultAction,
 };
 
 use super::request_budget::{OutboundRequestValidator, RequestEncoding};
 use super::{
     MAX_NMI_ADDRESS_LINE_BYTES, MAX_NMI_CITY_BYTES, MAX_NMI_CONTACT_NAME_BYTES,
+    MAX_NMI_DESCRIPTOR_BYTES, MAX_NMI_DESCRIPTOR_PHONE_BYTES, MAX_NMI_DESCRIPTOR_URL_BYTES,
     MAX_NMI_EMAIL_BYTES, MAX_NMI_IDENTIFIER_BYTES, MAX_NMI_ORDER_ID_BYTES,
     MAX_NMI_PAYMENT_TOKEN_BYTES, MAX_NMI_REPORT_DATE_BYTES, MAX_NMI_TRANSACTION_REPORTS,
     MAX_NMI_ZIP_BYTES, SUPPORTED_NMI_CURRENCY, WireError, sale_uses_classic_form,
@@ -274,7 +276,65 @@ fn validate_sale_request_size(
     if let Some(contact) = &request.billing_contact {
         validate_billing_contact(&mut validator, contact)?;
     }
+    if let Some(descriptor) = &request.descriptor {
+        validate_statement_descriptor(&mut validator, descriptor)?;
+    }
     Ok(())
+}
+
+/// Local bounds for the Classic dynamic descriptor fields. A one-time v5 sale
+/// never sends them, but the same rules apply so a rejected descriptor is
+/// found before any request shape is chosen.
+fn validate_statement_descriptor(
+    validator: &mut OutboundRequestValidator,
+    descriptor: &StatementDescriptor,
+) -> Result<(), &'static str> {
+    validator.trimmed_field(
+        &descriptor.name,
+        MAX_NMI_DESCRIPTOR_BYTES,
+        "statement descriptor exceeds the supported size",
+    )?;
+    let name = descriptor.name.trim();
+    if name.is_empty() {
+        return Err("statement descriptor is required");
+    }
+    ensure_printable_ascii(name, "statement descriptor contains unsupported characters")?;
+    if let Some(phone) = &descriptor.phone {
+        validator.trimmed_field(
+            phone,
+            MAX_NMI_DESCRIPTOR_PHONE_BYTES,
+            "statement descriptor phone exceeds the supported size",
+        )?;
+        if !phone.trim().bytes().all(|byte| {
+            byte.is_ascii_digit() || matches!(byte, b' ' | b'+' | b'-' | b'(' | b')' | b'.')
+        }) {
+            return Err("statement descriptor phone contains unsupported characters");
+        }
+    }
+    if let Some(url) = &descriptor.url {
+        validator.trimmed_field(
+            url,
+            MAX_NMI_DESCRIPTOR_URL_BYTES,
+            "statement descriptor URL exceeds the supported size",
+        )?;
+        let url = url.trim();
+        ensure_printable_ascii(
+            url,
+            "statement descriptor URL contains unsupported characters",
+        )?;
+        if url.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            return Err("statement descriptor URL contains whitespace");
+        }
+    }
+    Ok(())
+}
+
+fn ensure_printable_ascii(value: &str, error: &'static str) -> Result<(), &'static str> {
+    if value.bytes().all(|byte| (b' '..=b'~').contains(&byte)) {
+        Ok(())
+    } else {
+        Err(error)
+    }
 }
 
 fn validate_store_payment_method_request_size(

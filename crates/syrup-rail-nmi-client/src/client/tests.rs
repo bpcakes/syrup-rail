@@ -318,6 +318,7 @@ fn test_sale_request(source: PaymentSource) -> SaleRequest {
         vault_action: None,
         stored_credential: None,
         billing_contact: None,
+        descriptor: None,
     }
 }
 

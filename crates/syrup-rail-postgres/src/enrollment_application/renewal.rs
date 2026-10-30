@@ -45,11 +45,22 @@ pub struct AdmittedSubscriptionRenewal {
     reservation: SubscriptionRenewalReservation,
     attempt: PaymentAttempt,
     payment_method_reference: syrup_rail::GatewayPaymentMethodReference,
+    /// The subscription was still in its paid-trial phase at admission, so
+    /// this sale (or a dunning retry of it) is the first recurring charge
+    /// after the trial. Read under the admission lock and carried into the
+    /// sale intent for statement-descriptor selection.
+    first_charge_after_paid_trial: bool,
 }
 
 impl AdmittedSubscriptionRenewal {
     pub const fn attempt(&self) -> &PaymentAttempt {
         &self.attempt
+    }
+
+    /// Whether the admitted sale is the first recurring charge after a paid
+    /// trial, including a dunning retry of that charge.
+    pub const fn first_charge_after_paid_trial(&self) -> bool {
+        self.first_charge_after_paid_trial
     }
 }
 
@@ -60,6 +71,10 @@ impl fmt::Debug for AdmittedSubscriptionRenewal {
             .field("attempt", &self.attempt)
             .field("has_submission_authority", &true)
             .field("has_payment_method_reference", &true)
+            .field(
+                "first_charge_after_paid_trial",
+                &self.first_charge_after_paid_trial,
+            )
             .finish()
     }
 }
@@ -141,10 +156,33 @@ pub(crate) async fn admit_subscription_renewal_submission_with_policy(
                 syrup_rail::GatewayPaymentMethodReference::new(reference).map_err(|_| {
                     SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
                 })?;
+            // The phase flips to `recurring` only when a renewal approval is
+            // applied, so under the admission lock `paid_trial` means this
+            // sale is the first recurring charge after the trial.
+            let phase = sqlx::query_scalar::<_, String>(
+                r#"
+                SELECT phase
+                FROM billing_subscriptions
+                WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
+                "#,
+            )
+            .bind(reservation.subscription_id().as_uuid())
+            .bind(identity.billing_scope_id().as_uuid())
+            .bind(identity.subscriber_id().as_uuid())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
+                INVALID_APPLICATION_STATE,
+            ))?
+            .parse::<syrup_rail::SubscriptionPhase>()
+            .map_err(|_| {
+                SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
+            })?;
             SubscriptionRenewalAdmissionOutcome::Admitted(Box::new(AdmittedSubscriptionRenewal {
                 reservation: reservation.clone(),
                 attempt,
                 payment_method_reference,
+                first_charge_after_paid_trial: phase == syrup_rail::SubscriptionPhase::PaidTrial,
             }))
         }
         SubscriptionRenewalSubmissionOutcome::AlreadyAdmitted(attempt) => {
@@ -197,6 +235,7 @@ pub async fn submit_admitted_subscription_renewal(
                 .expected_state()
                 .initial_transaction_id()
                 .clone(),
+            first_charge_after_paid_trial: admission.first_charge_after_paid_trial,
         },
         // Only the address reserved on the attempt is sent; renewals carry no
         // names or email, and an addressless reservation sends no contact.

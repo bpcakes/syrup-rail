@@ -6,10 +6,10 @@ use syrup_rail::{
 
 use super::*;
 
-const CLASSIC_APPROVAL: &str = "response=1&response_code=100&transactionid=txn_address&customer_vault_id=vault_address&responsetext=Approved";
-const V5_APPROVAL: &str = r#"{"id":"txn_address","status":"approved"}"#;
+pub(super) const CLASSIC_APPROVAL: &str = "response=1&response_code=100&transactionid=txn_address&customer_vault_id=vault_address&responsetext=Approved";
+pub(super) const V5_APPROVAL: &str = r#"{"id":"txn_address","status":"approved"}"#;
 
-async fn capturing_gateway(
+pub(super) async fn capturing_gateway(
     response_body: &'static str,
 ) -> (
     NmiPaymentGateway,
@@ -80,11 +80,11 @@ async fn capturing_gateway(
     (NmiPaymentGateway::new(client), receiver, server)
 }
 
-fn charge() -> ChargeAmount {
+pub(super) fn charge() -> ChargeAmount {
     ChargeAmount::new(4_900, CurrencyCode::new("USD").unwrap()).unwrap()
 }
 
-fn order() -> GatewayOrderId {
+pub(super) fn order() -> GatewayOrderId {
     GatewayOrderId::from_correlation("ck_address_order").unwrap()
 }
 
@@ -122,14 +122,15 @@ fn named_contact() -> BillingContact {
     .with_address(core_address())
 }
 
-fn recurring_intent() -> GatewaySaleIntent {
+pub(super) fn recurring_intent() -> GatewaySaleIntent {
     GatewaySaleIntent::RecurringStoredCredential {
         payment_method_reference: GatewayPaymentMethodReference::new("vault_existing").unwrap(),
         initial_transaction_id: GatewayTransactionId::new("txn_initial").unwrap(),
+        first_charge_after_paid_trial: false,
     }
 }
 
-fn form_fields(request: &str) -> HashMap<String, String> {
+pub(super) fn form_fields(request: &str) -> HashMap<String, String> {
     let (head, body) = request.split_once("\r\n\r\n").expect("request body");
     assert!(head.starts_with("POST /api/transact.php "), "{head}");
     url::form_urlencoded::parse(body.as_bytes())
@@ -137,13 +138,13 @@ fn form_fields(request: &str) -> HashMap<String, String> {
         .collect()
 }
 
-fn json_body(request: &str) -> serde_json::Value {
+pub(super) fn json_body(request: &str) -> serde_json::Value {
     let (head, body) = request.split_once("\r\n\r\n").expect("request body");
     assert!(head.starts_with("POST /api/v5/payments/sale "), "{head}");
     serde_json::from_str(body).expect("v5 body should be JSON")
 }
 
-async fn finish(server: tokio::task::JoinHandle<()>) {
+pub(super) async fn finish(server: tokio::task::JoinHandle<()>) {
     tokio::time::timeout(std::time::Duration::from_secs(5), server)
         .await
         .expect("test server should not hang")
