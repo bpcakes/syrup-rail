@@ -127,6 +127,39 @@ async fn descriptor_reaches_the_classic_wire_for_stored_credential_sales() {
 }
 
 #[tokio::test]
+async fn maximum_size_core_descriptor_reaches_the_classic_wire() {
+    let name = "M".repeat(syrup_rail::MAX_STATEMENT_DESCRIPTOR_NAME_BYTES);
+    let phone = "+1 (234) 567-890.123";
+    assert_eq!(
+        phone.len(),
+        syrup_rail::MAX_STATEMENT_DESCRIPTOR_PHONE_BYTES
+    );
+    let url = "u".repeat(syrup_rail::MAX_STATEMENT_DESCRIPTOR_URL_BYTES);
+    let descriptor = StatementDescriptor::new(name.clone())
+        .unwrap()
+        .with_phone(Some(phone.to_owned()))
+        .unwrap()
+        .with_url(Some(url.clone()))
+        .unwrap();
+    let (gateway, captured, server) = capturing_gateway(CLASSIC_APPROVAL).await;
+
+    let outcome = gateway
+        .sale(
+            GatewaySaleRequest::new(charge(), order(), recurring_intent(), None)
+                .with_descriptor(Some(descriptor)),
+        )
+        .await
+        .expect("maximum-size core descriptor must pass NMI validation");
+
+    assert_eq!(outcome.status(), GatewayPaymentStatus::Approved);
+    let fields = form_fields(&captured.await.unwrap());
+    assert_eq!(fields["descriptor"], name);
+    assert_eq!(fields["descriptor_phone"], phone);
+    assert_eq!(fields["descriptor_url"], url);
+    finish(server).await;
+}
+
+#[tokio::test]
 async fn one_time_v5_sale_ignores_the_descriptor() {
     let (gateway, captured, server) = capturing_gateway(V5_APPROVAL).await;
     let outcome = gateway

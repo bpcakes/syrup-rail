@@ -97,8 +97,10 @@ then fills `GatewaySaleRequest::descriptor` by intent unless the request
 already carries one. `GatewaySaleIntent::RecurringStoredCredential` names
 that first post-trial charge with `first_charge_after_paid_trial`, which the
 PostgreSQL renewal workflow sets from the subscription phase, and
-`GatewaySaleRequest::into_parts` returns `GatewaySaleRequestParts` so a
-decorator cannot drop the descriptor by accident. The limits are transport
+`GatewaySaleRequest::into_parts` returns `GatewaySaleRequestParts`. A decorator
+can rebuild the request losslessly with `GatewaySaleRequest::from(parts)`;
+when rebuilding with `GatewaySaleRequest::new`, it must also forward
+`parts.descriptor` with `with_descriptor`. The limits are transport
 bounds: the networks print the name in a 25- or 22-character field that the
 acquirer's prefix shares and the phone or URL in 13 characters, and only a
 real statement proves what printed.
