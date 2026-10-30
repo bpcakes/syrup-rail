@@ -48,7 +48,7 @@ and transaction orchestration.
   workflows.
 - `src/enrollment_application/{initial,recovery,renewal,payment_method_replacement}.rs`
   — workflow-owned provider submission, foreground/reconciled outcome
-  application, and compensation paths. Initial and payment-method replacement
+  application, and compensation paths. Initial, renewal, and payment-method replacement
   approval mutations live in their nested `approval.rs` modules.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.

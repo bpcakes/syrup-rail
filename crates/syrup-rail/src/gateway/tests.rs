@@ -1,7 +1,10 @@
 use chrono::TimeZone;
 
 use super::*;
-use crate::{CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError, PaymentAttemptId};
+use crate::{
+    ChargeAmount, CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError,
+    PaymentAttemptId, StatementDescriptor,
+};
 
 #[test]
 fn gateway_account_mode_storage_values_round_trip_exhaustively() {

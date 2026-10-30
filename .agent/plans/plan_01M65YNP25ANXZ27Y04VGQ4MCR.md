@@ -1,0 +1,1 @@
+Address PR #9 failures by updating compatible advisory-affected dependencies and async-trait, splitting oversized Rust modules without changing behavior or public paths, and validating with Rust 1.99 plus the repository gates. Keep SQLx 0.8 and immutable schema artifacts unchanged. Run the full test suite, push the branch, and verify every GitHub check on the pushed commit.
