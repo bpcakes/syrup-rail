@@ -32,6 +32,10 @@ command/outcome types for application-independent subscription billing.
   typed evidence, sensitive values, provider-I/O-free host resolver contract,
   and diagnostic boundary. `src/gateway_value/contact.rs` owns the redacted
   billing contact, billing address, and contact-parts values.
+  `src/gateway_value/descriptor.rs` owns the opt-in `StatementDescriptor` value
+  and `StatementDescriptorPolicy`; `ResolvedGateway::sale` in `src/resolver.rs`
+  fills a sale's missing descriptor from the attached policy by intent and
+  never replaces an explicit one.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure
   payment/calendar policy.
 - `src/billing_portal.rs` owns the provider-neutral customer billing portal,
