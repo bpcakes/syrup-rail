@@ -286,6 +286,52 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_bounds_apply_to_trimmed_values() {
+        let padded = |value: String| format!("  {value} ");
+        let name = "A".repeat(MAX_STATEMENT_DESCRIPTOR_NAME_BYTES);
+        let phone = "1".repeat(MAX_STATEMENT_DESCRIPTOR_PHONE_BYTES);
+        let url = "a".repeat(MAX_STATEMENT_DESCRIPTOR_URL_BYTES);
+        let descriptor = StatementDescriptor::new(padded(name.clone()))
+            .unwrap()
+            .with_phone(Some(padded(phone.clone())))
+            .unwrap()
+            .with_url(Some(padded(url.clone())))
+            .unwrap();
+        assert_eq!(descriptor.name(), name);
+        assert_eq!(descriptor.phone(), Some(phone.as_str()));
+        assert_eq!(descriptor.url(), Some(url.as_str()));
+
+        // A whitespace-only optional field longer than its bound is absent.
+        let cleared = descriptor
+            .clone()
+            .with_phone(Some(" ".repeat(MAX_STATEMENT_DESCRIPTOR_PHONE_BYTES + 10)))
+            .unwrap()
+            .with_url(Some(" ".repeat(MAX_STATEMENT_DESCRIPTOR_URL_BYTES + 10)))
+            .unwrap();
+        assert_eq!(cleared.phone(), None);
+        assert_eq!(cleared.url(), None);
+
+        // Trimming never shortens a value that is still too long.
+        assert_eq!(
+            StatementDescriptor::new(padded(format!("{name}A"))).unwrap_err(),
+            StatementDescriptorError::NameTooLong
+        );
+        assert_eq!(
+            descriptor
+                .clone()
+                .with_phone(Some(padded(format!("{phone}1"))))
+                .unwrap_err(),
+            StatementDescriptorError::PhoneTooLong
+        );
+        assert_eq!(
+            descriptor
+                .with_url(Some(padded(format!("{url}a"))))
+                .unwrap_err(),
+            StatementDescriptorError::UrlTooLong
+        );
+    }
+
+    #[test]
     fn policy_overrides_only_the_first_recurring_charge_after_a_paid_trial() {
         let default = StatementDescriptor::new("IDENTITYPRO.COM").unwrap();
         let trial_end = StatementDescriptor::new("IDENTITYPRO TRIAL").unwrap();

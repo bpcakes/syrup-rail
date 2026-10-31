@@ -629,6 +629,14 @@ async fn descriptor_outside_local_rules_is_rejected_before_transport() {
             url: Some("a".repeat(41)),
             ..valid.clone()
         },
+        crate::StatementDescriptor {
+            url: Some("identité.com".to_owned()),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            url: Some("identity\u{7f}pro.com".to_owned()),
+            ..valid.clone()
+        },
         // Trimming never shortens a value that is still too long.
         crate::StatementDescriptor {
             name: format!(" {} ", "A".repeat(26)),
