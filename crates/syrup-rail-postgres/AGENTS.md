@@ -48,7 +48,7 @@ and transaction orchestration.
   workflows.
 - `src/enrollment_application/{initial,recovery,renewal,payment_method_replacement}.rs`
   — workflow-owned provider submission, foreground/reconciled outcome
-  application, and compensation paths. Initial and payment-method replacement
+  application, and compensation paths. Initial, renewal, and payment-method replacement
   approval mutations live in their nested `approval.rs` modules.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
@@ -350,6 +350,12 @@ and transaction orchestration.
   separately honor the exact `active` or `past_due` state snapshotted by an
   already-durable attempt, so preserved v1 authority can complete without
   reopening recovery for active subscriptions.
+- Renewal final admission reads the subscription phase under the aggregate
+  lock and sets `first_charge_after_paid_trial` while it is still
+  `paid_trial`. Only applied renewal or recovery approval moves the phase to
+  `recurring`, so the flag covers the first post-trial charge and every dunning
+  retry of it. The statement descriptor itself is chosen by the core
+  `ResolvedGateway::sale` policy, not by this crate.
 - `next_renewal_at` remains the economic period anchor;
   `next_payment_attempt_at` alone controls automatic dispatch. Foreground,
   exact reconciliation, and operator review apply qualifying automatic

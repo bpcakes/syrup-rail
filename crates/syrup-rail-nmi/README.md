@@ -101,6 +101,25 @@ idempotency key, hosts must pre-validate addresses to these rules before
 reserving a payment. Passing them does not prove that NMI or the processor will
 accept the address or the payment.
 
+A core `StatementDescriptor` on a sale maps to NMI's dynamic descriptor
+fields: `name` to `descriptor`, `phone` to `descriptor_phone`, and `url` to
+`descriptor_url`. Enrollment and recovery sales and merchant-initiated
+renewals send them through Classic; the v5 one-time sale used for host charges
+sends no descriptor, and Classic `validate` has none. Hosts normally attach a
+`StatementDescriptorPolicy` to the `ResolvedGateway` rather than setting a
+descriptor per request; the renewal intent's `first_charge_after_paid_trial`
+flag selects the policy's trial-wording override and has no NMI field of its
+own. NMI forwards these fields only on processors that support dynamic (soft)
+descriptors and silently ignores them elsewhere, the acquirer usually fixes a
+prefix inside the card networks' 25-character merchant-name field, and an
+accepted sale never proves what printed. Confirm support with the acquirer and
+a real statement before relying on the text. The raw client rejects a
+descriptor outside its local rules (25-byte printable-ASCII name, 20-byte
+phone of digits, spaces, `+`, `-`, `(`, `)` or `.`, 40-byte URL without
+whitespace) as `GatewayNotSubmittedError::Malformed` after the attempt is
+reserved, so hosts validate the strings at configuration time; the core type
+enforces the same rules.
+
 `query_transaction_diagnostics` makes one exact Query API lookup by transaction
 ID and never searches by order ID. It requires exactly one returned transaction
 whose ID matches, rejects a returned order ID or currency that differs from the

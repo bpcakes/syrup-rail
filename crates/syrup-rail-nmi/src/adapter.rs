@@ -5,10 +5,11 @@ use syrup_rail::{
     GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy, GatewayMutationError,
     GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentDiagnostic,
     GatewayPaymentMethodMetadata, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewayStorePaymentMethodRequest,
-    GatewayTransactionDiagnostics, GatewayTransactionDiagnosticsRequest, GatewayTransactionId,
-    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway,
-    ProcessorEvidence,
+    GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewaySaleRequestParts,
+    GatewayStorePaymentMethodRequest, GatewayTransactionDiagnostics,
+    GatewayTransactionDiagnosticsRequest, GatewayTransactionId, GatewayTransactionReport,
+    GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway, ProcessorEvidence,
+    StatementDescriptor,
 };
 use syrup_rail_nmi_client::{
     AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeDiagnostic,
@@ -197,7 +198,13 @@ fn map_account_mode(mode: AccountMode) -> GatewayAccountMode {
 }
 
 fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayMutationError> {
-    let (charge, order_id, intent, billing_contact) = request.into_parts();
+    let GatewaySaleRequestParts {
+        charge,
+        order_id,
+        intent,
+        billing_contact,
+        descriptor,
+    } = request.into_parts();
     if charge.currency().as_str() != "USD" {
         return Err(GatewayMutationError::NotSubmitted(
             GatewayNotSubmittedError::Malformed(GatewayDiagnostic::new(
@@ -216,9 +223,12 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
             Some(VaultAction::AddCustomer),
             Some(StoredCredential::InitialCustomer),
         ),
+        // NMI has no field for the first-charge-after-trial flag; the core
+        // descriptor policy has already chosen the statement text from it.
         GatewaySaleIntent::RecurringStoredCredential {
             payment_method_reference,
             initial_transaction_id,
+            first_charge_after_paid_trial: _,
         } => (
             PaymentSource::CustomerVault(payment_method_reference.into_inner()),
             None,
@@ -235,7 +245,20 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
         vault_action,
         stored_credential,
         billing_contact: billing_contact.map(map_billing_contact),
+        descriptor: descriptor.map(map_statement_descriptor),
     })
+}
+
+/// Maps the validated core descriptor onto NMI's Classic field names. The raw
+/// client re-checks its own local rules before any request is sent.
+fn map_statement_descriptor(
+    descriptor: StatementDescriptor,
+) -> syrup_rail_nmi_client::StatementDescriptor {
+    syrup_rail_nmi_client::StatementDescriptor {
+        name: descriptor.name().to_owned(),
+        phone: descriptor.phone().map(ToOwned::to_owned),
+        url: descriptor.url().map(ToOwned::to_owned),
+    }
 }
 
 fn map_billing_contact(contact: BillingContact) -> syrup_rail_nmi_client::BillingContact {

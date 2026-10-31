@@ -3,8 +3,9 @@
 Version 0.6.0 requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
 pool, transaction, and error types are incompatible with SQLx 0.8; hosts must
 upgrade their SQLx dependencies and CLI together and regenerate host metadata.
-Schema v6 and billing behavior are unchanged from 0.5.5 at
-`3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`.
+Schema v6 and existing billing behavior are unchanged from 0.5.5 at
+`3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`; dynamic statement descriptors are
+opt-in.
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -176,6 +177,27 @@ subscriptions and grants block enrollment across modes, saved discount claims
 are shared, and cancellation/deletion blockers remain mode-neutral. Hosts that
 need test work to have no effect on live subscriber lifecycle must isolate the
 tenant/database or use synthetic test subscribers.
+
+0.6.0 adds opt-in dynamic statement descriptors. The core `StatementDescriptor`
+value carries a merchant name of at most 25 printable-ASCII bytes with an
+optional phone (20 bytes) and URL (40 bytes); `StatementDescriptorPolicy`
+pairs a default descriptor with an optional override for the first recurring
+charge after a paid trial. A host attaches the policy to its `ResolvedGateway`
+with `with_statement_descriptors`, and `ResolvedGateway::sale` then fills
+`GatewaySaleRequest::descriptor` from the sale's intent unless the request
+already carries one (`with_descriptor`). The flag that drives the override is
+new on `GatewaySaleIntent::RecurringStoredCredential`
+(`first_charge_after_paid_trial`), which the PostgreSQL renewal workflow sets
+from the subscription's phase under the admission lock, so a dunning retry of
+the first post-trial charge keeps the trial wording. The NMI adapter maps the
+descriptor onto the Classic `descriptor`, `descriptor_phone`, and
+`descriptor_url` fields, which NMI forwards only on supported processors; the
+v5 one-time sale sends none. Source breaks: `GatewaySaleRequest::into_parts`
+returns `GatewaySaleRequestParts` (decorators that rebuild a request must pass
+the descriptor on), the recurring intent variant gains a field, and the raw
+`syrup_rail_nmi_client::SaleRequest` struct gains `descriptor`; add
+`descriptor: None` to existing literals. Without a policy nothing changes on
+the wire.
 
 0.5.5 added an opt-in billing-period expiry policy and the operations around
 it. `SubscriptionPeriodExpiryPolicy` defaults to `Disabled`, which keeps the

@@ -3,7 +3,7 @@ use std::fmt;
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
 use crate::{
-    BillingContact, DuplicateCheck, PaymentSource, ReportQuery, SaleRequest,
+    BillingContact, DuplicateCheck, PaymentSource, ReportQuery, SaleRequest, StatementDescriptor,
     StorePaymentMethodRequest, StoredCredential, TransactionQuery, VaultAction,
 };
 
@@ -114,6 +114,9 @@ fn nmi_form_param_is_debug_safe(key: &str) -> bool {
             | "billing_method"
             | "initiated_by"
             | "stored_credential_indicator"
+            | "descriptor"
+            | "descriptor_phone"
+            | "descriptor_url"
     )
 }
 
@@ -162,7 +165,26 @@ pub(super) fn classic_sale_params<'a>(
     if let Some(contact) = &request.billing_contact {
         push_classic_billing_contact(&mut params, contact);
     }
+    if let Some(descriptor) = &request.descriptor {
+        push_classic_statement_descriptor(&mut params, descriptor);
+    }
     params
+}
+
+/// Dynamic descriptor fields NMI forwards on supported processors. They are
+/// merchant configuration, not customer data, so they stay on the `Debug`
+/// allowlist.
+fn push_classic_statement_descriptor<'a>(
+    params: &mut NmiFormParams<'a>,
+    descriptor: &'a StatementDescriptor,
+) {
+    params.push_borrowed("descriptor", descriptor.name.trim());
+    if let Some(phone) = trimmed_optional(&descriptor.phone) {
+        params.push_borrowed("descriptor_phone", phone);
+    }
+    if let Some(url) = trimmed_optional(&descriptor.url) {
+        params.push_borrowed("descriptor_url", url);
+    }
 }
 
 pub(super) fn classic_store_payment_method_params<'a>(

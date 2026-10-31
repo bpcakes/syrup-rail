@@ -5,9 +5,10 @@ All notable changes to the Syrup Rail crates are documented in this file.
 ## [0.6.0] - Unreleased
 
 Breaking SQLx upgrade from the IdentityPro-consumed 0.5.5 revision
-`3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`. Billing behavior and every schema-v6
-artifact are preserved. This release does not include the separate unfinished
-features on the historically named `dev/0.6.0` branch.
+`3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`. Existing billing behavior and every
+schema-v6 artifact are preserved; dynamic statement descriptors are opt-in.
+This release does not include the separate unfinished features on the
+historically named `dev/0.6.0` branch.
 
 ### Action required for hosts
 
@@ -18,6 +19,17 @@ features on the historically named `dev/0.6.0` branch.
   its query-string API, and regenerate host query metadata with that CLI.
 - Keep the existing schema-v6 installation and startup assertion. No database
   migration is required for a host already consuming 0.5.5 on schema v6.
+- `GatewaySaleRequest::into_parts` now returns `GatewaySaleRequestParts`
+  instead of a tuple. A gateway decorator that rebuilds the request it
+  forwards must carry `descriptor` across with `with_descriptor`, or the
+  provider prints the account's static descriptor for that sale.
+- `GatewaySaleIntent::RecurringStoredCredential` gains
+  `first_charge_after_paid_trial: bool`. Code that constructs or exhaustively
+  destructures the variant must name it; the NMI adapter ignores it on the
+  wire because the descriptor policy has already consumed it.
+- The raw `syrup_rail_nmi_client::SaleRequest` struct gains
+  `descriptor: Option<StatementDescriptor>`; add `descriptor: None` to
+  existing literals.
 
 ### Changed
 
@@ -28,9 +40,44 @@ features on the historically named `dev/0.6.0` branch.
 - Preserve recovery's top-level transaction requirement through the exactly
   pinned SQLx core transaction-depth API.
 - Regenerate PostgreSQL query metadata against the unchanged schema v6.
-- Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, and
+- Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, `tokio`, and
   `webpki-roots` to compatible patched versions required by the release audit.
   SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
+
+### Added
+
+- Add `StatementDescriptor` (merchant name of at most 25 printable-ASCII
+  bytes, optional phone of at most 20 bytes of digits, spaces, `+`, `-`, `(`,
+  `)` or `.`, optional URL of at most 40 bytes without whitespace) and
+  `StatementDescriptorError`, with the `MAX_STATEMENT_DESCRIPTOR_*_BYTES`
+  constants. These are transport bounds; the card networks print the name in
+  a 25- or 22-character field that the acquirer's fixed prefix shares and the
+  phone or URL in a 13-character field, so hosts take the exact strings from
+  their acquirer. Local validation never proves the provider, acquirer or
+  processor honors a dynamic descriptor.
+- Add `StatementDescriptorPolicy`: a default descriptor plus an optional
+  override for the first recurring charge after a paid trial, selected by
+  `descriptor_for(&GatewaySaleIntent)`.
+- Add `ResolvedGateway::with_statement_descriptors` and
+  `statement_descriptors`. `ResolvedGateway::sale` fills a sale's descriptor
+  from the policy by intent when the request carries none, so every
+  enrollment, recovery, renewal and host-charge submission through
+  `syrup-rail-postgres` is covered without changing their commands.
+- Add `GatewaySaleRequest::with_descriptor`, `descriptor`, and
+  `GatewaySaleRequestParts` (also convertible back with `From`).
+- The PostgreSQL renewal workflow reads the subscription's phase under the
+  final-admission lock and sets `first_charge_after_paid_trial` when it is
+  still `paid_trial`, which covers the first post-trial charge and every
+  dunning retry of it; `AdmittedSubscriptionRenewal::first_charge_after_paid_trial`
+  exposes the value. Immediate-recurring subscriptions never set it.
+- The NMI adapter maps the descriptor onto the Classic `descriptor`,
+  `descriptor_phone` and `descriptor_url` sale fields. The raw client trims
+  them, omits blank optional fields, applies the same local bounds before
+  network I/O, keeps them on the `Debug` allowlist as merchant configuration,
+  and never sends them on the v5 one-time sale. NMI forwards the fields only
+  on supported processors and an accepted sale does not prove the descriptor
+  printed; confirm acquirer support against a real statement before relying on
+  it.
 
 ## [0.5.5] - Unreleased
 

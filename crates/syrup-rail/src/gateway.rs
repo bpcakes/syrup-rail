@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use crate::{
-    BillingContact, ChargeAmount, GatewayDiagnostic, GatewayLifecycleCursorKey, GatewayOrderId,
+    BillingContact, GatewayDiagnostic, GatewayLifecycleCursorKey, GatewayOrderId,
     GatewayPaymentMethodReference, GatewayTransactionId, PaymentToken,
 };
 
@@ -29,6 +29,7 @@ mod diagnostics;
 mod lifecycle;
 mod metadata;
 mod port;
+mod sale;
 
 pub use self::diagnostics::{
     GatewayDiagnosticOperation, GatewayDiagnosticsCompleteness, GatewayDiagnosticsSource,
@@ -37,6 +38,7 @@ pub use self::diagnostics::{
     GatewayTransactionDiagnosticsRequest, MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES,
 };
 pub use self::metadata::GatewayPaymentMethodMetadata;
+pub use self::sale::{GatewaySaleIntent, GatewaySaleRequest, GatewaySaleRequestParts};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GatewayAccountMode {
@@ -73,99 +75,6 @@ impl std::str::FromStr for GatewayAccountMode {
             "test" => Ok(Self::Test),
             _ => Err(GatewayAccountModeParseError),
         }
-    }
-}
-
-#[derive(Clone)]
-pub enum GatewaySaleIntent {
-    OneTime {
-        payment_token: PaymentToken,
-    },
-    InitialStoredCredential {
-        payment_token: PaymentToken,
-    },
-    RecurringStoredCredential {
-        payment_method_reference: GatewayPaymentMethodReference,
-        initial_transaction_id: GatewayTransactionId,
-    },
-}
-
-impl fmt::Debug for GatewaySaleIntent {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::OneTime { payment_token } => formatter
-                .debug_struct("OneTime")
-                .field("payment_token", payment_token)
-                .finish(),
-            Self::InitialStoredCredential { payment_token } => formatter
-                .debug_struct("InitialStoredCredential")
-                .field("payment_token", payment_token)
-                .finish(),
-            Self::RecurringStoredCredential {
-                payment_method_reference,
-                initial_transaction_id,
-            } => formatter
-                .debug_struct("RecurringStoredCredential")
-                .field("payment_method_reference", payment_method_reference)
-                .field("initial_transaction_id", initial_transaction_id)
-                .finish(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct GatewaySaleRequest {
-    charge: ChargeAmount,
-    order_id: GatewayOrderId,
-    intent: GatewaySaleIntent,
-    billing_contact: Option<BillingContact>,
-}
-
-impl GatewaySaleRequest {
-    pub const fn new(
-        charge: ChargeAmount,
-        order_id: GatewayOrderId,
-        intent: GatewaySaleIntent,
-        billing_contact: Option<BillingContact>,
-    ) -> Self {
-        Self {
-            charge,
-            order_id,
-            intent,
-            billing_contact,
-        }
-    }
-
-    pub const fn charge(&self) -> ChargeAmount {
-        self.charge
-    }
-
-    pub const fn order_id(&self) -> &GatewayOrderId {
-        &self.order_id
-    }
-
-    pub const fn intent(&self) -> &GatewaySaleIntent {
-        &self.intent
-    }
-
-    pub const fn billing_contact(&self) -> Option<&BillingContact> {
-        self.billing_contact.as_ref()
-    }
-
-    pub fn into_parts(
-        self,
-    ) -> (
-        ChargeAmount,
-        GatewayOrderId,
-        GatewaySaleIntent,
-        Option<BillingContact>,
-    ) {
-        (
-            self.charge,
-            self.order_id,
-            self.intent,
-            self.billing_contact,
-        )
     }
 }
 

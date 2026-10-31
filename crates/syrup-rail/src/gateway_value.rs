@@ -7,6 +7,7 @@ use zeroize::Zeroizing;
 use crate::{raw_card_data_ranges, string_contains_raw_card_data};
 
 mod contact;
+mod descriptor;
 
 pub const MAX_GATEWAY_TEXT_BYTES: usize = 512;
 pub const MAX_BILLING_CONTACT_FIELD_BYTES: usize = 255;
@@ -390,6 +391,11 @@ impl_redacted_format!(GatewayDiagnostic);
 
 pub use contact::{
     BillingAddress, BillingAddressError, BillingContact, BillingContactError, BillingContactParts,
+};
+pub use descriptor::{
+    MAX_STATEMENT_DESCRIPTOR_NAME_BYTES, MAX_STATEMENT_DESCRIPTOR_PHONE_BYTES,
+    MAX_STATEMENT_DESCRIPTOR_URL_BYTES, StatementDescriptor, StatementDescriptorError,
+    StatementDescriptorPolicy,
 };
 
 pub fn sanitize_gateway_detail(message: &str) -> String {

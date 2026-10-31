@@ -36,6 +36,12 @@ transaction queries, and report parsing.
   mutation outcome.
 - Never expose credentials, provider bodies, identifiers, or free-form provider
   text through `Debug`, `Display`, or an error message.
+- Statement-descriptor `name`, `phone`, and `url` values are merchant
+  configuration printed on customer statements, so the `client/form.rs`
+  `Debug` allowlist keeps them visible beside the transaction scalars; do not
+  extend that allowlist to customer, credential, or provider values.
+  `client/validation.rs` enforces descriptor bounds on the trimmed values
+  before network I/O.
 - Report anomalous payment evidence through payload-free diagnostics; leave
   logging and metrics policy to the caller.
 - Keep response, report, action, and field counts bounded.

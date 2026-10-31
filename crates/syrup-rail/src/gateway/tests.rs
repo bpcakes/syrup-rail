@@ -1,7 +1,10 @@
 use chrono::TimeZone;
 
 use super::*;
-use crate::{CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError, PaymentAttemptId};
+use crate::{
+    ChargeAmount, CumulativeRefundCents, CurrencyCode, GatewayReferenceValueError,
+    PaymentAttemptId, StatementDescriptor,
+};
 
 #[test]
 fn gateway_account_mode_storage_values_round_trip_exhaustively() {
@@ -51,6 +54,61 @@ fn sale_request_cannot_represent_zero_money() {
         None,
     );
     assert_eq!(request.charge().cents(), 100);
+}
+
+#[test]
+fn sale_request_parts_round_trip_preserves_descriptor_and_payment_fields() {
+    let charge = ChargeAmount::new(2699, CurrencyCode::new("USD").unwrap()).unwrap();
+    let attempt_id = "00000000-0000-0000-0000-000000000000".parse().unwrap();
+    let order = GatewayOrderId::from_generated_attempt(
+        "ck_order_00000000000000000000000000000000",
+        attempt_id,
+    )
+    .unwrap();
+    let contact = BillingContact::new(
+        Some("Ada".to_owned()),
+        Some("Lovelace".to_owned()),
+        Some("ada@example.test".to_owned()),
+    )
+    .unwrap()
+    .with_address(crate::BillingAddress::new("1 Main St".to_owned(), "US".to_owned()).unwrap());
+    let descriptor = StatementDescriptor::new("MERCHANT TRIAL")
+        .unwrap()
+        .with_phone(Some("800-555-0199".to_owned()))
+        .unwrap()
+        .with_url(Some("merchant.example".to_owned()))
+        .unwrap();
+    let method = GatewayPaymentMethodReference::new("vault_round_trip").unwrap();
+    let initial_transaction = GatewayTransactionId::new("txn_round_trip").unwrap();
+    let request = GatewaySaleRequest::new(
+        charge,
+        order.clone(),
+        GatewaySaleIntent::RecurringStoredCredential {
+            payment_method_reference: method.clone(),
+            initial_transaction_id: initial_transaction.clone(),
+            first_charge_after_paid_trial: true,
+        },
+        Some(contact.clone()),
+    )
+    .with_descriptor(Some(descriptor.clone()));
+
+    let restored = GatewaySaleRequest::from(request.into_parts());
+
+    assert_eq!(restored.charge(), charge);
+    assert_eq!(restored.order_id(), &order);
+    assert_eq!(restored.billing_contact(), Some(&contact));
+    assert_eq!(restored.descriptor(), Some(&descriptor));
+    let GatewaySaleIntent::RecurringStoredCredential {
+        payment_method_reference,
+        initial_transaction_id,
+        first_charge_after_paid_trial,
+    } = restored.intent()
+    else {
+        panic!("round trip must preserve the recurring sale intent");
+    };
+    assert_eq!(payment_method_reference, &method);
+    assert_eq!(initial_transaction_id, &initial_transaction);
+    assert!(*first_charge_after_paid_trial);
 }
 
 #[test]

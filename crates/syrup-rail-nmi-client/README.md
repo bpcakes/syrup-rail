@@ -257,6 +257,24 @@ redacted from request `Debug` output. The field breaks existing
 `BillingContact` struct literals; add `address: None` to keep sending no
 address.
 
+`SaleRequest.descriptor` optionally carries a `StatementDescriptor` for
+processors that support dynamic (soft) descriptors. Classic sales send `name`
+as `descriptor`, `phone` as `descriptor_phone`, and `url` as `descriptor_url`,
+trimmed, with blank optional fields omitted; the v5 one-time sale does not
+send them. Before network I/O the client measures the trimmed values, as the
+core `StatementDescriptor` does, and requires a non-blank `name` of at most 25
+printable-ASCII bytes, a `phone` of at most 20 bytes of ASCII digits, spaces,
+`+`, `-`, `(`, `)` or `.`, and a `url` of at most 40 bytes of printable ASCII
+without whitespace; a whitespace-only `phone` or `url` is omitted rather than
+rejected. NMI documents no lengths for these fields
+and forwards them only on supported processors; the card networks print the
+merchant name in a 25- or 22-character field that the acquirer's fixed prefix
+shares and the phone or URL in a 13-character field. An accepted sale does not
+prove the descriptor printed. Descriptor values are merchant configuration for
+customer statements, so they stay visible in `Debug` output. The field breaks
+existing `SaleRequest` struct literals; add `descriptor: None` to keep sending
+none.
+
 `Client::query_transaction_diagnostics` performs the same bounded one-shot query
 as `query_transaction`, selected only by transaction ID, and returns
 `TransactionDiagnosticsLookup`: not found, more than one transaction, or one
