@@ -22,7 +22,11 @@ async fn canonical_rows(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
             FROM public.{table} AS rows
             "#
         );
-        snapshots.push(sqlx::query_scalar(&query).fetch_one(pool).await?);
+        snapshots.push(
+            sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
+                .fetch_one(pool)
+                .await?,
+        );
     }
     Ok(snapshots)
 }
@@ -215,12 +219,12 @@ async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
         )
         .fetch_one(&v5.pool)
         .await?;
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE billing_payment_attempts \
              DROP CONSTRAINT billing_payment_attempts_resolution_code_check; \
              ALTER TABLE billing_payment_attempts \
              ADD CONSTRAINT billing_payment_attempts_resolution_code_check {v5_definition}"
-        ))
+        )))
         .execute(&narrowed.pool)
         .await?;
         assert!(matches!(
@@ -237,13 +241,13 @@ async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
         )
         .fetch_one(&unvalidated.pool)
         .await?;
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE billing_external_reversal_attestations \
              DROP CONSTRAINT billing_external_reversal_attestations_resolution_check; \
              ALTER TABLE billing_external_reversal_attestations \
              ADD CONSTRAINT billing_external_reversal_attestations_resolution_check \
              {definition} NOT VALID"
-        ))
+        )))
         .execute(&unvalidated.pool)
         .await?;
         let error = crate::assert_runtime_schema_v6_compatible(&unvalidated.pool)

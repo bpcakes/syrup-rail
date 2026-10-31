@@ -92,14 +92,14 @@ async fn schema_v1_catalog_conformance_accepts_host_extensions_and_rejects_canon
         let drifted_view = format!(
             "CREATE OR REPLACE VIEW billing_payment_facts AS SELECT * FROM ({payment_facts_definition}) AS canonical_payment_facts WHERE false"
         );
-        sqlx::raw_sql(&drifted_view)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(drifted_view.as_str()))
             .execute(&database.pool)
             .await?;
         expect_conformance_rejection(&database.pool, "canonical view drift").await?;
         let restored_view = format!(
             "CREATE OR REPLACE VIEW billing_payment_facts AS {payment_facts_definition}"
         );
-        sqlx::raw_sql(&restored_view)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(restored_view.as_str()))
             .execute(&database.pool)
             .await?;
         assert_v1_conforms(&database.pool).await?;
@@ -119,7 +119,7 @@ async fn schema_v1_catalog_conformance_accepts_host_extensions_and_rejects_canon
         .execute(&database.pool)
         .await?;
         expect_conformance_rejection(&database.pool, "canonical function drift").await?;
-        sqlx::raw_sql(&canonical_function)
+        sqlx::raw_sql(sqlx::AssertSqlSafe(canonical_function.as_str()))
             .execute(&database.pool)
             .await?;
         assert_v1_conforms(&database.pool).await?;

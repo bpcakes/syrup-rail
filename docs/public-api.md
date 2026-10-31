@@ -1,4 +1,11 @@
-# Syrup Rail 0.5.6 public API
+# Syrup Rail 0.6.0 public API
+
+Version 0.6.0 requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
+pool, transaction, and error types are incompatible with SQLx 0.8; hosts must
+upgrade their SQLx dependencies and CLI together and regenerate host metadata.
+Schema v6 and existing billing behavior are unchanged from 0.5.5 at
+`3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`; dynamic statement descriptors are
+opt-in.
 
 Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
@@ -171,7 +178,7 @@ are shared, and cancellation/deletion blockers remain mode-neutral. Hosts that
 need test work to have no effect on live subscriber lifecycle must isolate the
 tenant/database or use synthetic test subscribers.
 
-0.5.6 adds opt-in dynamic statement descriptors. The core `StatementDescriptor`
+0.6.0 adds opt-in dynamic statement descriptors. The core `StatementDescriptor`
 value carries a merchant name of at most 25 printable-ASCII bytes with an
 optional phone (20 bytes) and URL (40 bytes); `StatementDescriptorPolicy`
 pairs a default descriptor with an optional override for the first recurring
@@ -192,7 +199,7 @@ the descriptor on), the recurring intent variant gains a field, and the raw
 `descriptor: None` to existing literals. Without a policy nothing changes on
 the wire.
 
-0.5.5 adds an opt-in billing-period expiry policy and the operations around
+0.5.5 added an opt-in billing-period expiry policy and the operations around
 it. `SubscriptionPeriodExpiryPolicy` defaults to `Disabled`, which keeps the
 historical behavior. A host enables `RejectExpiredPeriods` by overriding the
 defaulted `BillingTransactionCoordinator::subscription_period_expiry_policy`.
@@ -283,7 +290,7 @@ Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
 Use `assert_runtime_schema_v6_compatible` after host migrations and before
-serving billing traffic. Version 0.5.5 supports PostgreSQL 18 and schema v6 only;
+serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v6 only;
 the assertion is read-only and does not install or upgrade a schema.
 `assert_runtime_schema_v5_compatible` remains for confirming the pre-cutover
 state before a host commits `schema/v6/upgrade_from_v5.sql` with every billing

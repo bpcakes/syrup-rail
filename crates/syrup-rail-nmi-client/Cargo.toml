@@ -2,7 +2,7 @@
 name = "syrup-rail-nmi-client"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.88"
+rust-version.workspace = true
 license-file.workspace = true
 repository.workspace = true
 description = "A bounded, retry-free client for NMI payment APIs"

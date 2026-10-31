@@ -1,14 +1,20 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.5.6
+SQLx operations, and high-level subscription billing service. Version 0.6.0
 supports PostgreSQL 18 only and uses schema v6.
 
 ```toml
 [dependencies]
-syrup-rail = "0.5.6"
-syrup-rail-postgres = "0.5.6"
+syrup-rail = "0.6.0"
+syrup-rail-postgres = "0.6.0"
 ```
+
+Requires Rust 1.94 and SQLx 0.9.0. Host SQLx types must come from 0.9.0;
+0.8 pools, connections, transactions, and errors are not interchangeable.
+Upgrade the host's SQLx CLI to 0.9.0 and regenerate its query metadata.
+Schema v6 artifacts are unchanged from 0.5.5, so an existing v6 host needs no
+database migration for this package upgrade.
 
 New hosts install `schema/v6/install.sql` through their normal migration
 system. Existing schema-v5 hosts stop every billing writer and commit

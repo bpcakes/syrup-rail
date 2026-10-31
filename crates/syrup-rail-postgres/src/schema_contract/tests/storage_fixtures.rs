@@ -71,7 +71,7 @@ pub(super) async fn insert_payment_method_gateway_text(
         ) VALUES ($1, $2, $3, $4, $5, 'active', $6)
         "#
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
         .bind(payment_method_id)
         .bind(gateway.billing_scope_id)
         .bind(subscriber_id)
@@ -126,7 +126,7 @@ pub(super) async fn insert_attempt_gateway_text(
         )
         "#
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
         .bind(attempt_id)
         .bind(gateway.billing_scope_id)
         .bind(subscriber_id)
@@ -187,7 +187,7 @@ pub(super) async fn insert_charge_gateway_text(
         ) VALUES ($1, $2, $3, $4, 'host_charge', 100, 'USD', $5)
         "#
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
         .bind(attempt_id)
         .bind(gateway.billing_scope_id)
         .bind(gateway.gateway_account_id)
@@ -278,7 +278,7 @@ pub(super) async fn insert_attestation_gateway_text(
         )
         "#
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
         .bind(attempt_id)
         .bind(charge_id)
         .bind(Uuid::now_v7())
@@ -309,7 +309,7 @@ pub(super) async fn insert_lifecycle_gateway_text(
         ) VALUES ($1, $2, $3, 'unknown', $4)
         "#
     );
-    sqlx::query(&query)
+    sqlx::query(sqlx::AssertSqlSafe(query.as_str()))
         .bind(gateway.billing_scope_id)
         .bind(gateway.gateway_account_id)
         .bind(format!(

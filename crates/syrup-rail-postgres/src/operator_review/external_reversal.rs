@@ -430,7 +430,8 @@ async fn load_attempt(
         "{} WHERE billing_scope_id = $1 AND id = $2",
         crate::attempts::PAYMENT_ATTEMPT_SELECT
     );
-    let row = sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(scope.as_uuid())
         .bind(attempt_id.as_uuid())
         .fetch_optional(&mut **transaction)

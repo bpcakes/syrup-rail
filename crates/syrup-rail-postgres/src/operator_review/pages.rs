@@ -24,7 +24,8 @@ pub async fn attempt_review_page(
         "#,
         crate::attempts::PAYMENT_ATTEMPT_SELECT
     );
-    let rows = sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(cursor.map(AttemptReviewCursor::reviewed_at))
         .bind(cursor.map(|value| value.attempt_id().into_uuid()))
         .bind(limit.get() + 1)
@@ -110,7 +111,8 @@ pub async fn processor_charge_review_page(
         "#,
         crate::attempts::PAYMENT_ATTEMPT_SELECT
     );
-    let rows = sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    let rows = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(cursor.map(ProcessorChargeReviewCursor::reviewed_at))
         .bind(cursor.map(|value| value.processor_charge_id().into_uuid()))
         .bind(limit.get() + 1)

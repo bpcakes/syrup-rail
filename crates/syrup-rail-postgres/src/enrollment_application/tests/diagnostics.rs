@@ -195,9 +195,9 @@ async fn canonical_rows(pool: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error>
         "billing_gateway_provider_rate_limits",
     ] {
         rows.push(
-            sqlx::query_scalar(&format!(
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
                 "SELECT COALESCE(jsonb_agg(to_jsonb(rows) ORDER BY to_jsonb(rows)::text), '[]'::jsonb)::text FROM public.{table} AS rows"
-            ))
+            )))
             .fetch_one(pool)
             .await?,
         );

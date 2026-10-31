@@ -327,7 +327,8 @@ async fn payment_attempt_by_id(
     attempt_id: PaymentAttemptId,
 ) -> Result<Option<PaymentAttempt>, OperatorReviewError> {
     let query = format!("{} WHERE id = $1", crate::attempts::PAYMENT_ATTEMPT_SELECT);
-    let row = sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(attempt_id.as_uuid())
         .fetch_optional(pool)
         .await?;

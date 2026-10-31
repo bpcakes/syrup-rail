@@ -835,7 +835,7 @@ mod tests {
             "#,
             fixed_table(table)
         );
-        sqlx::query_scalar(&query)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
             .bind(id)
             .bind(columns)
             .fetch_one(pool)
@@ -856,7 +856,7 @@ mod tests {
             "#,
             fixed_table(table)
         );
-        sqlx::query_scalar(&query)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
             .bind(id)
             .bind(columns)
             .fetch_one(pool)

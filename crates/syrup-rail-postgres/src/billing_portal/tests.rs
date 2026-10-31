@@ -368,7 +368,7 @@ async fn payment_history_first_and_continuation_plans_use_the_exact_ordered_inde
                 "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
                 page_query.sql()
             );
-            let plan_row = sqlx::raw_sql(&explain_sql)
+            let plan_row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain_sql.as_str()))
                 .fetch_one(&database.pool)
                 .await?;
             let plan: serde_json::Value = plan_row.try_get(0)?;

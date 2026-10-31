@@ -127,7 +127,7 @@ async fn representative_first_and_continuation_plans_are_limit_driven_and_index_
                 "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
                 page_query.sql(required_mode)
             );
-            let plan_row = sqlx::raw_sql(&explain_sql)
+            let plan_row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain_sql.as_str()))
                 .fetch_one(&mut *transaction)
                 .await?;
             let plan: serde_json::Value = plan_row.try_get(0)?;

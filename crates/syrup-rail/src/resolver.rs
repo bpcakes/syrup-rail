@@ -53,7 +53,7 @@ impl ResolvedGateway {
     /// so the host configures them here rather than on each payment command.
     /// A sale that already carries an explicit descriptor keeps it. Without a
     /// policy, sales carry no descriptor and the account's static descriptor
-    /// prints, exactly as before 0.5.6.
+    /// prints, exactly as before dynamic descriptors were introduced.
     pub fn with_statement_descriptors(mut self, policy: StatementDescriptorPolicy) -> Self {
         self.statement_descriptors = Some(policy);
         self

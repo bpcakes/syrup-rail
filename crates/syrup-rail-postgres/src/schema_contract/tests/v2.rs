@@ -1,7 +1,11 @@
 use super::fixtures::*;
 use super::storage_fixtures::*;
 use super::*;
+use sqlx::AssertSqlSafe;
 use std::time::Duration;
+
+mod observer;
+use observer::{drop_schema_observer_role, require_hidden_reindex_to_fail_closed};
 
 #[derive(Clone, Copy)]
 struct ConcurrentReindexCase {
@@ -172,15 +176,19 @@ async fn runtime_schema_v2_compatibility_accepts_only_active_reindex_shadow_inde
     let database = TestDatabase::start_v2("sr_v2_reindex").await?;
     let observer_role = format!("syrup_schema_observer_{}", Uuid::now_v7().simple());
     let result = async {
-        sqlx::query(&format!("CREATE ROLE {observer_role} NOLOGIN"))
-            .execute(&database.pool)
-            .await?;
-        sqlx::query(&format!("GRANT USAGE ON SCHEMA public TO {observer_role}"))
-            .execute(&database.pool)
-            .await?;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE ROLE {observer_role} NOLOGIN"
+        )))
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "GRANT USAGE ON SCHEMA public TO {observer_role}"
+        )))
+        .execute(&database.pool)
+        .await?;
+        sqlx::query(AssertSqlSafe(format!(
             "GRANT SELECT ON ALL TABLES IN SCHEMA public TO {observer_role}"
-        ))
+        )))
         .execute(&database.pool)
         .await?;
         sqlx::raw_sql(
@@ -529,16 +537,6 @@ async fn exercise_completed_reindex_transition(pool: &PgPool) -> Result<(), Box<
     Ok(())
 }
 
-async fn drop_schema_observer_role(pool: &PgPool, role: &str) -> Result<(), sqlx::Error> {
-    sqlx::query(&format!("DROP OWNED BY {role}"))
-        .execute(pool)
-        .await?;
-    sqlx::query(&format!("DROP ROLE {role}"))
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
 async fn exercise_active_concurrent_reindex(
     pool: &PgPool,
     case: ConcurrentReindexCase,
@@ -557,9 +555,12 @@ async fn exercise_active_concurrent_reindex(
 
     let reindex_pool = pool.clone();
     let mut reindex_task = tokio::spawn(async move {
-        sqlx::query(&format!("REINDEX INDEX CONCURRENTLY {}", case.target))
-            .execute(&reindex_pool)
-            .await
+        sqlx::query(AssertSqlSafe(format!(
+            "REINDEX INDEX CONCURRENTLY {}",
+            case.target
+        )))
+        .execute(&reindex_pool)
+        .await
     });
     let mut after_swap_reader = None;
 
@@ -622,43 +623,6 @@ async fn exercise_active_concurrent_reindex(
     reindex_result?;
     assert_v2_conforms(pool).await?;
     Ok(())
-}
-
-async fn require_hidden_reindex_to_fail_closed(
-    pool: &PgPool,
-    observer_role: &str,
-    expected_shadow: &str,
-) -> Result<(), Box<dyn Error>> {
-    let mut transaction = pool
-        .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
-        .await?;
-    sqlx::query(&format!("SET LOCAL ROLE {observer_role}"))
-        .execute(&mut *transaction)
-        .await?;
-    let result = assert_schema_conforms(
-        &mut transaction,
-        2,
-        V2_CURRENT_SUBSCRIPTION_COLUMNS,
-        V2_CATALOG_FINGERPRINT,
-    )
-    .await;
-    transaction.rollback().await?;
-
-    match result {
-        Err(SchemaConformanceAttemptError::RetryableReindexTransition {
-            fallback: crate::SchemaConformanceError::Contract { detail, .. },
-        }) if detail.contains("not planner/write ready") && detail.contains(expected_shadow) => {
-            Ok(())
-        }
-        Err(error) => Err(io::Error::other(format!(
-            "expected hidden reindex progress to fail closed, got {error:?}"
-        ))
-        .into()),
-        Ok(()) => Err(io::Error::other(
-            "schema validation accepted a reindex whose progress details were hidden",
-        )
-        .into()),
-    }
 }
 
 async fn wait_for_reindex_phase(
@@ -1278,9 +1242,9 @@ async fn schema_v2_term_schedule_status_and_discount_shapes_are_constrained()
             "phase = 'paid_trial'",
             "trial_amount_cents = 10",
         ] {
-            let rejected = sqlx::query(&format!(
+            let rejected = sqlx::query(AssertSqlSafe(format!(
                 "UPDATE billing_subscriptions SET {assignment} WHERE id = $1"
-            ))
+            )))
             .bind(subscription_id)
             .execute(&database.pool)
             .await;
@@ -1305,9 +1269,9 @@ async fn schema_v2_term_schedule_status_and_discount_shapes_are_constrained()
             "ARRAY[4294967296]::bigint[]",
             "ARRAY(SELECT generate_series(1, 17)::bigint)",
         ] {
-            let rejected = sqlx::query(&format!(
+            let rejected = sqlx::query(AssertSqlSafe(format!(
                 "UPDATE billing_subscriptions SET dunning_retry_delays_seconds = {schedule} WHERE id = $1"
-            ))
+            )))
             .bind(subscription_id)
             .execute(&database.pool)
             .await;
@@ -1356,9 +1320,9 @@ async fn schema_v2_term_schedule_status_and_discount_shapes_are_constrained()
             "subscription_initial_start_kind = 'paid_trial'",
             "subscription_initial_dunning_retry_delays_seconds = '[0:1]={1,2}'::bigint[]",
         ] {
-            let rejected = sqlx::query(&format!(
+            let rejected = sqlx::query(AssertSqlSafe(format!(
                 "UPDATE billing_payment_attempts SET {assignment} WHERE id = $1"
-            ))
+            )))
             .bind(initial_attempt_id)
             .execute(&database.pool)
             .await;

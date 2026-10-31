@@ -2,6 +2,7 @@
 name = "syrup-rail-sqlx-gate"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license-file.workspace = true
 publish = false
 

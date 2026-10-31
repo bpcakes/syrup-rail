@@ -88,7 +88,7 @@ async fn canonical_rows_without_addresses(pool: &PgPool) -> Result<Vec<String>, 
             "#
         );
         snapshots.push(
-            sqlx::query_scalar(&query)
+            sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
                 .bind(&address_columns)
                 .fetch_one(pool)
                 .await?,
@@ -138,7 +138,9 @@ async fn runtime_schema_v5_accepts_fresh_install_and_populated_v4_upgrade()
                 "SELECT count(*) FROM public.{table} WHERE num_nonnulls({}) <> 0",
                 ADDRESS_COLUMNS.join(", ")
             );
-            let addressed: i64 = sqlx::query_scalar(&query).fetch_one(&upgraded.pool).await?;
+            let addressed: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
+                .fetch_one(&upgraded.pool)
+                .await?;
             assert_eq!(addressed, 0, "{table} must not infer historical addresses");
         }
 
@@ -212,12 +214,12 @@ async fn schema_v5_and_v4_assertions_reject_each_other_and_address_drift()
         )
         .fetch_one(&unvalidated.pool)
         .await?;
-        sqlx::raw_sql(&format!(
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE billing_payment_attempts \
              DROP CONSTRAINT billing_payment_attempts_billing_address_valid; \
              ALTER TABLE billing_payment_attempts \
              ADD CONSTRAINT billing_payment_attempts_billing_address_valid {definition} NOT VALID"
-        ))
+        )))
         .execute(&unvalidated.pool)
         .await?;
         let error = crate::assert_runtime_schema_v5_compatible(&unvalidated.pool)
@@ -379,7 +381,7 @@ async fn v5_address_constraints_accept_only_whole_bounded_addresses() -> Result<
                 "#
             );
             for (case, values, accepted) in &cases {
-                let update = sqlx::query(&statement)
+                let update = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
                     .bind(row_id)
                     .bind(values[0])
                     .bind(values[1])

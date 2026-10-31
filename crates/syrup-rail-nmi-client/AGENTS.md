@@ -51,8 +51,8 @@ transaction queries, and report parsing.
 - `cargo tree -p syrup-rail-nmi-client`
 - `bash crates/syrup-rail-nmi-client/check-standalone.sh` (requires the `stable`
   toolchain for packaging)
-- `RUSTUP_TOOLCHAIN=1.88 bash crates/syrup-rail-nmi-client/check-standalone.sh`
-  (requires both `stable` and `1.88`; compiles and tests the packaged crate at
+- `RUSTUP_TOOLCHAIN=1.94 bash crates/syrup-rail-nmi-client/check-standalone.sh`
+  (requires both `stable` and `1.94`; compiles and tests the packaged crate at
   the MSRV)
 
 The standalone commands preserve dependency artifacts in compiler-keyed

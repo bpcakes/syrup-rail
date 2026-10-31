@@ -55,8 +55,6 @@ workspace_discovery = false
 
 
 
-[status]
-providers = []
 
 
 [[work.gates]]

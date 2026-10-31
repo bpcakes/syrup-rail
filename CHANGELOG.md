@@ -2,15 +2,23 @@
 
 All notable changes to the Syrup Rail crates are documented in this file.
 
-## [0.5.6] - Unreleased
+## [0.6.0] - Unreleased
 
-Opt-in dynamic statement descriptors on the 0.5.x line. No schema change:
-schema v6 remains current, and a host that configures no descriptor policy
-sends exactly the 0.5.5 wire fields. The release manager dates this heading
-when the release is tagged.
+Breaking SQLx upgrade from the IdentityPro-consumed 0.5.5 revision
+`3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`. Existing billing behavior and every
+schema-v6 artifact are preserved; dynamic statement descriptors are opt-in.
+This release does not include the separate unfinished features on the
+historically named `dev/0.6.0` branch.
 
 ### Action required for hosts
 
+- Upgrade all four Syrup Rail crates together to 0.6.0 and use Rust 1.94 or
+  later. Public PostgreSQL pools, connections, transactions, errors, and host
+  trait implementations now use SQLx 0.9.0 types; SQLx 0.8 types are incompatible.
+- Upgrade host SQLx dependencies and SQLx CLI to 0.9.0, adapt host queries to
+  its query-string API, and regenerate host query metadata with that CLI.
+- Keep the existing schema-v6 installation and startup assertion. No database
+  migration is required for a host already consuming 0.5.5 on schema v6.
 - `GatewaySaleRequest::into_parts` now returns `GatewaySaleRequestParts`
   instead of a tuple. A gateway decorator that rebuilds the request it
   forwards must carry `descriptor` across with `with_descriptor`, or the
@@ -22,6 +30,19 @@ when the release is tagged.
 - The raw `syrup_rail_nmi_client::SaleRequest` struct gains
   `descriptor: Option<StatementDescriptor>`; add `descriptor: None` to
   existing literals.
+
+### Changed
+
+- Pin SQLx and SQLx CLI to 0.9.0, declare the shared Rust 1.94 minimum, and
+  update CI and release checks to exercise that toolchain.
+- Adapt assembled queries to SQLx's explicit SQL-safety boundary while
+  retaining bound values, SQL statements, and transaction behavior.
+- Preserve recovery's top-level transaction requirement through the exactly
+  pinned SQLx core transaction-depth API.
+- Regenerate PostgreSQL query metadata against the unchanged schema v6.
+- Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, `tokio`, and
+  `webpki-roots` to compatible patched versions required by the release audit.
+  SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
 
 ### Added
 

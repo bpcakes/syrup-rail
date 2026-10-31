@@ -1,6 +1,5 @@
-use std::fmt;
-
-use sqlx::{PgConnection, PgPool, Postgres, Transaction, TransactionManager};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use sqlx_core::transaction::TransactionManager;
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
@@ -55,8 +54,8 @@ impl AdmittedSubscriptionRecovery {
     }
 }
 
-impl fmt::Debug for AdmittedSubscriptionRecovery {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for AdmittedSubscriptionRecovery {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AdmittedSubscriptionRecovery")
             .field("attempt", &self.attempt)

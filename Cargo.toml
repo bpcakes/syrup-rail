@@ -10,12 +10,13 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "0.5.6"
+rust-version = "1.94"
+version = "0.6.0"
 license-file = "LICENSE"
 repository = "https://github.com/bpcakes/syrup-rail"
 
 [workspace.dependencies]
-async-trait = "0.1"
+async-trait = "0.1.92"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 h2 = "0.4.16"
@@ -25,7 +26,10 @@ regex = "1"
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "derive", "uuid", "json", "chrono"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "macros", "derive", "uuid", "json", "chrono"] }
+# Recovery admission uses the transaction-depth API removed from SQLx's facade.
+# Keep the internal API pinned with SQLx and verify nested-transaction rejection.
+sqlx-core = { version = "=0.9.0", default-features = false }
 thiserror = "2"
 tokio = { version = "1.50", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
 tracing = "0.1"
@@ -35,7 +39,7 @@ zeroize = { version = "1", features = ["derive", "serde"] }
 
 postgres-test-harness = { git = "https://github.com/bpcakes/postgres-test-harness.git", rev = "473d280772672a435cafd81901eee6e6db0f32e4" }
 
-syrup-rail = { version = "=0.5.6", path = "crates/syrup-rail" }
-syrup-rail-postgres = { version = "=0.5.6", path = "crates/syrup-rail-postgres" }
-syrup-rail-nmi = { version = "=0.5.6", path = "crates/syrup-rail-nmi" }
-syrup-rail-nmi-client = { version = "=0.5.6", path = "crates/syrup-rail-nmi-client" }
+syrup-rail = { version = "=0.6.0", path = "crates/syrup-rail" }
+syrup-rail-postgres = { version = "=0.6.0", path = "crates/syrup-rail-postgres" }
+syrup-rail-nmi = { version = "=0.6.0", path = "crates/syrup-rail-nmi" }
+syrup-rail-nmi-client = { version = "=0.6.0", path = "crates/syrup-rail-nmi-client" }

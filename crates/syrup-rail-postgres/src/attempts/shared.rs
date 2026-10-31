@@ -306,7 +306,8 @@ pub(super) async fn payment_attempt_by_idempotency(
          WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3 \
          {lock}"
     );
-    let row = sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(billing_scope_id.as_uuid())
         .bind(subscriber_id.as_uuid())
         .bind(idempotency_key.expose())

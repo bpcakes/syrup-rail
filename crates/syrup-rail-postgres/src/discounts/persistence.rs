@@ -103,7 +103,8 @@ pub(super) async fn find_active_code(
     for_update: bool,
 ) -> Result<Option<PgRow>, sqlx::Error> {
     let lock = if for_update { "FOR UPDATE" } else { "" };
-    sqlx::query(&format!(
+    // The lock clause is a closed choice of literals; all values remain bound.
+    sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"
         SELECT id, billing_scope_id, plan_key, code_normalized, display_code,
             label, status, discount_kind, amount_off_cents, percent_off_bps,
@@ -113,7 +114,7 @@ pub(super) async fn find_active_code(
             AND code_normalized = $3 AND status = 'active'
         {lock}
         "#,
-    ))
+    )))
     .bind(billing_scope_id.as_uuid())
     .bind(plan_key.as_str())
     .bind(code.as_str())

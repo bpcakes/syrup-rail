@@ -17,7 +17,7 @@ manage NMI plans or subscription schedules.
 
 ```toml
 [dependencies]
-syrup-rail-nmi-client = "0.5.6"
+syrup-rail-nmi-client = "0.6.0"
 ```
 
 The client never retries mutations. `MutationError::Indeterminate` and

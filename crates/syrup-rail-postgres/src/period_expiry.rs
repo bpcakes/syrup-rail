@@ -222,7 +222,8 @@ pub(crate) async fn retire_expired_subscription_period_on_connection(
         RETURNING {SUBSCRIPTION_COLUMNS}, unpaid_at
         "#
     );
-    let row = sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(command.subscription_id().as_uuid())
         .bind(command.billing_scope_id().as_uuid())
         .bind(command.subscriber_id().as_uuid())
@@ -306,7 +307,8 @@ pub async fn change_subscription_past_due_access_in_transaction(
         RETURNING {SUBSCRIPTION_COLUMNS}
         "#
     );
-    let row = sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    let row = sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(command.subscription_id().as_uuid())
         .bind(command.billing_scope_id().as_uuid())
         .bind(command.subscriber_id().as_uuid())
@@ -360,7 +362,8 @@ async fn lock_exact_subscription(
         FOR NO KEY UPDATE
         "#
     );
-    sqlx::query(&query)
+    // Only crate-owned SQL fragments are interpolated; values remain bound below.
+    sqlx::query(sqlx::AssertSqlSafe(query))
         .bind(subscription_id)
         .bind(billing_scope_id)
         .bind(subscriber_id.as_uuid())
