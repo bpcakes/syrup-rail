@@ -158,9 +158,10 @@ pub(crate) async fn admit_subscription_renewal_submission_with_policy(
                 syrup_rail::GatewayPaymentMethodReference::new(reference).map_err(|_| {
                     SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
                 })?;
-            // The phase flips to `recurring` only when a renewal approval is
-            // applied, so under the admission lock `paid_trial` means this
-            // sale is the first recurring charge after the trial.
+            // Only an applied renewal or recovery approval sets the phase to
+            // `recurring`, and either one pays the period that was due, so
+            // under the admission lock `paid_trial` means this sale is the
+            // first recurring charge after the trial.
             let phase = sqlx::query_scalar::<_, String>(
                 r#"
                 SELECT phase

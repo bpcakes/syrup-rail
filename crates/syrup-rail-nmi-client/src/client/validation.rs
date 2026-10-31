@@ -285,39 +285,42 @@ fn validate_sale_request_size(
 /// Local bounds for the Classic dynamic descriptor fields. A one-time v5 sale
 /// never sends them, but the same rules apply so a rejected descriptor is
 /// found before any request shape is chosen.
+///
+/// The bounds apply to the trimmed values the Classic form sends, matching the
+/// core `StatementDescriptor` normalization: surrounding whitespace never
+/// counts, and a whitespace-only optional field is omitted from the wire.
 fn validate_statement_descriptor(
     validator: &mut OutboundRequestValidator,
     descriptor: &StatementDescriptor,
 ) -> Result<(), &'static str> {
-    validator.trimmed_field(
-        &descriptor.name,
-        MAX_NMI_DESCRIPTOR_BYTES,
-        "statement descriptor exceeds the supported size",
-    )?;
     let name = descriptor.name.trim();
     if name.is_empty() {
         return Err("statement descriptor is required");
     }
+    validator.trimmed_field(
+        name,
+        MAX_NMI_DESCRIPTOR_BYTES,
+        "statement descriptor exceeds the supported size",
+    )?;
     ensure_printable_ascii(name, "statement descriptor contains unsupported characters")?;
-    if let Some(phone) = &descriptor.phone {
+    if let Some(phone) = descriptor.phone.as_deref().map(str::trim) {
         validator.trimmed_field(
             phone,
             MAX_NMI_DESCRIPTOR_PHONE_BYTES,
             "statement descriptor phone exceeds the supported size",
         )?;
-        if !phone.trim().bytes().all(|byte| {
+        if !phone.bytes().all(|byte| {
             byte.is_ascii_digit() || matches!(byte, b' ' | b'+' | b'-' | b'(' | b')' | b'.')
         }) {
             return Err("statement descriptor phone contains unsupported characters");
         }
     }
-    if let Some(url) = &descriptor.url {
+    if let Some(url) = descriptor.url.as_deref().map(str::trim) {
         validator.trimmed_field(
             url,
             MAX_NMI_DESCRIPTOR_URL_BYTES,
             "statement descriptor URL exceeds the supported size",
         )?;
-        let url = url.trim();
         ensure_printable_ascii(
             url,
             "statement descriptor URL contains unsupported characters",

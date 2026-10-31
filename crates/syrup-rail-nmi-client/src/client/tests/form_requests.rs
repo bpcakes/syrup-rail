@@ -629,6 +629,19 @@ async fn descriptor_outside_local_rules_is_rejected_before_transport() {
             url: Some("a".repeat(41)),
             ..valid.clone()
         },
+        // Trimming never shortens a value that is still too long.
+        crate::StatementDescriptor {
+            name: format!(" {} ", "A".repeat(26)),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            phone: Some(format!(" {} ", "1".repeat(21))),
+            ..valid.clone()
+        },
+        crate::StatementDescriptor {
+            url: Some(format!(" {} ", "a".repeat(41))),
+            ..valid.clone()
+        },
     ];
     for descriptor in cases {
         let error = client
@@ -650,4 +663,65 @@ async fn descriptor_outside_local_rules_is_rejected_before_transport() {
         !matches!(error, MutationError::InvalidRequest(_)),
         "valid descriptor must pass local validation: {error:?}"
     );
+}
+
+#[tokio::test]
+async fn descriptor_bounds_apply_to_the_trimmed_values_sent() {
+    let client = Client::new(
+        "http://127.0.0.1:1",
+        "unused_private_key",
+        "unused_query_key",
+    )
+    .expect("closed-loopback client should construct");
+    // Like the core `StatementDescriptor`, surrounding whitespace never counts
+    // toward a bound, and a whitespace-only optional field is omitted.
+    let cases = [
+        crate::StatementDescriptor {
+            name: format!("  {}  ", "A".repeat(25)),
+            phone: Some(format!(" {} ", "1".repeat(20))),
+            url: Some(format!(" {} ", "a".repeat(40))),
+        },
+        crate::StatementDescriptor {
+            name: "IDENTITYPRO".to_owned(),
+            phone: Some(" ".repeat(30)),
+            url: Some(" ".repeat(50)),
+        },
+    ];
+    for descriptor in cases {
+        let request = renewal_with_descriptor(Some(descriptor.clone()));
+        {
+            let params = classic_sale_params(
+                "private_key",
+                &request,
+                "26.99".to_owned(),
+                DuplicateCheck::ProcessorConfigured,
+            );
+            let form: std::collections::HashMap<&str, &str> = params.iter().collect();
+            fn sent(value: &Option<String>) -> Option<&str> {
+                value
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            }
+            assert_eq!(
+                form.get("descriptor").copied(),
+                Some(descriptor.name.trim())
+            );
+            assert_eq!(
+                form.get("descriptor_phone").copied(),
+                sent(&descriptor.phone)
+            );
+            assert_eq!(form.get("descriptor_url").copied(), sent(&descriptor.url));
+        }
+        // The descriptor passes local validation and fails only on the closed
+        // local port.
+        let error = client
+            .sale(request)
+            .await
+            .expect_err("closed local port should fail submission");
+        assert!(
+            !matches!(error, MutationError::InvalidRequest(_)),
+            "{descriptor:?}: {error:?}"
+        );
+    }
 }

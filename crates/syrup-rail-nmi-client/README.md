@@ -261,10 +261,12 @@ address.
 processors that support dynamic (soft) descriptors. Classic sales send `name`
 as `descriptor`, `phone` as `descriptor_phone`, and `url` as `descriptor_url`,
 trimmed, with blank optional fields omitted; the v5 one-time sale does not
-send them. Before network I/O the client requires a non-blank `name` of at
-most 25 printable-ASCII bytes, a `phone` of at most 20 bytes of ASCII digits,
-spaces, `+`, `-`, `(`, `)` or `.`, and a `url` of at most 40 bytes of
-printable ASCII without whitespace. NMI documents no lengths for these fields
+send them. Before network I/O the client measures the trimmed values, as the
+core `StatementDescriptor` does, and requires a non-blank `name` of at most 25
+printable-ASCII bytes, a `phone` of at most 20 bytes of ASCII digits, spaces,
+`+`, `-`, `(`, `)` or `.`, and a `url` of at most 40 bytes of printable ASCII
+without whitespace; a whitespace-only `phone` or `url` is omitted rather than
+rejected. NMI documents no lengths for these fields
 and forwards them only on supported processors; the card networks print the
 merchant name in a 25- or 22-character field that the acquirer's fixed prefix
 shares and the phone or URL in a 13-character field. An accepted sale does not
