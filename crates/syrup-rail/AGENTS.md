@@ -18,6 +18,9 @@ command/outcome types for application-independent subscription billing.
   outcomes, typed entitlement guards, subscriber billing-data scrub
   commands/results, stable renewal-dispatch scan cursor/page values, and the
   closed host admission boundary for end-user billing mutations.
+- `src/attempt/phase.rs` derives prepared, admitted, uncertain, review, and
+  terminal phases from durable status and admission evidence. Missing timestamps
+  never make uncertain evidence retryable.
 - `src/attempt/{fingerprint,snapshots}.rs` own canonical request equality and
   optimistic/durable snapshots; `src/attempt.rs` remains the attempt lifecycle
   and target facade.

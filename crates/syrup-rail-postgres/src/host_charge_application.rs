@@ -1,3 +1,7 @@
+mod resolution;
+pub(crate) use resolution::HostChargeBeforeSubmissionResolution;
+use resolution::HostChargeNonApprovedResolution;
+
 mod approval_observation;
 use approval_observation::{
     observe_conflicting_host_charge_approval, observe_terminal_host_charge_approval,
@@ -30,8 +34,9 @@ use crate::{
         persist_attempt_transition,
     },
     enrollment_application::{
-        GatewayNotSubmittedPolicy, OutcomeResolutionBoundary, PreparedAttemptReplay,
-        RateLimitCooldown, RateLimitCooldownCommitError, RateLimitCooldownOperation,
+        GatewayNotSubmittedPolicy, NonSubmissionProof, OutcomeResolutionBoundary,
+        OutcomeResolutionCommand, PreparedAttemptReplay, RateLimitCooldown,
+        RateLimitCooldownCommitError, RateLimitCooldownOperation,
         SubscriptionEnrollmentApplicationError, commit_rate_limit_cooldown_for_operation,
         map_attempt_transition_error, mutation_error_evidence, park_locked_attempt,
         processor_identity_conflict_diagnostics, reconcile_non_approved_evidence,
@@ -155,65 +160,6 @@ impl HostChargeResolutionApplication {
     }
 }
 
-/// Complete persistence behavior for a host charge resolved before provider
-/// submission.
-#[derive(Clone, Copy)]
-pub(crate) struct HostChargeBeforeSubmissionResolution {
-    boundary: OutcomeResolutionBoundary,
-    cooldown: Option<RateLimitCooldown>,
-}
-
-#[derive(Clone, Copy)]
-struct HostChargeNonApprovedResolution<'provider> {
-    boundary: OutcomeResolutionBoundary,
-    cooldown: Option<(&'provider GatewayProviderKey, RateLimitCooldown)>,
-}
-
-impl HostChargeNonApprovedResolution<'_> {
-    const fn submitted() -> Self {
-        Self {
-            boundary: OutcomeResolutionBoundary::Submitted,
-            cooldown: None,
-        }
-    }
-}
-
-impl HostChargeBeforeSubmissionResolution {
-    pub(crate) const fn prepared() -> Self {
-        Self {
-            boundary: OutcomeResolutionBoundary::Prepared,
-            cooldown: None,
-        }
-    }
-
-    pub(crate) const fn admitted_not_submitted() -> Self {
-        Self {
-            boundary: OutcomeResolutionBoundary::AdmittedNotSubmitted,
-            cooldown: None,
-        }
-    }
-
-    pub(crate) const fn with_not_submitted_policy(self, policy: GatewayNotSubmittedPolicy) -> Self {
-        Self {
-            boundary: self.boundary,
-            cooldown: policy.cooldown(),
-        }
-    }
-
-    const fn with_provider(
-        self,
-        provider_key: &GatewayProviderKey,
-    ) -> HostChargeNonApprovedResolution<'_> {
-        HostChargeNonApprovedResolution {
-            boundary: self.boundary,
-            cooldown: match self.cooldown {
-                Some(cooldown) => Some((provider_key, cooldown)),
-                None => None,
-            },
-        }
-    }
-}
-
 pub async fn admit_host_charge_submission(
     pool: &PgPool,
     targets: &dyn HostChargeTargetStore,
@@ -262,13 +208,7 @@ pub async fn submit_admitted_host_charge(
     if reconstructed != admission.reservation
         || admission.attempt.identity() != admission.reservation.identity()
         || admission.attempt.request() != admission.reservation.request()
-        || admission.attempt.status() != PaymentAttemptStatus::Pending
-        || admission
-            .attempt
-            .state()
-            .timestamps()
-            .submitted_at()
-            .is_none()
+        || !admission.attempt.phase().is_admitted()
     {
         return Err(HostChargeApplicationError::SubmissionIdentityMismatch);
     }
@@ -298,18 +238,23 @@ pub async fn submit_admitted_host_charge(
             let evidence = mutation_error_evidence(error.detail());
             let policy = GatewayNotSubmittedPolicy::for_error(&error);
             let application = if policy.restores_prepared_attempt_when_supported() {
-                restore_admitted_host_charge_for_retry(pool, &admission.reservation).await?
+                restore_admitted_host_charge_for_retry(
+                    pool,
+                    &admission.reservation,
+                    NonSubmissionProof::for_error(&admission.attempt, &error)?,
+                )
+                .await?
             } else {
                 resolve_host_charge_non_approved(
                     pool,
                     targets,
                     &admission.reservation,
                     &evidence,
-                    AttemptResolutionStatus::Failed,
-                    Some(policy.resolution_code()),
-                    HostChargeBeforeSubmissionResolution::admitted_not_submitted()
-                        .with_not_submitted_policy(policy)
-                        .with_provider(&provider_key),
+                    HostChargeBeforeSubmissionResolution::admitted_not_submitted(
+                        NonSubmissionProof::for_error(&admission.attempt, &error)?,
+                    )
+                    .with_not_submitted_policy(policy)
+                    .with_provider(&provider_key, policy.resolution_code()),
                 )
                 .await?
             };
@@ -395,9 +340,7 @@ async fn apply_host_charge_gateway_decision(
             targets,
             reservation,
             outcome.evidence(),
-            AttemptResolutionStatus::Declined,
-            None,
-            HostChargeNonApprovedResolution::submitted(),
+            HostChargeNonApprovedResolution::submitted(AttemptResolutionStatus::Declined),
         )
         .await
         .map(HostChargeResolutionApplication::into_payment),
@@ -406,9 +349,7 @@ async fn apply_host_charge_gateway_decision(
             targets,
             reservation,
             outcome.evidence(),
-            AttemptResolutionStatus::Failed,
-            None,
-            HostChargeNonApprovedResolution::submitted(),
+            HostChargeNonApprovedResolution::submitted(AttemptResolutionStatus::Failed),
         )
         .await
         .map(HostChargeResolutionApplication::into_payment),
@@ -475,9 +416,7 @@ pub(crate) async fn resolve_host_charge_before_submission(
         targets,
         reservation,
         &evidence,
-        AttemptResolutionStatus::Failed,
-        Some(resolution_code),
-        resolution.with_provider(provider_key),
+        resolution.with_provider(provider_key, resolution_code),
     )
     .await
     .map(HostChargeResolutionApplication::into_payment)
@@ -634,10 +573,10 @@ async fn resolve_host_charge_non_approved(
     targets: &dyn HostChargeTargetStore,
     reservation: &HostChargeReservation,
     evidence: &ProcessorEvidence,
-    status: AttemptResolutionStatus,
-    resolution_code: Option<PaymentResolutionCode>,
     resolution: HostChargeNonApprovedResolution<'_>,
 ) -> Result<HostChargeResolutionApplication, HostChargeApplicationError> {
+    let status = resolution.command.status();
+    let resolution_code = resolution.command.resolution_code();
     let identity = reservation.identity();
     // Provider/account backoff is independent of whether this attempt still
     // owns the host target or can still be resolved. Commit it first so a
@@ -661,9 +600,9 @@ async fn resolve_host_charge_non_approved(
                 identity.subscriber_id(),
                 identity.attempt_id(),
                 reservation.snapshot().target_id(),
-                match resolution.boundary {
+                match resolution.command.boundary() {
                     OutcomeResolutionBoundary::Prepared
-                    | OutcomeResolutionBoundary::AdmittedNotSubmitted => {
+                    | OutcomeResolutionBoundary::AdmittedNotSubmitted(_) => {
                         HostChargeTargetTransitionKind::ReleasedBeforeSubmission
                     }
                     OutcomeResolutionBoundary::Submitted => {
@@ -681,7 +620,7 @@ async fn resolve_host_charge_non_approved(
             subscriber_id = %identity.subscriber_id().as_uuid(),
             attempt_id = %identity.attempt_id().as_uuid(),
             target_id = %reservation.snapshot().target_id().as_uuid(),
-            boundary = ?resolution.boundary,
+            boundary = ?resolution.command.boundary(),
             ?target_outcome,
             "host target refused a payment outcome; leaving the canonical attempt unresolved"
         );
@@ -692,7 +631,10 @@ async fn resolve_host_charge_non_approved(
             processor_identity_conflict_diagnostics(application.payment.attempt(), evidence);
         application.payment =
             append_host_observation_diagnostics(application.payment, &diagnostics);
-        if !host_charge_attempt_may_resolve(application.payment.attempt(), resolution.boundary) {
+        if !host_charge_attempt_may_resolve(
+            application.payment.attempt(),
+            resolution.command.boundary(),
+        ) {
             return Ok(application);
         }
         return Err(HostChargeApplicationError::InvalidState(
@@ -702,7 +644,7 @@ async fn resolve_host_charge_non_approved(
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
     let reconciled = reconcile_non_approved_evidence(&attempt, evidence);
     let diagnostics = reconciled.identity_conflict_diagnostics();
-    let may_resolve = host_charge_attempt_may_resolve(&attempt, resolution.boundary);
+    let may_resolve = host_charge_attempt_may_resolve(&attempt, resolution.command.boundary());
     if !may_resolve {
         transaction.rollback().await?;
         let mut canonical = canonical_host_charge_resolution_application(pool, reservation).await?;
@@ -736,12 +678,16 @@ async fn resolve_host_charge_non_approved(
         )
         .await?;
     }
-    if resolution.boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
+    if matches!(
+        resolution.command.boundary(),
+        OutcomeResolutionBoundary::AdmittedNotSubmitted(_)
+    ) {
         let cleared = sqlx::query(
-            "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2",
+            "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2 AND submitted_at = $3",
         )
         .bind(identity.attempt_id().as_uuid())
         .bind(status.as_str())
+        .bind(attempt.state().timestamps().submitted_at())
         .execute(&mut *transaction)
         .await?;
         if cleared.rows_affected() != 1 {
@@ -770,16 +716,11 @@ fn host_charge_attempt_may_resolve(
     attempt: &PaymentAttempt,
     boundary: OutcomeResolutionBoundary,
 ) -> bool {
-    attempt.status().is_resolvable()
-        && match boundary {
-            OutcomeResolutionBoundary::Prepared => {
-                attempt.state().timestamps().submitted_at().is_none()
-            }
-            OutcomeResolutionBoundary::AdmittedNotSubmitted => {
-                attempt.state().timestamps().submitted_at().is_some()
-            }
-            OutcomeResolutionBoundary::Submitted => true,
-        }
+    match boundary {
+        OutcomeResolutionBoundary::Prepared => attempt.phase().is_prepared(),
+        OutcomeResolutionBoundary::AdmittedNotSubmitted(proof) => proof.matches(attempt),
+        OutcomeResolutionBoundary::Submitted => attempt.phase().is_resolvable(),
+    }
 }
 
 async fn canonical_host_charge_resolution_application(
@@ -807,6 +748,7 @@ async fn canonical_host_charge_resolution_application(
 async fn restore_admitted_host_charge_for_retry(
     pool: &PgPool,
     reservation: &HostChargeReservation,
+    proof: NonSubmissionProof,
 ) -> Result<HostChargeResolutionApplication, HostChargeApplicationError> {
     // Keep this domain wrapper separate from subscriber restoration: host
     // charges have their own exact lock and result projection. Both wrappers
@@ -815,10 +757,9 @@ async fn restore_admitted_host_charge_for_retry(
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
     let attempt = lock_expected_host_charge(&mut transaction, reservation).await?;
-    let restored = attempt.status() == PaymentAttemptStatus::Pending
-        && attempt.state().timestamps().submitted_at().is_some();
+    let restored = proof.matches(&attempt);
     if restored {
-        restore_prepared_attempt_submission(&mut transaction, &attempt).await?;
+        restore_prepared_attempt_submission(&mut transaction, &attempt, proof).await?;
     }
     let attempt = find_payment_attempt_by_id_on_connection(
         &mut transaction,

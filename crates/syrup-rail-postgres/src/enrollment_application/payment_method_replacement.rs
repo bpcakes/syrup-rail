@@ -25,8 +25,8 @@ use crate::{
 use super::{
     APPROVED_APPLICATION_ATTEMPTS, APPROVED_EVIDENCE_RETRY_DELAY, APPROVED_EVIDENCE_WRITE_ATTEMPTS,
     AttemptResolutionStatus, BILLING_LOCK_TIMEOUT, GatewayNotSubmittedPolicy,
-    INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation, OutcomeResolutionBoundary,
-    OutcomeResolutionCommand, PAYMENT_METHOD_REPLACEMENT_INCOMPLETE_APPROVAL_TEXT,
+    INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation, OutcomeResolutionCommand,
+    PAYMENT_METHOD_REPLACEMENT_INCOMPLETE_APPROVAL_TEXT,
     PAYMENT_METHOD_REPLACEMENT_STALE_STATE_TEXT, PAYMENT_METHOD_REPLACEMENT_STORAGE_FAILURE_TEXT,
     RateLimitCooldown, SubscriptionEnrollmentApplicationError,
     append_subscription_observation_diagnostics, apply_resumable_not_submitted_policy,
@@ -154,13 +154,7 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
     let resolved_gateway = gateway.resolved_gateway();
     if admission.attempt.identity() != admission.reservation.identity()
         || admission.attempt.request() != admission.reservation.request()
-        || admission.attempt.status() != PaymentAttemptStatus::Pending
-        || admission
-            .attempt
-            .state()
-            .timestamps()
-            .submitted_at()
-            .is_none()
+        || !admission.attempt.phase().is_admitted()
         || !admission
             .reservation
             .matches_submission(command, resolved_gateway)
@@ -192,6 +186,7 @@ pub async fn submit_admitted_subscription_payment_method_replacement(
                 OutcomeReservation::PaymentMethodReplacement(&admission.reservation),
                 &evidence,
                 policy,
+                super::NonSubmissionProof::for_error(&admission.attempt, &error)?,
             )
             .await?;
             if application.should_surface_not_submitted(policy) {
@@ -294,10 +289,7 @@ async fn apply_subscription_payment_method_replacement_gateway_decision(
                 pool,
                 reservation,
                 outcome.evidence(),
-                AttemptResolutionStatus::Declined,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
+                OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Declined, None, None),
             )
             .await
         }
@@ -306,10 +298,7 @@ async fn apply_subscription_payment_method_replacement_gateway_decision(
                 pool,
                 reservation,
                 outcome.evidence(),
-                AttemptResolutionStatus::Failed,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
+                OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Failed, None, None),
             )
             .await
         }
@@ -421,18 +410,12 @@ async fn apply_locked_reconciled_non_approved_payment_method_replacement_outcome
     let diagnostics = reconciled.observation_diagnostics;
     let outcome = reconciled.outcome;
     let resolution = match outcome.status() {
-        GatewayPaymentStatus::Declined => OutcomeResolutionCommand::non_approved(
-            AttemptResolutionStatus::Declined,
-            None,
-            None,
-            OutcomeResolutionBoundary::Submitted,
-        ),
-        GatewayPaymentStatus::Failed => OutcomeResolutionCommand::non_approved(
-            AttemptResolutionStatus::Failed,
-            None,
-            None,
-            OutcomeResolutionBoundary::Submitted,
-        ),
+        GatewayPaymentStatus::Declined => {
+            OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Declined, None, None)
+        }
+        GatewayPaymentStatus::Failed => {
+            OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Failed, None, None)
+        }
         GatewayPaymentStatus::Unknown => OutcomeResolutionCommand::unknown(None),
         GatewayPaymentStatus::Approved => {
             return Err(SubscriptionEnrollmentApplicationError::InvalidState(
@@ -539,12 +522,7 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
             outcome.evidence(),
-            OutcomeResolutionCommand::non_approved(
-                AttemptResolutionStatus::Declined,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
-            ),
+            OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Declined, None, None),
         )
         .await
         .map(|application| (application.into_payment(), None)),
@@ -553,12 +531,7 @@ async fn apply_locked_reconciled_payment_method_replacement_decision(
             OutcomeReservation::PaymentMethodReplacement(reservation),
             attempt,
             outcome.evidence(),
-            OutcomeResolutionCommand::non_approved(
-                AttemptResolutionStatus::Failed,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
-            ),
+            OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Failed, None, None),
         )
         .await
         .map(|application| (application.into_payment(), None)),
@@ -643,16 +616,13 @@ pub(crate) async fn resolve_payment_method_replacement_non_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionPaymentMethodReplacement,
     evidence: &ProcessorEvidence,
-    status: AttemptResolutionStatus,
-    resolution_code: Option<PaymentResolutionCode>,
-    cooldown: Option<RateLimitCooldown>,
-    boundary: OutcomeResolutionBoundary,
+    resolution: OutcomeResolutionCommand,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     resolve_pool_outcome(
         pool,
         OutcomeReservation::PaymentMethodReplacement(reservation),
         evidence,
-        OutcomeResolutionCommand::non_approved(status, resolution_code, cooldown, boundary),
+        resolution,
     )
     .await
     .map(OutcomeApplication::into_payment)

@@ -523,9 +523,7 @@ pub(crate) async fn admit_subscription_renewal_submission_with_policy_in_transac
     if !renewal_attempt_belongs_to_reservation(&attempt, reservation) {
         return Err(invalid_state());
     }
-    if attempt.status() != PaymentAttemptStatus::Pending
-        || attempt.state().timestamps().submitted_at().is_some()
-    {
+    if !attempt.phase().is_prepared() {
         return Ok(SubscriptionRenewalSubmissionOutcome::AlreadyAdmitted(
             attempt,
         ));

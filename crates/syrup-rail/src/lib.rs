@@ -38,9 +38,10 @@ pub use admission::{
 pub use attempt::{
     BillingContactSnapshot, PaymentAttempt, PaymentAttemptError, PaymentAttemptFingerprint,
     PaymentAttemptFingerprintError, PaymentAttemptIdentity, PaymentAttemptLifecycle,
-    PaymentAttemptRequest, PaymentAttemptSnapshotError, PaymentAttemptState, PaymentAttemptTarget,
-    PaymentAttemptTimestamps, PaymentMethodUpdateSnapshot, SubscriptionEnrollmentTermsVersion,
-    SubscriptionInitialApplication, SubscriptionPaymentStateSnapshot,
+    PaymentAttemptPhase, PaymentAttemptRequest, PaymentAttemptSnapshotError, PaymentAttemptState,
+    PaymentAttemptTarget, PaymentAttemptTimestamps, PaymentMethodUpdateSnapshot,
+    SubscriptionEnrollmentTermsVersion, SubscriptionInitialApplication,
+    SubscriptionPaymentStateSnapshot,
 };
 pub use billing_portal::{
     SUBSCRIPTION_PAYMENT_HISTORY_PAGE_LIMIT, SubscriptionBillingPortalQuery,

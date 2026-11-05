@@ -1,3 +1,9 @@
+mod resolution_command;
+pub(crate) use resolution_command::OutcomeResolutionCommand;
+
+mod non_submission;
+pub(crate) use non_submission::{NonSubmissionProof, restore_prepared_attempt_submission};
+
 use std::{fmt, time::Duration};
 
 use chrono::{DateTime, Utc};
@@ -458,7 +464,7 @@ async fn advance_subscription_discount_after_successful_charge(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutcomeResolutionBoundary {
     Prepared,
-    AdmittedNotSubmitted,
+    AdmittedNotSubmitted(NonSubmissionProof),
     Submitted,
 }
 
@@ -696,95 +702,6 @@ impl ReservationAttemptExpectation<'_> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OutcomeResolutionKind {
-    NonApproved,
-    Unknown,
-}
-
-/// Typed durable resolution inputs. This separates a provider outcome's
-/// status/code/cooldown/boundary from the mechanics that persist it.
-#[derive(Clone, Copy)]
-pub(crate) struct OutcomeResolutionCommand {
-    kind: OutcomeResolutionKind,
-    status: AttemptResolutionStatus,
-    resolution_code: Option<PaymentResolutionCode>,
-    cooldown: Option<RateLimitCooldown>,
-    boundary: OutcomeResolutionBoundary,
-}
-
-impl OutcomeResolutionCommand {
-    pub(crate) const fn non_approved(
-        status: AttemptResolutionStatus,
-        resolution_code: Option<PaymentResolutionCode>,
-        cooldown: Option<RateLimitCooldown>,
-        boundary: OutcomeResolutionBoundary,
-    ) -> Self {
-        Self {
-            kind: OutcomeResolutionKind::NonApproved,
-            status,
-            resolution_code,
-            cooldown,
-            boundary,
-        }
-    }
-
-    const fn unknown(cooldown: Option<RateLimitCooldown>) -> Self {
-        Self {
-            kind: OutcomeResolutionKind::Unknown,
-            status: AttemptResolutionStatus::Unknown,
-            resolution_code: None,
-            cooldown,
-            boundary: OutcomeResolutionBoundary::Submitted,
-        }
-    }
-
-    const fn may_resolve(
-        self,
-        status: PaymentAttemptStatus,
-        submitted_at: Option<DateTime<Utc>>,
-    ) -> bool {
-        status.is_resolvable()
-            && match self.boundary {
-                OutcomeResolutionBoundary::Prepared => submitted_at.is_none(),
-                OutcomeResolutionBoundary::AdmittedNotSubmitted => submitted_at.is_some(),
-                OutcomeResolutionBoundary::Submitted => true,
-            }
-    }
-
-    fn resolved_status(
-        self,
-        operation: ReservationOperation,
-        current: PaymentAttemptStatus,
-    ) -> AttemptResolutionStatus {
-        if self.kind == OutcomeResolutionKind::Unknown
-            && operation.preserves_review_required_for_unknown()
-            && current == PaymentAttemptStatus::ReviewRequired
-        {
-            AttemptResolutionStatus::ReviewRequired
-        } else {
-            self.status
-        }
-    }
-
-    fn clears_submitted_at(self) -> bool {
-        self.boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted
-    }
-
-    fn records_pending_evidence(self, status: AttemptResolutionStatus) -> bool {
-        self.kind == OutcomeResolutionKind::Unknown
-            && status != AttemptResolutionStatus::ReviewRequired
-    }
-
-    fn marks_renewal_past_due(self, status: AttemptResolutionStatus) -> bool {
-        self.boundary == OutcomeResolutionBoundary::Submitted
-            && matches!(
-                status,
-                AttemptResolutionStatus::Declined | AttemptResolutionStatus::Failed
-            )
-    }
-}
-
 pub(crate) struct OutcomeApplication {
     payment: SubscriptionEnrollmentPaymentResult,
     applied: bool,
@@ -839,7 +756,7 @@ async fn resolve_pool_outcome(
     resolution: OutcomeResolutionCommand,
 ) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
-    if let Some(cooldown) = resolution.cooldown {
+    if let Some(cooldown) = resolution.cooldown() {
         commit_rate_limit_cooldown(pool, reservation, cooldown).await?;
     }
     let mut transaction = pool.begin().await?;
@@ -1084,11 +1001,8 @@ async fn resolve_locked_outcome(
     let prepared_attempt_replay = reservation.prepared_attempt_replay();
     // An approval parked for an expired period keeps its typed reversal
     // disposition; a later non-approved observation never resolves it.
-    let applied = !is_parked_expired_period_approval(&attempt)
-        && resolution.may_resolve(
-            attempt.status(),
-            attempt.state().timestamps().submitted_at(),
-        );
+    let applied =
+        !is_parked_expired_period_approval(&attempt) && resolution.matches_attempt(&attempt);
     if applied {
         let status = resolution.resolved_status(reservation.operation(), attempt.status());
         persist_attempt_transition(
@@ -1097,7 +1011,7 @@ async fn resolve_locked_outcome(
             evidence,
             AttemptTransition::Resolved {
                 status,
-                resolution_code: resolution.resolution_code,
+                resolution_code: resolution.resolution_code(),
             },
         )
         .await
@@ -1132,6 +1046,7 @@ async fn resolve_locked_outcome(
 async fn restore_admitted_attempt_for_retry(
     pool: &PgPool,
     reservation: OutcomeReservation<'_>,
+    proof: NonSubmissionProof,
 ) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     // Subscriber reservations share this lock/result projection; host charges
     // intentionally use their own domain wrapper around the same atomic
@@ -1146,10 +1061,9 @@ async fn restore_admitted_attempt_for_retry(
     )
     .await?;
     let attempt = lock_expected_reservation_attempt(&mut transaction, reservation).await?;
-    let restored = attempt.status() == PaymentAttemptStatus::Pending
-        && attempt.state().timestamps().submitted_at().is_some();
+    let restored = proof.matches(&attempt);
     if restored {
-        restore_prepared_attempt_submission(&mut transaction, &attempt).await?;
+        restore_prepared_attempt_submission(&mut transaction, &attempt, proof).await?;
     }
     let result = payment_result_for_reservation_attempt(&mut transaction, reservation).await?;
     transaction.commit().await?;
@@ -1174,28 +1088,28 @@ async fn apply_resumable_not_submitted_policy(
     reservation: OutcomeReservation<'_>,
     evidence: &ProcessorEvidence,
     policy: GatewayNotSubmittedPolicy,
+    proof: NonSubmissionProof,
 ) -> Result<OutcomeApplication, SubscriptionEnrollmentApplicationError> {
     if policy.restores_prepared_attempt_when_supported()
         && reservation.prepared_attempt_replay() == PreparedAttemptReplay::Supported
     {
-        return restore_admitted_attempt_for_retry(pool, reservation).await;
+        return restore_admitted_attempt_for_retry(pool, reservation, proof).await;
     }
     resolve_pool_outcome(
         pool,
         reservation,
         evidence,
-        OutcomeResolutionCommand::non_approved(
-            AttemptResolutionStatus::Failed,
+        OutcomeResolutionCommand::local_failure(
+            OutcomeResolutionBoundary::AdmittedNotSubmitted(proof),
             Some(policy.resolution_code()),
             policy.cooldown(),
-            OutcomeResolutionBoundary::AdmittedNotSubmitted,
         ),
     )
     .await
 }
 
 /// Clears the economic-submission timestamp after the locked attempt has
-/// already transitioned to a terminal or review status. This deliberately
+/// already transitioned to a definite pre-submission failure. This deliberately
 /// cannot use the pending-state predicate of
 /// [`restore_prepared_attempt_submission`].
 async fn clear_resolved_attempt_submission(
@@ -1203,32 +1117,10 @@ async fn clear_resolved_attempt_submission(
     attempt: &PaymentAttempt,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
     let result = sqlx::query(
-        "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1",
+        "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = 'failed' AND submitted_at = $2",
     )
     .bind(attempt.identity().attempt_id().as_uuid())
-    .execute(connection)
-    .await?;
-    if result.rows_affected() != 1 {
-        return Err(SubscriptionEnrollmentApplicationError::InvalidState(
-            INVALID_APPLICATION_STATE,
-        ));
-    }
-    Ok(())
-}
-
-/// Restores a still-pending, admitted attempt after a trusted control-plane
-/// check proves that the mutation endpoint was not contacted. Unlike
-/// [`clear_resolved_attempt_submission`], the state predicate is part of the
-/// atomic update so this function cannot clear a concurrent resolution.
-pub(crate) async fn restore_prepared_attempt_submission(
-    connection: &mut PgConnection,
-    attempt: &PaymentAttempt,
-) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let result = sqlx::query(
-        "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() \
-         WHERE id = $1 AND status = 'pending' AND submitted_at IS NOT NULL",
-    )
-    .bind(attempt.identity().attempt_id().as_uuid())
+    .bind(attempt.state().timestamps().submitted_at())
     .execute(connection)
     .await?;
     if result.rows_affected() != 1 {

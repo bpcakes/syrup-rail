@@ -210,13 +210,7 @@ pub async fn submit_admitted_subscription_renewal(
     let resolved_gateway = gateway.resolved_gateway();
     if admission.attempt.identity() != identity
         || admission.attempt.request() != admission.reservation.request()
-        || admission.attempt.status() != PaymentAttemptStatus::Pending
-        || admission
-            .attempt
-            .state()
-            .timestamps()
-            .submitted_at()
-            .is_none()
+        || !admission.attempt.phase().is_admitted()
         || resolved_gateway.provider_key() != admission.reservation.provider_key()
     {
         return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
@@ -267,11 +261,12 @@ pub async fn submit_admitted_subscription_renewal(
                 coordinator,
                 &admission.reservation,
                 &evidence,
-                OutcomeResolutionCommand::non_approved(
-                    AttemptResolutionStatus::Failed,
+                OutcomeResolutionCommand::local_failure(
+                    OutcomeResolutionBoundary::AdmittedNotSubmitted(
+                        super::NonSubmissionProof::for_error(&admission.attempt, &error)?,
+                    ),
                     Some(policy.resolution_code()),
                     policy.cooldown(),
-                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
                 ),
             )
             .await?;
@@ -364,12 +359,7 @@ async fn apply_subscription_renewal_gateway_decision(
             coordinator,
             reservation,
             outcome.evidence(),
-            OutcomeResolutionCommand::non_approved(
-                AttemptResolutionStatus::Declined,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
-            ),
+            OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Declined, None, None),
         )
         .await
         .map(OutcomeApplication::into_payment),
@@ -378,12 +368,7 @@ async fn apply_subscription_renewal_gateway_decision(
             coordinator,
             reservation,
             outcome.evidence(),
-            OutcomeResolutionCommand::non_approved(
-                AttemptResolutionStatus::Failed,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
-            ),
+            OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Failed, None, None),
         )
         .await
         .map(OutcomeApplication::into_payment),
@@ -445,7 +430,7 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
     let renewal = reservation;
     let reservation = OutcomeReservation::Renewal(renewal);
     let identity = reservation.identity();
-    if let Some(cooldown) = resolution.cooldown {
+    if let Some(cooldown) = resolution.cooldown() {
         commit_rate_limit_cooldown(pool, reservation, cooldown).await?;
     }
     let mut transaction = coordinator
@@ -470,11 +455,8 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
         let evidence = &reconciled.evidence;
         // An approval parked for an expired period keeps its typed reversal
         // disposition: no later observation resolves, duns, or clears it.
-        let may_resolve = !is_parked_expired_period_approval(&attempt)
-            && resolution.may_resolve(
-                attempt.status(),
-                attempt.state().timestamps().submitted_at(),
-            );
+        let may_resolve =
+            !is_parked_expired_period_approval(&attempt) && resolution.matches_attempt(&attempt);
         let mut events = Vec::new();
         // Renewal has no prepared-attempt replay entrypoint. Even when the
         // shared policy identifies a not-submitted failure as retry-safe for
@@ -487,7 +469,7 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
                 evidence,
                 AttemptTransition::Resolved {
                     status,
-                    resolution_code: resolution.resolution_code,
+                    resolution_code: resolution.resolution_code(),
                 },
             )
             .await
@@ -495,7 +477,7 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
             if resolution.clears_submitted_at() {
                 clear_resolved_attempt_submission(connection, &attempt).await?;
             } else if resolution.marks_renewal_past_due(status)
-                && resolution.resolution_code.is_none()
+                && resolution.resolution_code().is_none()
             {
                 let resolved_attempt = find_payment_attempt_by_id_on_connection(
                     connection,

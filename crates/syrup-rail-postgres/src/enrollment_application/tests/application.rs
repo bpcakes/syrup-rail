@@ -819,6 +819,7 @@ async fn recovery_admission_rejects_changed_contact_before_provider_io()
     );
 
     let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
+    let admission_snapshot = admission.attempt().clone();
     let error = submit_admitted_subscription_recovery(
         &fixture.database.pool,
         &fixture.coordinator,
@@ -842,6 +843,7 @@ async fn recovery_admission_rejects_changed_contact_before_provider_io()
         OutcomeReservation::Recovery(&reservation),
         &mutation_error_evidence(not_transmitted.detail()),
         policy,
+        NonSubmissionProof::for_error(&admission_snapshot, &not_transmitted)?,
     )
     .await?;
     assert!(restored.should_surface_not_submitted(policy));

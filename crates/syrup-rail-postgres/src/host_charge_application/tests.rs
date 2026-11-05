@@ -46,13 +46,6 @@ fn before_submission_resolution_modes_keep_boundary_and_cooldown_distinct() {
     assert_eq!(prepared.boundary, OutcomeResolutionBoundary::Prepared);
     assert!(prepared.cooldown.is_none());
 
-    let admitted = HostChargeBeforeSubmissionResolution::admitted_not_submitted();
-    assert_eq!(
-        admitted.boundary,
-        OutcomeResolutionBoundary::AdmittedNotSubmitted
-    );
-    assert!(admitted.cooldown.is_none());
-
     let rate_limited = HostChargeBeforeSubmissionResolution::prepared().with_not_submitted_policy(
         GatewayNotSubmittedPolicy::for_readiness_error(&syrup_rail::GatewayError::RateLimited(
             GatewayDiagnostic::new("rate limited"),

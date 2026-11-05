@@ -6,7 +6,7 @@ Implement the four safety refactors identified in the audit, and publish reviewa
 
 - [x] Revalidated merged baseline and transition entrypoints.
 - [x] SM4 implementation and local verification: explicit lifecycle evidence transition matrix; delivered as PR #11 (https://github.com/bpcakes/syrup-rail/pull/11).
-- [x] SM1 implementation and local verification: named processor-charge transitions and shared classification; PR publication follows.
+- [x] SM1 implementation and local verification: named processor-charge transitions and shared classification; delivered as PR #12 (https://github.com/bpcakes/syrup-rail/pull/12).
 - [ ] SM2: validated attempt phases and evidence-bound non-submission restoration.
 - [ ] SM3: explicit subscription collection states with separate access projection.
 - [ ] Verify every PR and publish final links with dependencies and test results.
@@ -37,7 +37,17 @@ compatibility transitions. Unresolved host conflicts retain their legitimate
 reconciliation path. Two new database scenarios and two policy tests pass;
 full workspace verification passed 767 tests (none ignored/filtered), plus
 fmt, Clippy, SQLx and public API documentation checks. No schema changes.
-SM2–SM3 remain unimplemented.
+SM1 is published as PR #12, stacked on #11; all 11 CI checks pass.
+
+SM2 implementation: explicit attempt phases now drive admission and replay.
+Non-submission proof binds the exact attempt identity and admission timestamp;
+SQL fences both retry restoration and post-failure timestamp clearing. Local
+failures and submitted outcomes are distinct commands shared with host charges.
+Core phase coverage and the database stale-proof regression pass. Full tests
+passed 769 with no ignored/filtered tests; the initial crate run had one Docker
+port-exposure startup failure, and the full rerun with four test threads passed.
+Final rerun after host admission cleanup is in progress. Fmt, Clippy, SQLx and
+public API documentation passed. SM3 remains unimplemented.
 
 ## Work and acceptance
 
