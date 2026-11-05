@@ -1,3 +1,4 @@
+use super::shared::AttemptLookup;
 use super::*;
 use support::{
     active_grant_exists, attempt_identity_matches_requested_gateway_without_required_mode,
@@ -36,7 +37,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        false,
+        AttemptLookup::Read,
     )
     .await?
     {
@@ -70,7 +71,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
                 identity.billing_scope_id(),
                 identity.subscriber_id(),
                 reservation.idempotency_key(),
-                true,
+                AttemptLookup::LockForUpdate,
             )
             .await?
             .ok_or_else(invalid_state)?;
@@ -148,7 +149,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
         && matches!(
@@ -219,7 +220,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     {
@@ -247,7 +248,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
             identity.billing_scope_id(),
             identity.subscriber_id(),
             reservation.idempotency_key(),
-            true,
+            AttemptLookup::LockForUpdate,
         )
         .await?
         .ok_or_else(invalid_state)?;
@@ -258,7 +259,7 @@ pub async fn reserve_subscription_enrollment_in_transaction(
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     .ok_or_else(invalid_state)?;
@@ -328,7 +329,7 @@ pub async fn preflight_subscription_enrollment_in_transaction(
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     .ok_or_else(invalid_state)?;
@@ -375,7 +376,7 @@ pub async fn preflight_subscription_enrollment_in_transaction(
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     .ok_or_else(invalid_state)?;
@@ -413,7 +414,7 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     .ok_or_else(invalid_state)?;

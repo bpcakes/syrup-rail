@@ -73,7 +73,7 @@ pub(crate) struct LocalAttemptPolicy {
 static LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES: LazyLock<Vec<String>> = LazyLock::new(|| {
     PaymentAttemptStatus::ALL
         .into_iter()
-        .filter(|status| LocalAttemptPolicy::should_expire(*status, false, true))
+        .filter(|status| LocalAttemptPolicy::is_locally_expirable(*status, None))
         .map(|status| status.as_str().to_owned())
         .collect()
 });
@@ -101,17 +101,16 @@ impl LocalAttemptPolicy {
         LOCAL_ATTEMPT_EXPIRABLE_STATUS_VALUES.as_slice()
     }
 
-    pub(crate) const fn should_expire(
+    /// Whether state permits local expiry once the kind-specific stale window elapses.
+    pub(crate) const fn is_locally_expirable(
         status: PaymentAttemptStatus,
-        was_submitted: bool,
-        is_stale: bool,
+        submitted_at: Option<DateTime<Utc>>,
     ) -> bool {
-        is_stale
-            && matches!(
-                attempt_replay_disposition_for(status, was_submitted),
-                AttemptReplayDisposition::ResumePrepared
-                    | AttemptReplayDisposition::RepairUnsubmittedReview
-            )
+        matches!(
+            attempt_replay_disposition_for(status, submitted_at),
+            AttemptReplayDisposition::ResumePrepared
+                | AttemptReplayDisposition::RepairUnsubmittedReview
+        )
     }
 }
 
@@ -130,7 +129,7 @@ pub(super) enum ExistingAttemptPreflight {
 pub(crate) fn attempt_replay_disposition(attempt: &PaymentAttempt) -> AttemptReplayDisposition {
     attempt_replay_disposition_for(
         attempt.status(),
-        attempt.state().timestamps().submitted_at().is_some(),
+        attempt.state().timestamps().submitted_at(),
     )
 }
 
@@ -150,11 +149,11 @@ pub(crate) fn prepared_replay_required_mode_changed(
 
 const fn attempt_replay_disposition_for(
     status: PaymentAttemptStatus,
-    was_submitted: bool,
+    submitted_at: Option<DateTime<Utc>>,
 ) -> AttemptReplayDisposition {
-    match (status, was_submitted) {
-        (PaymentAttemptStatus::Pending, false) => AttemptReplayDisposition::ResumePrepared,
-        (PaymentAttemptStatus::ReviewRequired, false) => {
+    match (status, submitted_at) {
+        (PaymentAttemptStatus::Pending, None) => AttemptReplayDisposition::ResumePrepared,
+        (PaymentAttemptStatus::ReviewRequired, None) => {
             AttemptReplayDisposition::RepairUnsubmittedReview
         }
         _ => AttemptReplayDisposition::ReturnCanonical,
@@ -173,7 +172,7 @@ pub(super) async fn preflight_existing_attempt(
         billing_scope_id,
         subscriber_id,
         idempotency_key,
-        false,
+        AttemptLookup::Read,
     )
     .await?
     else {
@@ -293,14 +292,23 @@ pub(crate) async fn try_lock_subscription_aggregate(
     .await
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum AttemptLookup {
+    Read,
+    LockForUpdate,
+}
+
 pub(super) async fn payment_attempt_by_idempotency(
     transaction: &mut Transaction<'_, Postgres>,
     billing_scope_id: BillingScopeId,
     subscriber_id: SubscriberId,
     idempotency_key: &IdempotencyKey,
-    for_update: bool,
+    lookup: AttemptLookup,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let lock = if for_update { "FOR UPDATE" } else { "" };
+    let lock = match lookup {
+        AttemptLookup::Read => "",
+        AttemptLookup::LockForUpdate => "FOR UPDATE",
+    };
     let query = format!(
         "{PAYMENT_ATTEMPT_SELECT} \
          WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3 \
@@ -584,25 +592,25 @@ mod replay_disposition_tests {
     #[test]
     fn replay_disposition_keeps_local_review_distinct_from_prepared_and_canonical() {
         assert_eq!(
-            attempt_replay_disposition_for(PaymentAttemptStatus::Pending, false),
+            attempt_replay_disposition_for(PaymentAttemptStatus::Pending, None),
             AttemptReplayDisposition::ResumePrepared,
         );
         assert_eq!(
-            attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, false),
+            attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, None),
             AttemptReplayDisposition::RepairUnsubmittedReview,
         );
         assert!(
-            attempt_replay_disposition_for(PaymentAttemptStatus::Pending, false)
+            attempt_replay_disposition_for(PaymentAttemptStatus::Pending, None)
                 .may_reach_provider()
         );
         assert!(
-            !attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, false)
+            !attempt_replay_disposition_for(PaymentAttemptStatus::ReviewRequired, None)
                 .may_reach_provider()
         );
 
         for status in PaymentAttemptStatus::ALL {
             assert_eq!(
-                attempt_replay_disposition_for(status, true),
+                attempt_replay_disposition_for(status, Some(DateTime::UNIX_EPOCH)),
                 AttemptReplayDisposition::ReturnCanonical,
             );
         }
@@ -613,7 +621,7 @@ mod replay_disposition_tests {
             PaymentAttemptStatus::Failed,
         ] {
             assert_eq!(
-                attempt_replay_disposition_for(status, false),
+                attempt_replay_disposition_for(status, None),
                 AttemptReplayDisposition::ReturnCanonical,
             );
         }
@@ -622,20 +630,17 @@ mod replay_disposition_tests {
     #[test]
     fn local_attempt_state_policy_covers_the_complete_state_matrix() {
         for status in PaymentAttemptStatus::ALL {
-            for was_submitted in [false, true] {
-                for is_stale in [false, true] {
-                    let expected = is_stale
-                        && !was_submitted
-                        && matches!(
-                            status,
-                            PaymentAttemptStatus::Pending | PaymentAttemptStatus::ReviewRequired
-                        );
-                    assert_eq!(
-                        LocalAttemptPolicy::should_expire(status, was_submitted, is_stale),
-                        expected,
-                        "status={status:?} submitted={was_submitted} stale={is_stale}",
+            for submitted_at in [None, Some(DateTime::UNIX_EPOCH)] {
+                let expected = submitted_at.is_none()
+                    && matches!(
+                        status,
+                        PaymentAttemptStatus::Pending | PaymentAttemptStatus::ReviewRequired
                     );
-                }
+                assert_eq!(
+                    LocalAttemptPolicy::is_locally_expirable(status, submitted_at),
+                    expected,
+                    "status={status:?} submitted_at={submitted_at:?}",
+                );
             }
         }
 

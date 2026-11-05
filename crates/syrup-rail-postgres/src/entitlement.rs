@@ -325,7 +325,7 @@ fn classify_guard_access(
         "canceled" => GuardAccess::PaidThroughCancellation,
         "past_due" => match past_due_access.parse::<PastDueAccessPolicy>() {
             Ok(policy)
-                if classify_past_due_access(policy, next_payment_attempt_at.is_some())
+                if classify_past_due_access(policy, *next_payment_attempt_at)
                     == PastDueAccess::AllowedDuringDunning =>
             {
                 GuardAccess::Paid
@@ -641,7 +641,7 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
         SubscriptionStatus::PastDue => Entitlement::PastDue {
             access: classify_past_due_access(
                 subscription.renewal_failure().past_due_access(),
-                subscription.next_payment_attempt_at().is_some(),
+                subscription.next_payment_attempt_at().copied(),
             ),
             subscription,
             next_action: if row.try_get("pending_recovery_confirmation")? {

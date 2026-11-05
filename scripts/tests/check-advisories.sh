@@ -32,7 +32,8 @@ cat >"$test_root/bin/cargo" <<'EOF'
 #!/usr/bin/env bash
 case "${1:-}" in
   tree)
-    if [[ "$*" != "tree --locked --workspace --all-features --target all -e all --prefix none --format {p}" ]]; then
+    if [[ "$*" != "tree --locked --workspace --all-features --target all -e all --prefix none --format {p}" &&
+          "$*" != "tree --locked --workspace --exclude syrup-rail-sqlx-gate --all-features --target all -e normal,build --prefix none --format {p}" ]]; then
       printf 'unexpected cargo tree arguments: %s\n' "$*" >&2
       exit 1
     fi
@@ -53,7 +54,12 @@ case "${1:-}" in
 esac
 EOF
 
-chmod +x "$test_root/bin/git" "$test_root/bin/cargo"
+cat >"$test_root/bin/date" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "${ADVISORY_TEST_DATE:-2026-11-05}"
+EOF
+
+chmod +x "$test_root/bin/git" "$test_root/bin/cargo" "$test_root/bin/date"
 
 prepare_case() {
   local name="$1"
@@ -172,5 +178,42 @@ run_success_case "rsa-absent" false "--deny warnings" false
 run_success_case "rsa-unreachable" true "--deny warnings --ignore RUSTSEC-2023-0071" true
 run_reachable_rsa_case
 run_audit_failure_case
+
+run_tar_case() {
+  local name="$1" version="$2" today="$3" runtime_tree="$4" expected_status="$5"
+  local case_root
+  case_root="$(prepare_case "$name" false)"
+  printf '[[package]]\nname = "astral-tokio-tar"\nversion = "%s"\n' "$version" >>"$case_root/Cargo.lock"
+  set +e
+  ADVISORY_TEST_REPO_ROOT="$case_root" \
+    ADVISORY_TEST_DATE="$today" \
+    ADVISORY_TEST_TREE_OUTPUT="$runtime_tree" \
+    ADVISORY_TEST_TREE_CALLED="$case_root/tree-called" \
+    ADVISORY_TEST_AUDIT_ARGS="$case_root/audit-args" \
+    ADVISORY_TEST_AUDIT_EXIT="${6:-0}" \
+    PATH="$test_root/bin:$PATH" \
+    "$subject" 2>"$case_root/stderr"
+  local status=$?
+  set -e
+  if [[ "$status" -ne "$expected_status" ]]; then
+    printf 'unexpected status %s for %s\n' "$status" "$name" >&2
+    exit 1
+  fi
+  if [[ "$expected_status" == 1 ]]; then
+    if [[ -e "$case_root/audit-args" ]]; then
+      printf 'audit invoked after rejected exception for %s\n' "$name" >&2
+      exit 1
+    fi
+  elif [[ "$(cat "$case_root/audit-args")" != "--deny warnings --ignore RUSTSEC-2026-0440" ]]; then
+    printf 'unexpected exception arguments for %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+run_tar_case tar-tool-only 0.6.4 2026-12-04 "" 0
+run_tar_case tar-runtime 0.6.4 2026-11-05 "astral-tokio-tar v0.6.4" 1
+run_tar_case tar-expired 0.6.4 2026-12-05 "" 1
+run_tar_case tar-version-changed 0.7.1 2026-11-05 "" 1
+run_tar_case tar-other-advisory 0.6.4 2026-11-05 "" 42 42
 
 printf 'Dependency advisory wrapper tests passed.\n'

@@ -473,7 +473,7 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
         let may_resolve = !is_parked_expired_period_approval(&attempt)
             && resolution.may_resolve(
                 attempt.status(),
-                attempt.state().timestamps().submitted_at().is_some(),
+                attempt.state().timestamps().submitted_at(),
             );
         let mut events = Vec::new();
         // Renewal has no prepared-attempt replay entrypoint. Even when the

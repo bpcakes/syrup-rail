@@ -628,7 +628,6 @@ async fn attempt_candidates(
                 row.try_get::<String, _>("gateway_lifecycle_status")?
                     .as_str(),
                 Some(current_refunded_amount_cents),
-                true,
             )?;
             Ok(AttemptCandidate {
                 id: row.try_get("id")?,
@@ -781,7 +780,6 @@ fn stored_amount_is_valid(state: &GatewayLifecycleState, refunded: i32, captured
 fn lifecycle_state_from_parts(
     status: &str,
     refunded: Option<i32>,
-    stored_attempt: bool,
 ) -> Result<GatewayLifecycleState, GatewayLifecycleReconciliationError> {
     let state = match (status, refunded) {
         ("unknown", None | Some(0)) => GatewayLifecycleState::Unknown,
@@ -814,11 +812,6 @@ fn lifecycle_state_from_parts(
             ));
         }
     };
-    if stored_attempt && refunded.is_none() {
-        return Err(GatewayLifecycleReconciliationError::InvalidState(
-            INVALID_STORED_STATE,
-        ));
-    }
     Ok(state)
 }
 
@@ -1177,7 +1170,7 @@ async fn actionable_pending(
                 StoredEvidence {
                     transaction_id: row.try_get("gateway_transaction_id")?,
                     order_id: row.try_get("gateway_order_id")?,
-                    state: lifecycle_state_from_parts(&status, refunded, false)?,
+                    state: lifecycle_state_from_parts(&status, refunded)?,
                     condition: row.try_get("gateway_condition")?,
                     action: row.try_get("gateway_lifecycle_action")?,
                     effective_at: row.try_get("gateway_lifecycle_at")?,

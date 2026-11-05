@@ -30,9 +30,19 @@ historically named `dev/0.6.0` branch.
 - The raw `syrup_rail_nmi_client::SaleRequest` struct gains
   `descriptor: Option<StatementDescriptor>`; add `descriptor: None` to
   existing literals.
+- `classify_past_due_access` now takes `Option<DateTime<Utc>>` for the next
+  payment attempt instead of a boolean. Pass the scheduled timestamp directly
+  (use `.copied()` for `Subscription::next_payment_attempt_at()`).
+- `BillingDeletionBlockers::new` now accepts an iterator of
+  `BillingDeletionBlocker::{ActiveSubscription, UnresolvedPayment}` instead
+  of two booleans. Pass `[]` for no blockers; construction is no longer `const`.
 
 ### Changed
 
+- Replace boolean function parameters with named policies, existing evidence,
+  and fixture builders throughout the workspace. Enforce zero boolean function
+  parameters through workspace Clippy settings; defer function-length and
+  cognitive-complexity limits until existing workflows meet them.
 - Pin SQLx and SQLx CLI to 0.9.0, declare the shared Rust 1.94 minimum, and
   update CI and release checks to exercise that toolchain.
 - Adapt assembled queries to SQLx's explicit SQL-safety boundary while

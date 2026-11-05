@@ -11,6 +11,19 @@ Syrup Rail's four crates are released at one version and form one layered API.
 Every root export is explicit: adding or removing a public symbol requires an
 intentional facade edit rather than being pulled in by a wildcard re-export.
 
+The 0.6.0 boolean-parameter API changes also affect two core helpers:
+
+- `classify_past_due_access(policy, next_payment_attempt_at)` takes
+  `Option<DateTime<Utc>>`. For a subscription, pass
+  `subscription.next_payment_attempt_at().copied()`. A scheduled payment allows
+  access only under `ContinueUntilDunningExhausted`; the timestamp is not
+  compared with the current time here.
+- `BillingDeletionBlockers::new` takes an iterator of named
+  `BillingDeletionBlocker` reasons. For example,
+  `BillingDeletionBlockers::new([BillingDeletionBlocker::UnresolvedPayment])`
+  replaces `new(false, true)`. Use `new([])` or `default()` for no blockers.
+  The constructor is no longer `const`; duplicate reasons are harmless.
+
 ## Primary host surface
 
 Most applications should construct `syrup_rail_postgres::SubscriptionBillingService`

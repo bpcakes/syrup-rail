@@ -15,6 +15,9 @@ version = "0.6.0"
 license-file = "LICENSE"
 repository = "https://github.com/bpcakes/syrup-rail"
 
+[workspace.lints.clippy]
+fn_params_excessive_bools = "warn"
+
 [workspace.dependencies]
 async-trait = "0.1.92"
 chrono = { version = "0.4", features = ["serde"] }

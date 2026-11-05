@@ -8,6 +8,26 @@ use syrup_rail::{
 use super::*;
 use crate::test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account};
 
+/// Last-resort immutable evidence write used when another transaction keeps
+/// the attempt row locked beyond the bounded application window.
+///
+/// Database foreign keys and uniqueness constraints remain the authority, so
+/// this path can retain processor evidence without mutating or locking the
+/// attempt itself.
+async fn persist_approved_evidence_without_attempt_lock(
+    pool: &PgPool,
+    terms: LockFreeApprovedEvidenceTerms<'_>,
+    evidence: &ProcessorEvidence,
+) -> Result<LockFreeApprovedEvidenceOutcome, sqlx::Error> {
+    persist_approved_evidence_without_attempt_lock_with_policy(
+        pool,
+        terms,
+        evidence,
+        LockFreeApprovalPolicy::Reconcile,
+    )
+    .await
+}
+
 async fn insert_host_charge_attempt(
     pool: &PgPool,
     gateway: GatewayAccountFixture,
@@ -236,11 +256,15 @@ async fn lock_free_expired_primary_evidence_starts_in_typed_external_reversal()
                 LockFreeApprovedEvidenceOutcome::ExactReplay,
             ] {
                 assert_eq!(
-                    persist_approved_evidence_without_attempt_lock_with_expiry(
+                    persist_approved_evidence_without_attempt_lock_with_policy(
                         &database.pool,
                         lock_free_terms(&recovery, PaymentAttemptKind::SubscriptionRecovery),
                         &evidence,
-                        expired,
+                        if expired {
+                            LockFreeApprovalPolicy::ReverseExpiredPeriod
+                        } else {
+                            LockFreeApprovalPolicy::Reconcile
+                        },
                     )
                     .await?,
                     outcome

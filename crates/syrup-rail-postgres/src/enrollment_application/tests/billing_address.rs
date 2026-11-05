@@ -274,7 +274,7 @@ async fn wait_for_advisory_waiters(pool: &sqlx::PgPool, count: i64) -> Result<()
 #[tokio::test]
 async fn enrollment_and_renewal_carry_the_confirmed_address_end_to_end()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_e2e", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_e2e").build().await?;
     let home = address("1 Main St");
     let (subscription_id, enrollment_gateway) = enroll_with(
         &fixture,
@@ -305,7 +305,7 @@ async fn enrollment_and_renewal_carry_the_confirmed_address_end_to_end()
 
 #[tokio::test]
 async fn addressless_history_renews_without_any_contact() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_none", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_none").build().await?;
     let (subscription_id, _) = enroll_with(
         &fixture,
         "addressless-enrollment",
@@ -328,7 +328,7 @@ async fn addressless_history_renews_without_any_contact() -> Result<(), Box<dyn 
 #[tokio::test]
 async fn reserved_renewal_submits_its_snapshot_after_the_method_address_changes()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_snapshot", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_snapshot").build().await?;
     let home = address("1 Main St");
     let (subscription_id, _) = enroll_with(
         &fixture,
@@ -396,7 +396,7 @@ async fn reserved_renewal_submits_its_snapshot_after_the_method_address_changes(
 #[tokio::test]
 async fn renewal_without_an_active_method_stores_no_address_and_admission_fails_as_before()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_inactive", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_inactive").build().await?;
     let (subscription_id, _) = enroll_with(
         &fixture,
         "inactive-enrollment",
@@ -423,7 +423,7 @@ async fn renewal_without_an_active_method_stores_no_address_and_admission_fails_
 #[tokio::test]
 async fn approved_replacement_moves_the_next_renewal_address_and_failed_replacement_keeps_it()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_replace", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_replace").build().await?;
     let home = address("1 Main St");
     let (subscription_id, _) = enroll_with(
         &fixture,
@@ -485,7 +485,7 @@ async fn approved_replacement_moves_the_next_renewal_address_and_failed_replacem
 #[tokio::test]
 async fn same_reference_approval_replaces_or_keeps_the_whole_address() -> Result<(), Box<dyn Error>>
 {
-    let fixture = enrollment_fixture("addr_same_ref", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_same_ref").build().await?;
     let home = address("1 Main St");
     let (subscription_id, _) = enroll_with(
         &fixture,
@@ -546,7 +546,7 @@ async fn same_reference_approval_replaces_or_keeps_the_whole_address() -> Result
 #[tokio::test]
 async fn same_key_address_changes_conflict_before_provider_io() -> Result<(), Box<dyn Error>> {
     // The prepared fixture attempt is addressless, like every pre-v5 attempt.
-    let fixture = enrollment_fixture("addr_conflict", false, false, true).await?;
+    let fixture = application_fixture("addr_conflict").build().await?;
     let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
         "txn_conflict_must_not_submit",
     ))));
@@ -711,7 +711,7 @@ async fn addressed_due_subscription(
 #[tokio::test]
 async fn scrub_waits_for_a_held_renewal_reservation_then_clears_its_snapshot()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_ren_scrub", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_ren_scrub").build().await?;
     let subscriber_id = fixture.command.subscriber_id();
     let (subscription_id, period_start_at, resolved) =
         addressed_due_subscription(&fixture, "reservation_first").await?;
@@ -752,7 +752,7 @@ async fn scrub_waits_for_a_held_renewal_reservation_then_clears_its_snapshot()
 #[tokio::test]
 async fn renewal_reservation_waits_for_a_held_scrub_and_restores_no_address()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_scrub_ren", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_scrub_ren").build().await?;
     let subscriber_id = fixture.command.subscriber_id();
     let (subscription_id, period_start_at, resolved) =
         addressed_due_subscription(&fixture, "scrub_first").await?;
@@ -791,7 +791,7 @@ async fn renewal_reservation_waits_for_a_held_scrub_and_restores_no_address()
 
 #[tokio::test]
 async fn approval_waits_for_a_held_scrub_and_restores_no_pii() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_scrub_app", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_scrub_app").build().await?;
     let subscriber_id = fixture.command.subscriber_id();
     let command = enroll_command(
         &fixture,
@@ -855,7 +855,7 @@ async fn approval_waits_for_a_held_scrub_and_restores_no_pii() -> Result<(), Box
 #[tokio::test]
 async fn renewal_reservation_rejects_an_account_changed_between_locator_and_lock()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("addr_locator", false, false, false).await?;
+    let fixture = enrollment_fixture("addr_locator").build().await?;
     let (subscription_id, period_start_at, _) =
         addressed_due_subscription(&fixture, "locator_switch").await?;
     let pool = &fixture.database.pool;

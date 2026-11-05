@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn reconciled_unknown_payment_method_replacement_rejects_conflicting_identity_bundle()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("repl_unk_conf", false, false, false).await?;
+    let fixture = enrollment_fixture("repl_unk_conf").build().await?;
     let initial_gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
         Ok(approved_outcome_with_reference(
@@ -613,7 +613,7 @@ async fn sparse_terminal_reconciliation_is_not_promoted_to_an_exact_replay()
 #[tokio::test]
 async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_atomically()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("svc_ready_429", false, false, false).await?;
+    let fixture = enrollment_fixture("svc_ready_429").build().await?;
     let resolved = scripted_resolved_gateway(
         fixture.gateway_account,
         Arc::new(RateLimitedReadinessGateway),
@@ -674,7 +674,7 @@ async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_at
 #[tokio::test]
 async fn foreground_fresh_cooldown_after_readiness_prevents_the_admitted_sale()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("svc_fresh_stop", false, false, false).await?;
+    let fixture = enrollment_fixture("svc_fresh_stop").build().await?;
     let gateway = Arc::new(CooldownDuringReadinessGateway {
         pool: fixture.database.pool.clone(),
         account_id: fixture.gateway_account.gateway_account_id,

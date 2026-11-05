@@ -1,3 +1,4 @@
+use super::shared::AttemptLookup;
 use super::*;
 
 fn payment_method_replacement_attempt_matches_command(
@@ -354,7 +355,7 @@ pub async fn preflight_subscription_payment_method_replacement_in_transaction(
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     else {
@@ -388,7 +389,7 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     {
@@ -501,7 +502,7 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
             command.billing_scope_id(),
             command.subscriber_id(),
             command.idempotency_key(),
-            true,
+            AttemptLookup::LockForUpdate,
         )
         .await?
         .ok_or_else(invalid_state)?;
@@ -517,7 +518,7 @@ pub async fn reserve_subscription_payment_method_replacement_in_transaction(
         command.billing_scope_id(),
         command.subscriber_id(),
         command.idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     {
@@ -560,7 +561,7 @@ pub async fn admit_subscription_payment_method_replacement_in_transaction(
         identity.billing_scope_id(),
         identity.subscriber_id(),
         reservation.request().idempotency_key(),
-        true,
+        AttemptLookup::LockForUpdate,
     )
     .await?
     .ok_or_else(invalid_state)?;

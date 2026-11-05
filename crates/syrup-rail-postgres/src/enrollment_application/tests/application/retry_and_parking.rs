@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn payment_method_admission_rejects_changed_idempotency_key_before_provider_io()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("replace_submit", false, false).await?;
+    let fixture = application_fixture("replace_submit").build().await?;
     apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
@@ -119,7 +119,7 @@ async fn payment_method_admission_rejects_changed_idempotency_key_before_provide
 #[tokio::test]
 async fn provider_not_submitted_unavailable_restores_the_admitted_attempt_for_retry()
 -> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("not_submitted", false, false).await?;
+    let mut fixture = application_fixture("not_submitted").build().await?;
     let gateway = Arc::new(ScriptedGateway::new(Err(
         GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::NotTransmitted(
             GatewayDiagnostic::new("temporary provider outage"),
@@ -157,7 +157,7 @@ async fn provider_not_submitted_unavailable_restores_the_admitted_attempt_for_re
 #[tokio::test]
 async fn adapter_cannot_mint_retry_safe_account_mode_verification_errors()
 -> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("adapter_mode", false, false).await?;
+    let mut fixture = application_fixture("adapter_mode").build().await?;
     let gateway = Arc::new(ScriptedGateway::new(Err(
         GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::AccountModeVerification(
             GatewayError::Unavailable(GatewayDiagnostic::new(
@@ -189,7 +189,7 @@ async fn adapter_cannot_mint_retry_safe_account_mode_verification_errors()
 #[tokio::test]
 async fn adapter_account_mode_mismatch_is_also_a_malformed_contract_error()
 -> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("adapter_mismatch", false, false).await?;
+    let mut fixture = application_fixture("adapter_mismatch").build().await?;
     let gateway = Arc::new(ScriptedGateway::new(Err(
         GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::AccountModeMismatch {
             required: GatewayAccountMode::Live,
@@ -221,7 +221,7 @@ async fn adapter_account_mode_mismatch_is_also_a_malformed_contract_error()
 #[tokio::test]
 async fn provider_not_submitted_throttle_atomically_extends_the_account_cooldown()
 -> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("account_throttle", false, false).await?;
+    let mut fixture = application_fixture("account_throttle").build().await?;
     let gateway = Arc::new(ScriptedGateway::new(Err(
         GatewayMutationError::NotSubmitted(GatewayNotSubmittedError::RateLimited(
             GatewayDiagnostic::new("merchant throttle"),
@@ -269,7 +269,10 @@ async fn provider_not_submitted_throttle_atomically_extends_the_account_cooldown
 #[tokio::test]
 async fn event_failure_rolls_back_application_and_durably_parks_approval()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("event_fail", false, true).await?;
+    let fixture = application_fixture("event_fail")
+        .with_failing_event_append()
+        .build()
+        .await?;
     let result = apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
@@ -300,7 +303,7 @@ async fn event_failure_rolls_back_application_and_durably_parks_approval()
 #[tokio::test]
 async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("charge_fallback", false, false).await?;
+    let fixture = application_fixture("charge_fallback").build().await?;
     sqlx::raw_sql(
         r#"
         CREATE FUNCTION host_reject_attempt_status_update()
@@ -363,7 +366,7 @@ async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
 #[tokio::test]
 async fn later_exact_approval_identifies_a_transactionless_fallback_charge()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("identify_charge", false, false).await?;
+    let fixture = application_fixture("identify_charge").build().await?;
     sqlx::raw_sql(
         r#"
         CREATE FUNCTION host_reject_attempt_status_update()
@@ -423,7 +426,7 @@ async fn later_exact_approval_identifies_a_transactionless_fallback_charge()
 #[tokio::test]
 async fn approval_after_terminal_failure_is_parked_with_reversal_required_charge()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("terminal_race", false, false).await?;
+    let fixture = application_fixture("terminal_race").build().await?;
     sqlx::query(
         r#"
         UPDATE billing_payment_attempts

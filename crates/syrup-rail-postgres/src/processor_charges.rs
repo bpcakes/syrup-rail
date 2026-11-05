@@ -22,10 +22,11 @@ use crate::processor_charge_persistence::{
 };
 use crate::{OperatorReviewError, PaymentAttemptStoreError};
 
+pub(crate) use storage::LockFreeApprovalPolicy;
 use storage::{
-    charge_by_id, compensating_progression, identify_transactionless, initial_charge_progression,
-    initial_charge_state_code, is_transient, map_operator_error, matching_charge,
-    owned_by_other_attempt, parse_role,
+    ChargeStateCodeUpdate, charge_by_id, compensating_progression, identify_transactionless,
+    initial_charge_progression, initial_charge_state_code, is_transient, map_operator_error,
+    matching_charge, owned_by_other_attempt, parse_role,
 };
 
 mod storage;
@@ -190,33 +191,18 @@ pub(crate) enum LockFreeApprovedEvidenceOutcome {
     NotDurable,
 }
 
-/// Last-resort immutable evidence write used when another transaction keeps
-/// the attempt row locked beyond the bounded application window.
-///
-/// Database foreign keys and uniqueness constraints remain the authority, so
-/// this path can retain processor evidence without mutating or locking the
-/// attempt itself.
-#[cfg(test)]
-pub(crate) async fn persist_approved_evidence_without_attempt_lock(
-    pool: &PgPool,
-    terms: LockFreeApprovedEvidenceTerms<'_>,
-    evidence: &ProcessorEvidence,
-) -> Result<LockFreeApprovedEvidenceOutcome, sqlx::Error> {
-    persist_approved_evidence_without_attempt_lock_with_expiry(pool, terms, evidence, false).await
-}
-
 /// The last-resort evidence write with a billing-period expiry decision.
 ///
-/// When `expired_period` is true because the caller's expiry policy applies
+/// With `ReverseExpiredPeriod`, selected because the caller's expiry policy applies
 /// and the approval's period ended at the database clock, a newly inserted,
 /// identified primary charge starts in external-reversal review with the
 /// typed expiry code, so the operator reversal path can resolve it even if
 /// the attempt is never applied again. The attempt itself is never touched.
-pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_expiry(
+pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
     pool: &PgPool,
     terms: LockFreeApprovedEvidenceTerms<'_>,
     evidence: &ProcessorEvidence,
-    expired_period: bool,
+    approval_policy: LockFreeApprovalPolicy,
 ) -> Result<LockFreeApprovedEvidenceOutcome, sqlx::Error> {
     let identity = terms.identity;
     let descriptor = evidence.descriptor();
@@ -290,7 +276,10 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_expiry(
         .bind(terms.host_charge_target_id)
         .bind(terms.amount_cents)
         .bind(terms.currency.as_str())
-        .bind(expired_period)
+        .bind(matches!(
+            approval_policy,
+            LockFreeApprovalPolicy::ReverseExpiredPeriod
+        ))
         .fetch_optional(&mut *transaction)
         .await?;
         if inserted.is_some() {
@@ -461,7 +450,7 @@ async fn store_once(
                 let state_code = initial_charge_state_code(
                     persisted.role(),
                     persisted.progression(),
-                    evidence.transaction_id().is_some(),
+                    evidence.transaction_id().map(GatewayTransactionId::expose),
                 );
                 if persisted.state_code() != state_code {
                     persisted = transition_processor_charge(
@@ -469,8 +458,7 @@ async fn store_once(
                         persisted.id(),
                         &[persisted.progression()],
                         persisted.progression(),
-                        state_code,
-                        false,
+                        ChargeStateCodeUpdate::Replace(state_code),
                     )
                     .await?;
                 }
@@ -534,7 +522,7 @@ pub async fn observe_processor_charge_in_transaction(
                 let state_code = initial_charge_state_code(
                     persisted.role(),
                     persisted.progression(),
-                    evidence.transaction_id().is_some(),
+                    evidence.transaction_id().map(GatewayTransactionId::expose),
                 );
                 if persisted.state_code() != state_code {
                     persisted = transition_processor_charge(
@@ -542,8 +530,7 @@ pub async fn observe_processor_charge_in_transaction(
                         persisted.id(),
                         &[persisted.progression()],
                         persisted.progression(),
-                        state_code,
-                        false,
+                        ChargeStateCodeUpdate::Replace(state_code),
                     )
                     .await?;
                 }
@@ -565,8 +552,7 @@ pub async fn transition_processor_charge_in_transaction(
         charge_id,
         expected_progressions,
         progression,
-        state_code,
-        false,
+        ChargeStateCodeUpdate::Replace(state_code),
     )
     .await
 }
@@ -610,7 +596,7 @@ pub(crate) async fn observe_processor_charge(
     let progression = initial_charge_progression(
         role,
         attempt.request().amount().cents(),
-        identified,
+        transaction_id,
         initial_progression,
     );
     let descriptor = evidence.descriptor();
@@ -727,8 +713,9 @@ pub(crate) async fn transition_charge(
         ProcessorChargeId::new(charge_id),
         EXPECTED,
         progression,
-        resolution_code.map(ProcessorChargeStateCode::PaymentResolution),
-        true,
+        ChargeStateCodeUpdate::PreserveExisting(
+            resolution_code.map(ProcessorChargeStateCode::PaymentResolution),
+        ),
     )
     .await?;
     Ok(())
@@ -739,9 +726,12 @@ async fn transition_processor_charge(
     charge_id: ProcessorChargeId,
     expected_progressions: &[ProcessorChargeProgression],
     progression: ProcessorChargeProgression,
-    state_code: Option<ProcessorChargeStateCode>,
-    preserve_existing_state_code: bool,
+    state_code_update: ChargeStateCodeUpdate,
 ) -> Result<ProcessorCharge, ProcessorChargeStoreError> {
+    let (state_code, preserve_existing_state_code) = match state_code_update {
+        ChargeStateCodeUpdate::Replace(code) => (code, false),
+        ChargeStateCodeUpdate::PreserveExisting(code) => (code, true),
+    };
     if expected_progressions.is_empty() {
         return Err(ProcessorChargeStoreError::InvalidState(
             "processor charge transition requires an expected state",

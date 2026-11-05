@@ -1,5 +1,18 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(crate) enum LockFreeApprovalPolicy {
+    /// Retain the approval with pending progression for later application.
+    Reconcile,
+    /// Park an identified primary approval for an expired period for reversal.
+    ReverseExpiredPeriod,
+}
+
+pub(super) enum ChargeStateCodeUpdate {
+    Replace(Option<ProcessorChargeStateCode>),
+    PreserveExisting(Option<ProcessorChargeStateCode>),
+}
+
 pub(super) async fn matching_charge(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
@@ -128,7 +141,7 @@ pub(super) async fn identify_transactionless(
     let progression = initial_charge_progression(
         role,
         attempt.request().amount().cents(),
-        true,
+        Some(transaction_id),
         requested_progression,
     );
     sqlx::query(
@@ -225,10 +238,10 @@ pub(super) fn is_external_reversal_terminal_attempt(attempt: &PaymentAttempt) ->
 pub(super) fn initial_charge_progression(
     role: ProcessorChargeRole,
     amount_cents: i32,
-    identified: bool,
+    transaction_id: Option<&str>,
     requested: ProcessorChargeProgression,
 ) -> ProcessorChargeProgression {
-    if !identified {
+    if transaction_id.is_none() {
         return ProcessorChargeProgression::ReconciliationRequired;
     }
     match role {
@@ -243,26 +256,26 @@ pub(super) fn initial_charge_progression(
 pub(super) fn initial_charge_state_code(
     role: ProcessorChargeRole,
     progression: ProcessorChargeProgression,
-    identified: bool,
+    transaction_id: Option<&str>,
 ) -> Option<ProcessorChargeStateCode> {
-    match (role, progression, identified) {
+    match (role, progression, transaction_id) {
         (
             ProcessorChargeRole::Additional,
             ProcessorChargeProgression::ExternalReversalRequired,
-            true,
+            Some(_),
         ) => Some(ProcessorChargeStateCode::AdditionalApprovedChargeIdentified),
-        (_, ProcessorChargeProgression::ReconciliationRequired, false) => {
+        (_, ProcessorChargeProgression::ReconciliationRequired, None) => {
             Some(ProcessorChargeStateCode::TransactionIdentityRequired)
         }
         (
             ProcessorChargeRole::Primary,
             ProcessorChargeProgression::ReconciliationRequired,
-            true,
+            Some(_),
         ) => Some(ProcessorChargeStateCode::ApprovedChargeWaitingForApplication),
         (
             ProcessorChargeRole::Additional,
             ProcessorChargeProgression::ReconciliationRequired,
-            true,
+            Some(_),
         ) => Some(ProcessorChargeStateCode::ZeroAmountAdditionalApprovedCharge),
         _ => None,
     }

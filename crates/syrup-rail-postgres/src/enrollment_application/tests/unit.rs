@@ -228,9 +228,9 @@ fn resolution_command_keeps_boundaries_and_replacement_review_typed() {
         Some(RateLimitCooldown::Account),
         OutcomeResolutionBoundary::Prepared,
     );
-    assert!(prepared.may_resolve(PaymentAttemptStatus::Pending, false));
-    assert!(!prepared.may_resolve(PaymentAttemptStatus::Pending, true));
-    assert!(!prepared.may_resolve(PaymentAttemptStatus::Declined, false));
+    assert!(prepared.may_resolve(PaymentAttemptStatus::Pending, None));
+    assert!(!prepared.may_resolve(PaymentAttemptStatus::Pending, Some(DateTime::UNIX_EPOCH)));
+    assert!(!prepared.may_resolve(PaymentAttemptStatus::Declined, None));
     assert!(!prepared.clears_submitted_at());
 
     let admitted = OutcomeResolutionCommand::non_approved(
@@ -239,8 +239,8 @@ fn resolution_command_keeps_boundaries_and_replacement_review_typed() {
         None,
         OutcomeResolutionBoundary::AdmittedNotSubmitted,
     );
-    assert!(!admitted.may_resolve(PaymentAttemptStatus::Pending, false));
-    assert!(admitted.may_resolve(PaymentAttemptStatus::Pending, true));
+    assert!(!admitted.may_resolve(PaymentAttemptStatus::Pending, None));
+    assert!(admitted.may_resolve(PaymentAttemptStatus::Pending, Some(DateTime::UNIX_EPOCH)));
     assert!(admitted.clears_submitted_at());
 
     let unknown = OutcomeResolutionCommand::unknown(Some(RateLimitCooldown::Provider));
@@ -385,14 +385,12 @@ fn not_submitted_surface_requires_a_flow_with_prepared_replay() {
         "not-submitted-surface",
     );
 
-    assert!(should_surface_not_submitted_application(
-        false,
+    assert!(should_surface_prepared_not_submitted(
         &attempt,
         policy,
         PreparedAttemptReplay::Supported,
     ));
-    assert!(!should_surface_not_submitted_application(
-        false,
+    assert!(!should_surface_prepared_not_submitted(
         &attempt,
         policy,
         PreparedAttemptReplay::Unsupported,

@@ -13,10 +13,11 @@ use super::super::{
     text::{last4, parse_expiry, sensitive_gateway_field},
     validation::trimmed_optional,
 };
+use super::common::ScalarBounds::{GatewayField, Protocol};
 use super::common::{
-    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
-    ScalarOccurrenceCollector, finalize_payment_identifiers, normalize_gateway_state,
-    resolve_optional_scalar,
+    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarBounds,
+    ScalarOccurrence, ScalarOccurrenceCollector, finalize_payment_identifiers,
+    normalize_gateway_state, resolve_optional_scalar,
 };
 
 fn normalize_report_success(value: &str) -> String {
@@ -225,18 +226,19 @@ fn exact_query_response_from_xml(
         return Ok(None);
     };
     let decision = PaymentDecisionFields::new(
-        collect_xml_scalar(transaction, &["response"], false)
+        collect_xml_scalar(transaction, &["response"], Protocol)
             .finish_decision(DecisionFieldKind::Response),
-        collect_xml_scalar(transaction, &["response_code"], false)
+        collect_xml_scalar(transaction, &["response_code"], Protocol)
             .finish_decision(DecisionFieldKind::ResponseCode),
-        collect_xml_scalar(transaction, &["status"], false)
+        collect_xml_scalar(transaction, &["status"], Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
-        collect_xml_scalar(transaction, &["condition"], false)
+        collect_xml_scalar(transaction, &["condition"], Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
     )
     .resolve();
-    let (response_text, _) =
-        resolve_optional_scalar(collect_xml_scalar(transaction, &["response_text"], true).finish());
+    let (response_text, _) = resolve_optional_scalar(
+        collect_xml_scalar(transaction, &["response_text"], GatewayField).finish(),
+    );
     let mut status = decision.status;
     let mut diagnostics = decision.diagnostics;
     let order_identifier =
@@ -264,21 +266,22 @@ fn exact_query_response_from_xml(
         &mut diagnostics,
     );
     let (payment_type, _) = resolve_optional_scalar(
-        collect_xml_scalar(transaction, &["transaction_type"], true).finish(),
+        collect_xml_scalar(transaction, &["transaction_type"], GatewayField).finish(),
     );
-    let brand = collect_xml_scalar(transaction, &["cc_type"], true);
+    let brand = collect_xml_scalar(transaction, &["cc_type"], GatewayField);
     let (card_brand, _) = resolve_optional_scalar(match purpose {
         DescriptorPurpose::FinancialEvidence => brand.finish(),
         DescriptorPurpose::DisplayMetadata => brand.finish_normalized(str::to_ascii_lowercase),
     });
-    let (card_number, _) =
-        resolve_optional_scalar(collect_xml_scalar(transaction, &["cc_number"], true).finish());
+    let (card_number, _) = resolve_optional_scalar(
+        collect_xml_scalar(transaction, &["cc_number"], GatewayField).finish(),
+    );
     let (card_exp_month, card_exp_year) = match purpose {
         // Preserve the descriptor that v0.5.2 stored as immutable evidence.
         DescriptorPurpose::FinancialEvidence => (None, None),
         DescriptorPurpose::DisplayMetadata => {
             let (expiry, _) = resolve_optional_scalar(
-                collect_xml_scalar(transaction, &["cc_exp"], true).finish(),
+                collect_xml_scalar(transaction, &["cc_exp"], GatewayField).finish(),
             );
             parse_expiry(expiry.as_deref())
         }
@@ -347,7 +350,7 @@ pub(in crate::client) fn query_diagnostics_from_xml(
         &mut malformed,
     );
     let currency = report_field(
-        collect_xml_scalar(transaction, &["currency"], false).finish(),
+        collect_xml_scalar(transaction, &["currency"], Protocol).finish(),
         &mut malformed,
     );
     let avs_response = optional_diagnostic_code(transaction, "avs_response", &mut incomplete);
@@ -378,14 +381,14 @@ pub(in crate::client) fn query_diagnostics_from_xml(
                 None
             } else {
                 report_field(
-                    collect_xml_scalar(action, &["action_type"], false)
+                    collect_xml_scalar(action, &["action_type"], Protocol)
                         .finish_normalized(normalize_gateway_state),
                     &mut malformed,
                 )
                 .map(|value| normalize_gateway_state(&value))
             };
             let amount = report_field(
-                collect_xml_scalar(action, &["amount"], false)
+                collect_xml_scalar(action, &["amount"], Protocol)
                     .finish_normalized(normalize_report_amount),
                 &mut malformed,
             )
@@ -454,7 +457,7 @@ fn optional_diagnostic_code(
         return None;
     }
     let (value, invalid) =
-        resolve_optional_scalar(collect_xml_scalar(node, &[name], false).finish());
+        resolve_optional_scalar(collect_xml_scalar(node, &[name], Protocol).finish());
     *incomplete |= invalid || value.is_none();
     value.map(SensitiveText::new)
 }
@@ -503,7 +506,7 @@ fn optional_diagnostic_field(
         return None;
     }
     let (value, invalid) =
-        resolve_optional_scalar(collect_xml_scalar(node, &[name], true).finish());
+        resolve_optional_scalar(collect_xml_scalar(node, &[name], GatewayField).finish());
     *incomplete |= invalid;
     value.map(SensitiveText::new)
 }
@@ -592,15 +595,15 @@ pub(in crate::client) fn query_transaction_reports_from_xml(
     for transaction in element_children_named(envelope, "transaction") {
         let mut malformed_structure = false;
         let transaction_id = report_field(
-            collect_xml_scalar(transaction, &["transaction_id"], false).finish(),
+            collect_xml_scalar(transaction, &["transaction_id"], Protocol).finish(),
             &mut malformed_structure,
         );
         let order_id = report_field(
-            collect_xml_scalar(transaction, &["order_id"], false).finish(),
+            collect_xml_scalar(transaction, &["order_id"], Protocol).finish(),
             &mut malformed_structure,
         );
         let condition = report_field(
-            collect_xml_scalar(transaction, &["condition"], false)
+            collect_xml_scalar(transaction, &["condition"], Protocol)
                 .finish_normalized(normalize_gateway_state),
             &mut malformed_structure,
         );
@@ -626,21 +629,21 @@ pub(in crate::client) fn query_transaction_reports_from_xml(
         if !malformed_structure {
             for action in element_children_named(transaction, "action") {
                 let action_type = report_field(
-                    collect_xml_scalar(action, &["action_type"], false)
+                    collect_xml_scalar(action, &["action_type"], Protocol)
                         .finish_normalized(normalize_gateway_state),
                     &mut malformed_structure,
                 );
                 let date = report_field(
-                    collect_xml_scalar(action, &["date"], false).finish(),
+                    collect_xml_scalar(action, &["date"], Protocol).finish(),
                     &mut malformed_structure,
                 );
                 let amount = report_field(
-                    collect_xml_scalar(action, &["amount"], false)
+                    collect_xml_scalar(action, &["amount"], Protocol)
                         .finish_normalized(normalize_report_amount),
                     &mut malformed_structure,
                 );
                 let success = report_field(
-                    collect_xml_scalar(action, &["success"], false)
+                    collect_xml_scalar(action, &["success"], Protocol)
                         .finish_normalized(normalize_report_success),
                     &mut malformed_structure,
                 );
@@ -648,10 +651,10 @@ pub(in crate::client) fn query_transaction_reports_from_xml(
                     break;
                 }
                 let (response_code, _) = resolve_optional_scalar(
-                    collect_xml_scalar(action, &["response_code"], true).finish(),
+                    collect_xml_scalar(action, &["response_code"], GatewayField).finish(),
                 );
                 let (response_text, _) = resolve_optional_scalar(
-                    collect_xml_scalar(action, &["response_text"], true).finish(),
+                    collect_xml_scalar(action, &["response_text"], GatewayField).finish(),
                 );
                 actions.push(TransactionAction {
                     action_type: action_type.map(SensitiveText::new),
@@ -694,7 +697,7 @@ pub(in crate::client) fn query_transaction_reports_from_xml(
 fn collect_xml_scalar(
     node: roxmltree::Node<'_, '_>,
     aliases: &[&'static str],
-    bounded: bool,
+    bounds: ScalarBounds,
 ) -> ScalarOccurrenceCollector {
     let mut collector = ScalarOccurrenceCollector::default();
     for child in node.children().filter(|child| child.is_element()) {
@@ -702,10 +705,9 @@ fn collect_xml_scalar(
             continue;
         }
         let occurrence = xml_scalar_occurrence(child);
-        if bounded {
-            collector.record_bounded(occurrence);
-        } else {
-            collector.record(occurrence);
+        match bounds {
+            GatewayField => collector.record_bounded(occurrence),
+            Protocol => collector.record(occurrence),
         }
     }
     collector

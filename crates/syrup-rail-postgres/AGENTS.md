@@ -50,6 +50,8 @@ and transaction orchestration.
   — workflow-owned provider submission, foreground/reconciled outcome
   application, and compensation paths. Initial, renewal, and payment-method replacement
   approval mutations live in their nested `approval.rs` modules.
+- `src/enrollment_application/recovery/evidence.rs` owns bounded recovery
+  approval-evidence retries and the fallback that does not lock the attempt.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
 - `src/period_expiry.rs` — the database-clock billing-period expiry check,
@@ -101,8 +103,8 @@ and transaction orchestration.
   reconstruction, and quote persistence support.
 - `src/cancellation.rs` — caller-transaction exact-plan cancellation,
   attempt fences, stale update cleanup, and canonical event production.
-- `src/deletion.rs` — transaction-local canonical account-deletion blockers
-  and mutable billing-data scrubbing.
+- `src/deletion.rs` — transaction-local mutable billing-data scrubbing;
+  `src/deletion/blockers.rs` owns the canonical account-deletion blocker query.
 - `src/reconciliation.rs` — deterministic registered-account reconciliation
   candidate selection and bounded local account phases;
   `src/reconciliation/classification.rs` owns pending-charge locking and state
@@ -236,9 +238,9 @@ and transaction orchestration.
 - Change exact-plan cancellation in `src/cancellation.rs`; the host must lock
   the live or retained event recipient first, append the returned event in the
   same transaction, and leave stored payment methods unchanged.
-- Change canonical deletion admission or billing attempt/payment-method scrub
-  policy in `src/deletion.rs`; keep host identity, order, fulfillment, and
-  retained-subject work in the host transaction. Classify every new attempt or
+- Change canonical deletion admission in `src/deletion/blockers.rs` and billing
+  attempt/payment-method scrub policy in `src/deletion.rs`; keep host identity,
+  order, fulfillment, and retained-subject work in the host transaction. Classify every new attempt or
   method column as retained, cleared, or rewritten in the scrub tests.
 - Change registered-account reconciliation selection, local stale-attempt
   phases, or exact-query claiming/negative observation transitions in

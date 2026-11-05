@@ -636,7 +636,7 @@ mod tests {
     fn review_attempt(
         target: crate::PaymentAttemptTarget,
         cents: i32,
-        submitted: bool,
+        submitted_at: Option<DateTime<Utc>>,
         evidence: ProcessorEvidence,
     ) -> PaymentAttempt {
         let created_at = Utc.with_ymd_and_hms(2026, 8, 8, 0, 0, 0).unwrap();
@@ -663,7 +663,7 @@ mod tests {
                 evidence,
                 crate::PaymentAttemptLifecycle::default(),
                 crate::PaymentAttemptTimestamps::new(
-                    submitted.then_some(created_at),
+                    submitted_at,
                     None,
                     Some(created_at),
                     created_at,
@@ -734,14 +734,15 @@ mod tests {
 
     #[test]
     fn manual_failure_policy_refuses_charge_risk_and_preserves_update_evidence() {
+        let submitted_at = Some(Utc.with_ymd_and_hms(2026, 8, 8, 0, 0, 0).unwrap());
         let host = || crate::PaymentAttemptTarget::HostCharge {
             target_id: HostChargeTargetId::new(Uuid::from_u128(6)),
         };
         assert!(review_required_attempt_can_be_manually_failed(
-            &review_attempt(host(), 500, false, ProcessorEvidence::default())
+            &review_attempt(host(), 500, None, ProcessorEvidence::default())
         ));
         assert!(!review_required_attempt_can_be_manually_failed(
-            &review_attempt(host(), 500, true, ProcessorEvidence::default())
+            &review_attempt(host(), 500, submitted_at, ProcessorEvidence::default())
         ));
         let approved = ProcessorEvidence::new(
             None,
@@ -753,7 +754,7 @@ mod tests {
             crate::GatewayPaymentDescriptor::default(),
         );
         assert!(!review_required_attempt_can_be_manually_failed(
-            &review_attempt(host(), 500, false, approved)
+            &review_attempt(host(), 500, None, approved)
         ));
 
         let update_evidence = ProcessorEvidence::new(
@@ -776,7 +777,7 @@ mod tests {
                 ),
             },
             0,
-            true,
+            submitted_at,
             update_evidence,
         );
         assert!(review_required_attempt_can_be_manually_failed(&update));

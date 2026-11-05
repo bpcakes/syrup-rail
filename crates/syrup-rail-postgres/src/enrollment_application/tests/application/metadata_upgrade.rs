@@ -35,7 +35,10 @@ fn retained_v052_outcome() -> GatewayPaymentOutcome {
 #[tokio::test]
 async fn v052_parked_approval_reconciles_before_metadata_expiry_repair()
 -> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("metadata_upgrade", false, true).await?;
+    let mut fixture = application_fixture("metadata_upgrade")
+        .with_failing_event_append()
+        .build()
+        .await?;
     let retained = retained_v052_outcome();
     let pool = &fixture.database.pool;
     let attempt_id = fixture.command.attempt_id();
@@ -185,7 +188,7 @@ async fn charge_evidence_snapshot(
 #[tokio::test]
 async fn nmi_query_repairs_all_missing_card_fields_without_financial_changes()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("meta_all_blank", false, false).await?;
+    let fixture = application_fixture("meta_all_blank").build().await?;
     let pool = &fixture.database.pool;
     // The original incident: approval and vault linkage exist, but every
     // display field is absent. Repair must work without reapplying approval.

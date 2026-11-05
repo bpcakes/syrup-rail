@@ -26,12 +26,16 @@ pub enum PastDueAccess {
     Suspended,
 }
 
+/// Classifies access from the snapshotted policy and the next scheduled payment.
+///
+/// A present timestamp means dunning remains scheduled; its distance from the
+/// current time does not change this classification.
 pub const fn classify_past_due_access(
     policy: PastDueAccessPolicy,
-    has_scheduled_payment: bool,
+    next_payment_attempt_at: Option<DateTime<Utc>>,
 ) -> PastDueAccess {
-    match (policy, has_scheduled_payment) {
-        (PastDueAccessPolicy::ContinueUntilDunningExhausted, true) => {
+    match (policy, next_payment_attempt_at) {
+        (PastDueAccessPolicy::ContinueUntilDunningExhausted, Some(_)) => {
             PastDueAccess::AllowedDuringDunning
         }
         _ => PastDueAccess::Suspended,
@@ -264,6 +268,15 @@ impl DeletionBlockerQuery {
     }
 }
 
+/// A billing condition that prevents subscriber deletion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BillingDeletionBlocker {
+    /// A live subscription still requires the retained billing subject.
+    ActiveSubscription,
+    /// A payment attempt or charge still needs resolution.
+    UnresolvedPayment,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct BillingDeletionBlockers {
     active_subscription: bool,
@@ -271,11 +284,17 @@ pub struct BillingDeletionBlockers {
 }
 
 impl BillingDeletionBlockers {
-    pub const fn new(active_subscription: bool, unresolved_payment: bool) -> Self {
-        Self {
-            active_subscription,
-            unresolved_payment,
+    /// Collects the reasons preventing deletion. An empty iterator yields no
+    /// billing blockers; repeated reasons are idempotent.
+    pub fn new(blockers: impl IntoIterator<Item = BillingDeletionBlocker>) -> Self {
+        let mut result = Self::default();
+        for blocker in blockers {
+            match blocker {
+                BillingDeletionBlocker::ActiveSubscription => result.active_subscription = true,
+                BillingDeletionBlocker::UnresolvedPayment => result.unresolved_payment = true,
+            }
         }
+        result
     }
 
     pub const fn active_subscription(self) -> bool {

@@ -51,11 +51,11 @@ fn sale(intent: GatewaySaleIntent) -> GatewaySaleRequest {
     )
 }
 
-fn recurring(first_charge_after_paid_trial: bool) -> GatewaySaleIntent {
+fn recurring(previous_phase: crate::SubscriptionPhase) -> GatewaySaleIntent {
     GatewaySaleIntent::RecurringStoredCredential {
         payment_method_reference: crate::GatewayPaymentMethodReference::new("vault_1").unwrap(),
         initial_transaction_id: GatewayTransactionId::new("txn_1").unwrap(),
-        first_charge_after_paid_trial,
+        first_charge_after_paid_trial: previous_phase == crate::SubscriptionPhase::PaidTrial,
     }
 }
 
@@ -97,7 +97,7 @@ fn resolved_gateway_applies_the_descriptor_policy_by_sale_intent() {
     assert!(gateway.statement_descriptors().is_none());
 
     // Without a policy every sale is forwarded without a descriptor.
-    let _ = poll_ready(gateway.sale(sale(recurring(true))));
+    let _ = poll_ready(gateway.sale(sale(recurring(crate::SubscriptionPhase::PaidTrial))));
     assert!(captured.requests.lock().unwrap()[0].descriptor().is_none());
 
     let gateway = gateway.with_statement_descriptors(
@@ -111,11 +111,21 @@ fn resolved_gateway_applies_the_descriptor_policy_by_sale_intent() {
     let initial = GatewaySaleIntent::InitialStoredCredential {
         payment_token: PaymentToken::new("tok_2").unwrap(),
     };
-    for intent in [one_time, initial, recurring(false), recurring(true)] {
+    for intent in [
+        one_time,
+        initial,
+        recurring(crate::SubscriptionPhase::Recurring),
+        recurring(crate::SubscriptionPhase::PaidTrial),
+    ] {
         let _ = poll_ready(gateway.sale(sale(intent)));
     }
     // An explicit descriptor on the request wins over the policy.
-    let _ = poll_ready(gateway.sale(sale(recurring(true)).with_descriptor(Some(explicit.clone()))));
+    let _ = poll_ready(
+        gateway.sale(
+            sale(recurring(crate::SubscriptionPhase::PaidTrial))
+                .with_descriptor(Some(explicit.clone())),
+        ),
+    );
 
     let requests = captured.requests.lock().unwrap();
     let descriptors = requests[1..]

@@ -101,16 +101,6 @@ pub enum GatewayMutationCooldownScope {
 }
 
 impl GatewayMutationCooldownScope {
-    pub(crate) const fn from_active_flags(account: bool, provider: bool) -> Option<Self> {
-        if provider {
-            Some(Self::Provider)
-        } else if account {
-            Some(Self::Account)
-        } else {
-            None
-        }
-    }
-
     const fn from_rate_limit_cooldown(cooldown: RateLimitCooldown) -> Self {
         match cooldown {
             RateLimitCooldown::Account => Self::Account,

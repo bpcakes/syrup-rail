@@ -119,21 +119,33 @@ impl PaymentAttemptDiagnosticEligibility {
             Self::Ineligible(reason) => reason.as_str(),
         }
     }
+}
 
-    fn classify(kind: &str, submitted: bool, status: &str, has_transaction_id: bool) -> Self {
+/// Metadata-only evidence used to classify diagnostic eligibility. Keep provider
+/// identifiers out of this projection, including the batched eligibility query.
+#[derive(sqlx::FromRow)]
+struct DiagnosticEligibilityFacts {
+    attempt_kind: String,
+    submitted: bool,
+    status: String,
+    has_transaction_id: bool,
+}
+
+impl DiagnosticEligibilityFacts {
+    pub(super) fn eligibility(&self) -> PaymentAttemptDiagnosticEligibility {
         use PaymentAttemptDiagnosticIneligibility as Reason;
-        let reason = if kind == PaymentAttemptKind::HostCharge.as_str() {
+        let reason = if self.attempt_kind == PaymentAttemptKind::HostCharge.as_str() {
             Reason::UnsupportedKind
-        } else if !submitted {
+        } else if !self.submitted {
             Reason::NotSubmitted
-        } else if status == "pending" {
+        } else if self.status == "pending" {
             Reason::Pending
-        } else if !has_transaction_id {
+        } else if !self.has_transaction_id {
             Reason::NoTransactionId
         } else {
-            return Self::Eligible;
+            return PaymentAttemptDiagnosticEligibility::Eligible;
         };
-        Self::Ineligible(reason)
+        PaymentAttemptDiagnosticEligibility::Ineligible(reason)
     }
 }
 
@@ -390,12 +402,7 @@ pub async fn payment_attempt_diagnostic_eligibility(
         .into_iter()
         .map(|row| PaymentAttemptDiagnosticEligibilityItem {
             attempt_id: PaymentAttemptId::new(row.attempt_id),
-            eligibility: PaymentAttemptDiagnosticEligibility::classify(
-                &row.attempt_kind,
-                row.submitted,
-                &row.status,
-                row.has_transaction_id,
-            ),
+            eligibility: row.facts.eligibility(),
         })
         .collect())
 }
@@ -597,6 +604,7 @@ impl DiagnosticCandidate {
     ) -> Result<Self, PaymentAttemptDiagnosticsError> {
         let invalid = |_| PaymentAttemptDiagnosticsError::InvalidIdentity;
         let attempt_kind = row
+            .facts
             .attempt_kind
             .parse::<PaymentAttemptKind>()
             .map_err(|_| PaymentAttemptDiagnosticsError::InvalidIdentity)?;
@@ -619,7 +627,7 @@ impl DiagnosticCandidate {
             transaction_id: GatewayTransactionId::new(stored_transaction_id.clone())
                 .map_err(invalid)?,
             stored_transaction_id,
-            status: row.status,
+            status: row.facts.status,
             operation,
             amount: Money::new(row.amount_cents, currency)
                 .map_err(|_| PaymentAttemptDiagnosticsError::InvalidIdentity)?,
