@@ -40,8 +40,9 @@ historically named `dev/0.6.0` branch.
 ### Changed
 
 - Replace boolean function parameters with named policies, existing evidence,
-  and fixture builders throughout the workspace. Enable Batter's Clippy
-  thresholds, including zero boolean function parameters.
+  and fixture builders throughout the workspace. Enforce zero boolean function
+  parameters through workspace Clippy settings; defer function-length and
+  cognitive-complexity limits until existing workflows meet them.
 - Pin SQLx and SQLx CLI to 0.9.0, declare the shared Rust 1.94 minimum, and
   update CI and release checks to exercise that toolchain.
 - Adapt assembled queries to SQLx's explicit SQL-safety boundary while

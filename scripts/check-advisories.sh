@@ -46,4 +46,32 @@ set -- --deny warnings
 if [[ "$ignore_unreachable_rsa_advisory" == true ]]; then
   set -- "$@" --ignore "$unreachable_rsa_advisory"
 fi
+
+# Temporary test/tool-only maintenance exception; see the reachability and
+# impact analysis in docs/security/dependency-advisories.md. Never exempt a
+# runtime dependency, a changed version, or a different advisory for this crate.
+if grep -Fqx 'name = "astral-tokio-tar"' Cargo.lock; then
+  if [[ "$(date -u +%F)" > "2026-12-04" ]]; then
+    echo "RUSTSEC-2026-0440 test/tool exception expired; replace or reassess the dependency." >&2
+    exit 1
+  fi
+  tar_versions="$(awk '
+    /^name = / { selected = ($0 == "name = \"astral-tokio-tar\"") }
+    selected && /^version = / { print $3 }
+  ' Cargo.lock)"
+  if [[ "$tar_versions" != '"0.6.4"' ]]; then
+    echo "RUSTSEC-2026-0440 exception covers only astral-tokio-tar 0.6.4." >&2
+    exit 1
+  fi
+  runtime_tar="$(
+    cargo tree --locked --workspace --exclude syrup-rail-sqlx-gate \
+      --all-features --target all -e normal,build --prefix none --format '{p}' |
+      reachable_package_lines astral-tokio-tar
+  )"
+  if [[ -n "$runtime_tar" ]]; then
+    echo "RUSTSEC-2026-0440 may not be ignored for a runtime or build dependency." >&2
+    exit 1
+  fi
+  set -- "$@" --ignore RUSTSEC-2026-0440
+fi
 cargo audit "$@"

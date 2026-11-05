@@ -255,9 +255,10 @@ file-size and `mod.rs` policies removed from Jig's native checks in 0.7.1.
 - `cargo test -p syrup-rail-nmi-client`
 
 All workspace members inherit the Clippy rules in the root `Cargo.toml`.
-`clippy.toml` sets cognitive complexity to 20, function length to 100 lines,
-and boolean function parameters to zero. Local and CI Clippy checks treat
-warnings as errors.
+`clippy.toml` sets boolean function parameters to zero. Local and CI Clippy
+checks treat warnings as errors. Function-length and cognitive-complexity
+limits are deferred until the existing payment workflows and tests have been
+refactored to meet them.
 
 See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.
