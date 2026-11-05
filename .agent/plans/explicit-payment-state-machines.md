@@ -5,11 +5,11 @@ Implement the four safety refactors identified in the audit, and publish reviewa
 ## Progress
 
 - [x] Revalidated merged baseline and transition entrypoints.
-- [x] SM4 implementation and local verification: explicit lifecycle evidence transition matrix; delivered as PR #11 (https://github.com/bpcakes/syrup-rail/pull/11).
-- [x] SM1 implementation and local verification: named processor-charge transitions and shared classification; delivered as PR #12 (https://github.com/bpcakes/syrup-rail/pull/12).
-- [ ] SM2: validated attempt phases and evidence-bound non-submission restoration.
-- [ ] SM3 implemented; full verification and PR publication pending: explicit subscription collection states with separate access projection.
-- [ ] Verify every PR and publish final links with dependencies and test results.
+- [x] SM4: exhaustive lifecycle evidence transitions; PR #11.
+- [x] SM1: named, guarded processor-charge transitions; PR #12.
+- [x] SM2: explicit attempt phases and admission-bound non-submission proof; PR #13.
+- [x] SM3: validated collection states with separate access projection; PR #14.
+- [x] Full local verification and published PR links with dependencies below.
 
 ## Surprises & Discoveries
 
@@ -24,34 +24,38 @@ Existing code already has consuming submission capabilities and typed attempt tr
 
 ## Outcomes & Retrospective
 
-SM4: focused lifecycle tests passed (5), formatting and Clippy passed, and
-`scripts/jig --json check test` passed all 763 tests with zero ignored/filtered
-tests. The production lifecycle owner shrank by 117 lines; the transition
-owner and its tests are separate small files. Schema and public API unchanged.
-PR #11 published with all 11 CI checks green.
+All four refactors are published in this merge order:
 
-SM1: named observation and transition operations now own charge progression.
-Application requires matching approved attempt evidence; terminal reversal
-requires immutable attestation. Expired-period parking cannot be cleared by
-compatibility transitions. Unresolved host conflicts retain their legitimate
-reconciliation path. Two new database scenarios and two policy tests pass;
-full workspace verification passed 767 tests (none ignored/filtered), plus
-fmt, Clippy, SQLx and public API documentation checks. No schema changes.
-SM1 is published as PR #12, stacked on #11; all 11 CI checks pass.
+| Refactor | PR | Base | Full local tests |
+| --- | --- | --- | --- |
+| SM4 lifecycle evidence | https://github.com/bpcakes/syrup-rail/pull/11 | master | 763 passed |
+| SM1 processor charges | https://github.com/bpcakes/syrup-rail/pull/12 | PR #11 branch | 767 passed |
+| SM2 attempt phases | https://github.com/bpcakes/syrup-rail/pull/13 | PR #12 branch | 769 passed |
+| SM3 collection/access | https://github.com/bpcakes/syrup-rail/pull/14 | PR #13 branch | 773 passed |
 
-SM2 implementation: explicit attempt phases now drive admission and replay.
-Non-submission proof binds the exact attempt identity and admission timestamp;
-SQL fences both retry restoration and post-failure timestamp clearing. Local
-failures and submitted outcomes are distinct commands shared with host charges.
-Core phase coverage and the database stale-proof regression pass. Full tests
-passed 769 with no ignored/filtered tests; the initial crate run had one Docker
-port-exposure startup failure, and the full rerun with four test threads passed.
-Final rerun after host admission cleanup is in progress. Fmt, Clippy, SQLx and
-public API documentation passed. SM2 is published as PR #13; serial local verification is pending after a
-shared-build-directory doctest collision, with independent build directories now
-in use. SM3 is implemented in an isolated worktree. Focused collection and
-renewal-failure tests, Clippy, formatting, SQLx and public API checks pass; full
-serial verification is running.
+Every full local run listed above had zero ignored/filtered tests. Formatting,
+Clippy and the relevant SQLx/public API checks passed. PR #11–#13 had all 11 CI
+checks green when this receipt was written; PR #14's final fixture correction
+triggers a new CI run. Live check results remain on the PRs.
+
+SM1 centralizes observation and application decisions, requires matching owning
+approval for application and immutable attestation for terminal reversal, and
+preserves permanent expiry parking. Legitimate unresolved host conflicts remain
+reconcilable. SM2 makes prepared/admitted/uncertain phases explicit and fences
+non-submission proof by identity and admission timestamp. SM3 validates schedule
+combinations at persistence, application and access boundaries and attaches
+required unpaid evidence to the terminal collection variant. Causal access
+history and legacy recovery provenance remain separate. No schema or durable
+label changes were made; compatibility constructors/adapters remain available.
+
+Verification recovered from intermittent per-test Docker startup/connection
+failures. One cross-worktree shared build directory also caused a doctest crate
+version collision; independent build directories fixed that setup error. The
+final SM2 and SM3 full suites used the harness-supported POSTGRES_TEST_ADMIN_URL
+against a dedicated ephemeral PostgreSQL 18 server, with four test threads and
+isolated per-test databases. Both passed cleanly. The collection query's added
+anchor required updating the deliberately malformed temporary-table fixture so
+its rollback test still reaches the intended client-side decode failure.
 
 ## Work and acceptance
 

@@ -314,7 +314,8 @@ async fn protected_write_guard_rolls_back_after_a_client_decode_error() -> Resul
                 required_gateway_account_mode text NOT NULL,
                 current_period_end_at text NOT NULL,
                 past_due_access text NOT NULL,
-                next_payment_attempt_at timestamptz
+                next_payment_attempt_at timestamptz,
+                next_renewal_at timestamptz NOT NULL DEFAULT clock_timestamp()
             ) ON COMMIT DROP
             "#,
         )
