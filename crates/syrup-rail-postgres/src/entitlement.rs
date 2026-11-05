@@ -1,3 +1,6 @@
+mod guard;
+use guard::{GuardGrantTimeState, GuardSubscriptionState, classify_guard_access};
+
 use std::fmt;
 
 use chrono::{DateTime, Utc};
@@ -10,7 +13,7 @@ use syrup_rail::{
     PositiveDiscountCents, SavedSubscriptionDiscount, Subscription, SubscriptionDiscountCode,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionDiscountSnapshot,
     SubscriptionGrant, SubscriptionGrantId, SubscriptionGrantKind, SubscriptionId,
-    SubscriptionPhase, SubscriptionStatus, classify_past_due_access,
+    SubscriptionPhase, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -24,9 +27,6 @@ use crate::subscription_persistence::{
 const INVALID_ENTITLEMENT_STATE: &str =
     "canonical subscription state cannot be represented as one entitlement";
 const ENTITLEMENT_GUARD_LOCK_TIMEOUT: &str = "250ms";
-
-type GuardGrantTimeState = (DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>);
-type GuardSubscriptionState = (String, DateTime<Utc>, String, Option<DateTime<Utc>>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GuardAccess {
@@ -247,7 +247,7 @@ async fn lock_and_classify_entitlement(
 
     let subscriptions = sqlx::query_as::<_, GuardSubscriptionState>(
         r#"
-        SELECT status, current_period_end_at, past_due_access, next_payment_attempt_at
+        SELECT status, current_period_end_at, past_due_access, next_payment_attempt_at, next_renewal_at
         FROM billing_subscriptions
         WHERE billing_scope_id = $1
             AND subscriber_id = $2
@@ -288,53 +288,6 @@ async fn lock_and_classify_entitlement(
         .await?;
 
     Ok(classify_guard_access(&subscriptions, &grants, access_at))
-}
-
-fn classify_guard_access(
-    subscriptions: &[GuardSubscriptionState],
-    grants: &[GuardGrantTimeState],
-    access_at: DateTime<Utc>,
-) -> GuardAccess {
-    let current_paid = subscriptions
-        .iter()
-        .filter(|(status, current_period_end_at, _, _)| {
-            matches!(status.as_str(), "active" | "past_due")
-                || (status == "canceled" && *current_period_end_at > access_at)
-        })
-        .collect::<Vec<_>>();
-    let active_grant_count = grants
-        .iter()
-        .filter(|(starts_at, ends_at, revoked_at)| {
-            *starts_at <= access_at && *ends_at > access_at && revoked_at.is_none()
-        })
-        .count();
-    if current_paid.len() > 1
-        || active_grant_count > 1
-        || (!current_paid.is_empty() && active_grant_count > 0)
-    {
-        return GuardAccess::Invalid;
-    }
-    if active_grant_count == 1 {
-        return GuardAccess::Granted;
-    }
-    let Some((status, _, past_due_access, next_payment_attempt_at)) = current_paid.first() else {
-        return GuardAccess::Missing;
-    };
-    match status.as_str() {
-        "active" => GuardAccess::Paid,
-        "canceled" => GuardAccess::PaidThroughCancellation,
-        "past_due" => match past_due_access.parse::<PastDueAccessPolicy>() {
-            Ok(policy)
-                if classify_past_due_access(policy, *next_payment_attempt_at)
-                    == PastDueAccess::AllowedDuringDunning =>
-            {
-                GuardAccess::Paid
-            }
-            Ok(_) => GuardAccess::PastDue,
-            Err(_) => GuardAccess::Invalid,
-        },
-        _ => GuardAccess::Invalid,
-    }
 }
 
 /// Loads one exact scope/subscriber/plan entitlement from a single database snapshot.
@@ -630,7 +583,12 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
         .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?,
         row.try_get("paid_next_renewal_at")?,
         next_payment_attempt_at,
-    );
+    )
+    .validated()
+    .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?;
+    let collection = subscription
+        .collection_state()
+        .map_err(|_| EntitlementQueryError::InvalidState(INVALID_ENTITLEMENT_STATE))?;
     let applied_discount = applied_discount_from_row(row)?;
 
     Ok(match status {
@@ -639,10 +597,11 @@ fn entitlement_from_row(row: &PgRow) -> Result<Entitlement, EntitlementQueryErro
             applied_discount,
         },
         SubscriptionStatus::PastDue => Entitlement::PastDue {
-            access: classify_past_due_access(
-                subscription.renewal_failure().past_due_access(),
-                subscription.next_payment_attempt_at().copied(),
-            ),
+            access: collection
+                .past_due_access(subscription.renewal_failure().past_due_access())
+                .ok_or(EntitlementQueryError::InvalidState(
+                    INVALID_ENTITLEMENT_STATE,
+                ))?,
             subscription,
             next_action: if row.try_get("pending_recovery_confirmation")? {
                 PastDueAction::ConfirmRecoveryPayment

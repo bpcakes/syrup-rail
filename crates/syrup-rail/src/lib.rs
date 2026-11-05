@@ -179,12 +179,13 @@ pub use subscription::{
     EntitlementGuard, EntitlementQuery, LimitedDiscountMonths, MissingSubscriptionAction,
     PastDueAccess, PastDueAction, PercentOffBasisPoints, PositiveDiscountCents,
     SavedSubscriptionDiscount, ScrubSubscriberBillingData, ScrubbedBillingRows, Subscription,
-    SubscriptionDiscountCode, SubscriptionDiscountDuration, SubscriptionDiscountError,
-    SubscriptionDiscountKind, SubscriptionDiscountSnapshot, SubscriptionGrant,
-    SubscriptionGrantCreation, SubscriptionGrantCreationOutcome, SubscriptionGrantError,
-    SubscriptionGrantKind, SubscriptionGrantKindParseError, SubscriptionGrantReason,
-    SubscriptionGrantReasonError, SubscriptionGrantRecord, SubscriptionGrantRecordError,
-    SubscriptionGrantRevocation, SubscriptionGrantRevocationOutcome, classify_past_due_access,
+    SubscriptionCollectionState, SubscriptionCollectionStateError, SubscriptionDiscountCode,
+    SubscriptionDiscountDuration, SubscriptionDiscountError, SubscriptionDiscountKind,
+    SubscriptionDiscountSnapshot, SubscriptionGrant, SubscriptionGrantCreation,
+    SubscriptionGrantCreationOutcome, SubscriptionGrantError, SubscriptionGrantKind,
+    SubscriptionGrantKindParseError, SubscriptionGrantReason, SubscriptionGrantReasonError,
+    SubscriptionGrantRecord, SubscriptionGrantRecordError, SubscriptionGrantRevocation,
+    SubscriptionGrantRevocationOutcome, classify_past_due_access,
 };
 pub use subscription_payment_context::SubscriptionPaymentContext;
 pub use terms::{

@@ -17,15 +17,13 @@ use crate::test_support::{TestDatabase, create_gateway_account};
 mod projection;
 mod stale_attempts;
 
-fn guard_subscription(
-    status: &str,
-    period_end_at: DateTime<Utc>,
-) -> (String, DateTime<Utc>, String, Option<DateTime<Utc>>) {
+fn guard_subscription(status: &str, period_end_at: DateTime<Utc>) -> super::GuardSubscriptionState {
     (
         status.to_owned(),
         period_end_at,
         "suspend_immediately".to_owned(),
-        None,
+        (status == "active").then_some(period_end_at),
+        period_end_at,
     )
 }
 
@@ -749,4 +747,40 @@ fn assert_lock_timeout(error: &sqlx::Error) -> Result<(), io::Error> {
             "expected PostgreSQL lock timeout, got {error}"
         )))
     }
+}
+
+#[test]
+fn protected_write_requires_valid_collection_and_uses_snapshotted_access_policy() {
+    let now = DateTime::UNIX_EPOCH;
+    let due = now + chrono::Duration::days(1);
+    let mut subscription = guard_subscription("active", due);
+    subscription.3 = None;
+    assert_eq!(
+        classify_guard_access(&[subscription], &[], now),
+        GuardAccess::Invalid
+    );
+    let mut retry = guard_subscription("past_due", due);
+    retry.2 = "continue_until_dunning_exhausted".into();
+    retry.3 = Some(due);
+    assert_eq!(
+        classify_guard_access(&[retry.clone()], &[], now),
+        GuardAccess::Paid
+    );
+    retry.2 = "suspend_immediately".into();
+    assert_eq!(
+        classify_guard_access(&[retry.clone()], &[], now),
+        GuardAccess::PastDue
+    );
+    retry.2 = "continue_until_dunning_exhausted".into();
+    retry.3 = None;
+    assert_eq!(
+        classify_guard_access(&[retry], &[], now),
+        GuardAccess::PastDue
+    );
+    let mut canceled = guard_subscription("canceled", due);
+    canceled.3 = Some(due);
+    assert_eq!(
+        classify_guard_access(&[canceled], &[], now),
+        GuardAccess::Invalid
+    );
 }

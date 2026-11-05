@@ -54,10 +54,14 @@ and transaction orchestration.
   outcomes, and `non_submission.rs` binds retry restoration to the exact
   admission generation. Host outcome commands live in
   `host_charge_application/resolution.rs`.
+  `enrollment_application/collection.rs` validates collection state under the
+  existing recovery/renewal application locks, retaining legacy authority.
 - `src/enrollment_application/recovery/evidence.rs` owns bounded recovery
   approval-evidence retries and the fallback that does not lock the attempt.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
+  `src/renewal_failure/collection.rs` owns closed collection projections and
+  required unpaid evidence; causal access history remains in the failure owner.
 - `src/period_expiry.rs` — the database-clock billing-period expiry check,
   canonical retirement of an obsolete due period as `unpaid`, and the
   existing-subscription past-due access policy change. The service wrapper and

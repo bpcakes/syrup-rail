@@ -1,3 +1,6 @@
+mod collection;
+use collection::{FailureProjection, projection};
+
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Row, postgres::PgRow};
 use syrup_rail::{
@@ -331,11 +334,12 @@ impl LockedRenewalFailureState {
         ))
         .map_err(map_subscription_persistence_error)?;
         Ok(Self {
-            current: FailureProjection {
+            current: FailureProjection::from_persisted(
                 status,
+                next_renewal_at,
                 next_payment_attempt_at,
                 unpaid_at,
-            },
+            )?,
             next_renewal_at,
             policy,
         })
@@ -425,28 +429,23 @@ fn decide_renewal_failure(
     if subscription.current == after {
         return Ok(RenewalFailureDecision::Noop);
     }
-    let before_is_valid = match history {
-        AutomaticRenewalFailureHistory::Empty => false,
-        AutomaticRenewalFailureHistory::First { .. } => {
-            (subscription.current.status == SubscriptionStatus::Active
-                || (subscription.current.status == SubscriptionStatus::PastDue
-                    && causal_history.has_legacy_recovery()))
-                && subscription.current.next_payment_attempt_at
-                    == Some(subscription.next_renewal_at)
-                && subscription
-                    .current
-                    .next_payment_attempt_at
-                    .is_some_and(|due_at| due_at <= attempt.submitted_at)
-                && subscription.current.unpaid_at.is_none()
+    let before_is_valid = match (history, subscription.current) {
+        (AutomaticRenewalFailureHistory::First { .. }, FailureProjection::Scheduled { due_at }) => {
+            due_at == subscription.next_renewal_at && due_at <= attempt.submitted_at
         }
-        AutomaticRenewalFailureHistory::Repeated { .. } => {
-            subscription.current.status == SubscriptionStatus::PastDue
-                && subscription
-                    .current
-                    .next_payment_attempt_at
-                    .is_some_and(|due_at| due_at <= attempt.submitted_at)
-                && subscription.current.unpaid_at.is_none()
+        (
+            AutomaticRenewalFailureHistory::First { .. },
+            FailureProjection::RetryScheduled { retry_at },
+        ) => {
+            causal_history.has_legacy_recovery()
+                && retry_at == subscription.next_renewal_at
+                && retry_at <= attempt.submitted_at
         }
+        (
+            AutomaticRenewalFailureHistory::Repeated { .. },
+            FailureProjection::RetryScheduled { retry_at },
+        ) => retry_at <= attempt.submitted_at,
+        _ => false,
     };
     if !before_is_valid {
         return Err(invalid_state());
@@ -549,12 +548,12 @@ async fn persist_renewal_failure_transition(
         "#,
     )
     .bind(subscription_id.as_uuid())
-    .bind(transition.after.status.as_str())
-    .bind(transition.after.next_payment_attempt_at)
-    .bind(transition.after.unpaid_at)
-    .bind(transition.before.status.as_str())
-    .bind(transition.before.next_payment_attempt_at)
-    .bind(transition.before.unpaid_at)
+    .bind(transition.after.collection().status().as_str())
+    .bind(transition.after.collection().next_payment_attempt_at())
+    .bind(transition.after.unpaid_at())
+    .bind(transition.before.collection().status().as_str())
+    .bind(transition.before.collection().next_payment_attempt_at())
+    .bind(transition.before.unpaid_at())
     .execute(&mut *connection)
     .await?;
     if updated.rows_affected() != 1 {
@@ -597,33 +596,6 @@ pub(crate) async fn apply_resolved_automatic_renewal_failure(
                 events: transition.events,
             })
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct FailureProjection {
-    status: SubscriptionStatus,
-    next_payment_attempt_at: Option<DateTime<Utc>>,
-    unpaid_at: Option<DateTime<Utc>>,
-}
-
-const fn projection(disposition: RenewalFailureDisposition) -> FailureProjection {
-    match disposition {
-        RenewalFailureDisposition::RetryScheduled { retry_at } => FailureProjection {
-            status: SubscriptionStatus::PastDue,
-            next_payment_attempt_at: Some(retry_at),
-            unpaid_at: None,
-        },
-        RenewalFailureDisposition::RemainPastDue { .. } => FailureProjection {
-            status: SubscriptionStatus::PastDue,
-            next_payment_attempt_at: None,
-            unpaid_at: None,
-        },
-        RenewalFailureDisposition::MarkUnpaid { ended_at } => FailureProjection {
-            status: SubscriptionStatus::Unpaid,
-            next_payment_attempt_at: None,
-            unpaid_at: Some(ended_at),
-        },
     }
 }
 

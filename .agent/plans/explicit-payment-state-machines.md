@@ -8,7 +8,7 @@ Implement the four safety refactors identified in the audit, and publish reviewa
 - [x] SM4 implementation and local verification: explicit lifecycle evidence transition matrix; delivered as PR #11 (https://github.com/bpcakes/syrup-rail/pull/11).
 - [x] SM1 implementation and local verification: named processor-charge transitions and shared classification; delivered as PR #12 (https://github.com/bpcakes/syrup-rail/pull/12).
 - [ ] SM2: validated attempt phases and evidence-bound non-submission restoration.
-- [ ] SM3: explicit subscription collection states with separate access projection.
+- [ ] SM3 implemented; full verification and PR publication pending: explicit subscription collection states with separate access projection.
 - [ ] Verify every PR and publish final links with dependencies and test results.
 
 ## Surprises & Discoveries
@@ -47,7 +47,11 @@ Core phase coverage and the database stale-proof regression pass. Full tests
 passed 769 with no ignored/filtered tests; the initial crate run had one Docker
 port-exposure startup failure, and the full rerun with four test threads passed.
 Final rerun after host admission cleanup is in progress. Fmt, Clippy, SQLx and
-public API documentation passed. SM3 remains unimplemented.
+public API documentation passed. SM2 is published as PR #13; serial local verification is pending after a
+shared-build-directory doctest collision, with independent build directories now
+in use. SM3 is implemented in an isolated worktree. Focused collection and
+renewal-failure tests, Clippy, formatting, SQLx and public API checks pass; full
+serial verification is running.
 
 ## Work and acceptance
 

@@ -1,3 +1,6 @@
+mod collection;
+pub use collection::{SubscriptionCollectionState, SubscriptionCollectionStateError};
+
 use std::{fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
@@ -49,6 +52,8 @@ pub struct Subscription {
 }
 
 impl Subscription {
+    /// Compatible constructor. Call [`Self::validated`] before treating external
+    /// status and scheduling fields as collection authority.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         id: SubscriptionId,

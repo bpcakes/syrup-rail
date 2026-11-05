@@ -24,6 +24,10 @@ command/outcome types for application-independent subscription billing.
 - `src/attempt/{fingerprint,snapshots}.rs` own canonical request equality and
   optimistic/durable snapshots; `src/attempt.rs` remains the attempt lifecycle
   and target facade.
+- `src/subscription/collection.rs` validates collection status and scheduling
+  as scheduled, retry scheduled, exhausted, canceled, or unpaid. Use
+  `Subscription::validated` at persistence boundaries; keep access policy and
+  causal payment history separate from collection eligibility.
 - `src/subscription/{grant,discount,access}.rs` own their separate entitlement
   sources and policies; `src/subscription.rs` retains subscription lifecycle
   and cancellation facts while re-exporting the established public paths.

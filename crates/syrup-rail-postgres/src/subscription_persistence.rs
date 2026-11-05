@@ -193,7 +193,7 @@ impl FullSubscriptionRow {
                 &past_due_access,
             ))?;
 
-        Ok(Subscription::new(
+        Subscription::new(
             SubscriptionId::new(id),
             PlanKey::new(plan_key).map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             status
@@ -218,8 +218,24 @@ impl FullSubscriptionRow {
                 .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
             next_renewal_at,
             next_payment_attempt_at,
-        ))
+        )
+        .validated()
+        .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)
     }
+}
+
+/// Decode the collection-only projection used under application locks.
+pub(crate) fn collection_state_from_row(
+    row: &PgRow,
+) -> Result<syrup_rail::SubscriptionCollectionState, SubscriptionPersistenceCodecError> {
+    syrup_rail::SubscriptionCollectionState::from_persisted(
+        row.try_get::<String, _>("status")?
+            .parse()
+            .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)?,
+        row.try_get("next_renewal_at")?,
+        row.try_get("next_payment_attempt_at")?,
+    )
+    .map_err(|_| SubscriptionPersistenceCodecError::InvalidState)
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Postgres, Row, Transaction};
 use syrup_rail::{
-    BillingEvent, CancelSubscription, CancelSubscriptionOutcome, PastDueAccessPolicy,
-    PaymentAttemptKind, PlanKey, Subscription, SubscriptionId, SubscriptionStatus,
+    BillingEvent, CancelSubscription, CancelSubscriptionOutcome, PaymentAttemptKind, PlanKey,
+    Subscription, SubscriptionId, SubscriptionStatus,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -98,11 +98,16 @@ pub(crate) async fn cancel_subscription_on_connection(
     let Some(subscription) = current_subscription(connection, command).await? else {
         return Ok(CancelSubscriptionOutcome::NotFound);
     };
-    match subscription.status() {
-        SubscriptionStatus::Canceled => {
+    let collection = subscription
+        .collection_state()
+        .map_err(|_| SubscriptionCancellationError::InvalidState(INVALID_SUBSCRIPTION_STATE))?;
+    match collection {
+        syrup_rail::SubscriptionCollectionState::Canceled => {
             Ok(CancelSubscriptionOutcome::AlreadyCanceled(subscription))
         }
-        SubscriptionStatus::Active | SubscriptionStatus::PastDue => {
+        syrup_rail::SubscriptionCollectionState::Scheduled { .. }
+        | syrup_rail::SubscriptionCollectionState::RetryScheduled { .. }
+        | syrup_rail::SubscriptionCollectionState::Exhausted => {
             fail_stale_unsubmitted_subscription_charges(connection, subscription.id()).await?;
             if has_blocking_renewal(connection, &subscription).await? {
                 return Ok(CancelSubscriptionOutcome::BlockedByRenewal);
@@ -116,9 +121,9 @@ pub(crate) async fn cancel_subscription_on_connection(
             let access_ends_at_before_cancel = match prior_status {
                 SubscriptionStatus::Active => Some(*subscription.current_period().end_at()),
                 SubscriptionStatus::PastDue
-                    if subscription.renewal_failure().past_due_access()
-                        == PastDueAccessPolicy::ContinueUntilDunningExhausted
-                        && subscription.next_payment_attempt_at().is_some() =>
+                    if collection
+                        .past_due_access(subscription.renewal_failure().past_due_access())
+                        == Some(syrup_rail::PastDueAccess::AllowedDuringDunning) =>
                 {
                     None
                 }
@@ -160,7 +165,7 @@ pub(crate) async fn cancel_subscription_on_connection(
                 event,
             })
         }
-        SubscriptionStatus::Unpaid => Ok(CancelSubscriptionOutcome::NotFound),
+        syrup_rail::SubscriptionCollectionState::Unpaid => Ok(CancelSubscriptionOutcome::NotFound),
     }
 }
 

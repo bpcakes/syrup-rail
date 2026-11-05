@@ -114,10 +114,8 @@ fn failure_history_rejects_a_count_that_cannot_be_persisted() {
 fn first_failure_decision_projects_retry_and_event_without_persistence() {
     let attempt = validated_attempt(1, 150, 200);
     let locked = locked_state(
-        FailureProjection {
-            status: SubscriptionStatus::Active,
-            next_payment_attempt_at: Some(timestamp(100)),
-            unpaid_at: None,
+        FailureProjection::Scheduled {
+            due_at: timestamp(100),
         },
         &[60],
         DunningExhaustion::RemainPastDue,
@@ -142,10 +140,8 @@ fn first_failure_decision_projects_retry_and_event_without_persistence() {
     );
     assert_eq!(
         transition.after,
-        FailureProjection {
-            status: SubscriptionStatus::PastDue,
-            next_payment_attempt_at: Some(timestamp(260)),
-            unpaid_at: None,
+        FailureProjection::RetryScheduled {
+            retry_at: timestamp(260)
         }
     );
     assert_eq!(transition.events.len(), 1);
@@ -226,10 +222,8 @@ fn failure_event_projection_carries_the_complete_access_consequence() {
 fn first_automatic_failure_after_legacy_recovery_preserves_suspension_boundary() {
     let attempt = validated_attempt(1, 150, 200);
     let locked = locked_state(
-        FailureProjection {
-            status: SubscriptionStatus::PastDue,
-            next_payment_attempt_at: Some(timestamp(100)),
-            unpaid_at: None,
+        FailureProjection::RetryScheduled {
+            retry_at: timestamp(100),
         },
         &[],
         DunningExhaustion::MarkUnpaid,
@@ -251,10 +245,8 @@ fn first_automatic_failure_after_legacy_recovery_preserves_suspension_boundary()
     };
     assert_eq!(
         transition.after,
-        FailureProjection {
-            status: SubscriptionStatus::Unpaid,
-            next_payment_attempt_at: None,
-            unpaid_at: Some(timestamp(200)),
+        FailureProjection::Unpaid {
+            ended_at: timestamp(200)
         }
     );
     assert!(matches!(
@@ -295,10 +287,8 @@ fn decision_is_idempotent_for_applied_state_and_older_attempts() {
     );
 
     let unapplied = locked_state(
-        FailureProjection {
-            status: SubscriptionStatus::Active,
-            next_payment_attempt_at: Some(timestamp(100)),
-            unpaid_at: None,
+        FailureProjection::Scheduled {
+            due_at: timestamp(100),
         },
         &[60, 60],
         DunningExhaustion::RemainPastDue,
@@ -324,10 +314,8 @@ fn decision_is_idempotent_for_applied_state_and_older_attempts() {
 fn repeated_history_rejects_a_previous_terminal_disposition() {
     let attempt = validated_attempt(2, 250, 300);
     let locked = locked_state(
-        FailureProjection {
-            status: SubscriptionStatus::PastDue,
-            next_payment_attempt_at: Some(timestamp(240)),
-            unpaid_at: None,
+        FailureProjection::RetryScheduled {
+            retry_at: timestamp(240),
         },
         &[],
         DunningExhaustion::MarkUnpaid,
@@ -361,10 +349,8 @@ fn terminal_event_access_boundary_follows_the_snapshotted_policy() {
     ] {
         let attempt = validated_attempt(2, 250, 300);
         let locked = locked_state(
-            FailureProjection {
-                status: SubscriptionStatus::PastDue,
-                next_payment_attempt_at: Some(timestamp(240)),
-                unpaid_at: None,
+            FailureProjection::RetryScheduled {
+                retry_at: timestamp(240),
             },
             &[60],
             DunningExhaustion::MarkUnpaid,
@@ -386,10 +372,8 @@ fn terminal_event_access_boundary_follows_the_snapshotted_policy() {
         };
         assert_eq!(
             transition.after,
-            FailureProjection {
-                status: SubscriptionStatus::Unpaid,
-                next_payment_attempt_at: None,
-                unpaid_at: Some(timestamp(300)),
+            FailureProjection::Unpaid {
+                ended_at: timestamp(300)
             }
         );
         assert!(matches!(
