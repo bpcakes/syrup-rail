@@ -6,11 +6,11 @@ use syrup_rail::{
     BillingEvent, BillingScopeId, GatewayAccountMode, GatewayDiagnostic, GatewayError,
     GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDiagnostic, GatewayProviderKey,
     PaymentAttempt, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
-    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey,
-    ProcessorChargeProgression, ProcessorEvidence, SubscriberId, Subscription,
-    SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentPaymentResultBuildError,
-    SubscriptionEnrollmentReservation, SubscriptionId, SubscriptionPaymentMethodReplacement,
-    SubscriptionRecoveryReservation, SubscriptionRenewalReservation,
+    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, PlanKey, ProcessorEvidence,
+    SubscriberId, Subscription, SubscriptionEnrollmentPaymentResult,
+    SubscriptionEnrollmentPaymentResultBuildError, SubscriptionEnrollmentReservation,
+    SubscriptionId, SubscriptionPaymentMethodReplacement, SubscriptionRecoveryReservation,
+    SubscriptionRenewalReservation,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -26,7 +26,6 @@ use crate::{
     processor_charges::{
         LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, ObservedCharge,
         observe_processor_charge, promote_conflicting_charge_to_external_reversal,
-        transition_processor_charge_in_transaction,
     },
     renewal_failure::RenewalFailureStoreError,
     subscription_persistence::{
@@ -944,12 +943,12 @@ pub(crate) async fn stop_conflicting_subscription_approval(
     }
     let progression = if attempt.status().is_resolvable() || attempt.request().amount().cents() == 0
     {
-        ProcessorChargeProgression::ReconciliationRequired
+        crate::processor_charges::ApprovalObservation::Reconcile
     } else {
-        ProcessorChargeProgression::ExternalReversalRequired
+        crate::processor_charges::ApprovalObservation::ReviewReversal
     };
     let observation = observe_processor_charge(connection, attempt, observed, progression).await?;
-    if progression == ProcessorChargeProgression::ExternalReversalRequired
+    if progression == crate::processor_charges::ApprovalObservation::ReviewReversal
         && observed.transaction_id().is_some()
     {
         promote_conflicting_charge_to_external_reversal(connection, observation).await?;
@@ -1111,7 +1110,7 @@ async fn resolve_locked_outcome(
                 connection,
                 &attempt,
                 evidence,
-                ProcessorChargeProgression::Pending,
+                crate::processor_charges::ApprovalObservation::AwaitApplication,
             )
             .await?;
         }
@@ -1505,7 +1504,7 @@ pub(crate) async fn observe_parked_expired_period_approval(
         connection,
         &attempt,
         evidence,
-        ProcessorChargeProgression::ExternalReversalRequired,
+        crate::processor_charges::ApprovalObservation::ReviewReversal,
     )
     .await?;
     Ok((
@@ -1527,18 +1526,10 @@ pub(crate) async fn park_expired_period_approval(
     (SubscriptionEnrollmentPaymentResult, Option<BillingEvent>),
     SubscriptionEnrollmentApplicationError,
 > {
-    transition_processor_charge_in_transaction(
+    crate::processor_charges::transition_charge(
         connection,
-        syrup_rail::ProcessorChargeId::new(charge_id),
-        &[
-            ProcessorChargeProgression::Pending,
-            ProcessorChargeProgression::ReconciliationRequired,
-            ProcessorChargeProgression::ExternalReversalRequired,
-        ],
-        ProcessorChargeProgression::ExternalReversalRequired,
-        Some(syrup_rail::ProcessorChargeStateCode::PaymentResolution(
-            PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
-        )),
+        charge_id,
+        crate::processor_charges::ChargeTransition::ParkExpiredPeriod,
     )
     .await?;
     let parked = park_locked_attempt(
@@ -1574,7 +1565,7 @@ pub(crate) async fn park_compensated_approved_attempt(
             connection,
             attempt,
             evidence,
-            ProcessorChargeProgression::ExternalReversalRequired,
+            crate::processor_charges::ApprovalObservation::ReviewReversal,
         )
         .await?;
         return Ok(attempt.clone());
@@ -1583,7 +1574,7 @@ pub(crate) async fn park_compensated_approved_attempt(
         connection,
         attempt,
         evidence,
-        ProcessorChargeProgression::Pending,
+        crate::processor_charges::ApprovalObservation::AwaitApplication,
     )
     .await?;
     if let Some(parked) = park_observed_approval_if_period_expired(
@@ -1640,18 +1631,10 @@ pub(crate) async fn park_observed_approval_if_period_expired(
     }
     if attempt.status().is_terminal() {
         if !charge_is_externally_reversed(connection, charge.id).await? {
-            transition_processor_charge_in_transaction(
+            crate::processor_charges::transition_charge(
                 connection,
-                syrup_rail::ProcessorChargeId::new(charge.id),
-                &[
-                    ProcessorChargeProgression::Pending,
-                    ProcessorChargeProgression::ReconciliationRequired,
-                    ProcessorChargeProgression::ExternalReversalRequired,
-                ],
-                ProcessorChargeProgression::ExternalReversalRequired,
-                Some(syrup_rail::ProcessorChargeStateCode::PaymentResolution(
-                    PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
-                )),
+                charge.id,
+                crate::processor_charges::ChargeTransition::ParkExpiredPeriod,
             )
             .await?;
         }

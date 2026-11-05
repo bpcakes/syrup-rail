@@ -9,8 +9,8 @@ use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
     GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId,
-    PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
-    ProcessorEvidence, SubscriptionEnrollmentPaymentResult, SubscriptionRenewalReservation,
+    PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeRole, ProcessorEvidence,
+    SubscriptionEnrollmentPaymentResult, SubscriptionRenewalReservation,
     SubscriptionRenewalSubmissionOutcome, SubscriptionRenewalSubmissionRejection,
 };
 
@@ -631,16 +631,16 @@ async fn try_park_renewal_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Applied,
+            crate::processor_charges::ApprovalObservation::ReplayApplied,
         )
         .await?;
         attempt
     } else if attempt.status().is_terminal() {
         let progression =
             if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
-                ProcessorChargeProgression::ExternalReversalRequired
+                crate::processor_charges::ApprovalObservation::ReviewReversal
             } else {
-                ProcessorChargeProgression::ReconciliationRequired
+                crate::processor_charges::ApprovalObservation::Reconcile
             };
         let observation =
             observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
@@ -692,7 +692,7 @@ async fn observe_renewal_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ProcessorChargeProgression::Pending,
+                crate::processor_charges::ApprovalObservation::AwaitApplication,
             )
             .await?;
             park_observed_approval_if_period_expired(

@@ -91,36 +91,10 @@ struct LockedAttempt {
     transaction_id: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChargeIdentityMatch {
-    Same,
-    Different,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChargeRole {
-    Primary,
-    Additional,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChargeProgression {
-    ReconciliationRequired,
-    ExternalReversalRequired,
-    Applied,
-    ExternallyReversed,
-}
-
-impl ChargeProgression {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::ReconciliationRequired => "reconciliation_required",
-            Self::ExternalReversalRequired => "external_reversal_required",
-            Self::Applied => "applied",
-            Self::ExternallyReversed => "externally_reversed",
-        }
-    }
-}
+use crate::processor_charges::policy::{
+    ApprovalApplicationFacts, ApprovalIdentity, ChargeIdentityMatch, PendingChargeDecision,
+};
+use syrup_rail::ProcessorChargeRole as ChargeRole;
 
 /// Returns every registered gateway account in deterministic locator order.
 ///
@@ -694,7 +668,7 @@ pub async fn classify_pending_processor_charges(
                 return Err(invalid_reconciliation_state());
             }
 
-            let (progression, state_code) = classify_pending_charge(
+            let decision = classify_pending_charge(
                 &mut transaction,
                 &attempt,
                 candidate.id,
@@ -703,13 +677,7 @@ pub async fn classify_pending_processor_charges(
                 identity_match,
             )
             .await?;
-            transition_pending_charge(
-                &mut transaction,
-                candidate.id,
-                progression,
-                state_code.as_deref(),
-            )
-            .await?;
+            transition_pending_charge(&mut transaction, candidate.id, decision).await?;
             transaction.commit().await?;
             transitioned += 1;
         }

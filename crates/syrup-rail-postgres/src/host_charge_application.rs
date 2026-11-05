@@ -1,3 +1,8 @@
+mod approval_observation;
+use approval_observation::{
+    observe_conflicting_host_charge_approval, observe_terminal_host_charge_approval,
+};
+
 use std::{fmt, time::Duration};
 
 use chrono::{DateTime, Utc};
@@ -9,7 +14,7 @@ use syrup_rail::{
     GatewaySaleRequest, HostChargePaymentResult, HostChargePaymentResultBuildError,
     HostChargeReservation, HostChargeTargetTransition, HostChargeTargetTransitionKind,
     HostChargeTargetTransitionOutcome, PaymentAttempt, PaymentAttemptStatus, PaymentResolutionCode,
-    ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
+    ProcessorChargeRole, ProcessorEvidence,
 };
 use thiserror::Error;
 
@@ -34,8 +39,8 @@ use crate::{
         should_surface_prepared_not_submitted,
     },
     processor_charges::{
-        ObservedCharge, observe_processor_charge, promote_conflicting_charge_to_external_reversal,
-        transition_charge,
+        ApprovalObservation, ChargeTransition, ObservedCharge, observe_processor_charge,
+        promote_conflicting_charge_to_external_reversal, transition_charge,
     },
 };
 
@@ -530,7 +535,7 @@ async fn apply_host_charge_approved(
             connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Applied,
+            ApprovalObservation::ReplayApplied,
         )
         .await?;
         transaction.commit().await?;
@@ -550,7 +555,7 @@ async fn apply_host_charge_approved(
         connection,
         &attempt,
         evidence,
-        ProcessorChargeProgression::Pending,
+        ApprovalObservation::AwaitApplication,
     )
     .await?;
     let ObservedCharge::Owned(charge) = observation else {
@@ -576,13 +581,7 @@ async fn apply_host_charge_approved(
             )
             .await
             .map_err(map_attempt_transition_error)?;
-            transition_charge(
-                connection,
-                charge.id,
-                ProcessorChargeProgression::Applied,
-                None,
-            )
-            .await?;
+            transition_charge(connection, charge.id, ChargeTransition::MarkApplied).await?;
             let applied = find_payment_attempt_by_id_on_connection(
                 connection,
                 identity.billing_scope_id(),
@@ -605,8 +604,9 @@ async fn apply_host_charge_approved(
             transition_charge(
                 connection,
                 charge.id,
-                ProcessorChargeProgression::ExternalReversalRequired,
-                Some(PaymentResolutionCode::HostChargeApprovedStaleState),
+                ChargeTransition::RequireExternalReversal(Some(
+                    PaymentResolutionCode::HostChargeApprovedStaleState,
+                )),
             )
             .await?;
             let parked = park_locked_attempt(
@@ -627,98 +627,6 @@ async fn apply_host_charge_approved(
             ))
         }
     }
-}
-
-async fn observe_conflicting_host_charge_approval(
-    coordinator: &dyn BillingTransactionCoordinator,
-    reservation: &HostChargeReservation,
-    evidence: &ProcessorEvidence,
-) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
-    let identity = reservation.identity();
-    let mut transaction = coordinator
-        .begin(
-            BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id()),
-            BILLING_LOCK_TIMEOUT,
-        )
-        .await?;
-    let connection = transaction.connection();
-    set_application_timeouts(connection).await?;
-    let attempt = lock_expected_host_charge(connection, reservation).await?;
-    let diagnostics = processor_identity_conflict_diagnostics(&attempt, evidence);
-    if diagnostics.is_empty() {
-        transaction.rollback().await?;
-        return Ok(HostChargePaymentResult::new(attempt)?);
-    }
-    if attempt.status() == PaymentAttemptStatus::Approved
-        && same_processor_transaction(&attempt, evidence)
-    {
-        transaction.commit().await?;
-        return Ok(append_host_observation_diagnostics(
-            HostChargePaymentResult::new(attempt)?,
-            &diagnostics,
-        ));
-    }
-    let progression = if attempt.status().is_resolvable() {
-        ProcessorChargeProgression::ReconciliationRequired
-    } else {
-        ProcessorChargeProgression::ExternalReversalRequired
-    };
-    let observation = observe_processor_charge(connection, &attempt, evidence, progression).await?;
-    if progression == ProcessorChargeProgression::ExternalReversalRequired
-        && evidence.transaction_id().is_some()
-    {
-        promote_conflicting_charge_to_external_reversal(connection, observation).await?;
-    }
-    transaction.commit().await?;
-    Ok(append_host_observation_diagnostics(
-        HostChargePaymentResult::new(attempt)?,
-        &diagnostics,
-    ))
-}
-
-async fn observe_terminal_host_charge_approval(
-    coordinator: &dyn BillingTransactionCoordinator,
-    reservation: &HostChargeReservation,
-    terminal_attempt: &PaymentAttempt,
-    approved_evidence: &ApprovedProcessorEvidence,
-) -> Result<HostChargePaymentResult, HostChargeApplicationError> {
-    let evidence = approved_evidence.evidence();
-    let identity = reservation.identity();
-    let mut transaction = coordinator
-        .begin(
-            BillingEventSubject::new(identity.billing_scope_id(), identity.subscriber_id()),
-            BILLING_LOCK_TIMEOUT,
-        )
-        .await?;
-    let connection = transaction.connection();
-    set_application_timeouts(connection).await?;
-    if matches!(
-        observe_processor_charge(
-            connection,
-            terminal_attempt,
-            evidence,
-            ProcessorChargeProgression::Pending,
-        )
-        .await?,
-        ObservedCharge::OwnedByOtherAttempt
-    ) {
-        let _ = transaction.rollback().await;
-        return Err(HostChargeApplicationError::InvalidState(
-            "the approved gateway transaction belongs to another payment attempt",
-        ));
-    }
-    let locked = lock_expected_host_charge(connection, reservation).await?;
-    if !locked.status().is_terminal() || locked.status() == PaymentAttemptStatus::Approved {
-        let _ = transaction.rollback().await;
-        return Err(HostChargeApplicationError::InvalidState(
-            INVALID_HOST_CHARGE_STATE,
-        ));
-    }
-    transaction.commit().await?;
-    Ok(HostChargePaymentResult::confirmation_pending(
-        locked,
-        approved_evidence.clone(),
-    )?)
 }
 
 async fn resolve_host_charge_non_approved(
@@ -824,7 +732,7 @@ async fn resolve_host_charge_non_approved(
             &mut transaction,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Pending,
+            ApprovalObservation::AwaitApplication,
         )
         .await?;
     }
@@ -970,7 +878,7 @@ async fn resolve_host_charge_unknown(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ProcessorChargeProgression::Pending,
+                ApprovalObservation::AwaitApplication,
             )
             .await?;
         }
@@ -1034,16 +942,21 @@ async fn park_host_charge_approved(
             ));
         }
         let progression = if attempt.status().is_resolvable() {
-            ProcessorChargeProgression::ReconciliationRequired
+            ApprovalObservation::Reconcile
         } else {
-            ProcessorChargeProgression::ExternalReversalRequired
+            ApprovalObservation::ReviewReversal
         };
         let observation =
             observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
-        if progression == ProcessorChargeProgression::ExternalReversalRequired {
+        if progression == ApprovalObservation::ReviewReversal {
             promote_conflicting_charge_to_external_reversal(&mut transaction, observation).await?;
         } else if let ObservedCharge::Owned(charge) = observation {
-            transition_charge(&mut transaction, charge.id, progression, None).await?;
+            transition_charge(
+                &mut transaction,
+                charge.id,
+                ChargeTransition::ReconcileConflictingApproval,
+            )
+            .await?;
         }
         transaction.commit().await?;
         return Ok(append_host_observation_diagnostics(
@@ -1052,14 +965,19 @@ async fn park_host_charge_approved(
         ));
     }
     let progression = if evidence.transaction_id().is_some() {
-        ProcessorChargeProgression::ExternalReversalRequired
+        ApprovalObservation::ReviewReversal
     } else {
-        ProcessorChargeProgression::ReconciliationRequired
+        ApprovalObservation::Reconcile
     };
     let observation =
         observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
     if let ObservedCharge::Owned(charge) = observation {
-        transition_charge(&mut transaction, charge.id, progression, None).await?;
+        let transition = if evidence.transaction_id().is_some() {
+            ChargeTransition::RequireExternalReversal(None)
+        } else {
+            ChargeTransition::RequireReconciliation(None)
+        };
+        transition_charge(&mut transaction, charge.id, transition).await?;
     }
     let parked = park_locked_attempt(
         &mut transaction,

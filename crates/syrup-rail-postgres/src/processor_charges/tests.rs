@@ -522,3 +522,5 @@ async fn transaction_observation_preserves_exact_replay_and_rejects_drift()
     result?;
     cleanup
 }
+
+mod transitions;

@@ -5,8 +5,8 @@ Implement the four safety refactors identified in the audit, and publish reviewa
 ## Progress
 
 - [x] Revalidated merged baseline and transition entrypoints.
-- [x] SM4 implementation and local verification: explicit lifecycle evidence transition matrix; PR publication pending.
-- [ ] SM1: named processor-charge transitions and shared classification.
+- [x] SM4 implementation and local verification: explicit lifecycle evidence transition matrix; delivered as PR #11 (https://github.com/bpcakes/syrup-rail/pull/11).
+- [x] SM1 implementation and local verification: named processor-charge transitions and shared classification; PR publication follows.
 - [ ] SM2: validated attempt phases and evidence-bound non-submission restoration.
 - [ ] SM3: explicit subscription collection states with separate access projection.
 - [ ] Verify every PR and publish final links with dependencies and test results.
@@ -28,7 +28,16 @@ SM4: focused lifecycle tests passed (5), formatting and Clippy passed, and
 `scripts/jig --json check test` passed all 763 tests with zero ignored/filtered
 tests. The production lifecycle owner shrank by 117 lines; the transition
 owner and its tests are separate small files. Schema and public API unchanged.
-PR publication pending; SM1–SM3 remain unimplemented.
+PR #11 published with all 11 CI checks green.
+
+SM1: named observation and transition operations now own charge progression.
+Application requires matching approved attempt evidence; terminal reversal
+requires immutable attestation. Expired-period parking cannot be cleared by
+compatibility transitions. Unresolved host conflicts retain their legitimate
+reconciliation path. Two new database scenarios and two policy tests pass;
+full workspace verification passed 767 tests (none ignored/filtered), plus
+fmt, Clippy, SQLx and public API documentation checks. No schema changes.
+SM2–SM3 remain unimplemented.
 
 ## Work and acceptance
 

@@ -8,11 +8,6 @@ pub(crate) enum LockFreeApprovalPolicy {
     ReverseExpiredPeriod,
 }
 
-pub(super) enum ChargeStateCodeUpdate {
-    Replace(Option<ProcessorChargeStateCode>),
-    PreserveExisting(Option<ProcessorChargeStateCode>),
-}
-
 pub(super) async fn matching_charge(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
@@ -197,9 +192,15 @@ pub(super) async fn charge_by_id(
 pub(super) fn compensating_progression(
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
-) -> ProcessorChargeProgression {
+) -> ApprovalObservation {
     if attempt.status() == PaymentAttemptStatus::Approved {
-        ProcessorChargeProgression::Applied
+        if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
+            ApprovalObservation::ReplayApplied
+        } else if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
+            ApprovalObservation::ReviewReversal
+        } else {
+            ApprovalObservation::Reconcile
+        }
     } else if attempt.request().amount().cents() > 0
         && evidence.transaction_id().is_some()
         && (matches!(
@@ -209,30 +210,22 @@ pub(super) fn compensating_progression(
             == Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict)
             || is_external_reversal_terminal_attempt(attempt))
     {
-        ProcessorChargeProgression::ExternalReversalRequired
+        ApprovalObservation::ReviewReversal
     } else if matches!(
         attempt.status(),
         PaymentAttemptStatus::Declined
             | PaymentAttemptStatus::Failed
             | PaymentAttemptStatus::ReviewRequired
     ) {
-        ProcessorChargeProgression::ReconciliationRequired
+        ApprovalObservation::Reconcile
     } else {
-        ProcessorChargeProgression::Pending
+        ApprovalObservation::AwaitApplication
     }
 }
 
 pub(super) fn is_external_reversal_terminal_attempt(attempt: &PaymentAttempt) -> bool {
     attempt.status() == PaymentAttemptStatus::Failed
-        && matches!(
-            attempt.state().resolution_code(),
-            Some(
-                PaymentResolutionCode::SubscriptionInitialExternallyRefunded
-                    | PaymentResolutionCode::SubscriptionInitialExternallyVoided
-                    | PaymentResolutionCode::ProcessorChargeExternallyRefunded
-                    | PaymentResolutionCode::ProcessorChargeExternallyVoided
-            )
-        )
+        && super::policy::is_external_reversal_resolution(attempt.state().resolution_code())
 }
 
 pub(super) fn initial_charge_progression(
@@ -241,15 +234,13 @@ pub(super) fn initial_charge_progression(
     transaction_id: Option<&str>,
     requested: ProcessorChargeProgression,
 ) -> ProcessorChargeProgression {
-    if transaction_id.is_none() {
-        return ProcessorChargeProgression::ReconciliationRequired;
-    }
-    match role {
-        ProcessorChargeRole::Primary => requested,
-        ProcessorChargeRole::Additional if amount_cents > 0 => {
-            ProcessorChargeProgression::ExternalReversalRequired
+    use super::policy::ApprovalIdentity;
+    match ApprovalIdentity::classify(role, amount_cents, transaction_id) {
+        ApprovalIdentity::Unidentified | ApprovalIdentity::AdditionalZeroAmount => {
+            ProcessorChargeProgression::ReconciliationRequired
         }
-        ProcessorChargeRole::Additional => ProcessorChargeProgression::ReconciliationRequired,
+        ApprovalIdentity::Primary => requested,
+        ApprovalIdentity::AdditionalCharge => ProcessorChargeProgression::ExternalReversalRequired,
     }
 }
 

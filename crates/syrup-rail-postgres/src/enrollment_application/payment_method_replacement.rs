@@ -8,10 +8,9 @@ use syrup_rail::{
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentDiagnostic,
     GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
     GatewayStorePaymentMethodRequest, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
-    PaymentCardDisplay, PaymentMethodId, PaymentResolutionCode, ProcessorChargeProgression,
-    ProcessorChargeRole, ProcessorEvidence, ReplaceSubscriptionPaymentMethod,
-    SubscriptionEnrollmentPaymentResult, SubscriptionPaymentMethodReplacement,
-    SubscriptionPaymentMethodReplacementSubmissionOutcome,
+    PaymentCardDisplay, PaymentMethodId, PaymentResolutionCode, ProcessorChargeRole,
+    ProcessorEvidence, ReplaceSubscriptionPaymentMethod, SubscriptionEnrollmentPaymentResult,
+    SubscriptionPaymentMethodReplacement, SubscriptionPaymentMethodReplacementSubmissionOutcome,
     SubscriptionPaymentMethodReplacementSubmissionRejection,
 };
 
@@ -479,7 +478,7 @@ async fn apply_locked_reconciled_payment_method_replacement_outcome(
                 connection,
                 &attempt,
                 evidence,
-                ProcessorChargeProgression::ReconciliationRequired,
+                crate::processor_charges::ApprovalObservation::Reconcile,
             )
             .await?;
         }
@@ -802,7 +801,7 @@ async fn try_park_reconciled_payment_method_replacement_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ProcessorChargeProgression::ReconciliationRequired,
+            crate::processor_charges::ApprovalObservation::Reconcile,
         )
         .await?;
     }
@@ -854,7 +853,7 @@ async fn park_locked_payment_method_replacement_approved_outcome(
             &mut *connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Applied,
+            crate::processor_charges::ApprovalObservation::ReplayApplied,
         )
         .await?;
         attempt
@@ -863,7 +862,7 @@ async fn park_locked_payment_method_replacement_approved_outcome(
             &mut *connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::ReconciliationRequired,
+            crate::processor_charges::ApprovalObservation::Reconcile,
         )
         .await?;
         attempt
@@ -872,7 +871,7 @@ async fn park_locked_payment_method_replacement_approved_outcome(
             &mut *connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Pending,
+            crate::processor_charges::ApprovalObservation::AwaitApplication,
         )
         .await?;
         let message = match observation {
@@ -904,7 +903,7 @@ async fn observe_payment_method_replacement_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ProcessorChargeProgression::Pending,
+                crate::processor_charges::ApprovalObservation::AwaitApplication,
             )
             .await?;
             transaction.commit().await?;
