@@ -98,18 +98,36 @@ pub async fn activate_gateway_configuration(
     })
 }
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct GatewayCooldownSnapshot {
+    account_active: bool,
+    provider_active: bool,
+}
+
+impl GatewayCooldownSnapshot {
+    pub(crate) fn active_scope(&self) -> Option<crate::GatewayMutationCooldownScope> {
+        if self.provider_active {
+            Some(crate::GatewayMutationCooldownScope::Provider)
+        } else if self.account_active {
+            Some(crate::GatewayMutationCooldownScope::Account)
+        } else {
+            None
+        }
+    }
+}
+
 /// Loads both durable cooldowns from one snapshot; a missing row fails closed
 /// at the calling operation's boundary.
 pub(crate) async fn load_gateway_cooldown<'e>(
     executor: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     account_id: syrup_rail::GatewayAccountId,
     provider_key: &syrup_rail::GatewayProviderKey,
-) -> Result<Option<(bool, bool)>, sqlx::Error> {
+) -> Result<Option<GatewayCooldownSnapshot>, sqlx::Error> {
     sqlx::query_as(
         r#"
         SELECT
-            COALESCE(accounts.mutation_rate_limited_until > clock_timestamp(), false),
-            provider.rate_limited_until > clock_timestamp()
+            COALESCE(accounts.mutation_rate_limited_until > clock_timestamp(), false) AS account_active,
+            provider.rate_limited_until > clock_timestamp() AS provider_active
         FROM billing_gateway_accounts AS accounts
         INNER JOIN billing_gateway_provider_rate_limits AS provider
             ON provider.provider_key = accounts.provider_key

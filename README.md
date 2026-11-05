@@ -249,9 +249,15 @@ application checks. CI uses `scripts/check-rust-policy.py` to retain the Rust
 file-size and `mod.rs` policies removed from Jig's native checks in 0.7.1.
 
 - `scripts/jig doctor`
+- `scripts/jig check clippy`
 - `scripts/jig check test`
 - `scripts/check-public-api.sh`
 - `cargo test -p syrup-rail-nmi-client`
+
+All workspace members inherit the Clippy rules in the root `Cargo.toml`.
+`clippy.toml` sets cognitive complexity to 20, function length to 100 lines,
+and boolean function parameters to zero. Local and CI Clippy checks treat
+warnings as errors.
 
 See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.

@@ -91,9 +91,7 @@ impl SubscriptionBillingService {
         )
         .await?
         .ok_or(SubscriptionBillingServiceError::GatewayConfigurationChanged)?;
-        Ok(GatewayMutationCooldownScope::from_active_flags(
-            row.0, row.1,
-        ))
+        Ok(row.active_scope())
     }
 
     pub(super) async fn resolve_subscriber_readiness_failure(

@@ -106,7 +106,7 @@ pub(super) async fn lock_pending_charge_for_classification(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     charge_id: Uuid,
     attempt_id: Uuid,
-) -> Result<Option<(ChargeRole, Option<String>, bool, bool)>, sqlx::Error> {
+) -> Result<Option<(ChargeRole, Option<String>, ChargeIdentityMatch, bool)>, sqlx::Error> {
     let row = sqlx::query(
         r#"
         SELECT charges.charge_role,
@@ -182,7 +182,11 @@ pub(super) async fn lock_pending_charge_for_classification(
         Ok((
             role,
             row.try_get("transaction_id")?,
-            row.try_get("same_charge")?,
+            if row.try_get("same_charge")? {
+                ChargeIdentityMatch::Same
+            } else {
+                ChargeIdentityMatch::Different
+            },
             row.try_get("dimensions_match")?,
         ))
     })
@@ -195,7 +199,7 @@ pub(super) async fn classify_pending_charge(
     charge_id: Uuid,
     role: ChargeRole,
     transaction_id: Option<&str>,
-    same_charge: bool,
+    identity_match: ChargeIdentityMatch,
 ) -> Result<(ChargeProgression, Option<String>), sqlx::Error> {
     let Some(transaction_id) = transaction_id else {
         return Ok((
@@ -244,7 +248,8 @@ pub(super) async fn classify_pending_charge(
         && (role == ChargeRole::Additional
             || terminal_external_reversal
             || initial_grant_conflict
-            || (attempt.transaction_id.is_some() && !same_charge))
+            || (attempt.transaction_id.is_some()
+                && identity_match == ChargeIdentityMatch::Different))
     {
         return Ok((
             ChargeProgression::ExternalReversalRequired,
@@ -258,7 +263,9 @@ pub(super) async fn classify_pending_charge(
             ),
         ));
     }
-    if same_charge && attempt.status == PaymentAttemptStatus::Approved {
+    if identity_match == ChargeIdentityMatch::Same
+        && attempt.status == PaymentAttemptStatus::Approved
+    {
         return Ok((ChargeProgression::Applied, None));
     }
     Ok((

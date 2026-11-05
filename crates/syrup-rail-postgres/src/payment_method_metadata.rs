@@ -185,7 +185,7 @@ pub async fn refresh_payment_method_metadata(
     .ok_or(sqlx::Error::RowNotFound)?;
     // Release read locks and restore connection settings before any host/provider I/O.
     read_transaction.commit().await?;
-    if let Some(scope) = GatewayMutationCooldownScope::from_active_flags(cooldown.0, cooldown.1) {
+    if let Some(scope) = cooldown.active_scope() {
         return Err(PaymentMethodMetadataRefreshError::CooldownActive { scope });
     }
     let gateway = resolver

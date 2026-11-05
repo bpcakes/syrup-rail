@@ -95,14 +95,22 @@ pub(super) async fn current_subscription_id(
     .await
 }
 
+pub(super) enum DiscountCodeLookup {
+    Read,
+    LockForUpdate,
+}
+
 pub(super) async fn find_active_code(
     connection: &mut PgConnection,
     billing_scope_id: BillingScopeId,
     plan_key: &PlanKey,
     code: &SubscriptionDiscountCode,
-    for_update: bool,
+    lookup: DiscountCodeLookup,
 ) -> Result<Option<PgRow>, sqlx::Error> {
-    let lock = if for_update { "FOR UPDATE" } else { "" };
+    let lock = match lookup {
+        DiscountCodeLookup::Read => "",
+        DiscountCodeLookup::LockForUpdate => "FOR UPDATE",
+    };
     // The lock clause is a closed choice of literals; all values remain bound.
     sqlx::query(sqlx::AssertSqlSafe(format!(
         r#"

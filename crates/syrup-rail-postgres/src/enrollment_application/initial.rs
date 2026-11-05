@@ -634,7 +634,11 @@ async fn observe_approved_evidence_with_retry(
         pool,
         LockFreeApprovedEvidenceTerms::initial(reservation),
         evidence,
-        expired_period,
+        if expired_period {
+            crate::processor_charges::LockFreeApprovalPolicy::ReverseExpiredPeriod
+        } else {
+            crate::processor_charges::LockFreeApprovalPolicy::Reconcile
+        },
     )
     .await
 }

@@ -928,7 +928,7 @@ async fn observe_payment_method_replacement_approved_evidence_with_retry(
         pool,
         LockFreeApprovedEvidenceTerms::payment_method_replacement(reservation),
         evidence,
-        false,
+        crate::processor_charges::LockFreeApprovalPolicy::Reconcile,
     )
     .await
 }

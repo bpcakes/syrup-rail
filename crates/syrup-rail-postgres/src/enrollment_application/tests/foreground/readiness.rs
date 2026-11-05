@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn terminal_live_enrollment_replays_under_test_policy_without_provider_io()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("terminal_mode", false, false, false).await?;
+    let fixture = enrollment_fixture("terminal_mode").build().await?;
     let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
         "txn_terminal_cross_mode",
     ))));
@@ -47,7 +47,7 @@ async fn terminal_live_enrollment_replays_under_test_policy_without_provider_io(
 #[tokio::test]
 async fn foreground_renewal_mode_mismatch_does_not_consume_retry_budget()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("renew_ready", false, false, false).await?;
+    let fixture = enrollment_fixture("renew_ready").build().await?;
     let initial_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
         "txn_renew_ready_initial",
     ))));
@@ -150,7 +150,7 @@ async fn foreground_renewal_mode_mismatch_does_not_consume_retry_budget()
 #[tokio::test]
 async fn foreground_renewal_preserves_final_mode_query_unavailability() -> Result<(), Box<dyn Error>>
 {
-    let fixture = enrollment_fixture("renew_final", false, false, false).await?;
+    let fixture = enrollment_fixture("renew_final").build().await?;
     let initial_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
         "txn_renew_final_ready_initial",
     ))));
@@ -248,7 +248,7 @@ async fn foreground_renewal_preserves_final_mode_query_unavailability() -> Resul
 #[tokio::test]
 async fn foreground_unavailable_readiness_keeps_the_prepared_attempt_retryable()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("svc_ready_retry", false, false, false).await?;
+    let fixture = enrollment_fixture("svc_ready_retry").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [
             Err(GatewayError::Unavailable(GatewayDiagnostic::new(
@@ -308,7 +308,7 @@ async fn foreground_unavailable_readiness_keeps_the_prepared_attempt_retryable()
 #[tokio::test]
 async fn final_unavailable_mode_query_restores_enrollment_for_same_key_retry()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("final_retry", false, false, false).await?;
+    let fixture = enrollment_fixture("final_retry").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [
             Ok(GatewayAccountMode::Live),
@@ -366,7 +366,7 @@ async fn final_unavailable_mode_query_restores_enrollment_for_same_key_retry()
 #[tokio::test]
 async fn foreground_configuration_readiness_is_typed_and_same_key_recovers_terminal_result()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("svc_ready_config", false, false, false).await?;
+    let fixture = enrollment_fixture("svc_ready_config").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Err(GatewayError::Configuration(GatewayDiagnostic::new(
             "invalid merchant configuration",
@@ -428,7 +428,7 @@ async fn foreground_configuration_readiness_is_typed_and_same_key_recovers_termi
 
 #[tokio::test]
 async fn foreground_service_requires_live_mode_by_default() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("mode_live_def", false, false, false).await?;
+    let fixture = enrollment_fixture("mode_live_def").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Test)],
         Ok(approved_outcome("txn_live_default_must_not_submit")),
@@ -474,7 +474,7 @@ async fn foreground_service_requires_live_mode_by_default() -> Result<(), Box<dy
 
 #[tokio::test]
 async fn foreground_service_rechecks_mode_at_submission() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("mode_flip_guard", false, false, false).await?;
+    let fixture = enrollment_fixture("mode_flip_guard").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
         Ok(approved_outcome("txn_single_mode_capability")),
@@ -510,7 +510,7 @@ async fn foreground_service_rechecks_mode_at_submission() -> Result<(), Box<dyn 
 
 #[tokio::test]
 async fn foreground_service_blocks_mode_flip_after_early_readiness() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("mode_flip_final", false, false, false).await?;
+    let fixture = enrollment_fixture("mode_flip_final").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Live), Ok(GatewayAccountMode::Test)],
         Ok(approved_outcome("txn_mode_flip_must_not_submit")),
@@ -562,7 +562,7 @@ async fn foreground_service_blocks_mode_flip_after_early_readiness() -> Result<(
 #[tokio::test]
 async fn prepared_test_attempt_cannot_resume_under_live_service_mode() -> Result<(), Box<dyn Error>>
 {
-    let fixture = enrollment_fixture("mode_retry_guard", false, false, false).await?;
+    let fixture = enrollment_fixture("mode_retry_guard").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Err(GatewayError::Unavailable(GatewayDiagnostic::new(
             "temporary readiness failure",
@@ -618,7 +618,7 @@ async fn prepared_test_attempt_cannot_resume_under_live_service_mode() -> Result
 #[tokio::test]
 async fn foreground_service_submits_when_test_mode_is_required_and_observed()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("mode_test_ok", false, false, false).await?;
+    let fixture = enrollment_fixture("mode_test_ok").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
         Ok(approved_outcome("txn_test_mode_allowed")),
@@ -759,7 +759,7 @@ async fn foreground_service_submits_when_test_mode_is_required_and_observed()
 #[tokio::test]
 async fn foreground_service_rejects_live_mode_when_test_mode_is_required()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("mode_test_guard", false, false, false).await?;
+    let fixture = enrollment_fixture("mode_test_guard").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Live)],
         Ok(approved_outcome("txn_test_guard_must_not_submit")),

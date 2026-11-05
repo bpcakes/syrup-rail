@@ -92,6 +92,12 @@ struct LockedAttempt {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChargeIdentityMatch {
+    Same,
+    Different,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChargeRole {
     Primary,
     Additional,
@@ -672,7 +678,7 @@ pub async fn classify_pending_processor_charges(
                 transaction.rollback().await?;
                 continue;
             };
-            let Some((role, charge_transaction_id, same_charge, dimensions_match)) =
+            let Some((role, charge_transaction_id, identity_match, dimensions_match)) =
                 lock_pending_charge_for_classification(
                     &mut transaction,
                     candidate.id,
@@ -694,7 +700,7 @@ pub async fn classify_pending_processor_charges(
                 candidate.id,
                 role,
                 charge_transaction_id.as_deref(),
-                same_charge,
+                identity_match,
             )
             .await?;
             transition_pending_charge(

@@ -2,13 +2,15 @@
 
 use super::*;
 
+mod discount;
+
 mod metadata_upgrade;
 mod retry_and_parking;
 
 #[tokio::test]
 async fn foreground_duplicate_diagnostic_crosses_the_application_boundary()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("duplicate_diag", false, false).await?;
+    let fixture = application_fixture("duplicate_diag").build().await?;
     let result = apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
@@ -35,7 +37,7 @@ async fn foreground_duplicate_diagnostic_crosses_the_application_boundary()
 #[tokio::test]
 async fn indeterminate_processor_error_exits_empty_reconciliation_through_manual_review()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("indeterminate", false, false).await?;
+    let fixture = application_fixture("indeterminate").build().await?;
     let outcome = indeterminate_processor_error_outcome();
     assert_eq!(outcome.status(), GatewayPaymentStatus::Unknown);
     assert!(outcome.approved_evidence().is_none());
@@ -98,91 +100,9 @@ async fn indeterminate_processor_error_exits_empty_reconciliation_through_manual
 }
 
 #[tokio::test]
-async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()
--> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("enroll_apply", true, false).await?;
-    let outcome = approved_outcome("txn_application_approved");
-    let result = apply_subscription_enrollment_gateway_outcome(
-        &fixture.database.pool,
-        &fixture.coordinator,
-        &fixture.reservation,
-        &outcome,
-    )
-    .await?;
-    assert_eq!(result.attempt().status(), PaymentAttemptStatus::Approved);
-    assert_eq!(
-        result
-            .subscription()
-            .expect("applied subscription")
-            .recurring_charge()
-            .cents(),
-        800
-    );
-    let events = fixture.coordinator.events.lock().await.clone();
-    assert_eq!(events.len(), 1);
-    assert_eq!(
-        events[0].semantic_key(),
-        BillingEventKey::SubscriptionStarted(
-            result.subscription().expect("applied subscription").id()
-        )
-    );
-    assert!(matches!(
-        &events[0],
-        BillingEvent::SubscriptionStarted { charge, .. } if charge.cents() == 800
-    ));
-    let rows: (i64, i64, i64, String, i32) = sqlx::query_as(
-        r#"
-        SELECT
-            (SELECT count(*) FROM billing_payment_methods),
-            (SELECT count(*) FROM billing_subscriptions),
-            (SELECT count(*) FROM billing_processor_charges),
-            (SELECT status FROM billing_subscription_discount_claims LIMIT 1),
-            (SELECT periods_applied FROM billing_subscription_discounts LIMIT 1)
-        "#,
-    )
-    .fetch_one(&fixture.database.pool)
-    .await?;
-    assert_eq!(rows, (1, 1, 1, "applied".to_owned(), 1));
-    let progression: String =
-        sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
-            .fetch_one(&fixture.database.pool)
-            .await?;
-    assert_eq!(progression, "applied");
-
-    let identical_replay = apply_subscription_enrollment_gateway_outcome(
-        &fixture.database.pool,
-        &fixture.coordinator,
-        &fixture.reservation,
-        &outcome,
-    )
-    .await?;
-    assert_eq!(identical_replay, result);
-    assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
-
-    let diagnostic_replay = apply_subscription_enrollment_gateway_outcome(
-        &fixture.database.pool,
-        &fixture.coordinator,
-        &fixture.reservation,
-        &processor_duplicate_outcome(),
-    )
-    .await?;
-    assert_eq!(
-        diagnostic_replay.attempt().status(),
-        PaymentAttemptStatus::Approved
-    );
-    assert_eq!(
-        diagnostic_replay.observation_diagnostics(),
-        &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate],
-        "a current observation annotates but never overrides the durable result"
-    );
-    assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
-    fixture.cleanup().await
-}
-
-#[tokio::test]
 async fn approved_application_projects_the_locked_attempt_not_mismatched_reservation_terms()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("durable_terms", false, false).await?;
+    let fixture = application_fixture("durable_terms").build().await?;
     let mismatched_command = EnrollSubscription::new(
         syrup_rail::SubscriptionPaymentContext::new(
             fixture.command.attempt_id(),
@@ -231,7 +151,7 @@ async fn approved_application_projects_the_locked_attempt_not_mismatched_reserva
 #[tokio::test]
 async fn reconciled_initial_approval_uses_durable_attempt_after_configuration_rotation()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("rec_initial", false, false).await?;
+    let fixture = application_fixture("rec_initial").build().await?;
     sqlx::query(
         r#"
         UPDATE billing_gateway_accounts
@@ -273,7 +193,7 @@ async fn reconciled_initial_approval_uses_durable_attempt_after_configuration_ro
 #[tokio::test]
 async fn reconciled_initial_outcomes_cannot_replace_an_established_processor_identity()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("rec_init_id", false, false).await?;
+    let fixture = application_fixture("rec_init_id").build().await?;
     let unknown = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
         ProcessorEvidence::new(
@@ -373,7 +293,7 @@ async fn reconciled_initial_outcomes_cannot_replace_an_established_processor_ide
 #[tokio::test]
 async fn unresolved_same_transaction_approval_with_immutable_conflicting_metadata_fails_visibly()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("rec_immut_id", false, false).await?;
+    let fixture = application_fixture("rec_immut_id").build().await?;
     let transaction_id = "txn_initial_immutable";
     let durable_observation = GatewayPaymentOutcome::new(
         GatewayPaymentStatus::Unknown,
@@ -426,7 +346,7 @@ async fn unresolved_same_transaction_approval_with_immutable_conflicting_metadat
 #[tokio::test]
 async fn terminal_initial_reconciliation_reports_conflicts_without_rewriting_the_winner()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("term_init_id", false, false).await?;
+    let fixture = application_fixture("term_init_id").build().await?;
     let winner = apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
@@ -558,7 +478,7 @@ async fn terminal_initial_reconciliation_reports_conflicts_without_rewriting_the
 #[tokio::test]
 async fn committed_admission_capability_submits_and_applies_exactly_one_sale()
 -> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("submit_once", false, false).await?;
+    let mut fixture = application_fixture("submit_once").build().await?;
     let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
         "txn_submitted_once",
     ))));
@@ -584,7 +504,7 @@ async fn committed_admission_capability_submits_and_applies_exactly_one_sale()
 #[tokio::test]
 async fn mode_capability_mismatch_cannot_reach_the_low_level_submission()
 -> Result<(), Box<dyn Error>> {
-    let mut fixture = application_fixture("mode_guard", false, false).await?;
+    let mut fixture = application_fixture("mode_guard").build().await?;
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
         Ok(approved_outcome("txn_mode_guard_must_not_submit")),
@@ -627,7 +547,7 @@ async fn mode_capability_mismatch_cannot_reach_the_low_level_submission()
 #[tokio::test]
 async fn unsubmitted_review_attempt_replays_across_gateway_mode_change()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("review_mode", false, false, false).await?;
+    let fixture = enrollment_fixture("review_mode").build().await?;
     let mut transaction = fixture.database.pool.begin().await?;
     let attempt_id = match reserve_subscription_enrollment_in_transaction(
         &mut transaction,
@@ -679,7 +599,7 @@ async fn unsubmitted_review_attempt_replays_across_gateway_mode_change()
 #[tokio::test]
 async fn stale_initial_attempt_expires_before_cross_mode_replay_policy()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("stale_mode", false, false, false).await?;
+    let fixture = enrollment_fixture("stale_mode").build().await?;
     let mut transaction = fixture.database.pool.begin().await?;
     let attempt_id = match reserve_subscription_enrollment_in_transaction(
         &mut transaction,
@@ -736,7 +656,7 @@ async fn stale_initial_attempt_expires_before_cross_mode_replay_policy()
 #[tokio::test]
 async fn renewal_mode_capability_mismatch_cannot_reach_the_low_level_submission()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("renew_mode_guard", false, false).await?;
+    let fixture = application_fixture("renew_mode_guard").build().await?;
     let initial = apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
@@ -816,7 +736,7 @@ async fn renewal_mode_capability_mismatch_cannot_reach_the_low_level_submission(
 #[tokio::test]
 async fn recovery_admission_rejects_changed_contact_before_provider_io()
 -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("rec_submit_id", false, false).await?;
+    let fixture = application_fixture("rec_submit_id").build().await?;
     let initial = apply_subscription_enrollment_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,

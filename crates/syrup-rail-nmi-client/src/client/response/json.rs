@@ -5,10 +5,11 @@ use super::super::{
     WireError,
     text::{bounded_gateway_text, last4, parse_expiry, sensitive_gateway_field, valid_last4},
 };
+use super::common::ScalarBounds::{GatewayField, Protocol};
 use super::common::{
     DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedPaymentDecision,
-    ResolvedScalar, ScalarOccurrence, ScalarOccurrenceCollector, finalize_payment_identifiers,
-    rate_limited_wire_error, resolve_optional_scalar,
+    ResolvedScalar, ScalarBounds, ScalarOccurrence, ScalarOccurrenceCollector,
+    finalize_payment_identifiers, rate_limited_wire_error, resolve_optional_scalar,
 };
 
 const JSON_TRANSACTION_ID_PATHS: &[&[&str]] = &[
@@ -80,7 +81,7 @@ fn collect_json_identifier(
 fn collect_json_direct_scalar(
     value: &LosslessJsonValue,
     name: &str,
-    bounded: bool,
+    bounds: ScalarBounds,
 ) -> ScalarOccurrenceCollector {
     let mut collector = ScalarOccurrenceCollector::default();
     let LosslessJsonValue::Object(fields) = value else {
@@ -88,10 +89,9 @@ fn collect_json_direct_scalar(
     };
     for (_, field_value) in fields.iter().filter(|(field, _)| field == name) {
         let occurrence = json_scalar_occurrence(field_value);
-        if bounded {
-            collector.record_bounded(occurrence);
-        } else {
-            collector.record(occurrence);
+        match bounds {
+            GatewayField => collector.record_bounded(occurrence),
+            Protocol => collector.record(occurrence),
         }
     }
     collector
@@ -127,8 +127,9 @@ pub(in crate::client) fn payment_outcome_from_json(
     if json_is_known_preprocessing_rate_limit(value, &decision) {
         return Err(rate_limited_wire_error());
     }
-    let (response_text, _) =
-        resolve_optional_scalar(collect_json_direct_scalar(value, "response_text", true).finish());
+    let (response_text, _) = resolve_optional_scalar(
+        collect_json_direct_scalar(value, "response_text", GatewayField).finish(),
+    );
     let mut status = decision.status;
     let mut diagnostics = decision.diagnostics;
     let (transaction_id, customer_vault_id) = finalize_payment_identifiers(
@@ -157,13 +158,13 @@ pub(in crate::client) fn payment_outcome_from_json(
 
 fn payment_decision_from_json(value: &LosslessJsonValue) -> ResolvedPaymentDecision {
     PaymentDecisionFields::new(
-        collect_json_direct_scalar(value, "response", false)
+        collect_json_direct_scalar(value, "response", Protocol)
             .finish_decision(DecisionFieldKind::Response),
-        collect_json_direct_scalar(value, "response_code", false)
+        collect_json_direct_scalar(value, "response_code", Protocol)
             .finish_decision(DecisionFieldKind::ResponseCode),
-        collect_json_direct_scalar(value, "status", false)
+        collect_json_direct_scalar(value, "status", Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
-        collect_json_direct_scalar(value, "condition", false)
+        collect_json_direct_scalar(value, "condition", Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
     )
     .resolve()

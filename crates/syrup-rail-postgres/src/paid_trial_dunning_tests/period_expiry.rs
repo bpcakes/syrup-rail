@@ -21,6 +21,9 @@ use crate::{
     retire_expired_subscription_period_in_transaction, test_support::immediate_offer,
 };
 
+mod restart;
+use restart::{RestartOutcome, expired_restart};
+
 const ENFORCE: SubscriptionPeriodExpiryPolicy =
     SubscriptionPeriodExpiryPolicy::RejectExpiredPeriods;
 const EXPIRED_APPROVAL: &str = "subscription_approved_period_expired";
@@ -1968,78 +1971,16 @@ async fn late_approval_of_a_declined_restart_is_parked_for_its_expired_period()
     cleanup
 }
 
-/// Reserves and admits a full-price restart, optionally declines it, and
-/// backdates its submission so the calendar month it would buy has ended.
-async fn expired_restart(
-    harness: &Harness,
-    key: &str,
-    declined: bool,
-) -> Result<(SubscriberId, SubscriptionEnrollmentReservation), Box<dyn Error>> {
-    let offer = immediate_offer(
-        PlanKey::new("identity_pro")?,
-        ChargeAmount::new(2_699, CurrencyCode::new("USD")?)?,
-    );
-    let offers = StaticOfferStore {
-        offer: offer.clone(),
-    };
-    let subscriber_id = SubscriberId::new(Uuid::now_v7());
-    let enrollment = SubscriptionEnrollmentReservation::from_command(
-        &syrup_rail::EnrollSubscription::new(
-            syrup_rail::SubscriptionPaymentContext::new(
-                PaymentAttemptId::new(Uuid::now_v7()),
-                harness.scope,
-                subscriber_id,
-                GatewayConfigurationId::new(harness.account.gateway_configuration_id),
-                IdempotencyKey::new(key)?,
-                PaymentToken::new("opaque-restart-token")?,
-                BillingContact::new(None, None, Some("restart@example.test".to_owned()))?,
-            ),
-            SubscriptionEnrollmentExpectedTerms::full_price(offer),
-        ),
-        &harness.gateway,
-        GatewayAccountMode::Live,
-    )?;
-    let mut transaction = harness.pool().begin().await?;
-    assert!(matches!(
-        reserve_subscription_enrollment_in_transaction(&mut transaction, &offers, &enrollment)
-            .await?,
-        SubscriptionEnrollmentReservationOutcome::Reserved(_)
-    ));
-    transaction.commit().await?;
-    assert!(matches!(
-        admit_subscription_enrollment_submission(harness.pool(), &offers, &enrollment).await?,
-        SubscriptionEnrollmentAdmissionOutcome::Admitted(_)
-    ));
-    if declined {
-        apply_subscription_enrollment_gateway_outcome(
-            harness.pool(),
-            &harness.enforcing,
-            &enrollment,
-            &declined_outcome(&format!("{key}_decline")),
-        )
-        .await?;
-    }
-    sqlx::query(
-        r#"
-        UPDATE billing_payment_attempts
-        SET created_at = created_at - interval '40 days',
-            submitted_at = submitted_at - interval '40 days',
-            resolved_at = resolved_at - interval '40 days'
-        WHERE id = $1
-        "#,
-    )
-    .bind(enrollment.identity().attempt_id().as_uuid())
-    .execute(harness.pool())
-    .await?;
-    Ok((subscriber_id, enrollment))
-}
-
 #[tokio::test]
 async fn expiry_precedes_grant_conflicts_that_can_later_clear() -> Result<(), Box<dyn Error>> {
     let harness = Harness::start("pe_grant_first").await?;
     let result = async {
-        let (subscriber_id, enrollment) =
-            expired_restart(&harness, "grant-first-restart", false).await?;
+        let (subscriber_id, enrollment) = expired_restart(
+            &harness,
+            "grant-first-restart",
+            RestartOutcome::AwaitingResponse,
+        )
+        .await?;
         // A grant became active after submission and before the approval.
         sqlx::query(
             r#"
@@ -2088,8 +2029,12 @@ async fn expiry_precedes_grant_conflicts_that_can_later_clear() -> Result<(), Bo
 async fn compensation_parks_a_late_approval_of_a_declined_restart() -> Result<(), Box<dyn Error>> {
     let harness = Harness::start("pe_comp_decl").await?;
     let result = async {
-        let (subscriber_id, enrollment) =
-            expired_restart(&harness, "compensated-declined-restart", true).await?;
+        let (subscriber_id, enrollment) = expired_restart(
+            &harness,
+            "compensated-declined-restart",
+            RestartOutcome::Declined,
+        )
+        .await?;
         let attempt_id = enrollment.identity().attempt_id();
         assert_eq!(
             attempt_disposition(harness.pool(), attempt_id).await?.0,
@@ -2150,7 +2095,7 @@ async fn evidence_only_late_approval_of_an_old_declined_restart_reaches_operator
     let result = async {
         // Declined 40 days ago, so exact reconciliation no longer rescans it.
         let (subscriber_id, enrollment) =
-            expired_restart(&harness, "old-declined-restart", true).await?;
+            expired_restart(&harness, "old-declined-restart", RestartOutcome::Declined).await?;
         let attempt_id = enrollment.identity().attempt_id();
         let mut holder = harness.pool().begin().await?;
         sqlx::query(

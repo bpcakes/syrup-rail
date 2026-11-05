@@ -78,20 +78,14 @@ pub fn raw_card_data_ranges(value: &str) -> Vec<Range<usize>> {
                 &mut ranges,
                 candidate_start.take(),
                 candidate_end,
-                digits.has_luhn_window(),
+                &digits,
             );
             digits.reset();
         }
         index = next_index;
     }
 
-    push_raw_card_range(
-        value,
-        &mut ranges,
-        candidate_start,
-        candidate_end,
-        digits.has_luhn_window(),
-    );
+    push_raw_card_range(value, &mut ranges, candidate_start, candidate_end, &digits);
     ranges
 }
 
@@ -100,12 +94,12 @@ fn push_raw_card_range(
     ranges: &mut Vec<Range<usize>>,
     candidate_start: Option<usize>,
     candidate_end: usize,
-    has_luhn_window: bool,
+    digits: &PanDigitWindow,
 ) {
     let Some(candidate_start) = candidate_start else {
         return;
     };
-    if !has_luhn_window {
+    if !digits.has_luhn_window() {
         return;
     }
     let candidate = &value[candidate_start..candidate_end];
