@@ -269,6 +269,19 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
 #[tokio::test]
 async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
 -> Result<(), Box<dyn Error>> {
+    assert_terminal_reversal_reason(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict)
+        .await
+}
+
+#[tokio::test]
+async fn expired_period_replay_preserves_the_attested_prior_charge_classification()
+-> Result<(), Box<dyn Error>> {
+    assert_terminal_reversal_reason(PaymentResolutionCode::SubscriptionApprovedPeriodExpired).await
+}
+
+async fn assert_terminal_reversal_reason(
+    prior_code: PaymentResolutionCode,
+) -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("rail_op_grant").await?;
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let attempt_id = Uuid::now_v7();
@@ -299,7 +312,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
                 $1, $2, $3, 'base', 'subscription_initial', 'review_required',
                 $4, $5, 500, 'USD', $6, $7, $8, 'txn-grant-conflict',
                 '1', '100', 'Approved', 'complete',
-                'subscription_initial_current_grant_conflict',
+                $9,
                 clock_timestamp(), clock_timestamp(), 2, 'recurring_immediately',
                 500, 'calendar_months', 1, ARRAY[]::bigint[],
                 'remain_past_due', 'suspend_immediately'
@@ -314,6 +327,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
     .bind(account.gateway_account_id)
     .bind(account.gateway_configuration_id)
     .bind(&order_id)
+    .bind(prior_code.as_str())
     .execute(&database.pool)
     .await?;
     sqlx::query(
@@ -355,19 +369,81 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
         &reason,
     )
     .await?;
-    assert!(matches!(
-        attested,
-        ExternalReversalAttestationOutcome::Attested { .. }
-    ));
+    let ExternalReversalAttestationOutcome::Attested {
+        attempt,
+        attestation,
+    } = attested
+    else {
+        panic!("expected reversal attestation")
+    };
     let state_code: String =
         sqlx::query_scalar("SELECT state_code FROM billing_processor_charges WHERE id = $1")
             .bind(charge_id)
             .fetch_one(&database.pool)
             .await?;
+    assert_eq!(state_code, prior_code.as_str());
+    use syrup_rail::ProcessorChargeStateCode;
+    let snapshot_sql = "SELECT row_to_json(charges)::text, row_to_json(attempts)::text, \
+        row_to_json(attestations)::text FROM billing_processor_charges charges \
+        JOIN billing_payment_attempts attempts ON attempts.id = charges.attempt_id \
+        JOIN billing_external_reversal_attestations attestations \
+            ON attestations.processor_charge_id = charges.id WHERE charges.id = $1";
+    let before: (String, String, String) = sqlx::query_as(snapshot_sql)
+        .bind(charge_id)
+        .fetch_one(&database.pool)
+        .await?;
+    // A terminal self-edge must not rewrite the cause into the final outcome,
+    // clear it, or replace a specific cause with generic reversal review.
+    for replacement in [
+        Some(ProcessorChargeStateCode::PaymentResolution(
+            attestation.final_resolution_code(),
+        )),
+        None,
+        Some(ProcessorChargeStateCode::ExternalReversalRequired),
+    ] {
+        let mut transaction = database.pool.begin().await?;
+        assert!(matches!(
+            crate::transition_processor_charge_in_transaction(
+                &mut transaction,
+                ProcessorChargeId::new(charge_id),
+                &[ProcessorChargeProgression::ExternallyReversed],
+                ProcessorChargeProgression::ExternallyReversed,
+                replacement,
+            )
+            .await,
+            Err(crate::ProcessorChargeStoreError::InvalidState(_))
+        ));
+        transaction.commit().await?;
+        let after: (String, String, String) = sqlx::query_as(snapshot_sql)
+            .bind(charge_id)
+            .fetch_one(&database.pool)
+            .await?;
+        assert_eq!(after, before);
+    }
+    let mut transaction = database.pool.begin().await?;
+    let replay = crate::transition_processor_charge_in_transaction(
+        &mut transaction,
+        ProcessorChargeId::new(charge_id),
+        &[ProcessorChargeProgression::ExternallyReversed],
+        ProcessorChargeProgression::ExternallyReversed,
+        Some(ProcessorChargeStateCode::PaymentResolution(prior_code)),
+    )
+    .await?;
+    transaction.commit().await?;
     assert_eq!(
-        state_code,
-        PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict.as_str()
+        replay.state_code(),
+        Some(ProcessorChargeStateCode::PaymentResolution(prior_code))
     );
+    assert!(matches!(
+        crate::store_compensating_processor_charge(
+            &database.pool,
+            attempt.identity().attempt_id(),
+            attempt.request().gateway_order_id(),
+            attestation.processor_evidence(),
+        )
+        .await?,
+        crate::CompensatingProcessorChargeOutcome::ExactReplay
+    ));
     assert!(matches!(
         attest_external_reversal(
             &database.pool,

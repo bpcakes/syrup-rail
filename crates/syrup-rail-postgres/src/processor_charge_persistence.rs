@@ -122,21 +122,48 @@ pub(crate) fn attestation_matches_source(
     attempt: &PaymentAttempt,
     charge: &ProcessorCharge,
 ) -> bool {
-    attestation.processor_charge_id() == charge.id()
-        && attestation.attempt_id() == attempt.identity().attempt_id()
-        && attestation.gateway_account_id() == attempt.identity().gateway_account_id()
-        && attestation.gateway_configuration_id() == attempt.identity().gateway_configuration_id()
-        && attestation.gateway_order_id() == attempt.request().gateway_order_id()
-        && attestation.amount().money() == charge.amount()
-        && attestation.gateway_transaction_id()
-            == charge
-                .evidence()
-                .transaction_id()
-                .expect("eligible charge has transaction identity")
-        && attestation.processor_evidence() == charge.evidence()
-        && attestation.prior_resolution_code() == expected_prior_resolution_code(attempt, charge)
-        && attestation.final_resolution_code()
-            == expected_final_resolution_code(attempt.kind(), attestation.kind())
+    charge.progression() == ProcessorChargeProgression::ExternallyReversed
+        && AttestedReversalDisposition::from_evidence(attestation, attempt, charge)
+            .is_some_and(|disposition| disposition.permits_state_code(charge.state_code()))
+}
+
+/// A reversal's historical cause is owned by its immutable attestation. The
+/// attempt may already carry the final outcome; it cannot reconstruct that cause.
+pub(crate) struct AttestedReversalDisposition {
+    prior_code: ProcessorChargeStateCode,
+}
+
+impl AttestedReversalDisposition {
+    pub(crate) fn from_evidence(
+        attestation: &ExternalReversalAttestation,
+        attempt: &PaymentAttempt,
+        charge: &ProcessorCharge,
+    ) -> Option<Self> {
+        let matches = attestation.processor_charge_id() == charge.id()
+            && attestation.attempt_id() == charge.attempt_id()
+            && attestation.attempt_id() == attempt.identity().attempt_id()
+            && attestation.gateway_account_id() == charge.gateway_account_id()
+            && attestation.gateway_account_id() == attempt.identity().gateway_account_id()
+            && attestation.gateway_configuration_id()
+                == attempt.identity().gateway_configuration_id()
+            && attestation.gateway_order_id() == charge.gateway_order_id()
+            && attestation.gateway_order_id() == attempt.request().gateway_order_id()
+            && attestation.amount().money() == charge.amount()
+            && Some(attestation.gateway_transaction_id()) == charge.evidence().transaction_id()
+            && attestation.processor_evidence() == charge.evidence()
+            && attestation.final_resolution_code()
+                == expected_final_resolution_code(attempt.kind(), attestation.kind());
+        if !matches {
+            return None;
+        }
+        Some(Self {
+            prior_code: parse_charge_state_code(attestation.prior_resolution_code()).ok()?,
+        })
+    }
+
+    pub(crate) fn permits_state_code(&self, code: Option<ProcessorChargeStateCode>) -> bool {
+        code == Some(self.prior_code)
+    }
 }
 
 pub(crate) fn expected_prior_resolution_code(

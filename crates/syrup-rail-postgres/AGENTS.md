@@ -126,6 +126,9 @@ and transaction orchestration.
   contract. `src/operator_review/{pages,manual_failure,external_reversal}.rs`
   own pagination and the two operator workflows; `src/processor_charge_persistence.rs`
   is their neutral shared processor-charge and immutable-attestation codec.
+  Its `AttestedReversalDisposition` validates charge/attempt identity and the
+  attested final outcome; terminal writers and replay retain the immutable
+  attestation's prior reason rather than reconstructing it from attempt state.
 - `src/processor_charges.rs` — canonical charge observation and transition
   facade; `src/processor_charges/storage.rs` owns exact replay,
   transactionless identification and bounded compensating persistence support.

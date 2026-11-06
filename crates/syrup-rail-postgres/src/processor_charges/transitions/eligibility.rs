@@ -80,7 +80,10 @@ pub(super) async fn validate_transition(
             "expired-period reason requires subscription reversal disposition",
         ));
     }
-    if destination == ProcessorChargeProgression::Applied {
+    if matches!(
+        destination,
+        ProcessorChargeProgression::Applied | ProcessorChargeProgression::ExternallyReversed
+    ) {
         let attempt = find_payment_attempt_by_id_on_connection(
             connection,
             charge.billing_scope_id(),
@@ -90,7 +93,28 @@ pub(super) async fn validate_transition(
         .ok_or(ProcessorChargeStoreError::InvalidState(
             "processor charge attempt was not found",
         ))?;
-        if ApplicationDisposition::from_evidence(&charge, &attempt)
+        if destination == ProcessorChargeProgression::ExternallyReversed {
+            let attestation = attestation_by_charge(connection, charge_id.into_uuid())
+                .await
+                .map_err(map_operator_error)?
+                .ok_or(ProcessorChargeStoreError::InvalidState(
+                    "terminal reversal requires an attestation",
+                ))?;
+            let disposition =
+                crate::processor_charge_persistence::AttestedReversalDisposition::from_evidence(
+                    &attestation,
+                    &attempt,
+                    &charge,
+                )
+                .ok_or(ProcessorChargeStoreError::InvalidState(
+                    "reversal attestation does not match its charge and attempt",
+                ))?;
+            if !disposition.permits_state_code(resulting_code) {
+                return Err(ProcessorChargeStoreError::InvalidState(
+                    "terminal reversal must retain its attested prior reason",
+                ));
+            }
+        } else if ApplicationDisposition::from_evidence(&charge, &attempt)
             != ApplicationDisposition::Applicable
         {
             return Err(ProcessorChargeStoreError::InvalidState(

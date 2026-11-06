@@ -213,7 +213,7 @@ async fn update_processor_charge(
                     AND attestations.attempt_id = charges.attempt_id
                     AND attestations.gateway_transaction_id = charges.gateway_transaction_id
                     AND (CASE WHEN $5 THEN COALESCE(charges.state_code, $4) ELSE $4 END)
-                        IN (attestations.prior_resolution_code, attestations.final_resolution_code)
+                        = attestations.prior_resolution_code
             ))
             AND (
                 $3 <> ALL(ARRAY['external_reversal_required'::text, 'externally_reversed'::text])
@@ -255,6 +255,8 @@ async fn update_processor_charge(
 /// Compatibility callers may narrow source states, but cannot authorize an
 /// edge absent from the charge machine. Reversal review can return to
 /// reconciliation only while its owning attempt is unresolved (enforced in SQL).
+/// A terminal self-edge also retains the attestation's prior reason; the final
+/// attempt outcome is not an interchangeable charge classification.
 fn transition_allowed(from: ProcessorChargeProgression, to: ProcessorChargeProgression) -> bool {
     use ProcessorChargeProgression::*;
     match from {
