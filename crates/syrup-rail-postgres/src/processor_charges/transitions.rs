@@ -3,6 +3,8 @@
 //! source/destination pair.
 use super::*;
 
+mod eligibility;
+
 pub(super) enum ChargeStateCodeUpdate {
     Replace(Option<ProcessorChargeStateCode>),
     PreserveExisting(Option<ProcessorChargeStateCode>),
@@ -13,8 +15,11 @@ pub(super) enum ChargeStateCodeUpdate {
 #[derive(Clone, Copy, Debug)]
 pub enum ChargeTransition {
     /// Link an identified primary charge to its already-approved owning attempt.
+    /// Ordinary reversal review remains recoverable; expired periods and
+    /// attested reversals never regain application authority.
     MarkApplied,
     /// Retain unresolved evidence for later exact reconciliation.
+    /// The permanent expired-period reason is not a reconciliation reason.
     RequireReconciliation(Option<PaymentResolutionCode>),
     /// Send an identified positive charge to external-reversal review.
     RequireExternalReversal(Option<PaymentResolutionCode>),
@@ -61,7 +66,12 @@ impl ChargeTransition {
             Self::ReconcileConflictingApproval => {
                 &[Pending, ReconciliationRequired, ExternalReversalRequired]
             }
-            Self::MarkApplied => &[Pending, ReconciliationRequired, Applied],
+            Self::MarkApplied => &[
+                Pending,
+                ReconciliationRequired,
+                ExternalReversalRequired,
+                Applied,
+            ],
             Self::RequireReconciliation(_) => &[Pending, ReconciliationRequired],
             Self::RequireExternalReversal(_) | Self::ParkExpiredPeriod => {
                 &[Pending, ReconciliationRequired, ExternalReversalRequired]
@@ -145,6 +155,8 @@ async fn update_processor_charge(
     progression: ProcessorChargeProgression,
     state_code_update: ChargeStateCodeUpdate,
 ) -> Result<sqlx::postgres::PgRow, ProcessorChargeStoreError> {
+    eligibility::validate_transition(connection, charge_id, progression, &state_code_update)
+        .await?;
     let (state_code, preserve_existing_state_code) = match state_code_update {
         ChargeStateCodeUpdate::Replace(code) => (code, false),
         ChargeStateCodeUpdate::PreserveExisting(code) => (code, true),
@@ -191,6 +203,7 @@ async fn update_processor_charge(
             AND ($3 <> 'applied' OR EXISTS (
                 SELECT 1 FROM billing_payment_attempts attempts
                 WHERE attempts.id = charges.attempt_id AND attempts.status = 'approved'
+                    AND attempts.resolution_code IS DISTINCT FROM 'subscription_approved_period_expired'
                     AND billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)
                         = billing_canonical_gateway_transaction_id(charges.gateway_transaction_id)
             ))
@@ -200,7 +213,7 @@ async fn update_processor_charge(
                     AND attestations.attempt_id = charges.attempt_id
                     AND attestations.gateway_transaction_id = charges.gateway_transaction_id
                     AND (CASE WHEN $5 THEN COALESCE(charges.state_code, $4) ELSE $4 END)
-                        IN (attestations.prior_resolution_code, attestations.final_resolution_code)
+                        = attestations.prior_resolution_code
             ))
             AND (
                 $3 <> ALL(ARRAY['external_reversal_required'::text, 'externally_reversed'::text])
@@ -242,6 +255,8 @@ async fn update_processor_charge(
 /// Compatibility callers may narrow source states, but cannot authorize an
 /// edge absent from the charge machine. Reversal review can return to
 /// reconciliation only while its owning attempt is unresolved (enforced in SQL).
+/// A terminal self-edge also retains the attestation's prior reason; the final
+/// attempt outcome is not an interchangeable charge classification.
 fn transition_allowed(from: ProcessorChargeProgression, to: ProcessorChargeProgression) -> bool {
     use ProcessorChargeProgression::*;
     match from {
@@ -259,7 +274,7 @@ fn transition_allowed(from: ProcessorChargeProgression, to: ProcessorChargeProgr
         ),
         ExternalReversalRequired => matches!(
             to,
-            ReconciliationRequired | ExternalReversalRequired | ExternallyReversed
+            ReconciliationRequired | ExternalReversalRequired | Applied | ExternallyReversed
         ),
         Applied => matches!(to, Applied),
         ExternallyReversed => matches!(to, ExternallyReversed),

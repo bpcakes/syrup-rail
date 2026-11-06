@@ -54,8 +54,14 @@ async fn expired_approval_cannot_lose_its_reversal_disposition() -> Result<(), B
     let database = TestDatabase::start("rail_chg_expiry").await?;
     let result = async {
         let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
-        let attempt_id =
-            insert_host_charge_attempt(&database.pool, gateway, "expiry-order").await?;
+        let fixture = insert_subscription_attempt(
+            &database.pool,
+            gateway,
+            PaymentAttemptKind::SubscriptionRecovery,
+            "expiry-order",
+        )
+        .await?;
+        let attempt_id = fixture.identity.attempt_id();
         let mut transaction = database.pool.begin().await?;
         let ProcessorChargeObservationOutcome::Observed(charge) =
             observe_processor_charge_in_transaction(

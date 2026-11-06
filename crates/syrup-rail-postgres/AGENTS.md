@@ -54,10 +54,14 @@ and transaction orchestration.
   outcomes, and `non_submission.rs` binds retry restoration to the exact
   admission generation. Host outcome commands live in
   `host_charge_application/resolution.rs`.
+  `enrollment_application/collection.rs` validates collection state under the
+  existing recovery/renewal application locks, retaining legacy authority.
 - `src/enrollment_application/recovery/evidence.rs` owns bounded recovery
   approval-evidence retries and the fallback that does not lock the attempt.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
+  `src/renewal_failure/collection.rs` owns closed collection projections and
+  required unpaid evidence; causal access history remains in the failure owner.
 - `src/period_expiry.rs` — the database-clock billing-period expiry check,
   canonical retirement of an obsolete due period as `unpaid`, and the
   existing-subscription past-due access policy change. The service wrapper and
@@ -122,12 +126,19 @@ and transaction orchestration.
   contract. `src/operator_review/{pages,manual_failure,external_reversal}.rs`
   own pagination and the two operator workflows; `src/processor_charge_persistence.rs`
   is their neutral shared processor-charge and immutable-attestation codec.
+  Its `AttestedReversalDisposition` validates charge/attempt identity and the
+  attested final outcome; terminal writers and replay retain the immutable
+  attestation's prior reason rather than reconstructing it from attempt state.
 - `src/processor_charges.rs` — canonical charge observation and transition
   facade; `src/processor_charges/storage.rs` owns exact replay,
   transactionless identification and bounded compensating persistence support.
   `src/processor_charges/policy.rs` owns observation intents and shared approval
   classification; `transitions.rs` owns named application decisions, guarded
   compatibility transitions, and attested reversal completion.
+  `transitions/eligibility.rs` derives application eligibility from charge and
+  owning-attempt evidence and validates resulting expiry-reason dispositions.
+  Ordinary reversal review remains recoverable after matching approval; expiry
+  parking and attested reversal never regain application authority.
 - `src/host_charges.rs` — host target extension port, canonical attempt
   reservation/final admission, and typed caller-transaction access to the
   host-charge `Reserve`, `Submit`, and `Release` ledger modes.

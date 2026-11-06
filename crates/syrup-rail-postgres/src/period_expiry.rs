@@ -4,10 +4,9 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
-    BillingEvent, ChangeSubscriptionPastDueAccess, PastDueAccessPolicy, PaymentAttemptId,
-    PaymentResolutionCode, PlanKey, RetireExpiredSubscriptionPeriod, SubscriberId,
-    SubscriptionPastDueAccessChangeOutcome, SubscriptionPeriodRetirementOutcome,
-    SubscriptionStatus, next_billing_period,
+    BillingEvent, ChangeSubscriptionPastDueAccess, PaymentAttemptId, PaymentResolutionCode,
+    PlanKey, RetireExpiredSubscriptionPeriod, SubscriberId, SubscriptionPastDueAccessChangeOutcome,
+    SubscriptionPeriodRetirementOutcome, SubscriptionStatus, next_billing_period,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -135,21 +134,28 @@ pub(crate) async fn retire_expired_subscription_period_on_connection(
     };
     let subscription = decode_subscription_row(&row)?;
     let period_start_at = *command.period_start_at();
-    match subscription.status() {
-        SubscriptionStatus::Canceled => {
+    let collection = subscription
+        .collection_state()
+        .map_err(|_| SubscriptionPeriodExpiryError::InvalidState(INVALID_SUBSCRIPTION_STATE))?;
+    match collection {
+        syrup_rail::SubscriptionCollectionState::Canceled => {
             return Ok(SubscriptionPeriodRetirementOutcome::Canceled(subscription));
         }
-        SubscriptionStatus::Unpaid if *subscription.next_renewal_at() == period_start_at => {
+        syrup_rail::SubscriptionCollectionState::Unpaid
+            if *subscription.next_renewal_at() == period_start_at =>
+        {
             return Ok(SubscriptionPeriodRetirementOutcome::AlreadyUnpaid(
                 subscription,
             ));
         }
-        SubscriptionStatus::Unpaid => {
+        syrup_rail::SubscriptionCollectionState::Unpaid => {
             return Ok(SubscriptionPeriodRetirementOutcome::PeriodChanged(
                 subscription,
             ));
         }
-        SubscriptionStatus::Active | SubscriptionStatus::PastDue => {}
+        syrup_rail::SubscriptionCollectionState::Scheduled { .. }
+        | syrup_rail::SubscriptionCollectionState::RetryScheduled { .. }
+        | syrup_rail::SubscriptionCollectionState::Exhausted => {}
     }
     if *subscription.next_renewal_at() != period_start_at {
         return Ok(SubscriptionPeriodRetirementOutcome::PeriodChanged(
@@ -181,8 +187,8 @@ pub(crate) async fn retire_expired_subscription_period_on_connection(
     let access_open = match prior_status {
         SubscriptionStatus::Active => true,
         SubscriptionStatus::PastDue => {
-            policy == PastDueAccessPolicy::ContinueUntilDunningExhausted
-                && subscription.next_payment_attempt_at().is_some()
+            collection.past_due_access(policy)
+                == Some(syrup_rail::PastDueAccess::AllowedDuringDunning)
         }
         SubscriptionStatus::Canceled | SubscriptionStatus::Unpaid => {
             return Err(SubscriptionPeriodExpiryError::InvalidState(
@@ -260,7 +266,7 @@ pub(crate) async fn retire_expired_subscription_period_on_connection(
 /// and every later failure, cancellation, or terminal event derive product
 /// access from the persisted policy and the cycle's durable failure history,
 /// so a past-due row moved to
-/// [`PastDueAccessPolicy::SuspendImmediately`] loses access at once and its
+/// [`syrup_rail::PastDueAccessPolicy::SuspendImmediately`] loses access at once and its
 /// canonical access boundary is the cycle's first qualifying failure. No
 /// dunning schedule, retry time, date, amount, or payment record changes. A
 /// repeated change to the persisted policy returns `Unchanged`.

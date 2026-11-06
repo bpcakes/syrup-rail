@@ -469,3 +469,54 @@ async fn approval_after_terminal_failure_is_parked_with_reversal_required_charge
     assert!(fixture.coordinator.events.lock().await.is_empty());
     fixture.cleanup().await
 }
+
+#[tokio::test]
+async fn parked_initial_approval_recovers_without_conflicting_or_expired_evidence()
+-> Result<(), Box<dyn Error>> {
+    let fixture = application_fixture("initial_resume").build().await?;
+    sqlx::query(
+        "UPDATE billing_payment_attempts SET status = 'failed', resolved_at = clock_timestamp() \
+         WHERE id = $1",
+    )
+    .bind(fixture.reservation.identity().attempt_id().as_uuid())
+    .execute(&fixture.database.pool)
+    .await?;
+    let approval = approved_outcome("initial_late_recoverable");
+    let parked = apply_subscription_enrollment_gateway_outcome(
+        &fixture.database.pool,
+        &fixture.coordinator,
+        &fixture.reservation,
+        &approval,
+    )
+    .await?;
+    assert_eq!(
+        parked.attempt().status(),
+        PaymentAttemptStatus::ReviewRequired
+    );
+    assert!(parked.subscription().is_none());
+    let progression: String =
+        sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
+            .fetch_one(&fixture.database.pool)
+            .await?;
+    assert_eq!(progression, "external_reversal_required");
+    assert!(fixture.coordinator.events.lock().await.is_empty());
+    for _ in 0..2 {
+        let applied = apply_reconciled_subscription_enrollment_gateway_outcome(
+            &fixture.database.pool,
+            &fixture.coordinator,
+            fixture.reservation.identity().billing_scope_id(),
+            fixture.reservation.identity().attempt_id(),
+            &approval,
+        )
+        .await?;
+        assert_eq!(applied.attempt().status(), PaymentAttemptStatus::Approved);
+        assert!(applied.subscription().is_some());
+    }
+    let progression: String =
+        sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
+            .fetch_one(&fixture.database.pool)
+            .await?;
+    assert_eq!(progression, "applied");
+    assert_eq!(fixture.coordinator.events.lock().await.len(), 1);
+    fixture.cleanup().await
+}
