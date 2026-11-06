@@ -194,13 +194,7 @@ pub(super) fn compensating_progression(
     evidence: &ProcessorEvidence,
 ) -> ApprovalObservation {
     if attempt.status() == PaymentAttemptStatus::Approved {
-        if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
-            ApprovalObservation::ReplayApplied
-        } else if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
-            ApprovalObservation::ReviewReversal
-        } else {
-            ApprovalObservation::Reconcile
-        }
+        ApprovalObservation::for_approved_attempt(attempt, evidence)
     } else if attempt.request().amount().cents() > 0
         && evidence.transaction_id().is_some()
         && (matches!(

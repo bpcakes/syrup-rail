@@ -566,7 +566,7 @@ async fn apply_recovery_approved_on_connection(
             connection,
             charge.id,
             crate::processor_charges::ChargeTransition::RequireExternalReversal(Some(
-                PaymentResolutionCode::SubscriptionApprovedRecoveryStaleState,
+                crate::ChargeReversalReason::RecoveryStaleState,
             )),
         )
         .await?;
@@ -804,7 +804,7 @@ async fn try_park_recovery_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            crate::processor_charges::ApprovalObservation::ReplayApplied,
+            crate::processor_charges::ApprovalObservation::for_approved_attempt(&attempt, evidence),
         )
         .await?;
         attempt

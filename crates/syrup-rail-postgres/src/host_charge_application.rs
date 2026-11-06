@@ -605,7 +605,7 @@ async fn apply_host_charge_approved(
                 connection,
                 charge.id,
                 ChargeTransition::RequireExternalReversal(Some(
-                    PaymentResolutionCode::HostChargeApprovedStaleState,
+                    crate::ChargeReversalReason::HostStaleState,
                 )),
             )
             .await?;

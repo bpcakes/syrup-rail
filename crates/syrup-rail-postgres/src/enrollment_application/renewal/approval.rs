@@ -170,7 +170,7 @@ async fn apply_renewal_approved_on_connection(
             connection,
             charge.id,
             crate::processor_charges::ChargeTransition::RequireExternalReversal(Some(
-                PaymentResolutionCode::SubscriptionApprovedRenewalStaleState,
+                crate::ChargeReversalReason::RenewalStaleState,
             )),
         )
         .await?;

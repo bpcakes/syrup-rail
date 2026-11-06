@@ -31,7 +31,9 @@ use storage::{
 
 pub(crate) mod policy;
 pub(crate) use policy::ApprovalObservation;
+mod reasons;
 mod storage;
+pub use reasons::{ChargeReconciliationReason, ChargeReversalReason};
 mod transitions;
 use transitions::{ChargeStateCodeUpdate, transition_processor_charge};
 pub(crate) use transitions::{

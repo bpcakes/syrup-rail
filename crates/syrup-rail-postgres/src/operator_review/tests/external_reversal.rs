@@ -222,6 +222,37 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     };
     assert_eq!(attempt.status(), PaymentAttemptStatus::Failed);
     assert_eq!(attestation.actor_id(), actor);
+    let mut transaction = database.pool.begin().await?;
+    for destination in [
+        syrup_rail::ProcessorChargeProgression::Pending,
+        syrup_rail::ProcessorChargeProgression::ReconciliationRequired,
+        syrup_rail::ProcessorChargeProgression::ExternalReversalRequired,
+        syrup_rail::ProcessorChargeProgression::Applied,
+    ] {
+        assert!(
+            crate::transition_processor_charge_in_transaction(
+                &mut transaction,
+                ProcessorChargeId::new(charge_id),
+                &[syrup_rail::ProcessorChargeProgression::ExternallyReversed],
+                destination,
+                None,
+            )
+            .await
+            .is_err()
+        );
+    }
+    let unchanged: (String, String, Uuid) = sqlx::query_as(
+        "SELECT c.progression_state, c.state_code, a.actor_id \
+         FROM billing_processor_charges c JOIN billing_external_reversal_attestations a \
+         ON a.processor_charge_id = c.id WHERE c.id = $1",
+    )
+    .bind(charge_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    assert_eq!(unchanged.0, "externally_reversed");
+    assert_eq!(unchanged.1, attestation.prior_resolution_code());
+    assert_eq!(unchanged.2, *actor.as_uuid());
+    transaction.commit().await?;
     assert_eq!(host.calls.load(Ordering::SeqCst), 1);
     assert!(
         sqlx::query_scalar::<_, bool>("SELECT released FROM host_targets WHERE id = $1")

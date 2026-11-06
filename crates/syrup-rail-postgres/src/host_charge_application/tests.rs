@@ -1,6 +1,7 @@
 mod admission;
 mod billing_address;
 mod foreground;
+mod parked_recovery;
 mod resilience;
 
 use std::{

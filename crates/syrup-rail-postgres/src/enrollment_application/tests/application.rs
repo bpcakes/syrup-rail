@@ -5,6 +5,7 @@ use super::*;
 mod discount;
 
 mod metadata_upgrade;
+mod parked_recovery;
 mod retry_and_parking;
 
 #[tokio::test]

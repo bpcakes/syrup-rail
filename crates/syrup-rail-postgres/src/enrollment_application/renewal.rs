@@ -631,7 +631,7 @@ async fn try_park_renewal_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            crate::processor_charges::ApprovalObservation::ReplayApplied,
+            crate::processor_charges::ApprovalObservation::for_approved_attempt(&attempt, evidence),
         )
         .await?;
         attempt

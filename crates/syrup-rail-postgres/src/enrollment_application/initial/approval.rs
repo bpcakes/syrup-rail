@@ -216,7 +216,7 @@ async fn apply_approved_on_connection(
             connection,
             charge.id,
             crate::processor_charges::ChargeTransition::RequireExternalReversal(Some(
-                PaymentResolutionCode::SubscriptionInitialCurrentSubscriptionConflict,
+                crate::ChargeReversalReason::InitialSubscriptionConflict,
             )),
         )
         .await?;
@@ -238,7 +238,7 @@ async fn apply_approved_on_connection(
             connection,
             charge.id,
             crate::processor_charges::ChargeTransition::RequireExternalReversal(Some(
-                PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict,
+                crate::ChargeReversalReason::InitialGrantConflict,
             )),
         )
         .await?;

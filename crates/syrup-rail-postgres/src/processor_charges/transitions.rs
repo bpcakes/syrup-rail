@@ -15,9 +15,9 @@ pub enum ChargeTransition {
     /// Link an identified primary charge to its already-approved owning attempt.
     MarkApplied,
     /// Retain unresolved evidence for later exact reconciliation.
-    RequireReconciliation(Option<PaymentResolutionCode>),
+    RequireReconciliation(Option<ChargeReconciliationReason>),
     /// Send an identified positive charge to external-reversal review.
-    RequireExternalReversal(Option<PaymentResolutionCode>),
+    RequireExternalReversal(Option<ChargeReversalReason>),
     /// Retain conflicting approval evidence while its attempt remains unresolved.
     /// This may reclassify reversal review, but never an expired-period approval.
     ReconcileConflictingApproval,
@@ -37,13 +37,13 @@ impl ChargeTransition {
             Self::RequireReconciliation(code) => (
                 ReconciliationRequired,
                 ChargeStateCodeUpdate::PreserveExisting(
-                    code.map(ProcessorChargeStateCode::PaymentResolution),
+                    code.map(|reason| ProcessorChargeStateCode::PaymentResolution(reason.code())),
                 ),
             ),
             Self::RequireExternalReversal(code) => (
                 ExternalReversalRequired,
                 ChargeStateCodeUpdate::PreserveExisting(
-                    code.map(ProcessorChargeStateCode::PaymentResolution),
+                    code.map(|reason| ProcessorChargeStateCode::PaymentResolution(reason.code())),
                 ),
             ),
             Self::ParkExpiredPeriod => (
@@ -61,7 +61,12 @@ impl ChargeTransition {
             Self::ReconcileConflictingApproval => {
                 &[Pending, ReconciliationRequired, ExternalReversalRequired]
             }
-            Self::MarkApplied => &[Pending, ReconciliationRequired, Applied],
+            Self::MarkApplied => &[
+                Pending,
+                ReconciliationRequired,
+                ExternalReversalRequired,
+                Applied,
+            ],
             Self::RequireReconciliation(_) => &[Pending, ReconciliationRequired],
             Self::RequireExternalReversal(_) | Self::ParkExpiredPeriod => {
                 &[Pending, ReconciliationRequired, ExternalReversalRequired]
@@ -149,6 +154,7 @@ async fn update_processor_charge(
         ChargeStateCodeUpdate::Replace(code) => (code, false),
         ChargeStateCodeUpdate::PreserveExisting(code) => (code, true),
     };
+    super::reasons::validate_reason(progression, state_code)?;
     if expected_progressions.is_empty() {
         return Err(ProcessorChargeStoreError::InvalidState(
             "processor charge transition requires an expected state",
@@ -193,6 +199,10 @@ async fn update_processor_charge(
                 WHERE attempts.id = charges.attempt_id AND attempts.status = 'approved'
                     AND billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)
                         = billing_canonical_gateway_transaction_id(charges.gateway_transaction_id)
+            ))
+            AND ($3 <> 'applied' OR NOT EXISTS (
+                SELECT 1 FROM billing_external_reversal_attestations attestations
+                WHERE attestations.processor_charge_id = charges.id
             ))
             AND ($3 <> 'externally_reversed' OR EXISTS (
                 SELECT 1 FROM billing_external_reversal_attestations attestations
@@ -259,7 +269,7 @@ fn transition_allowed(from: ProcessorChargeProgression, to: ProcessorChargeProgr
         ),
         ExternalReversalRequired => matches!(
             to,
-            ReconciliationRequired | ExternalReversalRequired | ExternallyReversed
+            ReconciliationRequired | ExternalReversalRequired | Applied | ExternallyReversed
         ),
         Applied => matches!(to, Applied),
         ExternallyReversed => matches!(to, ExternallyReversed),

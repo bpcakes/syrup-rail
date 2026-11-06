@@ -12,6 +12,19 @@ historically named `dev/0.6.0` branch.
 
 ### Action required for hosts
 
+- Advanced processor-charge APIs now reject transitions without matching
+  approved-attempt evidence, terminal reversals without immutable attestation,
+  reopening of applied or externally reversed charges, and incompatible
+  destination/reason combinations. Handle `ProcessorChargeStoreError::InvalidState`
+  for these invalid calls. Observation alone cannot attest a reversal or mark an
+  unmatched approval applied. Existing compatibility signatures remain available.
+- Prefer `ProcessorChargeTransition` and
+  `apply_processor_charge_transition_in_transaction` for charge application;
+  `ChargeReconciliationReason` and `ChargeReversalReason` constrain operation
+  reasons. Use `ParkExpiredPeriod` for permanent expiry parking. Recoverable,
+  unattested reversal-review charges can still apply after their owning attempt
+  is approved in the same transaction; expired and attested charges cannot.
+
 - Upgrade all four Syrup Rail crates together to 0.6.0 and use Rust 1.94 or
   later. Public PostgreSQL pools, connections, transactions, errors, and host
   trait implementations now use SQLx 0.9.0 types; SQLx 0.8 types are incompatible.

@@ -18,11 +18,26 @@ async fn charge_application_requires_owning_approval_and_cannot_be_reopened()
         let ProcessorChargeObservationOutcome::Observed(charge) = observe_processor_charge_in_transaction(
             &mut transaction, attempt_id, &order, &evidence, ProcessorChargeProgression::Pending,
         ).await? else { panic!("new charge expected") };
+        for (destination, code) in [
+            (ProcessorChargeProgression::ReconciliationRequired, PaymentResolutionCode::SubscriptionApprovedPeriodExpired),
+            (ProcessorChargeProgression::ReconciliationRequired, PaymentResolutionCode::HostChargeApprovedStaleState),
+            (ProcessorChargeProgression::ExternalReversalRequired, PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateStaleState),
+        ] {
+            assert!(transition_processor_charge_in_transaction(
+                &mut transaction, charge.id(), &[ProcessorChargeProgression::Pending],
+                destination, Some(ProcessorChargeStateCode::PaymentResolution(code)),
+            ).await.is_err());
+        }
+        assert_eq!(charge_by_id(&mut transaction, charge.id().into_uuid()).await?.progression(), ProcessorChargeProgression::Pending);
+        let parked = apply_processor_charge_transition_in_transaction(
+            &mut transaction, charge.id(), ChargeTransition::RequireExternalReversal(Some(ChargeReversalReason::HostStaleState)),
+        ).await?;
+        assert_eq!(parked.state_code(), Some(ProcessorChargeStateCode::PaymentResolution(PaymentResolutionCode::HostChargeApprovedStaleState)));
         assert!(apply_processor_charge_transition_in_transaction(
             &mut transaction, charge.id(), ChargeTransition::MarkApplied,
         ).await.is_err());
         assert!(transition_processor_charge_in_transaction(
-            &mut transaction, charge.id(), &[ProcessorChargeProgression::Pending],
+            &mut transaction, charge.id(), &[ProcessorChargeProgression::ExternalReversalRequired],
             ProcessorChargeProgression::ExternallyReversed, None,
         ).await.is_err());
         sqlx::query("UPDATE billing_payment_attempts SET status = 'approved', resolved_at = clock_timestamp(), gateway_transaction_id = 'different-transaction' WHERE id = $1")
@@ -118,6 +133,11 @@ async fn expired_approval_cannot_lose_its_reversal_disposition() -> Result<(), B
                 PaymentResolutionCode::SubscriptionApprovedPeriodExpired
             ))
         );
+        sqlx::query("UPDATE billing_payment_attempts SET status = 'approved', resolved_at = clock_timestamp(), gateway_transaction_id = 'expiry-transaction' WHERE id = $1")
+            .bind(attempt_id.as_uuid()).execute(&mut *transaction).await?;
+        assert!(apply_processor_charge_transition_in_transaction(
+            &mut transaction, charge.id(), ChargeTransition::MarkApplied,
+        ).await.is_err());
         transaction.rollback().await?;
         Ok::<_, Box<dyn Error>>(())
     }

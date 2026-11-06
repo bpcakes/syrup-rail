@@ -853,7 +853,7 @@ async fn park_locked_payment_method_replacement_approved_outcome(
             &mut *connection,
             &attempt,
             evidence,
-            crate::processor_charges::ApprovalObservation::ReplayApplied,
+            crate::processor_charges::ApprovalObservation::for_approved_attempt(&attempt, evidence),
         )
         .await?;
         attempt

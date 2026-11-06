@@ -154,6 +154,21 @@ pub(crate) enum ApprovalObservation {
 }
 
 impl ApprovalObservation {
+    /// Classify evidence for an already-approved attempt without promoting a
+    /// sparse observation into an exact replay.
+    pub(crate) fn for_approved_attempt(
+        attempt: &syrup_rail::PaymentAttempt,
+        evidence: &syrup_rail::ProcessorEvidence,
+    ) -> Self {
+        if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
+            Self::ReplayApplied
+        } else if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
+            Self::ReviewReversal
+        } else {
+            Self::Reconcile
+        }
+    }
+
     pub(crate) fn progression(self) -> ProcessorChargeProgression {
         match self {
             Self::AwaitApplication => ProcessorChargeProgression::Pending,

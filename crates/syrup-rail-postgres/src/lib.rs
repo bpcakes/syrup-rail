@@ -163,8 +163,8 @@ pub use period_expiry::{
     retire_expired_subscription_period_in_transaction,
 };
 pub use processor_charges::{
-    CompensatingProcessorChargeOutcome, ProcessorChargeObservationOutcome,
-    ProcessorChargeStoreError, ProcessorChargeTransition,
+    ChargeReconciliationReason, ChargeReversalReason, CompensatingProcessorChargeOutcome,
+    ProcessorChargeObservationOutcome, ProcessorChargeStoreError, ProcessorChargeTransition,
     apply_processor_charge_transition_in_transaction, observe_processor_charge_in_transaction,
     store_compensating_processor_charge, transition_processor_charge_in_transaction,
 };

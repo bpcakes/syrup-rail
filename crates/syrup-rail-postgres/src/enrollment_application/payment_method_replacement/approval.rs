@@ -90,11 +90,7 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
                 INVALID_APPLICATION_STATE,
             ))?;
         let progression =
-            if attempt.state().processor_evidence().transaction_id() == evidence.transaction_id() {
-                crate::processor_charges::ApprovalObservation::ReplayApplied
-            } else {
-                crate::processor_charges::ApprovalObservation::Reconcile
-            };
+            crate::processor_charges::ApprovalObservation::for_approved_attempt(&attempt, evidence);
         observe_processor_charge(connection, &attempt, evidence, progression).await?;
         return Ok((
             SubscriptionEnrollmentPaymentResult::applied(attempt, subscription)?,
@@ -188,7 +184,13 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
-        transition_charge(connection, charge.id, crate::processor_charges::ChargeTransition::RequireReconciliation(Some(PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateSubscriptionIneligible)))
+        transition_charge(
+            connection,
+            charge.id,
+            crate::processor_charges::ChargeTransition::RequireReconciliation(Some(
+                crate::ChargeReconciliationReason::PaymentMethodSubscriptionIneligible,
+            )),
+        )
         .await?;
         let parked = park_locked_attempt(
             connection,
@@ -214,15 +216,16 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
     let exact_replay =
         current_method_id == method_id && current_transaction_id == transaction_id.expose();
     if !expected_state || (!baseline_matches && !exact_replay) {
-        let code = if expected_state {
-            PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateStaleState
+        let reason = if expected_state {
+            crate::ChargeReconciliationReason::PaymentMethodStaleState
         } else {
-            PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateSubscriptionIneligible
+            crate::ChargeReconciliationReason::PaymentMethodSubscriptionIneligible
         };
+        let code = reason.code();
         transition_charge(
             connection,
             charge.id,
-            crate::processor_charges::ChargeTransition::RequireReconciliation(Some(code)),
+            crate::processor_charges::ChargeTransition::RequireReconciliation(Some(reason)),
         )
         .await?;
         let parked = park_locked_attempt(
