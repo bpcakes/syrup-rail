@@ -106,7 +106,12 @@ pub(super) fn validate_reason(
         // Compatibility callers may preserve a prior application review reason.
         P::Applied => reconciliation || reversal,
         // The matching attestation, checked in SQL, owns the terminal reason.
-        P::ExternallyReversed => matches!(reason, C::PaymentResolution(_)),
+        P::ExternallyReversed => {
+            matches!(
+                reason,
+                C::ExternalReversalRequired | C::PaymentResolution(_)
+            )
+        }
     };
     if allowed {
         Ok(())
