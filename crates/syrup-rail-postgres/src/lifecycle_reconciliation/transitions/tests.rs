@@ -7,7 +7,7 @@ fn refund(cents: i32) -> CumulativeRefundCents {
 }
 
 #[test]
-fn every_state_pair_preserves_evidence_precedence_even_with_older_advancing_reports() {
+fn every_state_pair_preserves_evidence_precedence_across_timestamps() {
     use GatewayLifecycleState::*;
     let states = [
         Unknown,
@@ -24,7 +24,8 @@ fn every_state_pair_preserves_evidence_precedence_even_with_older_advancing_repo
         },
     ];
     // Rows are stored state; columns are incoming state, in the order above.
-    // Equal-state reports with an older timestamp do not advance.
+    // Cross-state advances are independent of timestamps; equal states refresh
+    // only when the incoming time is newer or the stored time is missing.
     let advances = [
         [false, true, true, true, true, true],
         [false, false, true, true, true, true],
@@ -37,24 +38,36 @@ fn every_state_pair_preserves_evidence_precedence_even_with_older_advancing_repo
     for (row, current) in states.iter().enumerate() {
         let stored_refund = lifecycle_refunded_amount(current).unwrap_or(0);
         for (column, incoming) in states.iter().enumerate() {
-            let result = lifecycle_transition(
-                current,
-                stored_refund,
-                Some(now),
-                incoming,
-                Some(now - Duration::seconds(1)),
-                100,
-            )
-            .unwrap();
-            let expected = if advances[row][column] {
-                LifecycleTransition::Apply {
-                    refunded_amount_cents: stored_refund
-                        .max(lifecycle_refunded_amount(incoming).unwrap_or(0)),
-                }
-            } else {
-                LifecycleTransition::AlreadySuperseded
-            };
-            assert_eq!(result, expected, "{current:?} -> {incoming:?}");
+            for (stored_at, incoming_at, refreshes) in [
+                (Some(now), Some(now - Duration::seconds(1)), false),
+                (Some(now), Some(now), false),
+                (Some(now), None, false),
+                (Some(now), Some(now + Duration::seconds(1)), true),
+                (None, Some(now), true),
+                (None, None, true),
+            ] {
+                let result = lifecycle_transition(
+                    current,
+                    stored_refund,
+                    stored_at,
+                    incoming,
+                    incoming_at,
+                    100,
+                )
+                .unwrap();
+                let expected = if advances[row][column] || (row == column && refreshes) {
+                    LifecycleTransition::Apply {
+                        refunded_amount_cents: stored_refund
+                            .max(lifecycle_refunded_amount(incoming).unwrap_or(0)),
+                    }
+                } else {
+                    LifecycleTransition::AlreadySuperseded
+                };
+                assert_eq!(
+                    result, expected,
+                    "{current:?} -> {incoming:?}, stored_at={stored_at:?}, incoming_at={incoming_at:?}",
+                );
+            }
         }
     }
 }
