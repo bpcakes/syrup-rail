@@ -123,7 +123,7 @@ and transaction orchestration.
   transactionless identification and bounded compensating persistence support.
   `src/processor_charges/policy.rs` owns observation intents and shared approval
   classification; `transitions.rs` owns named application decisions, guarded
-  compatibility transitions, and attested reversal completion.
+  transitions, and attested reversal completion.
 - `src/host_charges.rs` — host target extension port, canonical attempt
   reservation/final admission, and typed caller-transaction access to the
   host-charge `Reserve`, `Submit`, and `Release` ledger modes.

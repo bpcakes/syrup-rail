@@ -558,28 +558,6 @@ pub async fn observe_processor_charge_in_transaction(
     }
 }
 
-/// Compatibility entrypoint for callers supplying an expected-state filter.
-/// The filter can narrow but cannot widen the legal transition graph. Applied
-/// charges require the matching approved attempt; terminal reversals require a
-/// matching durable operator attestation. Prefer named decisions through
-/// [`apply_processor_charge_transition_in_transaction`].
-pub async fn transition_processor_charge_in_transaction(
-    connection: &mut PgConnection,
-    charge_id: ProcessorChargeId,
-    expected_progressions: &[ProcessorChargeProgression],
-    progression: ProcessorChargeProgression,
-    state_code: Option<ProcessorChargeStateCode>,
-) -> Result<ProcessorCharge, ProcessorChargeStoreError> {
-    transition_processor_charge(
-        connection,
-        charge_id,
-        expected_progressions,
-        progression,
-        ChargeStateCodeUpdate::Replace(state_code),
-    )
-    .await
-}
-
 pub(crate) async fn observe_processor_charge(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,

@@ -18,16 +18,6 @@ async fn charge_application_requires_owning_approval_and_cannot_be_reopened()
         let ProcessorChargeObservationOutcome::Observed(charge) = observe_processor_charge_in_transaction(
             &mut transaction, attempt_id, &order, &evidence, ProcessorChargeProgression::Pending,
         ).await? else { panic!("new charge expected") };
-        for (destination, code) in [
-            (ProcessorChargeProgression::ReconciliationRequired, PaymentResolutionCode::SubscriptionApprovedPeriodExpired),
-            (ProcessorChargeProgression::ReconciliationRequired, PaymentResolutionCode::HostChargeApprovedStaleState),
-            (ProcessorChargeProgression::ExternalReversalRequired, PaymentResolutionCode::SubscriptionApprovedPaymentMethodUpdateStaleState),
-        ] {
-            assert!(transition_processor_charge_in_transaction(
-                &mut transaction, charge.id(), &[ProcessorChargeProgression::Pending],
-                destination, Some(ProcessorChargeStateCode::PaymentResolution(code)),
-            ).await.is_err());
-        }
         assert_eq!(charge_by_id(&mut transaction, charge.id().into_uuid()).await?.progression(), ProcessorChargeProgression::Pending);
         let parked = apply_processor_charge_transition_in_transaction(
             &mut transaction, charge.id(), ChargeTransition::RequireExternalReversal(Some(ChargeReversalReason::HostStaleState)),
@@ -36,10 +26,7 @@ async fn charge_application_requires_owning_approval_and_cannot_be_reopened()
         assert!(apply_processor_charge_transition_in_transaction(
             &mut transaction, charge.id(), ChargeTransition::MarkApplied,
         ).await.is_err());
-        assert!(transition_processor_charge_in_transaction(
-            &mut transaction, charge.id(), &[ProcessorChargeProgression::ExternalReversalRequired],
-            ProcessorChargeProgression::ExternallyReversed, None,
-        ).await.is_err());
+        assert!(complete_attested_reversal(&mut transaction, charge.id()).await.is_err());
         sqlx::query("UPDATE billing_payment_attempts SET status = 'approved', resolved_at = clock_timestamp(), gateway_transaction_id = 'different-transaction' WHERE id = $1")
             .bind(attempt_id.as_uuid()).execute(&mut *transaction).await?;
         assert!(apply_processor_charge_transition_in_transaction(
@@ -51,9 +38,15 @@ async fn charge_application_requires_owning_approval_and_cannot_be_reopened()
             &mut transaction, charge.id(), ChargeTransition::MarkApplied,
         ).await?;
         assert_eq!(applied.progression(), ProcessorChargeProgression::Applied);
-        for destination in [ProcessorChargeProgression::Pending, ProcessorChargeProgression::ReconciliationRequired, ProcessorChargeProgression::ExternalReversalRequired] {
-            assert!(transition_processor_charge_in_transaction(
-                &mut transaction, charge.id(), &[ProcessorChargeProgression::Applied], destination, None,
+        assert_eq!(applied.state_code(), parked.state_code());
+        for transition in [
+            ChargeTransition::RequireReconciliation(None),
+            ChargeTransition::ReconcileConflictingApproval,
+            ChargeTransition::RequireExternalReversal(None),
+            ChargeTransition::ParkExpiredPeriod,
+        ] {
+            assert!(apply_processor_charge_transition_in_transaction(
+                &mut transaction, charge.id(), transition,
             ).await.is_err());
         }
         transaction.rollback().await?;
@@ -118,17 +111,6 @@ async fn expired_approval_cannot_lose_its_reversal_disposition() -> Result<(), B
             complete_attested_reversal(&mut transaction, charge.id())
                 .await
                 .is_err()
-        );
-        assert!(
-            transition_processor_charge_in_transaction(
-                &mut transaction,
-                charge.id(),
-                &[ProcessorChargeProgression::ExternalReversalRequired],
-                ProcessorChargeProgression::ExternalReversalRequired,
-                None,
-            )
-            .await
-            .is_err()
         );
         let retained = charge_by_id(&mut transaction, charge.id().into_uuid()).await?;
         assert_eq!(

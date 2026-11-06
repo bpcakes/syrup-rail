@@ -111,7 +111,11 @@ pub(super) async fn durably_park_host_charge_approved(
     ))?;
     transaction.commit().await?;
     if attempt.status() == PaymentAttemptStatus::Approved {
-        return Ok(HostChargePaymentResult::new(attempt)?);
+        let diagnostics = processor_identity_conflict_diagnostics(&attempt, evidence);
+        return Ok(append_host_observation_diagnostics(
+            HostChargePaymentResult::new(attempt)?,
+            &diagnostics,
+        ));
     }
     Ok(HostChargePaymentResult::confirmation_pending(
         attempt,

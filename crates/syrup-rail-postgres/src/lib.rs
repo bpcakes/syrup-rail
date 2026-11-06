@@ -166,7 +166,7 @@ pub use processor_charges::{
     ChargeReconciliationReason, ChargeReversalReason, CompensatingProcessorChargeOutcome,
     ProcessorChargeObservationOutcome, ProcessorChargeStoreError, ProcessorChargeTransition,
     apply_processor_charge_transition_in_transaction, observe_processor_charge_in_transaction,
-    store_compensating_processor_charge, transition_processor_charge_in_transaction,
+    store_compensating_processor_charge,
 };
 pub use reconciliation::{
     ExactQueryObservation, ProcessorChargeClassificationSummary, apply_exact_query_observation,

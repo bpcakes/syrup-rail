@@ -266,8 +266,8 @@ async fn update_processor_charge(
     Ok(row)
 }
 
-/// Compatibility callers may narrow source states, but cannot authorize an
-/// edge absent from the charge machine. Reversal review can return to
+/// Shared legal edges for named operations and pending-charge classification.
+/// Reversal review can return to
 /// reconciliation only while its owning attempt is unresolved (enforced in SQL).
 fn transition_allowed(from: ProcessorChargeProgression, to: ProcessorChargeProgression) -> bool {
     use ProcessorChargeProgression::*;

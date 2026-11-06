@@ -19,9 +19,14 @@ historically named `dev/0.6.0` branch.
   a primary subscription charge whose owning attempt is not approved.
   Handle `ProcessorChargeStoreError::InvalidState`
   for these invalid calls. Observation alone cannot attest a reversal or mark an
-  unmatched approval applied. Existing compatibility signatures remain available.
-- Prefer `ProcessorChargeTransition` and
-  `apply_processor_charge_transition_in_transaction` for charge application;
+  unmatched approval applied.
+- `transition_processor_charge_in_transaction` has been removed. Migrate calls
+  that supplied source states, a destination, and an arbitrary reason to
+  `apply_processor_charge_transition_in_transaction` with a named
+  `ProcessorChargeTransition`. Use `MarkApplied`, `RequireReconciliation`, or
+  `RequireExternalReversal` for the corresponding operation; use
+  `attest_external_reversal` for verified terminal reversals. Callers no longer
+  select expected-state lists or assign reasons while applying a charge.
   `ChargeReconciliationReason` and `ChargeReversalReason` constrain operation
   reasons. Use `ParkExpiredPeriod` for permanent expiry parking. Recoverable,
   unattested reversal-review charges can still apply after their owning attempt

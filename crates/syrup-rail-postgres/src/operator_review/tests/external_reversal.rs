@@ -223,48 +223,18 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     assert_eq!(attempt.status(), PaymentAttemptStatus::Failed);
     assert_eq!(attestation.actor_id(), actor);
     let mut transaction = database.pool.begin().await?;
-    let replayed = crate::transition_processor_charge_in_transaction(
-        &mut transaction,
-        ProcessorChargeId::new(charge_id),
-        &[syrup_rail::ProcessorChargeProgression::ExternallyReversed],
-        syrup_rail::ProcessorChargeProgression::ExternallyReversed,
-        Some(syrup_rail::ProcessorChargeStateCode::ExternalReversalRequired),
-    )
-    .await?;
-    assert_eq!(
-        replayed.progression(),
-        syrup_rail::ProcessorChargeProgression::ExternallyReversed,
-    );
-    assert_eq!(
-        replayed.state_code(),
-        Some(syrup_rail::ProcessorChargeStateCode::ExternalReversalRequired),
-    );
-    assert!(
-        crate::transition_processor_charge_in_transaction(
-            &mut transaction,
-            ProcessorChargeId::new(charge_id),
-            &[syrup_rail::ProcessorChargeProgression::ExternallyReversed],
-            syrup_rail::ProcessorChargeProgression::ExternallyReversed,
-            Some(syrup_rail::ProcessorChargeStateCode::PaymentResolution(
-                syrup_rail::PaymentResolutionCode::ProcessorChargeExternallyRefunded,
-            )),
-        )
-        .await
-        .is_err()
-    );
-    for destination in [
-        syrup_rail::ProcessorChargeProgression::Pending,
-        syrup_rail::ProcessorChargeProgression::ReconciliationRequired,
-        syrup_rail::ProcessorChargeProgression::ExternalReversalRequired,
-        syrup_rail::ProcessorChargeProgression::Applied,
+    for transition in [
+        crate::ProcessorChargeTransition::RequireReconciliation(None),
+        crate::ProcessorChargeTransition::ReconcileConflictingApproval,
+        crate::ProcessorChargeTransition::RequireExternalReversal(None),
+        crate::ProcessorChargeTransition::MarkApplied,
+        crate::ProcessorChargeTransition::ParkExpiredPeriod,
     ] {
         assert!(
-            crate::transition_processor_charge_in_transaction(
+            crate::apply_processor_charge_transition_in_transaction(
                 &mut transaction,
                 ProcessorChargeId::new(charge_id),
-                &[syrup_rail::ProcessorChargeProgression::ExternallyReversed],
-                destination,
-                None,
+                transition,
             )
             .await
             .is_err()

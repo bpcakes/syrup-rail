@@ -1,4 +1,4 @@
-//! Reasons accepted by charge transition operations and compatibility callers.
+//! Reasons accepted by named charge transition operations.
 use super::*;
 
 /// Why an approved payment-method update still needs reconciliation.
@@ -144,8 +144,8 @@ pub(super) fn validate_reason(
                         PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
                     )
         }
-        // Compatibility callers may preserve a prior application review reason.
-        P::Applied => reconciliation || reversal,
+        // Applying retains historical reasons; it never assigns a new reason.
+        P::Applied => false,
         // The matching attestation, checked in SQL, owns the terminal reason.
         P::ExternallyReversed => {
             matches!(

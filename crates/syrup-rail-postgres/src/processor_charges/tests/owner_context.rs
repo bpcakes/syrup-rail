@@ -1,8 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn host_charge_rejects_subscription_reasons_through_both_apis() -> Result<(), Box<dyn Error>>
-{
+async fn host_charge_rejects_subscription_reasons() -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("chg_owner_kind").await?;
     let result = async {
         let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
@@ -26,12 +25,10 @@ async fn host_charge_rejects_subscription_reasons_through_both_apis() -> Result<
             ChargeReversalReason::RenewalStaleState,
             ChargeReversalReason::RecoveryStaleState,
         ] {
-            assert_rejected_by_both_apis(
+            assert_transition_rejected(
                 &mut transaction,
                 charge.id(),
                 ChargeTransition::RequireExternalReversal(Some(reason)),
-                ProcessorChargeProgression::ExternalReversalRequired,
-                reason.code(),
             )
             .await?;
         }
@@ -39,21 +36,17 @@ async fn host_charge_rejects_subscription_reasons_through_both_apis() -> Result<
             ChargeReconciliationReason::PaymentMethodSubscriptionIneligible,
             ChargeReconciliationReason::PaymentMethodStaleState,
         ] {
-            assert_rejected_by_both_apis(
+            assert_transition_rejected(
                 &mut transaction,
                 charge.id(),
                 ChargeTransition::RequireReconciliation(Some(reason)),
-                ProcessorChargeProgression::ReconciliationRequired,
-                reason.code(),
             )
             .await?;
         }
-        assert_rejected_by_both_apis(
+        assert_transition_rejected(
             &mut transaction,
             charge.id(),
             ChargeTransition::ParkExpiredPeriod,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
         )
         .await?;
         let retained = charge_by_id(&mut transaction, charge.id().into_uuid()).await?;
@@ -87,22 +80,16 @@ async fn expiry_rejects_additional_and_approved_subscription_charges() -> Result
             ).await? else { panic!("new charge expected") };
             charges.push(charge);
         }
-        assert_rejected_by_both_apis(
+        assert_transition_rejected(
             &mut transaction, charges[1].id(), ChargeTransition::ParkExpiredPeriod,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
         ).await?;
-        assert_rejected_by_both_apis(
+        assert_transition_rejected(
             &mut transaction, charges[0].id(), ChargeTransition::RequireExternalReversal(Some(ChargeReversalReason::HostStaleState)),
-            ProcessorChargeProgression::ExternalReversalRequired,
-            PaymentResolutionCode::HostChargeApprovedStaleState,
         ).await?;
         sqlx::query("UPDATE billing_payment_attempts SET status = 'approved', resolved_at = clock_timestamp(), gateway_transaction_id = 'expiry-primary' WHERE id = $1")
             .bind(attempt.as_uuid()).execute(&mut *transaction).await?;
-        assert_rejected_by_both_apis(
+        assert_transition_rejected(
             &mut transaction, charges[0].id(), ChargeTransition::ParkExpiredPeriod,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            PaymentResolutionCode::SubscriptionApprovedPeriodExpired,
         ).await?;
         let applied = apply_processor_charge_transition_in_transaction(
             &mut transaction, charges[0].id(), ChargeTransition::MarkApplied,
@@ -120,27 +107,40 @@ async fn expiry_rejects_additional_and_approved_subscription_charges() -> Result
     cleanup
 }
 
-async fn assert_rejected_by_both_apis(
+#[tokio::test]
+async fn terminal_owner_cannot_return_reversal_to_reconciliation() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("chg_term_owner").await?;
+    let result = async {
+        let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
+        let attempt = insert_host_charge_attempt(&database.pool, gateway, "terminal-owner").await?;
+        for status in ["failed", "declined", "approved"] {
+            let mut transaction = database.pool.begin().await?;
+            let ProcessorChargeObservationOutcome::Observed(charge) = observe_processor_charge_in_transaction(
+                &mut transaction, attempt, &GatewayOrderId::from_correlation("terminal-owner")?,
+                &approved_evidence("terminal-owner-txn"), ProcessorChargeProgression::ExternalReversalRequired,
+            ).await? else { panic!("new charge expected") };
+            sqlx::query("UPDATE billing_payment_attempts SET status = $2, resolved_at = clock_timestamp(), gateway_transaction_id = 'terminal-owner-txn' WHERE id = $1")
+                .bind(attempt.as_uuid()).bind(status).execute(&mut *transaction).await?;
+            assert_transition_rejected(
+                &mut transaction, charge.id(), ChargeTransition::ReconcileConflictingApproval,
+            ).await?;
+            transaction.rollback().await?;
+        }
+        Ok::<_, Box<dyn Error>>(())
+    }.await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}
+
+async fn assert_transition_rejected(
     connection: &mut PgConnection,
     charge: ProcessorChargeId,
     transition: ChargeTransition,
-    destination: ProcessorChargeProgression,
-    code: PaymentResolutionCode,
 ) -> Result<(), Box<dyn Error>> {
     let current = charge_by_id(connection, charge.into_uuid()).await?;
     assert!(matches!(
         apply_processor_charge_transition_in_transaction(connection, charge, transition).await,
-        Err(ProcessorChargeStoreError::InvalidState(_))
-    ));
-    assert!(matches!(
-        transition_processor_charge_in_transaction(
-            connection,
-            charge,
-            &[current.progression()],
-            destination,
-            Some(ProcessorChargeStateCode::PaymentResolution(code)),
-        )
-        .await,
         Err(ProcessorChargeStoreError::InvalidState(_))
     ));
     assert_eq!(charge_by_id(connection, charge.into_uuid()).await?, current);

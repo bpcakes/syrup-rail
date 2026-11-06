@@ -13,13 +13,13 @@ Implement the four safety refactors identified in the audit, and publish reviewa
 
 ## Surprises & Discoveries
 
-Existing code already has consuming submission capabilities and typed attempt transitions. Remaining ambiguity lies in composite state and broadly parameterized persistence, not a complete absence of enums. Public advanced charge transition APIs require compatibility handling. Lifecycle numeric ranks encode an evidence precedence policy, including out-of-order reports, rather than merely chronological events. Existing Rust file-size policy prevents growing already oversized owners; extract cohesive decision modules.
+Existing code already has consuming submission capabilities and typed attempt transitions. Remaining ambiguity lies in composite state and broadly parameterized persistence, not a complete absence of enums. The arbitrary public charge transition API is removed; consumers migrate to named operations. Lifecycle numeric ranks encode an evidence precedence policy, including out-of-order reports, rather than merely chronological events. Existing Rust file-size policy prevents growing already oversized owners; extract cohesive decision modules.
 
 ## Decision Log
 
 - Preserve durable schema labels and data; no schema migration is planned. Keep SQL compare-and-set and lock ordering, because Rust values cannot establish freshness across processes.
 - Deliver SM4 first because it is independent and bounded; then SM1, SM2, and SM3. Stack subsequent PRs only where shared ownership requires it.
-- Retain public compatibility adapters where signatures already ship. Route adapters through validation; avoid retaining a second unguarded state machine.
+- Remove `transition_processor_charge_in_transaction` and migrate consumers to named operations. The user explicitly accepted this breaking change, superseding the earlier compatibility-adapter decision. Preserve durable schema compatibility.
 - Do not enable the deferred broad Clippy size/complexity limits as part of this work. New decision owners should be small enough to review.
 
 ## Outcomes & Retrospective
@@ -33,7 +33,7 @@ PR #11 published with all 11 CI checks green.
 SM1: named observation and transition operations now own charge progression.
 Application requires matching approved attempt evidence; terminal reversal
 requires immutable attestation. Expired-period parking cannot be cleared by
-compatibility transitions. Unresolved host conflicts retain their legitimate
+subsequent transitions. Unresolved host conflicts retain their legitimate
 reconciliation path. Two new database scenarios and two policy tests pass;
 full workspace verification passed 767 tests (none ignored/filtered), plus
 fmt, Clippy, SQLx and public API documentation checks. No schema changes.
@@ -47,7 +47,7 @@ Replace numeric lifecycle ranks in crates/syrup-rail-postgres/src/lifecycle_reco
 
 ### SM1 — processor-charge application (Depends on: none; tracker syrup-rail-jjw)
 
-Own source states, destination, reason, and evidence prerequisites in named commands for observation/application/reversal/attestation. Update processor_charges, reconciliation/classification, enrollment_application, host_charge_application, and operator_review. Share decision logic where foreground and reconciliation classify the same facts, retaining distinct event semantics. Test late approval, transactionless evidence, additional charges, terminal reversal replay, ownership conflicts, and application races. Done when production callers cannot independently select arbitrary transition dimensions and compatibility entrypoints validate equivalent rules. Preserve persisted labels and atomic write sets.
+Own source states, destination, reason, and evidence prerequisites in named commands for observation/application/reversal/attestation. Update processor_charges, reconciliation/classification, enrollment_application, host_charge_application, and operator_review. Share decision logic where foreground and reconciliation classify the same facts, retaining distinct event semantics. Test late approval, transactionless evidence, additional charges, terminal reversal replay, ownership conflicts, and application races. Done when production callers cannot independently select arbitrary transition dimensions and consumers use named transition operations rather than the removed arbitrary transition API. Preserve persisted labels and atomic write sets.
 
 ### SM2 — attempt retry authority (Depends on: SM1; tracker syrup-rail-njz)
 
