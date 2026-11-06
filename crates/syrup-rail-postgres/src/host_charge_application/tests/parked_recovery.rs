@@ -1,5 +1,20 @@
 use super::*;
 
+struct UnavailableCoordinator;
+
+#[async_trait]
+impl BillingTransactionCoordinator for UnavailableCoordinator {
+    async fn begin(
+        &self,
+        _subject: BillingEventSubject,
+        _lock_timeout: Duration,
+    ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError> {
+        Err(BillingTransactionError::new(std::io::Error::other(
+            "coordinator unavailable",
+        )))
+    }
+}
+
 #[tokio::test]
 async fn parked_approval_recovers_once_without_another_sale() -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_park_retry").await?;
@@ -47,7 +62,21 @@ async fn parked_approval_recovers_once_without_another_sale() -> Result<(), Box<
             ).await?;
             assert_eq!(recovered.status(), PaymentAttemptStatus::Approved);
         }
-        let state: (String, String) = sqlx::query_as("SELECT c.progression_state, t.status FROM billing_processor_charges c JOIN host_charge_targets t ON t.id = c.host_charge_target_id WHERE c.attempt_id = $1")
+        let sparse = GatewayPaymentOutcome::new(
+            GatewayPaymentStatus::Approved,
+            ProcessorEvidence::new(None, None, None, None, None, None, GatewayPaymentDescriptor::default()),
+        );
+        for replay in [&sparse, &outcome] {
+            let canonical = apply_reconciled_host_charge_gateway_outcome(
+                &database.pool, &UnavailableCoordinator, &TestTargets, command.billing_scope_id(), attempt_id, replay,
+            ).await?;
+            assert_eq!(canonical.status(), PaymentAttemptStatus::Approved);
+            assert_eq!(canonical.attempt().state().processor_evidence().transaction_id(), outcome.transaction_id());
+        }
+        let sparse_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM billing_processor_charges WHERE attempt_id = $1 AND gateway_transaction_id IS NULL AND progression_state = 'reconciliation_required'")
+            .bind(attempt_id.as_uuid()).fetch_one(&database.pool).await?;
+        assert_eq!(sparse_count, 1);
+        let state: (String, String) = sqlx::query_as("SELECT c.progression_state, t.status FROM billing_processor_charges c JOIN host_charge_targets t ON t.id = c.host_charge_target_id WHERE c.attempt_id = $1 AND c.gateway_transaction_id IS NOT NULL")
             .bind(attempt_id.as_uuid()).fetch_one(&database.pool).await?;
         assert_eq!(state, ("applied".to_owned(), "paid".to_owned()));
         assert_eq!(events.lock().await.iter().filter(|e| matches!(e, BillingEvent::HostChargePaid { .. })).count(), 1);

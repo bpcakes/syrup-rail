@@ -210,7 +210,7 @@ async fn update_processor_charge(
                     AND attestations.attempt_id = charges.attempt_id
                     AND attestations.gateway_transaction_id = charges.gateway_transaction_id
                     AND (CASE WHEN $5 THEN COALESCE(charges.state_code, $4) ELSE $4 END)
-                        IN (attestations.prior_resolution_code, attestations.final_resolution_code)
+                        = attestations.prior_resolution_code
             ))
             AND (
                 $3 <> ALL(ARRAY['external_reversal_required'::text, 'externally_reversed'::text])

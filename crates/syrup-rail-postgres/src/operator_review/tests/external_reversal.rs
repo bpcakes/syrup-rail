@@ -239,6 +239,19 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         replayed.state_code(),
         Some(syrup_rail::ProcessorChargeStateCode::ExternalReversalRequired),
     );
+    assert!(
+        crate::transition_processor_charge_in_transaction(
+            &mut transaction,
+            ProcessorChargeId::new(charge_id),
+            &[syrup_rail::ProcessorChargeProgression::ExternallyReversed],
+            syrup_rail::ProcessorChargeProgression::ExternallyReversed,
+            Some(syrup_rail::ProcessorChargeStateCode::PaymentResolution(
+                syrup_rail::PaymentResolutionCode::ProcessorChargeExternallyRefunded,
+            )),
+        )
+        .await
+        .is_err()
+    );
     for destination in [
         syrup_rail::ProcessorChargeProgression::Pending,
         syrup_rail::ProcessorChargeProgression::ReconciliationRequired,
@@ -309,6 +322,36 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         ).bind(charge_id).fetch_one(&database.pool).await?;
     assert_eq!(counts, (1, "externally_reversed".to_owned()));
 
+    assert!(matches!(
+        attest_external_reversal(
+            &database.pool,
+            &host,
+            ProcessorChargeId::new(additional_charge_id),
+            actor,
+            ExternalReversalKind::Refund,
+            &GatewayTransactionId::new("txn-operator-additional")?,
+            &reason,
+        )
+        .await?,
+        ExternalReversalAttestationOutcome::Attested { .. }
+    ));
+    let mut transaction = database.pool.begin().await?;
+    assert_eq!(
+        crate::host_charge_ledger_admission(
+            &mut transaction,
+            &crate::HostChargeLedgerAdmissionQuery::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                syrup_rail::HostChargeTargetId::new(target_id),
+                crate::HostChargeLedgerAdmissionMode::Reserve {
+                    idempotency_key: syrup_rail::IdempotencyKey::new("after-reversal")?,
+                },
+            ),
+        )
+        .await?,
+        crate::HostChargeLedgerAdmission::Safe,
+    );
+    transaction.commit().await?;
     database.cleanup().await?;
     Ok(())
 }

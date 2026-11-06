@@ -45,7 +45,7 @@ pub(crate) enum PendingChargeDecision {
     ReverseAdditional,
     ReverseConflicting,
     Applied,
-    AttestedReversal(PaymentResolutionCode),
+    AttestedReversal(ProcessorChargeStateCode),
 }
 
 impl PendingChargeDecision {
@@ -74,9 +74,7 @@ impl PendingChargeDecision {
                 Some(C::ExternalReversalRequired),
             ),
             Self::Applied => (P::Applied, None),
-            Self::AttestedReversal(code) => {
-                (P::ExternallyReversed, Some(C::PaymentResolution(code)))
-            }
+            Self::AttestedReversal(code) => (P::ExternallyReversed, Some(code)),
         }
     }
 }

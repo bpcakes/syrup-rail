@@ -206,7 +206,7 @@ pub(super) async fn classify_pending_charge(
     };
     let attestation = sqlx::query_as::<_, (Uuid, String)>(
         r#"
-        SELECT processor_charge_id, final_resolution_code
+        SELECT processor_charge_id, prior_resolution_code
         FROM billing_external_reversal_attestations
         WHERE attempt_id = $1 AND gateway_transaction_id = $2
         FOR UPDATE
@@ -216,14 +216,15 @@ pub(super) async fn classify_pending_charge(
     .bind(transaction_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    if let Some((attested_charge_id, final_resolution_code)) = attestation {
+    if let Some((attested_charge_id, prior_resolution_code)) = attestation {
         if attested_charge_id != charge_id {
             return Err(invalid_reconciliation_state());
         }
-        let final_resolution_code = PaymentResolutionCode::try_from(final_resolution_code.as_str())
-            .map_err(|_| invalid_reconciliation_state())?;
+        let prior_resolution_code =
+            crate::processor_charge_persistence::parse_charge_state_code(&prior_resolution_code)
+                .map_err(|_| invalid_reconciliation_state())?;
         return Ok(PendingChargeDecision::AttestedReversal(
-            final_resolution_code,
+            prior_resolution_code,
         ));
     }
     Ok(ApprovalApplicationFacts {
