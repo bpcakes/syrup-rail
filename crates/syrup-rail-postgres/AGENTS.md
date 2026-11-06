@@ -132,6 +132,10 @@ and transaction orchestration.
   `src/processor_charges/policy.rs` owns observation intents and shared approval
   classification; `transitions.rs` owns named application decisions, guarded
   compatibility transitions, and attested reversal completion.
+  `transitions/eligibility.rs` derives application eligibility from charge and
+  owning-attempt evidence and validates resulting expiry-reason dispositions.
+  Ordinary reversal review remains recoverable after matching approval; expiry
+  parking and attested reversal never regain application authority.
 - `src/host_charges.rs` — host target extension port, canonical attempt
   reservation/final admission, and typed caller-transaction access to the
   host-charge `Reserve`, `Submit`, and `Release` ledger modes.
