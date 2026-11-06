@@ -26,7 +26,7 @@ pub(crate) use storage::LockFreeApprovalPolicy;
 use storage::{
     charge_by_id, compensating_progression, identify_transactionless, initial_charge_progression,
     initial_charge_state_code, is_transient, map_operator_error, matching_charge,
-    owned_by_other_attempt, parse_role,
+    owned_by_other_attempt,
 };
 
 pub(crate) mod policy;
@@ -607,6 +607,13 @@ pub(crate) async fn observe_processor_charge(
         if owned_by_other_attempt(connection, attempt, transaction_id).await? {
             return Ok(ObservedCharge::OwnedByOtherAttempt);
         }
+        // A sparse observation can coexist with its identified charge. Resolve
+        // the canonical identity before filling the sparse row's missing ID.
+        if let Some(charge) =
+            matching_charge(connection, attempt, evidence, Some(transaction_id)).await?
+        {
+            return Ok(ObservedCharge::Owned(charge));
+        }
         if let Some(charge) = identify_transactionless(
             connection,
             attempt,
@@ -706,17 +713,8 @@ pub(crate) async fn observe_processor_charge(
             exact_replay: false,
         }));
     }
-    if let Some(row) = matching_charge(connection, attempt, evidence, transaction_id).await? {
-        if !row.try_get::<bool, _>("evidence_matches")? {
-            return Err(ProcessorChargeStoreError::InvalidState(
-                "processor charge replay evidence changed",
-            ));
-        }
-        return Ok(ObservedCharge::Owned(ChargeRecord {
-            id: row.try_get("id")?,
-            role: parse_role(&row.try_get::<String, _>("charge_role")?)?,
-            exact_replay: true,
-        }));
+    if let Some(charge) = matching_charge(connection, attempt, evidence, transaction_id).await? {
+        return Ok(ObservedCharge::Owned(charge));
     }
     if let Some(transaction_id) = transaction_id
         && owned_by_other_attempt(connection, attempt, transaction_id).await?

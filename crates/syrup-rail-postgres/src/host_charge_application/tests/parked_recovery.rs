@@ -64,14 +64,24 @@ async fn parked_approval_recovers_once_without_another_sale() -> Result<(), Box<
         }
         let sparse = GatewayPaymentOutcome::new(
             GatewayPaymentStatus::Approved,
-            ProcessorEvidence::new(None, None, None, None, None, None, GatewayPaymentDescriptor::default()),
+            ProcessorEvidence::new(
+                None,
+                outcome.evidence().payment_method_reference().cloned(),
+                outcome.evidence().response().cloned(),
+                outcome.evidence().response_code().cloned(),
+                outcome.evidence().response_text().cloned(),
+                outcome.evidence().condition().cloned(),
+                outcome.evidence().descriptor().clone(),
+            ),
         );
-        for replay in [&sparse, &outcome] {
-            let canonical = apply_reconciled_host_charge_gateway_outcome(
-                &database.pool, &UnavailableCoordinator, &TestTargets, command.billing_scope_id(), attempt_id, replay,
-            ).await?;
-            assert_eq!(canonical.status(), PaymentAttemptStatus::Approved);
-            assert_eq!(canonical.attempt().state().processor_evidence().transaction_id(), outcome.transaction_id());
+        for replay_coordinator in [&coordinator as &dyn BillingTransactionCoordinator, &UnavailableCoordinator] {
+            for replay in [&sparse, &outcome] {
+                let canonical = apply_reconciled_host_charge_gateway_outcome(
+                    &database.pool, replay_coordinator, &TestTargets, command.billing_scope_id(), attempt_id, replay,
+                ).await?;
+                assert_eq!(canonical.status(), PaymentAttemptStatus::Approved);
+                assert_eq!(canonical.attempt().state().processor_evidence().transaction_id(), outcome.transaction_id());
+            }
         }
         let sparse_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM billing_processor_charges WHERE attempt_id = $1 AND gateway_transaction_id IS NULL AND progression_state = 'reconciliation_required'")
             .bind(attempt_id.as_uuid()).fetch_one(&database.pool).await?;

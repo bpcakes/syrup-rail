@@ -13,9 +13,9 @@ pub(super) async fn matching_charge(
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
     transaction_id: Option<&str>,
-) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
+) -> Result<Option<ChargeRecord>, ProcessorChargeStoreError> {
     let descriptor = evidence.descriptor();
-    sqlx::query(
+    let row = sqlx::query(
         r#"
         SELECT id, charge_role,
             gateway_payment_method_reference IS NOT DISTINCT FROM $3
@@ -50,7 +50,20 @@ pub(super) async fn matching_charge(
     .bind(descriptor.card_exp_month())
     .bind(descriptor.card_exp_year())
     .fetch_optional(connection)
-    .await
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if !row.try_get::<bool, _>("evidence_matches")? {
+        return Err(ProcessorChargeStoreError::InvalidState(
+            "processor charge replay evidence changed",
+        ));
+    }
+    Ok(Some(ChargeRecord {
+        id: row.try_get("id")?,
+        role: parse_role(&row.try_get::<String, _>("charge_role")?)?,
+        exact_replay: true,
+    }))
 }
 
 pub(super) async fn owned_by_other_attempt(

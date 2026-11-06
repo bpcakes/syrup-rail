@@ -567,15 +567,16 @@ async fn sparse_terminal_reconciliation_is_not_promoted_to_an_exact_replay()
 -> Result<(), Box<dyn Error>> {
     let (fixture, reservation) =
         reconciled_payment_method_replacement_fixture("repl_term_sparse").await?;
+    let original_approval = approved_outcome_with_reference(
+        Some("txn_repl_terminal_sparse"),
+        "vault_repl_terminal_sparse",
+    );
     let applied = apply_reconciled_subscription_payment_method_replacement_gateway_outcome(
         &fixture.database.pool,
         &fixture.coordinator,
         reservation.identity().billing_scope_id(),
         reservation.identity().attempt_id(),
-        &approved_outcome_with_reference(
-            Some("txn_repl_terminal_sparse"),
-            "vault_repl_terminal_sparse",
-        ),
+        &original_approval,
     )
     .await?;
     assert_eq!(applied.attempt().status(), PaymentAttemptStatus::Approved);
@@ -625,6 +626,19 @@ async fn sparse_terminal_reconciliation_is_not_promoted_to_an_exact_replay()
         parked_replay.observation_diagnostics(),
         replay.observation_diagnostics()
     );
+    for coordinator in [&fixture.coordinator, &failing_coordinator] {
+        let exact_replay =
+            apply_reconciled_subscription_payment_method_replacement_gateway_outcome(
+                &fixture.database.pool,
+                coordinator,
+                reservation.identity().billing_scope_id(),
+                reservation.identity().attempt_id(),
+                &original_approval,
+            )
+            .await?;
+        assert_eq!(exact_replay.attempt(), applied.attempt());
+        assert_eq!(exact_replay.subscription(), applied.subscription());
+    }
     let retained: (i64, String) = sqlx::query_as(
         "SELECT count(*), min(progression_state) FROM billing_processor_charges \
          WHERE attempt_id = $1 AND gateway_transaction_id IS NULL",
