@@ -16,6 +16,19 @@ use crate::schema_contract::{
     V4_INSTALL_SQL, V4_TO_V5_UPGRADE_SQL, V5_INSTALL_SQL, V5_TO_V6_UPGRADE_SQL, V6_INSTALL_SQL,
 };
 
+/// Encodes fixture identity without decimal runs that can accidentally satisfy
+/// the raw-card detector used by provider-reference value types.
+pub(crate) fn opaque_fixture_uuid(id: Uuid) -> String {
+    const NIBBLES: &[u8; 16] = b"abcdefghijklmnop";
+
+    let mut encoded = String::with_capacity(32);
+    for byte in id.as_bytes() {
+        encoded.push(NIBBLES[usize::from(byte >> 4)] as char);
+        encoded.push(NIBBLES[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
 pub(crate) struct TestDatabase {
     harness: PostgresHarness,
     lease: DatabaseLease,

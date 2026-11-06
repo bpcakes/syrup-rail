@@ -19,20 +19,9 @@ use super::{
     require_unchanged_active_reindex_shadows, retry_reindex_transition_once,
     validate_index_contract,
 };
-use crate::test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account};
-
-/// Encodes fixture identity without decimal runs that can accidentally satisfy
-/// the raw-card detector used by provider-reference value types.
-fn opaque_fixture_uuid(id: Uuid) -> String {
-    const NIBBLES: &[u8; 16] = b"abcdefghijklmnop";
-
-    let mut encoded = String::with_capacity(32);
-    for byte in id.as_bytes() {
-        encoded.push(NIBBLES[usize::from(byte >> 4)] as char);
-        encoded.push(NIBBLES[usize::from(byte & 0x0f)] as char);
-    }
-    encoded
-}
+use crate::test_support::{
+    GatewayAccountFixture, TestDatabase, create_gateway_account, opaque_fixture_uuid,
+};
 
 #[test]
 fn opaque_fixture_uuid_is_unique_and_cannot_resemble_card_data() {

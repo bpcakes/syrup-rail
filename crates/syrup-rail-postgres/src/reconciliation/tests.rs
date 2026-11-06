@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     find_payment_attempt_by_id_in_transaction, register_gateway_account,
-    test_support::{TestDatabase, create_gateway_account},
+    test_support::{TestDatabase, create_gateway_account, opaque_fixture_uuid},
 };
 
 mod local_attempts;
@@ -584,7 +584,8 @@ async fn insert_pending_processor_charge(
 ) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
     let charge_id = Uuid::now_v7();
-    let order_id = format!("order-{attempt_id}");
+    let reference = opaque_fixture_uuid(attempt_id);
+    let order_id = format!("order-{reference}");
     sqlx::query(
         r#"
             INSERT INTO billing_payment_attempts (
@@ -641,7 +642,7 @@ async fn insert_pending_processor_charge(
     .bind(account.billing_scope_id)
     .bind(account.gateway_account_id)
     .bind(order_id)
-    .bind(format!("transaction-{attempt_id}"))
+    .bind(format!("transaction-{reference}"))
     .bind(age_seconds)
     .bind(plan_key)
     .execute(pool)
