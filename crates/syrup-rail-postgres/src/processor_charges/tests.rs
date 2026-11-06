@@ -5,6 +5,7 @@ use syrup_rail::{
     GatewayDiagnostic, GatewayPaymentDescriptor, GatewayTransactionId, PlanKey, SubscriberId,
 };
 
+use super::transitions::apply_charge_transition;
 use super::*;
 use crate::test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account};
 

@@ -228,7 +228,6 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         crate::ProcessorChargeTransition::ReconcileConflictingApproval,
         crate::ProcessorChargeTransition::RequireExternalReversal(None),
         crate::ProcessorChargeTransition::MarkApplied,
-        crate::ProcessorChargeTransition::ParkExpiredPeriod,
     ] {
         assert!(
             crate::apply_processor_charge_transition_in_transaction(

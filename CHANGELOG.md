@@ -28,7 +28,10 @@ historically named `dev/0.6.0` branch.
   `attest_external_reversal` for verified terminal reversals. Callers no longer
   select expected-state lists or assign reasons while applying a charge.
   `ChargeReconciliationReason` and `ChargeReversalReason` constrain operation
-  reasons. Use `ParkExpiredPeriod` for permanent expiry parking. Recoverable,
+  reasons. Expiry parking is internal to subscription application workflows;
+  enable it through `BillingTransactionCoordinator::subscription_period_expiry_policy`
+  so those workflows validate the durable period against the database clock.
+  `ProcessorChargeTransition` does not expose `ParkExpiredPeriod`. Recoverable,
   unattested reversal-review charges can still apply after their owning attempt
   is approved in the same transaction; expired and attested charges cannot.
 

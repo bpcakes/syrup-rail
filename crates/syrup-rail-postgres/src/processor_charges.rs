@@ -40,7 +40,7 @@ pub(crate) use transitions::{
     ChargeTransition, apply_pending_charge_decision, complete_attested_reversal, transition_charge,
 };
 pub use transitions::{
-    ChargeTransition as ProcessorChargeTransition, apply_processor_charge_transition_in_transaction,
+    ProcessorChargeTransition, apply_processor_charge_transition_in_transaction,
 };
 
 const INVALID_CHARGE_STATE: &str = "canonical processor charge state is invalid";

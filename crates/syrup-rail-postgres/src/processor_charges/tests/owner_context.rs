@@ -92,11 +92,11 @@ async fn expiry_rejects_additional_and_approved_subscription_charges() -> Result
             &mut transaction, charges[0].id(), ChargeTransition::ParkExpiredPeriod,
         ).await?;
         let applied = apply_processor_charge_transition_in_transaction(
-            &mut transaction, charges[0].id(), ChargeTransition::MarkApplied,
+            &mut transaction, charges[0].id(), ProcessorChargeTransition::MarkApplied,
         ).await?;
         assert_eq!(applied.progression(), ProcessorChargeProgression::Applied);
         let reversal = apply_processor_charge_transition_in_transaction(
-            &mut transaction, charges[1].id(), ChargeTransition::RequireExternalReversal(None),
+            &mut transaction, charges[1].id(), ProcessorChargeTransition::RequireExternalReversal(None),
         ).await?;
         assert_eq!(reversal.progression(), ProcessorChargeProgression::ExternalReversalRequired);
         transaction.rollback().await?;
@@ -140,7 +140,7 @@ async fn assert_transition_rejected(
 ) -> Result<(), Box<dyn Error>> {
     let current = charge_by_id(connection, charge.into_uuid()).await?;
     assert!(matches!(
-        apply_processor_charge_transition_in_transaction(connection, charge, transition).await,
+        apply_charge_transition(connection, charge, transition).await,
         Err(ProcessorChargeStoreError::InvalidState(_))
     ));
     assert_eq!(charge_by_id(connection, charge.into_uuid()).await?, current);

@@ -20,30 +20,29 @@ async fn charge_application_requires_owning_approval_and_cannot_be_reopened()
         ).await? else { panic!("new charge expected") };
         assert_eq!(charge_by_id(&mut transaction, charge.id().into_uuid()).await?.progression(), ProcessorChargeProgression::Pending);
         let parked = apply_processor_charge_transition_in_transaction(
-            &mut transaction, charge.id(), ChargeTransition::RequireExternalReversal(Some(ChargeReversalReason::HostStaleState)),
+            &mut transaction, charge.id(), ProcessorChargeTransition::RequireExternalReversal(Some(ChargeReversalReason::HostStaleState)),
         ).await?;
         assert_eq!(parked.state_code(), Some(ProcessorChargeStateCode::PaymentResolution(PaymentResolutionCode::HostChargeApprovedStaleState)));
         assert!(apply_processor_charge_transition_in_transaction(
-            &mut transaction, charge.id(), ChargeTransition::MarkApplied,
+            &mut transaction, charge.id(), ProcessorChargeTransition::MarkApplied,
         ).await.is_err());
         assert!(complete_attested_reversal(&mut transaction, charge.id()).await.is_err());
         sqlx::query("UPDATE billing_payment_attempts SET status = 'approved', resolved_at = clock_timestamp(), gateway_transaction_id = 'different-transaction' WHERE id = $1")
             .bind(attempt_id.as_uuid()).execute(&mut *transaction).await?;
         assert!(apply_processor_charge_transition_in_transaction(
-            &mut transaction, charge.id(), ChargeTransition::MarkApplied,
+            &mut transaction, charge.id(), ProcessorChargeTransition::MarkApplied,
         ).await.is_err());
         sqlx::query("UPDATE billing_payment_attempts SET gateway_transaction_id = 'edge-transaction' WHERE id = $1")
             .bind(attempt_id.as_uuid()).execute(&mut *transaction).await?;
         let applied = apply_processor_charge_transition_in_transaction(
-            &mut transaction, charge.id(), ChargeTransition::MarkApplied,
+            &mut transaction, charge.id(), ProcessorChargeTransition::MarkApplied,
         ).await?;
         assert_eq!(applied.progression(), ProcessorChargeProgression::Applied);
         assert_eq!(applied.state_code(), parked.state_code());
         for transition in [
-            ChargeTransition::RequireReconciliation(None),
-            ChargeTransition::ReconcileConflictingApproval,
-            ChargeTransition::RequireExternalReversal(None),
-            ChargeTransition::ParkExpiredPeriod,
+            ProcessorChargeTransition::RequireReconciliation(None),
+            ProcessorChargeTransition::ReconcileConflictingApproval,
+            ProcessorChargeTransition::RequireExternalReversal(None),
         ] {
             assert!(apply_processor_charge_transition_in_transaction(
                 &mut transaction, charge.id(), transition,
@@ -86,20 +85,20 @@ async fn expired_approval_cannot_lose_its_reversal_disposition() -> Result<(), B
             panic!("new charge expected")
         };
         // A conflicting approval can be reconciled while the attempt is unresolved.
-        apply_processor_charge_transition_in_transaction(
+        apply_charge_transition(
             &mut transaction,
             charge.id(),
             ChargeTransition::ReconcileConflictingApproval,
         )
         .await?;
-        apply_processor_charge_transition_in_transaction(
+        apply_charge_transition(
             &mut transaction,
             charge.id(),
             ChargeTransition::ParkExpiredPeriod,
         )
         .await?;
         assert!(
-            apply_processor_charge_transition_in_transaction(
+            apply_charge_transition(
                 &mut transaction,
                 charge.id(),
                 ChargeTransition::ReconcileConflictingApproval,
@@ -125,7 +124,7 @@ async fn expired_approval_cannot_lose_its_reversal_disposition() -> Result<(), B
         );
         sqlx::query("UPDATE billing_payment_attempts SET status = 'approved', resolved_at = clock_timestamp(), gateway_transaction_id = 'expiry-transaction' WHERE id = $1")
             .bind(attempt_id.as_uuid()).execute(&mut *transaction).await?;
-        assert!(apply_processor_charge_transition_in_transaction(
+        assert!(apply_charge_transition(
             &mut transaction, charge.id(), ChargeTransition::MarkApplied,
         ).await.is_err());
         transaction.rollback().await?;

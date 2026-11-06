@@ -8,10 +8,34 @@ pub(super) enum ChargeStateCodeUpdate {
     PreserveExisting(Option<ProcessorChargeStateCode>),
 }
 
+/// A host-callable application decision for an already observed processor charge.
+/// Persistence revalidates source state, ownership, and economic eligibility.
+/// Expiry parking belongs to subscription application workflows, which validate
+/// the host's policy and durable period against the database clock.
+///
+/// Hosts cannot permanently park a charge by asserting that its period expired:
+///
+/// ```compile_fail,E0599
+/// use syrup_rail_postgres::ProcessorChargeTransition;
+/// let _ = ProcessorChargeTransition::ParkExpiredPeriod;
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub enum ProcessorChargeTransition {
+    /// Link an identified primary charge to its already-approved owning attempt.
+    MarkApplied,
+    /// Retain unresolved evidence for later exact reconciliation.
+    RequireReconciliation(Option<ChargeReconciliationReason>),
+    /// Send an identified positive charge to external-reversal review.
+    RequireExternalReversal(Option<ChargeReversalReason>),
+    /// Retain conflicting approval evidence while its attempt remains unresolved.
+    /// This may reclassify reversal review, but never an expired-period approval.
+    ReconcileConflictingApproval,
+}
+
 /// A named application decision for an already observed processor charge.
 /// Persistence revalidates source state, ownership, and economic eligibility.
 #[derive(Clone, Copy, Debug)]
-pub enum ChargeTransition {
+pub(crate) enum ChargeTransition {
     /// Link an identified primary charge to its already-approved owning attempt.
     MarkApplied,
     /// Retain unresolved evidence for later exact reconciliation.
@@ -26,6 +50,23 @@ pub enum ChargeTransition {
     /// database clock; persistence rechecks primary subscription ownership
     /// and rejects an already-approved owning attempt.
     ParkExpiredPeriod,
+}
+
+impl From<ProcessorChargeTransition> for ChargeTransition {
+    fn from(transition: ProcessorChargeTransition) -> Self {
+        match transition {
+            ProcessorChargeTransition::MarkApplied => Self::MarkApplied,
+            ProcessorChargeTransition::RequireReconciliation(reason) => {
+                Self::RequireReconciliation(reason)
+            }
+            ProcessorChargeTransition::RequireExternalReversal(reason) => {
+                Self::RequireExternalReversal(reason)
+            }
+            ProcessorChargeTransition::ReconcileConflictingApproval => {
+                Self::ReconcileConflictingApproval
+            }
+        }
+    }
 }
 
 impl ChargeTransition {
@@ -83,12 +124,7 @@ pub(crate) async fn transition_charge(
     charge_id: Uuid,
     transition: ChargeTransition,
 ) -> Result<(), ProcessorChargeStoreError> {
-    apply_processor_charge_transition_in_transaction(
-        connection,
-        ProcessorChargeId::new(charge_id),
-        transition,
-    )
-    .await?;
+    apply_charge_transition(connection, ProcessorChargeId::new(charge_id), transition).await?;
     Ok(())
 }
 
@@ -96,6 +132,14 @@ pub(crate) async fn transition_charge(
 /// The caller must retain the owning aggregate/attempt locks and commit any
 /// application state and host events atomically. This does not perform provider I/O.
 pub async fn apply_processor_charge_transition_in_transaction(
+    connection: &mut PgConnection,
+    charge_id: ProcessorChargeId,
+    transition: ProcessorChargeTransition,
+) -> Result<ProcessorCharge, ProcessorChargeStoreError> {
+    apply_charge_transition(connection, charge_id, transition.into()).await
+}
+
+pub(super) async fn apply_charge_transition(
     connection: &mut PgConnection,
     charge_id: ProcessorChargeId,
     transition: ChargeTransition,
