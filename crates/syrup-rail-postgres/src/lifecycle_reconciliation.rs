@@ -20,6 +20,9 @@ const INVALID_STORED_STATE: &str = "canonical gateway lifecycle state is invalid
 
 use crate::{HostChargeTargetError, HostChargeTargetStore};
 
+mod transitions;
+use transitions::{LifecycleTransition, lifecycle_refunded_amount, lifecycle_transition};
+
 #[derive(Debug, Error)]
 pub enum GatewayLifecycleReconciliationError {
     #[error("gateway lifecycle storage operation failed")]
@@ -164,14 +167,6 @@ struct AttemptCandidate {
     current_refunded_amount_cents: i32,
     matched_transaction_id: bool,
     matched_order_id: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum LifecycleTransition {
-    Apply { refunded_amount_cents: i32 },
-    AlreadySuperseded,
-    InvalidRefundEconomics,
-    ConflictingLifecycleEvidence,
 }
 
 pub async fn gateway_lifecycle_reconciliation_start(
@@ -653,65 +648,6 @@ async fn attempt_candidates(
         .collect()
 }
 
-fn lifecycle_transition(
-    current_state: &GatewayLifecycleState,
-    current_refunded_amount_cents: i32,
-    current_lifecycle_at: Option<DateTime<Utc>>,
-    incoming_state: &GatewayLifecycleState,
-    incoming_lifecycle_at: Option<DateTime<Utc>>,
-    captured_amount_cents: i32,
-) -> Result<LifecycleTransition, GatewayLifecycleReconciliationError> {
-    if !stored_amount_is_valid(
-        current_state,
-        current_refunded_amount_cents,
-        captured_amount_cents,
-    ) {
-        return Err(GatewayLifecycleReconciliationError::InvalidState(
-            INVALID_STORED_STATE,
-        ));
-    }
-    let incoming_refunded_amount_cents = lifecycle_refunded_amount(incoming_state);
-    if !incoming_amount_is_valid(incoming_state, captured_amount_cents) {
-        return Ok(LifecycleTransition::InvalidRefundEconomics);
-    }
-    let incoming_rank = lifecycle_rank(incoming_state);
-    let current_rank = lifecycle_rank(current_state);
-    let should_advance = incoming_rank > current_rank
-        || (incoming_rank == current_rank
-            && (current_lifecycle_at.is_none()
-                || incoming_lifecycle_at
-                    .zip(current_lifecycle_at)
-                    .is_some_and(|(incoming, current)| incoming > current)
-                || incoming_refunded_amount_cents
-                    .is_some_and(|incoming| incoming > current_refunded_amount_cents)));
-    if !should_advance {
-        return Ok(LifecycleTransition::AlreadySuperseded);
-    }
-    let next_refunded_amount_cents = current_refunded_amount_cents
-        .max(incoming_refunded_amount_cents.unwrap_or(current_refunded_amount_cents));
-    if !stored_amount_is_valid(
-        incoming_state,
-        next_refunded_amount_cents,
-        captured_amount_cents,
-    ) {
-        return Ok(LifecycleTransition::ConflictingLifecycleEvidence);
-    }
-    Ok(LifecycleTransition::Apply {
-        refunded_amount_cents: next_refunded_amount_cents,
-    })
-}
-
-const fn lifecycle_rank(state: &GatewayLifecycleState) -> i16 {
-    match state {
-        GatewayLifecycleState::Unknown => 0,
-        GatewayLifecycleState::PendingSettlement => 1,
-        GatewayLifecycleState::Settled { .. } => 2,
-        GatewayLifecycleState::Voided => 3,
-        GatewayLifecycleState::Refunded { .. } => 4,
-        GatewayLifecycleState::Chargeback { .. } => 5,
-    }
-}
-
 const fn lifecycle_status(state: &GatewayLifecycleState) -> &'static str {
     match state {
         GatewayLifecycleState::Unknown => "unknown",
@@ -720,60 +656,6 @@ const fn lifecycle_status(state: &GatewayLifecycleState) -> &'static str {
         GatewayLifecycleState::Voided => "voided",
         GatewayLifecycleState::Refunded { .. } => "refunded",
         GatewayLifecycleState::Chargeback { .. } => "chargeback",
-    }
-}
-
-const fn lifecycle_refunded_amount(state: &GatewayLifecycleState) -> Option<i32> {
-    match state {
-        GatewayLifecycleState::Settled {
-            cumulative_refunded_cents,
-        }
-        | GatewayLifecycleState::Chargeback {
-            cumulative_refunded_cents,
-        } => match cumulative_refunded_cents {
-            Some(amount) => Some(amount.get()),
-            None => None,
-        },
-        GatewayLifecycleState::Refunded {
-            cumulative_refunded_cents,
-        } => Some(cumulative_refunded_cents.get()),
-        GatewayLifecycleState::Unknown
-        | GatewayLifecycleState::PendingSettlement
-        | GatewayLifecycleState::Voided => None,
-    }
-}
-
-fn incoming_amount_is_valid(state: &GatewayLifecycleState, captured: i32) -> bool {
-    match state {
-        GatewayLifecycleState::Unknown
-        | GatewayLifecycleState::PendingSettlement
-        | GatewayLifecycleState::Voided => true,
-        GatewayLifecycleState::Settled {
-            cumulative_refunded_cents,
-        } => captured > 0 && cumulative_refunded_cents.is_none_or(|amount| amount.get() < captured),
-        GatewayLifecycleState::Refunded {
-            cumulative_refunded_cents,
-        } => captured > 0 && cumulative_refunded_cents.get() == captured,
-        GatewayLifecycleState::Chargeback {
-            cumulative_refunded_cents,
-        } => {
-            captured > 0 && cumulative_refunded_cents.is_none_or(|amount| amount.get() <= captured)
-        }
-    }
-}
-
-fn stored_amount_is_valid(state: &GatewayLifecycleState, refunded: i32, captured: i32) -> bool {
-    match state {
-        GatewayLifecycleState::Unknown
-        | GatewayLifecycleState::PendingSettlement
-        | GatewayLifecycleState::Voided => refunded == 0,
-        GatewayLifecycleState::Settled { .. } => {
-            captured > 0 && refunded >= 0 && refunded < captured
-        }
-        GatewayLifecycleState::Refunded { .. } => captured > 0 && refunded == captured,
-        GatewayLifecycleState::Chargeback { .. } => {
-            captured > 0 && refunded >= 0 && refunded <= captured
-        }
     }
 }
 

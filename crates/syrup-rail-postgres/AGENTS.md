@@ -112,6 +112,8 @@ and transaction orchestration.
 - `src/lifecycle_reconciliation.rs` and `src/lifecycle_quarantine.rs` — report
   lifecycle application, pending evidence, quarantine alert cadence, and
   operator incident review/resolution.
+  `src/lifecycle_reconciliation/transitions.rs` owns the exhaustive evidence
+  transition table and monotonic refund-economics policy.
 - `src/operator_review.rs` — stable privileged-review facade and shared error
   contract. `src/operator_review/{pages,manual_failure,external_reversal}.rs`
   own pagination and the two operator workflows; `src/processor_charge_persistence.rs`
