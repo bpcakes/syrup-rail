@@ -15,7 +15,9 @@ historically named `dev/0.6.0` branch.
 - Advanced processor-charge APIs now reject transitions without matching
   approved-attempt evidence, terminal reversals without immutable attestation,
   reopening of applied or externally reversed charges, and incompatible
-  destination/reason combinations. Handle `ProcessorChargeStoreError::InvalidState`
+  destination/reason or reason/attempt-kind combinations. Expiry parking requires
+  a primary subscription charge whose owning attempt is not approved.
+  Handle `ProcessorChargeStoreError::InvalidState`
   for these invalid calls. Observation alone cannot attest a reversal or mark an
   unmatched approval applied. Existing compatibility signatures remain available.
 - Prefer `ProcessorChargeTransition` and

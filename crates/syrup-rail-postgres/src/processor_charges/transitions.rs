@@ -22,6 +22,9 @@ pub enum ChargeTransition {
     /// This may reclassify reversal review, but never an expired-period approval.
     ReconcileConflictingApproval,
     /// Permanently park an expired-period approval with its canonical reason.
+    /// The caller confirms expiry under its configured policy using the
+    /// database clock; persistence rechecks primary subscription ownership
+    /// and rejects an already-approved owning attempt.
     ParkExpiredPeriod,
 }
 
@@ -154,7 +157,7 @@ async fn update_processor_charge(
         ChargeStateCodeUpdate::Replace(code) => (code, false),
         ChargeStateCodeUpdate::PreserveExisting(code) => (code, true),
     };
-    super::reasons::validate_reason(progression, state_code)?;
+    let reason_owner = super::reasons::validate_reason(progression, state_code)?;
     if expected_progressions.is_empty() {
         return Err(ProcessorChargeStoreError::InvalidState(
             "processor charge transition requires an expected state",
@@ -182,6 +185,19 @@ async fn update_processor_charge(
                 THEN COALESCE(externally_reversed_at, clock_timestamp()) ELSE NULL END,
             updated_at = clock_timestamp()
         WHERE id = $1 AND progression_state = ANY($2::text[])
+            AND ($6 = 'any' OR EXISTS (
+                SELECT 1 FROM billing_payment_attempts attempts
+                WHERE attempts.id = charges.attempt_id
+                    AND CASE $6
+                        WHEN 'expired_subscription_period' THEN
+                            attempts.attempt_kind IN (
+                                'subscription_initial', 'subscription_renewal', 'subscription_recovery'
+                            )
+                            AND charges.charge_role = 'primary'
+                            AND attempts.status <> 'approved'
+                        ELSE attempts.attempt_kind = $6
+                    END
+            ))
             AND (charges.state_code IS DISTINCT FROM 'subscription_approved_period_expired'
                 OR $3 = 'externally_reversed'
                 OR ($3 = 'external_reversal_required'
@@ -241,6 +257,7 @@ async fn update_processor_charge(
     .bind(progression.as_str())
     .bind(state_code.map(ProcessorChargeStateCode::as_str))
     .bind(preserve_existing_state_code)
+    .bind(reason_owner.sql_key())
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(ProcessorChargeStoreError::InvalidState(

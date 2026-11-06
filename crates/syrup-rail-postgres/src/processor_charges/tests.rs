@@ -523,4 +523,6 @@ async fn transaction_observation_preserves_exact_replay_and_rejects_drift()
     cleanup
 }
 
+mod classification;
+mod owner_context;
 mod transitions;
