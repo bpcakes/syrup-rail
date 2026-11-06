@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn parked_approval_recovers_once_without_another_sale() -> Result<(), Box<dyn Error>> {
-    let database = TestDatabase::start("host_park_recover").await?;
+    let database = TestDatabase::start("host_park_retry").await?;
     let result = async {
         sqlx::query("CREATE TABLE host_charge_targets (id uuid PRIMARY KEY, billing_scope_id uuid NOT NULL, subscriber_id uuid NOT NULL, status text NOT NULL, amount_cents integer NOT NULL, currency text NOT NULL, paid_at timestamptz)")
             .execute(&database.pool).await?;

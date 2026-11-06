@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn initial_approval_recovers_after_grant_conflict_clears() -> Result<(), Box<dyn Error>> {
-    let fixture = application_fixture("initial_park_clear").build().await?;
+    let fixture = application_fixture("init_park_clear").build().await?;
     let result = async {
         let grant_id = Uuid::now_v7();
         sqlx::query("INSERT INTO billing_subscription_grants (id, billing_scope_id, subscriber_id, plan_key, grant_kind, reason, starts_at, ends_at, granted_by_actor_id) VALUES ($1, $2, $3, $4, 'promotion', 'test grant', clock_timestamp() - interval '1 hour', clock_timestamp() + interval '1 day', $5)")
