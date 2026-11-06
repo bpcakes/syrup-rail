@@ -8,19 +8,14 @@ pub(crate) enum LockFreeApprovalPolicy {
     ReverseExpiredPeriod,
 }
 
-pub(super) enum ChargeStateCodeUpdate {
-    Replace(Option<ProcessorChargeStateCode>),
-    PreserveExisting(Option<ProcessorChargeStateCode>),
-}
-
 pub(super) async fn matching_charge(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
     transaction_id: Option<&str>,
-) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
+) -> Result<Option<ChargeRecord>, ProcessorChargeStoreError> {
     let descriptor = evidence.descriptor();
-    sqlx::query(
+    let row = sqlx::query(
         r#"
         SELECT id, charge_role,
             gateway_payment_method_reference IS NOT DISTINCT FROM $3
@@ -55,7 +50,20 @@ pub(super) async fn matching_charge(
     .bind(descriptor.card_exp_month())
     .bind(descriptor.card_exp_year())
     .fetch_optional(connection)
-    .await
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    if !row.try_get::<bool, _>("evidence_matches")? {
+        return Err(ProcessorChargeStoreError::InvalidState(
+            "processor charge replay evidence changed",
+        ));
+    }
+    Ok(Some(ChargeRecord {
+        id: row.try_get("id")?,
+        role: parse_role(&row.try_get::<String, _>("charge_role")?)?,
+        exact_replay: true,
+    }))
 }
 
 pub(super) async fn owned_by_other_attempt(
@@ -197,9 +205,9 @@ pub(super) async fn charge_by_id(
 pub(super) fn compensating_progression(
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
-) -> ProcessorChargeProgression {
+) -> ApprovalObservation {
     if attempt.status() == PaymentAttemptStatus::Approved {
-        ProcessorChargeProgression::Applied
+        ApprovalObservation::for_approved_attempt(attempt, evidence)
     } else if attempt.request().amount().cents() > 0
         && evidence.transaction_id().is_some()
         && (matches!(
@@ -209,30 +217,22 @@ pub(super) fn compensating_progression(
             == Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict)
             || is_external_reversal_terminal_attempt(attempt))
     {
-        ProcessorChargeProgression::ExternalReversalRequired
+        ApprovalObservation::ReviewReversal
     } else if matches!(
         attempt.status(),
         PaymentAttemptStatus::Declined
             | PaymentAttemptStatus::Failed
             | PaymentAttemptStatus::ReviewRequired
     ) {
-        ProcessorChargeProgression::ReconciliationRequired
+        ApprovalObservation::Reconcile
     } else {
-        ProcessorChargeProgression::Pending
+        ApprovalObservation::AwaitApplication
     }
 }
 
 pub(super) fn is_external_reversal_terminal_attempt(attempt: &PaymentAttempt) -> bool {
     attempt.status() == PaymentAttemptStatus::Failed
-        && matches!(
-            attempt.state().resolution_code(),
-            Some(
-                PaymentResolutionCode::SubscriptionInitialExternallyRefunded
-                    | PaymentResolutionCode::SubscriptionInitialExternallyVoided
-                    | PaymentResolutionCode::ProcessorChargeExternallyRefunded
-                    | PaymentResolutionCode::ProcessorChargeExternallyVoided
-            )
-        )
+        && super::policy::is_external_reversal_resolution(attempt.state().resolution_code())
 }
 
 pub(super) fn initial_charge_progression(
@@ -241,15 +241,13 @@ pub(super) fn initial_charge_progression(
     transaction_id: Option<&str>,
     requested: ProcessorChargeProgression,
 ) -> ProcessorChargeProgression {
-    if transaction_id.is_none() {
-        return ProcessorChargeProgression::ReconciliationRequired;
-    }
-    match role {
-        ProcessorChargeRole::Primary => requested,
-        ProcessorChargeRole::Additional if amount_cents > 0 => {
-            ProcessorChargeProgression::ExternalReversalRequired
+    use super::policy::ApprovalIdentity;
+    match ApprovalIdentity::classify(role, amount_cents, transaction_id) {
+        ApprovalIdentity::Unidentified | ApprovalIdentity::AdditionalZeroAmount => {
+            ProcessorChargeProgression::ReconciliationRequired
         }
-        ProcessorChargeRole::Additional => ProcessorChargeProgression::ReconciliationRequired,
+        ApprovalIdentity::Primary => requested,
+        ApprovalIdentity::AdditionalCharge => ProcessorChargeProgression::ExternalReversalRequired,
     }
 }
 

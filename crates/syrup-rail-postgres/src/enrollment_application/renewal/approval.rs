@@ -65,7 +65,7 @@ async fn apply_renewal_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Applied,
+            crate::processor_charges::ApprovalObservation::ReplayApplied,
         )
         .await?;
         return Ok((
@@ -86,7 +86,7 @@ async fn apply_renewal_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::ExternalReversalRequired,
+            crate::processor_charges::ApprovalObservation::ReviewReversal,
         )
         .await?;
         if let ObservedCharge::Owned(charge) = &observation
@@ -101,8 +101,7 @@ async fn apply_renewal_approved_on_connection(
             transition_charge(
                 connection,
                 charge.id,
-                ProcessorChargeProgression::ExternalReversalRequired,
-                None,
+                crate::processor_charges::ChargeTransition::RequireExternalReversal(None),
             )
             .await?;
         }
@@ -129,7 +128,7 @@ async fn apply_renewal_approved_on_connection(
         connection,
         &attempt,
         evidence,
-        ProcessorChargeProgression::Pending,
+        crate::processor_charges::ApprovalObservation::AwaitApplication,
     )
     .await?;
     let ObservedCharge::Owned(charge) = observation else {
@@ -150,8 +149,7 @@ async fn apply_renewal_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            None,
+            crate::processor_charges::ChargeTransition::RequireExternalReversal(None),
         )
         .await?;
         let parked = park_locked_attempt(
@@ -171,8 +169,9 @@ async fn apply_renewal_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            Some(PaymentResolutionCode::SubscriptionApprovedRenewalStaleState),
+            crate::processor_charges::ChargeTransition::RequireExternalReversal(Some(
+                crate::ChargeReversalReason::RenewalStaleState,
+            )),
         )
         .await?;
         let parked = park_locked_attempt(
@@ -249,8 +248,7 @@ async fn apply_renewal_approved_on_connection(
     transition_charge(
         connection,
         charge.id,
-        ProcessorChargeProgression::Applied,
-        None,
+        crate::processor_charges::ChargeTransition::MarkApplied,
     )
     .await?;
     let attempt = find_payment_attempt_by_id_on_connection(

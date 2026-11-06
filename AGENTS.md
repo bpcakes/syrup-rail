@@ -9,6 +9,20 @@
   subject before invoking Syrup Rail. These crates do not create an alternate
   application security boundary.
 
+## Explicit Rust state machines
+
+- Implicit state machines are forbidden in Rust code. Represent lifecycle states
+  and transition operations explicitly with enums or validated types; do not
+  encode transition policy through numeric ranks, independent flags, or scattered
+  conditionals across callers.
+- The owning state machine must define legal source states, destinations,
+  operation-specific reasons, and required evidence. Use exhaustive decisions so
+  new states require an explicit policy; compatibility APIs must validate through
+  the same rules rather than accepting arbitrary state/reason combinations.
+- Keep database locks, compare-and-set predicates, and transaction boundaries
+  authoritative for concurrent transitions. Test permitted recovery and replay
+  paths as well as forbidden transitions and invalid evidence combinations.
+
 <!-- BEGIN JIG MANAGED BLOCK -->
 This repository uses the shared `jig.sh` workflow. Keep repo-local business rules and ownership guidance in crate-level guides; keep generic agent workflow and repo policy here.
 

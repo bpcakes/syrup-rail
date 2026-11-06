@@ -12,6 +12,29 @@ historically named `dev/0.6.0` branch.
 
 ### Action required for hosts
 
+- Advanced processor-charge APIs now reject transitions without matching
+  approved-attempt evidence, terminal reversals without immutable attestation,
+  reopening of applied or externally reversed charges, and incompatible
+  destination/reason or reason/attempt-kind combinations. Expiry parking requires
+  a primary subscription charge whose owning attempt is not approved.
+  Handle `ProcessorChargeStoreError::InvalidState`
+  for these invalid calls. Observation alone cannot attest a reversal or mark an
+  unmatched approval applied.
+- `transition_processor_charge_in_transaction` has been removed. Migrate calls
+  that supplied source states, a destination, and an arbitrary reason to
+  `apply_processor_charge_transition_in_transaction` with a named
+  `ProcessorChargeTransition`. Use `MarkApplied`, `RequireReconciliation`, or
+  `RequireExternalReversal` for the corresponding operation; use
+  `attest_external_reversal` for verified terminal reversals. Callers no longer
+  select expected-state lists or assign reasons while applying a charge.
+  `ChargeReconciliationReason` and `ChargeReversalReason` constrain operation
+  reasons. Expiry parking is internal to subscription application workflows;
+  enable it through `BillingTransactionCoordinator::subscription_period_expiry_policy`
+  so those workflows validate the durable period against the database clock.
+  `ProcessorChargeTransition` does not expose `ParkExpiredPeriod`. Recoverable,
+  unattested reversal-review charges can still apply after their owning attempt
+  is approved in the same transaction; expired and attested charges cannot.
+
 - Upgrade all four Syrup Rail crates together to 0.6.0 and use Rust 1.94 or
   later. Public PostgreSQL pools, connections, transactions, errors, and host
   trait implementations now use SQLx 0.9.0 types; SQLx 0.8 types are incompatible.

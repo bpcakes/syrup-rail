@@ -5,21 +5,21 @@ Implement the four safety refactors identified in the audit, and publish reviewa
 ## Progress
 
 - [x] Revalidated merged baseline and transition entrypoints.
-- [x] SM4 implementation and local verification: explicit lifecycle evidence transition matrix; PR publication pending.
-- [ ] SM1: named processor-charge transitions and shared classification.
+- [x] SM4 implementation and local verification: explicit lifecycle evidence transition matrix; delivered as PR #11 (https://github.com/bpcakes/syrup-rail/pull/11).
+- [x] SM1 implementation and local verification: named processor-charge transitions and shared classification; PR publication follows.
 - [ ] SM2: validated attempt phases and evidence-bound non-submission restoration.
 - [ ] SM3: explicit subscription collection states with separate access projection.
 - [ ] Verify every PR and publish final links with dependencies and test results.
 
 ## Surprises & Discoveries
 
-Existing code already has consuming submission capabilities and typed attempt transitions. Remaining ambiguity lies in composite state and broadly parameterized persistence, not a complete absence of enums. Public advanced charge transition APIs require compatibility handling. Lifecycle numeric ranks encode an evidence precedence policy, including out-of-order reports, rather than merely chronological events. Existing Rust file-size policy prevents growing already oversized owners; extract cohesive decision modules.
+Existing code already has consuming submission capabilities and typed attempt transitions. Remaining ambiguity lies in composite state and broadly parameterized persistence, not a complete absence of enums. The arbitrary public charge transition API is removed; consumers migrate to named operations. Lifecycle numeric ranks encode an evidence precedence policy, including out-of-order reports, rather than merely chronological events. Existing Rust file-size policy prevents growing already oversized owners; extract cohesive decision modules.
 
 ## Decision Log
 
 - Preserve durable schema labels and data; no schema migration is planned. Keep SQL compare-and-set and lock ordering, because Rust values cannot establish freshness across processes.
 - Deliver SM4 first because it is independent and bounded; then SM1, SM2, and SM3. Stack subsequent PRs only where shared ownership requires it.
-- Retain public compatibility adapters where signatures already ship. Route adapters through validation; avoid retaining a second unguarded state machine.
+- Remove `transition_processor_charge_in_transaction` and migrate consumers to named operations. The user explicitly accepted this breaking change, superseding the earlier compatibility-adapter decision. Preserve durable schema compatibility.
 - Do not enable the deferred broad Clippy size/complexity limits as part of this work. New decision owners should be small enough to review.
 
 ## Outcomes & Retrospective
@@ -28,7 +28,16 @@ SM4: focused lifecycle tests passed (5), formatting and Clippy passed, and
 `scripts/jig --json check test` passed all 763 tests with zero ignored/filtered
 tests. The production lifecycle owner shrank by 117 lines; the transition
 owner and its tests are separate small files. Schema and public API unchanged.
-PR publication pending; SM1–SM3 remain unimplemented.
+PR #11 published with all 11 CI checks green.
+
+SM1: named observation and transition operations now own charge progression.
+Application requires matching approved attempt evidence; terminal reversal
+requires immutable attestation. Expired-period parking cannot be cleared by
+subsequent transitions. Unresolved host conflicts retain their legitimate
+reconciliation path. Two new database scenarios and two policy tests pass;
+full workspace verification passed 767 tests (none ignored/filtered), plus
+fmt, Clippy, SQLx and public API documentation checks. No schema changes.
+SM2–SM3 remain unimplemented.
 
 ## Work and acceptance
 
@@ -38,7 +47,7 @@ Replace numeric lifecycle ranks in crates/syrup-rail-postgres/src/lifecycle_reco
 
 ### SM1 — processor-charge application (Depends on: none; tracker syrup-rail-jjw)
 
-Own source states, destination, reason, and evidence prerequisites in named commands for observation/application/reversal/attestation. Update processor_charges, reconciliation/classification, enrollment_application, host_charge_application, and operator_review. Share decision logic where foreground and reconciliation classify the same facts, retaining distinct event semantics. Test late approval, transactionless evidence, additional charges, terminal reversal replay, ownership conflicts, and application races. Done when production callers cannot independently select arbitrary transition dimensions and compatibility entrypoints validate equivalent rules. Preserve persisted labels and atomic write sets.
+Own source states, destination, reason, and evidence prerequisites in named commands for observation/application/reversal/attestation. Update processor_charges, reconciliation/classification, enrollment_application, host_charge_application, and operator_review. Share decision logic where foreground and reconciliation classify the same facts, retaining distinct event semantics. Test late approval, transactionless evidence, additional charges, terminal reversal replay, ownership conflicts, and application races. Done when production callers cannot independently select arbitrary transition dimensions and consumers use named transition operations rather than the removed arbitrary transition API. Preserve persisted labels and atomic write sets.
 
 ### SM2 — attempt retry authority (Depends on: SM1; tracker syrup-rail-njz)
 

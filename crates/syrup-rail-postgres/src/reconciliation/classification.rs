@@ -200,16 +200,13 @@ pub(super) async fn classify_pending_charge(
     role: ChargeRole,
     transaction_id: Option<&str>,
     identity_match: ChargeIdentityMatch,
-) -> Result<(ChargeProgression, Option<String>), sqlx::Error> {
+) -> Result<PendingChargeDecision, sqlx::Error> {
     let Some(transaction_id) = transaction_id else {
-        return Ok((
-            ChargeProgression::ReconciliationRequired,
-            Some("processor_charge_transaction_identity_required".to_owned()),
-        ));
+        return Ok(PendingChargeDecision::IdentifyTransaction);
     };
     let attestation = sqlx::query_as::<_, (Uuid, String)>(
         r#"
-        SELECT processor_charge_id, final_resolution_code
+        SELECT processor_charge_id, prior_resolution_code
         FROM billing_external_reversal_attestations
         WHERE attempt_id = $1 AND gateway_transaction_id = $2
         FOR UPDATE
@@ -219,123 +216,40 @@ pub(super) async fn classify_pending_charge(
     .bind(transaction_id)
     .fetch_optional(&mut **transaction)
     .await?;
-    if let Some((attested_charge_id, final_resolution_code)) = attestation {
+    if let Some((attested_charge_id, prior_resolution_code)) = attestation {
         if attested_charge_id != charge_id {
             return Err(invalid_reconciliation_state());
         }
-        let final_resolution_code = PaymentResolutionCode::try_from(final_resolution_code.as_str())
-            .map_err(|_| invalid_reconciliation_state())?;
-        return Ok((
-            ChargeProgression::ExternallyReversed,
-            Some(final_resolution_code.as_str().to_owned()),
+        let prior_resolution_code =
+            crate::processor_charge_persistence::parse_charge_state_code(&prior_resolution_code)
+                .map_err(|_| invalid_reconciliation_state())?;
+        return Ok(PendingChargeDecision::AttestedReversal(
+            prior_resolution_code,
         ));
     }
-
-    let terminal_external_reversal = attempt.status == PaymentAttemptStatus::Failed
-        && matches!(
-            attempt.resolution_code,
-            Some(
-                PaymentResolutionCode::SubscriptionInitialExternallyRefunded
-                    | PaymentResolutionCode::SubscriptionInitialExternallyVoided
-                    | PaymentResolutionCode::ProcessorChargeExternallyRefunded
-                    | PaymentResolutionCode::ProcessorChargeExternallyVoided
-            )
-        );
-    let initial_grant_conflict = attempt.locator.kind == PaymentAttemptKind::SubscriptionInitial
-        && attempt.resolution_code
-            == Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict);
-    if attempt.amount_cents > 0
-        && (role == ChargeRole::Additional
-            || terminal_external_reversal
-            || initial_grant_conflict
-            || (attempt.transaction_id.is_some()
-                && identity_match == ChargeIdentityMatch::Different))
-    {
-        return Ok((
-            ChargeProgression::ExternalReversalRequired,
-            Some(
-                if role == ChargeRole::Additional {
-                    "additional_approved_charge_identified"
-                } else {
-                    "processor_charge_external_reversal_required"
-                }
-                .to_owned(),
-            ),
-        ));
+    Ok(ApprovalApplicationFacts {
+        identity: ApprovalIdentity::classify(role, attempt.amount_cents, Some(transaction_id)),
+        amount_cents: attempt.amount_cents,
+        attempt_kind: attempt.locator.kind,
+        attempt_status: attempt.status,
+        resolution_code: attempt.resolution_code,
+        attempt_transaction_id: attempt.transaction_id.clone(),
+        identity_match,
     }
-    if identity_match == ChargeIdentityMatch::Same
-        && attempt.status == PaymentAttemptStatus::Approved
-    {
-        return Ok((ChargeProgression::Applied, None));
-    }
-    Ok((
-        ChargeProgression::ReconciliationRequired,
-        Some(
-            if role == ChargeRole::Additional {
-                "zero_amount_additional_approved_charge"
-            } else {
-                "approved_charge_waiting_for_application"
-            }
-            .to_owned(),
-        ),
-    ))
+    .pending_decision())
 }
 
 pub(super) async fn transition_pending_charge(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     charge_id: Uuid,
-    progression: ChargeProgression,
-    state_code: Option<&str>,
+    decision: PendingChargeDecision,
 ) -> Result<(), sqlx::Error> {
-    let result = sqlx::query(
-        r#"
-        UPDATE billing_processor_charges
-        SET progression_state = $2,
-            state_code = $3,
-            reconciliation_required_at = CASE
-                WHEN $2 = 'reconciliation_required'
-                THEN COALESCE(reconciliation_required_at, clock_timestamp())
-            END,
-            external_reversal_required_at = CASE
-                WHEN $2 = 'external_reversal_required'
-                THEN COALESCE(external_reversal_required_at, clock_timestamp())
-            END,
-            applied_at = CASE WHEN $2 = 'applied'
-                THEN COALESCE(applied_at, clock_timestamp()) END,
-            externally_reversed_at = CASE WHEN $2 = 'externally_reversed'
-                THEN COALESCE(externally_reversed_at, clock_timestamp()) END,
-            updated_at = clock_timestamp()
-        WHERE id = $1 AND progression_state = 'pending'
-            AND (
-                $2 NOT IN ('external_reversal_required', 'externally_reversed')
-                OR (
-                    billing_canonical_gateway_transaction_id(
-                        gateway_transaction_id
-                    ) IS NOT NULL
-                    AND amount_cents > 0
-                    AND attempt_kind <> 'subscription_payment_method_update'
-                )
-            )
-            AND (
-                $2 <> 'applied'
-                OR (
-                    charge_role = 'primary'
-                    AND billing_canonical_gateway_transaction_id(
-                        gateway_transaction_id
-                    ) IS NOT NULL
-                )
-            )
-        "#,
-    )
-    .bind(charge_id)
-    .bind(progression.as_str())
-    .bind(state_code)
-    .execute(&mut **transaction)
-    .await?;
-    if result.rows_affected() != 1 {
-        return Err(invalid_reconciliation_state());
-    }
-    Ok(())
+    crate::processor_charges::apply_pending_charge_decision(transaction, charge_id, decision)
+        .await
+        .map_err(|error| match error {
+            crate::ProcessorChargeStoreError::Sql(error) => error,
+            _ => invalid_reconciliation_state(),
+        })
 }
 
 pub(super) fn invalid_reconciliation_state() -> sqlx::Error {

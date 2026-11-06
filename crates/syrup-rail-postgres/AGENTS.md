@@ -120,8 +120,12 @@ and transaction orchestration.
   is their neutral shared processor-charge and immutable-attestation codec.
 - `src/processor_charges.rs` — canonical charge observation and transition
   facade; `src/processor_charges/storage.rs` owns exact replay,
-  transactionless identification, progression derivation, and bounded
-  compensating persistence support.
+  transactionless identification and bounded compensating persistence support.
+  `src/processor_charges/policy.rs` owns observation intents and shared approval
+  classification; `transitions.rs` owns named application decisions, guarded
+  transitions, and attested reversal completion. Its public transition enum
+  excludes expiry parking; checked subscription application workflows own the
+  internal expiry operation and its policy/database-clock prerequisites.
 - `src/host_charges.rs` — host target extension port, canonical attempt
   reservation/final admission, and typed caller-transaction access to the
   host-charge `Reserve`, `Submit`, and `Release` ledger modes.

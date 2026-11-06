@@ -24,12 +24,24 @@ use crate::{OperatorReviewError, PaymentAttemptStoreError};
 
 pub(crate) use storage::LockFreeApprovalPolicy;
 use storage::{
-    ChargeStateCodeUpdate, charge_by_id, compensating_progression, identify_transactionless,
-    initial_charge_progression, initial_charge_state_code, is_transient, map_operator_error,
-    matching_charge, owned_by_other_attempt, parse_role,
+    charge_by_id, compensating_progression, identify_transactionless, initial_charge_progression,
+    initial_charge_state_code, is_transient, map_operator_error, matching_charge,
+    owned_by_other_attempt,
 };
 
+pub(crate) mod policy;
+pub(crate) use policy::ApprovalObservation;
+mod reasons;
 mod storage;
+pub use reasons::{ChargeReconciliationReason, ChargeReversalReason};
+mod transitions;
+use transitions::{ChargeStateCodeUpdate, transition_processor_charge};
+pub(crate) use transitions::{
+    ChargeTransition, apply_pending_charge_decision, complete_attested_reversal, transition_charge,
+};
+pub use transitions::{
+    ProcessorChargeTransition, apply_processor_charge_transition_in_transaction,
+};
 
 const INVALID_CHARGE_STATE: &str = "canonical processor charge state is invalid";
 const STORE_MAX_ATTEMPTS: usize = 3;
@@ -87,8 +99,7 @@ pub(crate) async fn promote_conflicting_charge_to_external_reversal(
             transition_charge(
                 connection,
                 charge.id,
-                ProcessorChargeProgression::ExternalReversalRequired,
-                None,
+                crate::processor_charges::ChargeTransition::RequireExternalReversal(None),
             )
             .await
         }
@@ -508,7 +519,14 @@ pub async fn observe_processor_charge_in_transaction(
             "processor charge order does not match its attempt",
         ));
     }
-    match observe_processor_charge(connection, &attempt, evidence, initial_progression).await? {
+    match observe_processor_charge(
+        connection,
+        &attempt,
+        evidence,
+        initial_progression.try_into()?,
+    )
+    .await?
+    {
         ObservedCharge::OwnedByOtherAttempt => {
             Ok(ProcessorChargeObservationOutcome::OwnedByOtherAttempt)
         }
@@ -540,31 +558,23 @@ pub async fn observe_processor_charge_in_transaction(
     }
 }
 
-pub async fn transition_processor_charge_in_transaction(
-    connection: &mut PgConnection,
-    charge_id: ProcessorChargeId,
-    expected_progressions: &[ProcessorChargeProgression],
-    progression: ProcessorChargeProgression,
-    state_code: Option<ProcessorChargeStateCode>,
-) -> Result<ProcessorCharge, ProcessorChargeStoreError> {
-    transition_processor_charge(
-        connection,
-        charge_id,
-        expected_progressions,
-        progression,
-        ChargeStateCodeUpdate::Replace(state_code),
-    )
-    .await
-}
-
 pub(crate) async fn observe_processor_charge(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
     evidence: &ProcessorEvidence,
-    initial_progression: ProcessorChargeProgression,
+    observation: ApprovalObservation,
 ) -> Result<ObservedCharge, ProcessorChargeStoreError> {
+    let initial_progression = observation.progression();
     let identity = attempt.identity();
     let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
+    if observation == ApprovalObservation::ReplayApplied
+        && (attempt.status() != PaymentAttemptStatus::Approved
+            || attempt.state().processor_evidence().transaction_id() != evidence.transaction_id())
+    {
+        return Err(ProcessorChargeStoreError::InvalidState(
+            "applied observation requires its matching approved attempt",
+        ));
+    }
     let has_existing_charge: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
     )
@@ -574,6 +584,13 @@ pub(crate) async fn observe_processor_charge(
     if let Some(transaction_id) = transaction_id {
         if owned_by_other_attempt(connection, attempt, transaction_id).await? {
             return Ok(ObservedCharge::OwnedByOtherAttempt);
+        }
+        // A sparse observation can coexist with its identified charge. Resolve
+        // the canonical identity before filling the sparse row's missing ID.
+        if let Some(charge) =
+            matching_charge(connection, attempt, evidence, Some(transaction_id)).await?
+        {
+            return Ok(ObservedCharge::Owned(charge));
         }
         if let Some(charge) = identify_transactionless(
             connection,
@@ -674,17 +691,8 @@ pub(crate) async fn observe_processor_charge(
             exact_replay: false,
         }));
     }
-    if let Some(row) = matching_charge(connection, attempt, evidence, transaction_id).await? {
-        if !row.try_get::<bool, _>("evidence_matches")? {
-            return Err(ProcessorChargeStoreError::InvalidState(
-                "processor charge replay evidence changed",
-            ));
-        }
-        return Ok(ObservedCharge::Owned(ChargeRecord {
-            id: row.try_get("id")?,
-            role: parse_role(&row.try_get::<String, _>("charge_role")?)?,
-            exact_replay: true,
-        }));
+    if let Some(charge) = matching_charge(connection, attempt, evidence, transaction_id).await? {
+        return Ok(ObservedCharge::Owned(charge));
     }
     if let Some(transaction_id) = transaction_id
         && owned_by_other_attempt(connection, attempt, transaction_id).await?
@@ -694,105 +702,6 @@ pub(crate) async fn observe_processor_charge(
     Err(ProcessorChargeStoreError::InvalidState(
         INVALID_CHARGE_STATE,
     ))
-}
-
-pub(crate) async fn transition_charge(
-    connection: &mut PgConnection,
-    charge_id: Uuid,
-    progression: ProcessorChargeProgression,
-    resolution_code: Option<PaymentResolutionCode>,
-) -> Result<(), ProcessorChargeStoreError> {
-    const EXPECTED: &[ProcessorChargeProgression] = &[
-        ProcessorChargeProgression::Pending,
-        ProcessorChargeProgression::ReconciliationRequired,
-        ProcessorChargeProgression::ExternalReversalRequired,
-        ProcessorChargeProgression::Applied,
-    ];
-    transition_processor_charge(
-        connection,
-        ProcessorChargeId::new(charge_id),
-        EXPECTED,
-        progression,
-        ChargeStateCodeUpdate::PreserveExisting(
-            resolution_code.map(ProcessorChargeStateCode::PaymentResolution),
-        ),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn transition_processor_charge(
-    connection: &mut PgConnection,
-    charge_id: ProcessorChargeId,
-    expected_progressions: &[ProcessorChargeProgression],
-    progression: ProcessorChargeProgression,
-    state_code_update: ChargeStateCodeUpdate,
-) -> Result<ProcessorCharge, ProcessorChargeStoreError> {
-    let (state_code, preserve_existing_state_code) = match state_code_update {
-        ChargeStateCodeUpdate::Replace(code) => (code, false),
-        ChargeStateCodeUpdate::PreserveExisting(code) => (code, true),
-    };
-    if expected_progressions.is_empty() {
-        return Err(ProcessorChargeStoreError::InvalidState(
-            "processor charge transition requires an expected state",
-        ));
-    }
-    let expected_progressions = expected_progressions
-        .iter()
-        .map(|progression| progression.as_str())
-        .collect::<Vec<_>>();
-    let row = sqlx::query(
-        r#"
-        UPDATE billing_processor_charges
-        SET progression_state = $3,
-            state_code = CASE WHEN $5 THEN COALESCE(state_code, $4) ELSE $4 END,
-            reconciliation_required_at = CASE WHEN $3 = 'reconciliation_required'
-                THEN COALESCE(reconciliation_required_at, clock_timestamp())
-                ELSE NULL END,
-            external_reversal_required_at = CASE WHEN $3 = 'external_reversal_required'
-                THEN COALESCE(external_reversal_required_at, clock_timestamp())
-                ELSE NULL END,
-            applied_at = CASE WHEN $3 = 'applied'
-                THEN COALESCE(applied_at, clock_timestamp()) ELSE NULL END,
-            externally_reversed_at = CASE WHEN $3 = 'externally_reversed'
-                THEN COALESCE(externally_reversed_at, clock_timestamp()) ELSE NULL END,
-            updated_at = clock_timestamp()
-        WHERE id = $1 AND progression_state = ANY($2::text[])
-            AND (
-                $3 <> ALL(ARRAY['external_reversal_required'::text, 'externally_reversed'::text])
-                OR (
-                    billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NOT NULL
-                    AND amount_cents > 0
-                    AND attempt_kind <> 'subscription_payment_method_update'
-                )
-            )
-            AND (
-                $3 <> 'applied'
-                OR (
-                    charge_role = 'primary'
-                    AND billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NOT NULL
-                )
-            )
-        RETURNING id, attempt_id, billing_scope_id, gateway_account_id,
-            gateway_order_id, attempt_kind, amount_cents, currency,
-            charge_role, progression_state, state_code,
-            gateway_transaction_id, gateway_payment_method_reference,
-            gateway_response, gateway_response_code, gateway_response_text,
-            gateway_condition, payment_type, card_brand, card_last4,
-            card_exp_month, card_exp_year, observed_at
-        "#,
-    )
-    .bind(charge_id.as_uuid())
-    .bind(expected_progressions)
-    .bind(progression.as_str())
-    .bind(state_code.map(ProcessorChargeStateCode::as_str))
-    .bind(preserve_existing_state_code)
-    .fetch_optional(&mut *connection)
-    .await?
-    .ok_or(ProcessorChargeStoreError::InvalidState(
-        "processor charge transition did not match its expected state or eligibility",
-    ))?;
-    processor_charge_from_row(&row).map_err(map_operator_error)
 }
 
 #[cfg(test)]

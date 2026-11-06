@@ -162,25 +162,8 @@ pub async fn attest_external_reversal(
         attested_at,
     )
     .await?;
-    let updated = sqlx::query(
-        r#"
-        UPDATE billing_processor_charges
-        SET progression_state = 'externally_reversed',
-            state_code = $2,
-            externally_reversed_at = COALESCE(externally_reversed_at, clock_timestamp()),
-            updated_at = clock_timestamp()
-        WHERE id = $1 AND progression_state = 'external_reversal_required'
-        "#,
-    )
-    .bind(processor_charge_id.as_uuid())
-    .bind(&prior)
-    .execute(&mut *transaction)
-    .await?;
-    if updated.rows_affected() != 1 {
-        return Err(OperatorReviewError::InvalidState(
-            "eligible processor charge did not accept external reversal",
-        ));
-    }
+    crate::processor_charges::complete_attested_reversal(&mut transaction, processor_charge_id)
+        .await?;
     if charge.role() == ProcessorChargeRole::Primary && !attempt.status().is_terminal() {
         let updated = sqlx::query(
             r#"

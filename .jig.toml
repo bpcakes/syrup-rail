@@ -27,7 +27,8 @@ bootstrap_command = "cargo fetch --locked"
 
 rust_fmt_check_command = "cargo fmt --all -- --check"
 rust_clippy_command = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
-rust_test_command = "cargo test --workspace --all-features"
+# Each database test starts PostgreSQL; bound startup load like the locked suite.
+rust_test_command = "cargo test --workspace --all-features -- --test-threads=1"
 rust_test_locked_command = "cargo test --workspace --all-features --locked -- --test-threads=1"
 web_package_manager = "bun"
 

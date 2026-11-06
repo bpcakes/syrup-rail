@@ -222,6 +222,35 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     };
     assert_eq!(attempt.status(), PaymentAttemptStatus::Failed);
     assert_eq!(attestation.actor_id(), actor);
+    let mut transaction = database.pool.begin().await?;
+    for transition in [
+        crate::ProcessorChargeTransition::RequireReconciliation(None),
+        crate::ProcessorChargeTransition::ReconcileConflictingApproval,
+        crate::ProcessorChargeTransition::RequireExternalReversal(None),
+        crate::ProcessorChargeTransition::MarkApplied,
+    ] {
+        assert!(
+            crate::apply_processor_charge_transition_in_transaction(
+                &mut transaction,
+                ProcessorChargeId::new(charge_id),
+                transition,
+            )
+            .await
+            .is_err()
+        );
+    }
+    let unchanged: (String, String, Uuid) = sqlx::query_as(
+        "SELECT c.progression_state, c.state_code, a.actor_id \
+         FROM billing_processor_charges c JOIN billing_external_reversal_attestations a \
+         ON a.processor_charge_id = c.id WHERE c.id = $1",
+    )
+    .bind(charge_id)
+    .fetch_one(&mut *transaction)
+    .await?;
+    assert_eq!(unchanged.0, "externally_reversed");
+    assert_eq!(unchanged.1, attestation.prior_resolution_code());
+    assert_eq!(unchanged.2, *actor.as_uuid());
+    transaction.commit().await?;
     assert_eq!(host.calls.load(Ordering::SeqCst), 1);
     assert!(
         sqlx::query_scalar::<_, bool>("SELECT released FROM host_targets WHERE id = $1")
@@ -262,6 +291,36 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         ).bind(charge_id).fetch_one(&database.pool).await?;
     assert_eq!(counts, (1, "externally_reversed".to_owned()));
 
+    assert!(matches!(
+        attest_external_reversal(
+            &database.pool,
+            &host,
+            ProcessorChargeId::new(additional_charge_id),
+            actor,
+            ExternalReversalKind::Refund,
+            &GatewayTransactionId::new("txn-operator-additional")?,
+            &reason,
+        )
+        .await?,
+        ExternalReversalAttestationOutcome::Attested { .. }
+    ));
+    let mut transaction = database.pool.begin().await?;
+    assert_eq!(
+        crate::host_charge_ledger_admission(
+            &mut transaction,
+            &crate::HostChargeLedgerAdmissionQuery::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                syrup_rail::HostChargeTargetId::new(target_id),
+                crate::HostChargeLedgerAdmissionMode::Reserve {
+                    idempotency_key: syrup_rail::IdempotencyKey::new("after-reversal")?,
+                },
+            ),
+        )
+        .await?,
+        crate::HostChargeLedgerAdmission::Safe,
+    );
+    transaction.commit().await?;
     database.cleanup().await?;
     Ok(())
 }

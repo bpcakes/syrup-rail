@@ -7,8 +7,8 @@ use syrup_rail::{
     EnrollSubscription, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome,
     GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest,
     GatewayTransactionId, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentMethodId,
-    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
-    SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
+    PaymentResolutionCode, ProcessorChargeRole, ProcessorEvidence, SubscriptionDiscountDuration,
+    SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
     SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionPhase,
     next_billing_period,
@@ -500,22 +500,22 @@ async fn try_park_approved_outcome(
             &mut transaction,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Applied,
+            crate::processor_charges::ApprovalObservation::for_approved_attempt(&attempt, evidence),
         )
         .await?;
         attempt
     } else if attempt.status().is_terminal() {
         let progression =
             if evidence.transaction_id().is_some() && attempt.request().amount().cents() > 0 {
-                ProcessorChargeProgression::ExternalReversalRequired
+                crate::processor_charges::ApprovalObservation::ReviewReversal
             } else {
-                ProcessorChargeProgression::ReconciliationRequired
+                crate::processor_charges::ApprovalObservation::Reconcile
             };
         let observation =
             observe_processor_charge(&mut transaction, &attempt, evidence, progression).await?;
         // As in foreground application, a late approval of a terminal initial
         // attempt whose period ended receives the permanent expiry disposition.
-        if progression == ProcessorChargeProgression::ExternalReversalRequired
+        if progression == crate::processor_charges::ApprovalObservation::ReviewReversal
             && expiry_policy.rejects_expired_periods()
             && let ObservedCharge::Owned(charge) = &observation
             && charge.role == syrup_rail::ProcessorChargeRole::Primary
@@ -573,7 +573,7 @@ async fn observe_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ProcessorChargeProgression::Pending,
+                crate::processor_charges::ApprovalObservation::AwaitApplication,
             )
             .await?;
             let expired_period_end = if expiry_policy.rejects_expired_periods() {

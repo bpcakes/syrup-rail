@@ -67,7 +67,7 @@ async fn apply_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::Applied,
+            crate::processor_charges::ApprovalObservation::ReplayApplied,
         )
         .await?;
         return Ok((
@@ -91,7 +91,7 @@ async fn apply_approved_on_connection(
             connection,
             &attempt,
             evidence,
-            ProcessorChargeProgression::ExternalReversalRequired,
+            crate::processor_charges::ApprovalObservation::ReviewReversal,
         )
         .await?;
         if let ObservedCharge::Owned(charge) = &observation
@@ -133,8 +133,7 @@ async fn apply_approved_on_connection(
             transition_charge(
                 connection,
                 charge.id,
-                ProcessorChargeProgression::ExternalReversalRequired,
-                None,
+                crate::processor_charges::ChargeTransition::RequireExternalReversal(None),
             )
             .await?;
         }
@@ -147,7 +146,7 @@ async fn apply_approved_on_connection(
         connection,
         &attempt,
         evidence,
-        ProcessorChargeProgression::Pending,
+        crate::processor_charges::ApprovalObservation::AwaitApplication,
     )
     .await?;
     let ObservedCharge::Owned(charge) = observation else {
@@ -168,8 +167,7 @@ async fn apply_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            None,
+            crate::processor_charges::ChargeTransition::RequireExternalReversal(None),
         )
         .await?;
         let parked = park_locked_attempt(
@@ -217,8 +215,9 @@ async fn apply_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            Some(PaymentResolutionCode::SubscriptionInitialCurrentSubscriptionConflict),
+            crate::processor_charges::ChargeTransition::RequireExternalReversal(Some(
+                crate::ChargeReversalReason::InitialSubscriptionConflict,
+            )),
         )
         .await?;
         let parked = park_locked_attempt(
@@ -238,8 +237,9 @@ async fn apply_approved_on_connection(
         transition_charge(
             connection,
             charge.id,
-            ProcessorChargeProgression::ExternalReversalRequired,
-            Some(PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict),
+            crate::processor_charges::ChargeTransition::RequireExternalReversal(Some(
+                crate::ChargeReversalReason::InitialGrantConflict,
+            )),
         )
         .await?;
         let parked = park_locked_attempt(
@@ -287,8 +287,7 @@ async fn apply_approved_on_connection(
     transition_charge(
         connection,
         charge.id,
-        ProcessorChargeProgression::Applied,
-        None,
+        crate::processor_charges::ChargeTransition::MarkApplied,
     )
     .await?;
 

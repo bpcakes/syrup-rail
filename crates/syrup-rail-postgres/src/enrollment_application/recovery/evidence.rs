@@ -19,7 +19,7 @@ pub(super) async fn observe_recovery_approved_evidence_with_retry(
                 &mut transaction,
                 &attempt,
                 evidence,
-                ProcessorChargeProgression::Pending,
+                crate::processor_charges::ApprovalObservation::AwaitApplication,
             )
             .await?;
             park_observed_approval_if_period_expired(
