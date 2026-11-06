@@ -224,7 +224,10 @@ async fn insert_subscription_charge_attempt(
     let payment_method_id = Uuid::now_v7();
     let subscription_id = Uuid::now_v7();
     let attempt_id = Uuid::now_v7();
-    let transaction_id = format!("initial_{}", attempt_id.simple());
+    let transaction_id = format!(
+        "initial_{}",
+        crate::test_support::opaque_fixture_uuid(attempt_id)
+    );
     let period_start_at = Utc::now() - Duration::days(1);
     sqlx::query(
         r#"

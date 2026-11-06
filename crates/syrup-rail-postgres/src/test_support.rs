@@ -29,6 +29,19 @@ pub(crate) struct GatewayAccountFixture {
     pub(crate) gateway_configuration_id: Uuid,
 }
 
+/// Encodes fixture identity without decimal runs that can accidentally satisfy
+/// the raw-card detector used by provider-reference value types.
+pub(crate) fn opaque_fixture_uuid(id: Uuid) -> String {
+    const NIBBLES: &[u8; 16] = b"abcdefghijklmnop";
+
+    let mut encoded = String::with_capacity(32);
+    for byte in id.as_bytes() {
+        encoded.push(NIBBLES[usize::from(byte >> 4)] as char);
+        encoded.push(NIBBLES[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
+}
+
 pub(crate) fn billing_address(line1: &str) -> BillingAddress {
     BillingAddress::new(line1.to_owned(), "US".to_owned())
         .unwrap()
