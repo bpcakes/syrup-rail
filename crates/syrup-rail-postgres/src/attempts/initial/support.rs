@@ -265,8 +265,7 @@ pub(super) fn pending_attempt_matches_request_without_required_mode(
         && identity.subscriber_id() == requested_identity.subscriber_id()
         && identity.gateway_account_id() == requested_identity.gateway_account_id()
         && identity.gateway_configuration_id() == requested_identity.gateway_configuration_id()
-        && attempt.status() == PaymentAttemptStatus::Pending
-        && attempt.state().timestamps().submitted_at().is_none()
+        && attempt.phase().is_prepared()
         && attempt.request().target() == requested.target()
         && attempt.request().fingerprint() == requested.fingerprint()
         && attempt.request().amount() == requested.amount()
