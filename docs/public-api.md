@@ -230,8 +230,9 @@ hook must be a pure function of its arguments, because replaying a failure
 must reach the same decision. Earlier failures of the same period are still
 admitted by the schedule alone, so history written before a host enabled
 advice stays valid. `fail_review_required_renewal_for_retry` makes the retry
-due immediately only when the advice follows the schedule; stopping or
-postponing advice is honored instead. NMI hosts delegate to
+due immediately only when the advice follows the schedule; stop advice ends
+dunning, and any `RetryNoEarlierThan` advice keeps its advised retry time (the
+floor or a later scheduled step). NMI hosts delegate to
 `syrup_rail_nmi::nmi_renewal_decline_retry_advice` when the provider key is
 `NmiPaymentGateway::provider_key()`; it stops on NMI codes 220-224, 250-253,
 261-263, and 461, waits at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days)

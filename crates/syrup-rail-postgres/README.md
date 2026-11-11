@@ -353,8 +353,10 @@ hook must be a pure function of its arguments: replaying the same failure must
 reach the same decision. Earlier failures of the period are admitted by the
 schedule alone, so history written before advice was enabled stays valid. An
 operator "retry now" decision makes the retry due immediately only when the
-advice follows the schedule; stopping or postponing advice is honored instead.
-No schema change is involved.
+advice follows the schedule; stop advice ends dunning, and any
+`RetryNoEarlierThan` advice keeps its advised retry time (the floor or a later
+scheduled step), because retrying now would precede the provider's floor. No
+schema change is involved.
 
 ## Billing-period expiry
 

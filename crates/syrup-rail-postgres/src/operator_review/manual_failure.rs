@@ -77,9 +77,10 @@ pub async fn fail_review_required_attempt(
 /// calling this function. This operation performs no provider query or charge.
 /// It preserves ordinary dunning history, access policy, and exhaustion; only a
 /// newly scheduled retry is accelerated, and only when the coordinator's
-/// `renewal_decline_retry_advice` follows the schedule. Advice that stops
-/// dunning or postpones the retry is honored instead. Canceled, unpaid, and already exhausted
-/// subscriptions are not reopened. Hosts must retain their cancellation fences
+/// `renewal_decline_retry_advice` follows the schedule. Stop advice ends
+/// dunning, and any `RetryNoEarlierThan` advice keeps its advised retry time
+/// (the floor or a later scheduled step) instead. Canceled, unpaid, and
+/// already exhausted subscriptions are not reopened. Hosts must retain their cancellation fences
 /// when dispatching the resulting renewal through the ordinary renewal service.
 ///
 /// Replays and concurrent calls cannot accelerate another attempt's retry. An
@@ -217,7 +218,10 @@ async fn fail_review_required(
             )
             .await?
             {
-                // A retry the provider asked to delay keeps its advised time.
+                // Only schedule-following advice is expedited. Under any
+                // `RetryNoEarlierThan` advice the retry keeps its advised time,
+                // the floor or a later scheduled step, because retrying now
+                // would precede the provider's floor.
                 RenewalFailureApplication::Applied {
                     disposition: RenewalFailureDisposition::RetryScheduled { retry_at },
                     advice: RenewalDeclineRetryAdvice::FollowSchedule,

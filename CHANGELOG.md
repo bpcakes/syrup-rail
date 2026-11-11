@@ -71,7 +71,8 @@ historically named `dev/0.6.0` branch.
   are still admitted by the schedule alone, so history written before a host
   enabled advice remains valid. `fail_review_required_renewal_for_retry`
   makes a retry due immediately only when the advice follows the schedule;
-  advice that stops or postpones dunning is honored instead. No schema change.
+  stop advice ends dunning, and any `RetryNoEarlierThan` advice keeps its
+  advised retry time (the floor or a later scheduled step). No schema change.
 - Add `syrup_rail_nmi::nmi_renewal_decline_retry_advice` and
   `NMI_RETRY_IN_A_FEW_DAYS_DELAY`. NMI codes 220-224 (invalid or expired card
   data), 250-253 (pick up, lost, stolen, fraudulent), 261-262 (stop recurring),
