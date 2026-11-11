@@ -365,6 +365,12 @@ and transaction orchestration.
   exact reconciliation, and operator review apply qualifying automatic
   customer failures through `renewal_failure.rs` and append every returned
   event before commit.
+- Every path that applies a qualifying automatic failure passes the
+  coordinator's `renewal_decline_retry_advice` for that attempt's gateway
+  provider key and durable processor evidence; only the latest failure's
+  advice shapes its disposition. Earlier failures of the period remain
+  admitted by the schedule alone, so history written before a host enabled
+  advice, or under an older provider interpretation, stays valid.
 - Renewal dispatch applies subscription, provider, account, update, and cursor
   gates before a lateral probe of the exact `(subscription_id,
   next_renewal_at)` attempt history. Do not restore a global attempt-history

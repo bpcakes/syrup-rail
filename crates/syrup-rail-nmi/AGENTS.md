@@ -16,6 +16,8 @@ Adapt the raw NMI client to Syrup Rail gateway and lifecycle-evidence contracts.
   canonical evidence or quarantine.
 - `src/reference.rs` owns the two-letter host namespace and exact mutation
   reference format.
+- `src/decline_advice.rs` alone interprets NMI `response_code` values into
+  automatic-renewal retry advice.
 - `src/lib.rs` exports the adapter and retains the raw client re-export for
   hosts that construct short-lived clients from their own credential stores.
 
@@ -34,6 +36,9 @@ Adapt the raw NMI client to Syrup Rail gateway and lifecycle-evidence contracts.
   packages.
 - No SQLx or application crate dependencies.
 - Never move NMI action parsing into `syrup-rail` or `syrup-rail-postgres`.
+- Renewal retry advice interprets only NMI-published response codes whose
+  meaning forbids or delays a same-card retry; unknown, missing, generic, and
+  gateway-side codes follow the dunning schedule.
 - Preserve exact NMI card-brand evidence while conformance-testing every
   documented NMI scheme label against the core presentation vocabulary.
 

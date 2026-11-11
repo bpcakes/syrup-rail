@@ -565,6 +565,7 @@ async fn schema_v1_upgrade_backfills_legacy_lifecycle_attempt_terms_and_mode()
             crate::renewal_failure::apply_resolved_automatic_renewal_failure(
                 &mut transaction,
                 &first_v2_automatic_failure,
+                &crate::renewal_failure::follow_schedule,
             )
             .await?;
         transaction.commit().await?;

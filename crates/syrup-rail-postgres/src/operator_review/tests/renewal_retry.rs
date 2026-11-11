@@ -241,3 +241,91 @@ async fn immediate_renewal_retry_does_not_override_policy_exhaustion() -> Result
     result?;
     cleanup
 }
+
+/// Publishes retry advice keyed on the attempt's durable response code.
+struct AdvisingCoordinator(TestCoordinator);
+
+#[async_trait]
+impl BillingTransactionCoordinator for AdvisingCoordinator {
+    async fn begin(
+        &self,
+        subject: BillingEventSubject,
+        lock_timeout: Duration,
+    ) -> Result<Box<dyn BillingTransaction>, BillingTransactionError> {
+        self.0.begin(subject, lock_timeout).await
+    }
+
+    fn renewal_decline_retry_advice(
+        &self,
+        _provider_key: &syrup_rail::GatewayProviderKey,
+        evidence: &ProcessorEvidence,
+    ) -> syrup_rail::RenewalDeclineRetryAdvice {
+        match evidence.response_code().map(GatewayDiagnostic::expose) {
+            Some("261") => syrup_rail::RenewalDeclineRetryAdvice::StopAutomaticRetries,
+            Some("264") => syrup_rail::RenewalDeclineRetryAdvice::RetryNoEarlierThan(
+                syrup_rail::DunningRetryDelay::new(5 * 86_400).expect("positive delay"),
+            ),
+            _ => syrup_rail::RenewalDeclineRetryAdvice::FollowSchedule,
+        }
+    }
+}
+
+#[tokio::test]
+async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("rail_retry_adv").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let coordinator = AdvisingCoordinator(TestCoordinator {
+            pool: database.pool.clone(),
+            events: Arc::new(Mutex::new(Vec::new())),
+            fail_event: false,
+        });
+        for (suffix, code) in [("adv-wait", "264"), ("adv-stop", "261")] {
+            let (subscription_id, attempt_id) =
+                insert_review_renewal(&database, &account, Uuid::now_v7(), suffix).await?;
+            retry_policy(&database, subscription_id).await?;
+            sqlx::query("UPDATE billing_payment_attempts SET gateway_response_code = $2 WHERE id = $1")
+                .bind(attempt_id)
+                .bind(code)
+                .execute(&database.pool)
+                .await?;
+            assert!(matches!(
+                fail_review_required_renewal_for_retry(
+                    &database.pool,
+                    &coordinator,
+                    PaymentAttemptId::new(attempt_id),
+                )
+                .await?,
+                ManualAttemptFailureOutcome::Failed(_)
+            ));
+            let (status, next_attempt_at, resolved_at): (
+                String,
+                Option<DateTime<Utc>>,
+                DateTime<Utc>,
+            ) = sqlx::query_as(
+                "SELECT subscriptions.status, subscriptions.next_payment_attempt_at, attempts.resolved_at \
+                 FROM billing_subscriptions subscriptions JOIN billing_payment_attempts attempts \
+                 ON attempts.subscription_id = subscriptions.id WHERE attempts.id = $1",
+            )
+            .bind(attempt_id)
+            .fetch_one(&database.pool)
+            .await?;
+            match code {
+                "264" => {
+                    assert_eq!(status, "past_due");
+                    assert_eq!(next_attempt_at, Some(resolved_at + chrono::Duration::days(5)));
+                }
+                _ => {
+                    assert_eq!(status, "unpaid");
+                    assert_eq!(next_attempt_at, None);
+                }
+            }
+        }
+        assert!(crate::due_renewals(&database.pool).await?.is_empty());
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}

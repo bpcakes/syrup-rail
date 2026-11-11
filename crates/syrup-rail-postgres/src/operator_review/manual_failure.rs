@@ -1,5 +1,8 @@
 use super::*;
-use syrup_rail::{BillingEvent, RenewalFailureDisposition, SubscriptionPaymentFailureDisposition};
+use syrup_rail::{
+    BillingEvent, RenewalDeclineRetryAdvice, RenewalFailureDisposition,
+    SubscriptionPaymentFailureDisposition,
+};
 
 /// Value-redacted failure returned by the host's manual-failure store.
 #[derive(Debug)]
@@ -73,7 +76,9 @@ pub async fn fail_review_required_attempt(
 /// provider identity to confirm that no processor transaction exists before
 /// calling this function. This operation performs no provider query or charge.
 /// It preserves ordinary dunning history, access policy, and exhaustion; only a
-/// newly scheduled retry is accelerated. Canceled, unpaid, and already exhausted
+/// newly scheduled retry is accelerated, and only when the coordinator's
+/// `renewal_decline_retry_advice` follows the schedule. Advice that stops
+/// dunning or postpones the retry is honored instead. Canceled, unpaid, and already exhausted
 /// subscriptions are not reopened. Hosts must retain their cancellation fences
 /// when dispatching the resulting renewal through the ordinary renewal service.
 ///
@@ -203,9 +208,19 @@ async fn fail_review_required(
             && attempt.state().timestamps().submitted_at().is_some()
             && attempt.state().resolution_code().is_none()
         {
-            match apply_resolved_automatic_renewal_failure(connection, &attempt).await? {
+            match apply_resolved_automatic_renewal_failure(
+                connection,
+                &attempt,
+                &|provider_key, evidence| {
+                    coordinator.renewal_decline_retry_advice(provider_key, evidence)
+                },
+            )
+            .await?
+            {
+                // A retry the provider asked to delay keeps its advised time.
                 RenewalFailureApplication::Applied {
                     disposition: RenewalFailureDisposition::RetryScheduled { retry_at },
+                    advice: RenewalDeclineRetryAdvice::FollowSchedule,
                     mut events,
                 } if matches!(mode, ManualFailureMode::RetryRenewal) => {
                     expedite_retry(connection, &attempt, retry_at, &mut events).await?;

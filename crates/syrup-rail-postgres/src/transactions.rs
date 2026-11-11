@@ -4,7 +4,10 @@ use std::{error::Error, fmt, time::Duration};
 
 use async_trait::async_trait;
 use sqlx::PgConnection;
-use syrup_rail::{BillingEvent, BillingEventSubject, SubscriptionPeriodExpiryPolicy};
+use syrup_rail::{
+    BillingEvent, BillingEventSubject, GatewayProviderKey, ProcessorEvidence,
+    RenewalDeclineRetryAdvice, SubscriptionPeriodExpiryPolicy,
+};
 
 use crate::host_error::{BoxError, RedactedHostErrorSource};
 
@@ -102,6 +105,26 @@ pub trait BillingTransactionCoordinator: Send + Sync {
     /// of them at once. The default preserves the historical behavior.
     fn subscription_period_expiry_policy(&self) -> SubscriptionPeriodExpiryPolicy {
         SubscriptionPeriodExpiryPolicy::Disabled
+    }
+
+    /// Returns provider retry advice for one submitted, determinate
+    /// automatic-renewal failure, from the gateway account's provider key and
+    /// the attempt's durable processor evidence.
+    ///
+    /// Foreground, reconciled, and operator-reviewed failures all apply it
+    /// before scheduling dunning. Advice can only end automatic dunning early
+    /// or postpone a scheduled retry; it never adds an attempt or changes the
+    /// snapshotted exhaustion and access policy. It must be a pure function of
+    /// its arguments, because replaying the same failure must reach the same
+    /// decision. Provider adapters publish their interpretation, for example
+    /// `syrup_rail_nmi::nmi_renewal_decline_retry_advice`. The default follows
+    /// the dunning schedule, preserving the historical behavior.
+    fn renewal_decline_retry_advice(
+        &self,
+        _provider_key: &GatewayProviderKey,
+        _evidence: &ProcessorEvidence,
+    ) -> RenewalDeclineRetryAdvice {
+        RenewalDeclineRetryAdvice::FollowSchedule
     }
 }
 
