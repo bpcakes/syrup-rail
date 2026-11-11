@@ -231,8 +231,11 @@ async fn stop_advice_ends_dunning_on_the_first_failure_and_replays_as_a_noop()
         )));
     }
 
-    // Reconciling the same terminal evidence again reaches the same decision.
+    // Reconciling an already resolved failure is a no-op: the attempt is no
+    // longer resolvable, so no decision is made, no advice is consulted, and
+    // the stopped state is unchanged.
     let recorded_before_replay = events.lock().await.len();
+    let consulted_before_replay = coordinator.consulted_providers().len();
     apply_reconciled_subscription_renewal_gateway_outcome(
         &database.pool,
         &coordinator,
@@ -242,6 +245,10 @@ async fn stop_advice_ends_dunning_on_the_first_failure_and_replays_as_a_noop()
     )
     .await?;
     assert_eq!(events.lock().await.len(), recorded_before_replay);
+    assert_eq!(
+        coordinator.consulted_providers().len(),
+        consulted_before_replay
+    );
     assert_eq!(
         dunning_state(&database.pool, unpaid_id).await?,
         ("unpaid".to_owned(), None, Some(unpaid_failed_at))
@@ -370,6 +377,107 @@ async fn retry_floor_postpones_only_an_earlier_scheduled_retry() -> Result<(), B
         dunning_state(&database.pool, subscription_id).await?,
         ("unpaid".to_owned(), None, Some(final_failed_at))
     );
+
+    database.cleanup().await
+}
+
+#[tokio::test]
+async fn reconciliation_that_first_resolves_a_decline_applies_advice() -> Result<(), Box<dyn Error>>
+{
+    let database = TestDatabase::start("pt_decl_reconcil").await?;
+    let account = create_gateway_account(&database.pool, "nmi").await?;
+    let gateway = resolved_gateway(account)?;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let coordinator = AdvisingCoordinator::new(TestCoordinator {
+        pool: database.pool.clone(),
+        events: Arc::clone(&events),
+    });
+
+    for (key, code) in [("reconcile_stop", STOP_CODE), ("reconcile_wait", WAIT_CODE)] {
+        let (subscription_id, due_at) = due_subscription(
+            &database,
+            account,
+            &gateway,
+            &coordinator,
+            schedule(DunningExhaustion::MarkUnpaid)?,
+            key,
+        )
+        .await?;
+        let reservation = reserve_and_admit_renewal(
+            &database.pool,
+            &gateway,
+            ChargeRenewal::new(
+                BillingScopeId::new(account.billing_scope_id),
+                subscription_id,
+                due_at,
+            ),
+        )
+        .await?;
+        let attempt_id = reservation.identity().attempt_id();
+
+        // The foreground outcome is indeterminate: nothing is resolved, so no
+        // advice is consulted and dunning has not started.
+        let consulted_before = coordinator.consulted_providers().len();
+        let foreground = apply_subscription_renewal_gateway_outcome(
+            &database.pool,
+            &coordinator,
+            &reservation,
+            &unknown_outcome(),
+        )
+        .await?;
+        assert_eq!(
+            foreground.attempt().status(),
+            syrup_rail::PaymentAttemptStatus::Unknown,
+            "{key}"
+        );
+        assert_eq!(
+            coordinator.consulted_providers().len(),
+            consulted_before,
+            "{key}"
+        );
+        assert_eq!(
+            dunning_state(&database.pool, subscription_id).await?,
+            ("active".to_owned(), Some(due_at), None),
+            "{key}"
+        );
+
+        // Reconciliation is the first to resolve the decline and must apply
+        // the coordinator's advice for the attempt's provider.
+        let reconciled = apply_reconciled_subscription_renewal_gateway_outcome(
+            &database.pool,
+            &coordinator,
+            BillingScopeId::new(account.billing_scope_id),
+            attempt_id,
+            &declined_with_code(&format!("{key}_failure"), code),
+        )
+        .await?;
+        assert_eq!(
+            reconciled.attempt().status(),
+            syrup_rail::PaymentAttemptStatus::Declined,
+            "{key}"
+        );
+        assert_eq!(
+            coordinator.consulted_providers()[consulted_before..],
+            ["nmi".to_owned()],
+            "{key}"
+        );
+        let failed_at = resolved_at(&database.pool, attempt_id).await?;
+        let expected = if code == STOP_CODE {
+            ("unpaid".to_owned(), None, Some(failed_at))
+        } else {
+            // The schedule's 60-second first retry is postponed to the floor.
+            (
+                "past_due".to_owned(),
+                Some(failed_at + ChronoDuration::seconds(i64::from(WAIT_SECONDS))),
+                None,
+            )
+        };
+        assert_eq!(
+            dunning_state(&database.pool, subscription_id).await?,
+            expected,
+            "{key}"
+        );
+    }
 
     database.cleanup().await
 }
