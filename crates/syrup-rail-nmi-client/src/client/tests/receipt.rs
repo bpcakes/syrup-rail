@@ -1,6 +1,9 @@
 use super::*;
 use crate::{TransactionReceiptParts, TransactionReceiptQuery};
 
+mod evidence;
+mod evidence_transport;
+
 fn transaction() -> String {
     "<transaction><transaction_id>txn_receipt</transaction_id><order_id>order_receipt</order_id><currency>USD</currency><condition>complete</condition><cc_number>411111******1234</cc_number><action><action_type>sale</action_type><amount>1.00</amount><success>1</success><response_code>100</response_code><date>20260919100200</date></action></transaction>".to_owned()
 }

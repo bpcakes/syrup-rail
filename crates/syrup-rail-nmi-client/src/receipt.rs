@@ -16,6 +16,44 @@ impl fmt::Debug for TransactionReceiptQuery {
     }
 }
 
+/// Receipt evidence after binding both original selectors to one transaction.
+/// Errors and missing evidence are never promoted to an attributed conflict.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum TransactionReceiptLookup {
+    Found(TransactionReceipt),
+    NotFound,
+    /// Identity-bound facts for comparison only, never receipt completion.
+    /// Missing currency or malformed fields prevent a complete observation.
+    /// Each retained field is individually valid and consistent; any malformed
+    /// occurrence suppresses that field, while independent fields survive.
+    Incomplete {
+        currency: Option<SensitiveText>,
+        card_last4: Option<SensitiveText>,
+        actions: Vec<TransactionAction>,
+    },
+    /// At least two individually valid values for the same field disagree
+    /// after normalization. Contains field kinds only, never provider values.
+    /// Other fields may be missing or malformed; no partial receipt is returned.
+    BoundConflict {
+        fields: Vec<ReceiptConflictField>,
+    },
+}
+
+/// A contradictory field within the selected transaction or one of its actions.
+/// Different actions are history, not contradictory occurrences of one field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ReceiptConflictField {
+    Currency,
+    CardLast4,
+    ActionType,
+    ActionDate,
+    ActionAmount,
+    ActionSuccess,
+    ActionResponseCode,
+}
+
 /// Historical receipt evidence, independent of the current financial status.
 /// The caller must select and validate the original successful payment action
 /// and compare its amount and currency to the recorded charge.

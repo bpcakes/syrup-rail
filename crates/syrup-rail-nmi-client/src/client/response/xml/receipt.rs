@@ -1,6 +1,9 @@
 use super::*;
 use crate::{TransactionReceipt, TransactionReceiptParts};
 
+mod evidence;
+pub(in crate::client) use evidence::parse as parse_evidence;
+
 const MAX_RECEIPT_ACTIONS: usize = 100;
 
 pub(in crate::client) fn parse(
@@ -11,24 +14,9 @@ pub(in crate::client) fn parse(
         return Err(invalid());
     }
     let document = parse_transaction_report_xml(text)?;
-    let envelope = successful_query_response_root(&document, "receipt query")?;
-    let count = direct_element_count_without_nested_matches(envelope, "transaction", "receipt")?;
-    if count > 1 {
-        return Err(invalid());
-    }
-    let Some(transaction) = element_children_named(envelope, "transaction").next() else {
+    let Some(transaction) = bound_transaction(&document, query)? else {
         return Ok(None);
     };
-    for (name, expected) in [
-        ("transaction_id", &query.transaction_id),
-        ("order_id", &query.order_id),
-    ] {
-        bind_exact_query_identifier(
-            trimmed_optional(expected),
-            &collect_xml_identifier(transaction, &[name], IdentifierPresence::Required),
-            name,
-        )?;
-    }
     // Validate scalar conflicts even though current status is not payment-date
     // evidence. Do not map refunded/canceled into a failed original payment.
     field(transaction, "condition")?;
@@ -62,6 +50,32 @@ pub(in crate::client) fn parse(
             actions,
         },
     }))
+}
+
+fn bound_transaction<'document, 'input>(
+    document: &'document roxmltree::Document<'input>,
+    query: &TransactionQuery,
+) -> Result<Option<roxmltree::Node<'document, 'input>>, WireError> {
+    let envelope = successful_query_response_root(document, "receipt query")?;
+    let count = direct_element_count_without_nested_matches(envelope, "transaction", "receipt")?;
+    if count > 1 {
+        return Err(invalid());
+    }
+    let Some(transaction) = element_children_named(envelope, "transaction").next() else {
+        return Ok(None);
+    };
+    for (name, expected) in [
+        ("transaction_id", &query.transaction_id),
+        ("order_id", &query.order_id),
+    ] {
+        let expected = trimmed_optional(expected).ok_or_else(invalid)?;
+        bind_exact_query_identifier(
+            Some(expected),
+            &collect_xml_identifier(transaction, &[name], IdentifierPresence::Required),
+            name,
+        )?;
+    }
+    Ok(Some(transaction))
 }
 
 fn field(node: roxmltree::Node<'_, '_>, name: &'static str) -> Result<Option<String>, WireError> {
