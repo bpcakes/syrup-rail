@@ -12,6 +12,7 @@ mod client;
 mod configuration;
 mod errors;
 mod lossless_json;
+mod receipt;
 mod requests;
 mod responses;
 
@@ -22,6 +23,7 @@ pub use configuration::{
     ConfigurationError, Credentials, DuplicateCheck, DuplicateCheckWindow, Endpoint,
 };
 pub use errors::{MutationCertainty, MutationError, QueryError};
+pub use receipt::{TransactionReceipt, TransactionReceiptParts, TransactionReceiptQuery};
 pub use requests::{
     BillingAddress, BillingContact, PaymentSource, ReportQuery, SaleRequest, StatementDescriptor,
     StorePaymentMethodRequest, StoredCredential, TransactionDiagnosticsQuery, TransactionQuery,

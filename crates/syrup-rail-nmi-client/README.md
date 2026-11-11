@@ -304,3 +304,21 @@ Hosts that send their own receipts can call
 `Client::with_customer_receipts_disabled()` to explicitly send
 `customer_receipt=false` for every Classic payment and v5 sale, including
 existing-vault renewals. By default the client omits this field.
+
+## Original-payment receipt evidence
+
+`Client::query_transaction_receipt` requires both original transaction and order
+IDs and makes one exact query, with the standard 256 KiB response limit and a
+100-action limit. It returns historical actions, currency and optional original
+card digits separately from financial `PaymentOutcome` classification, so later
+refunds or voids do not erase an original sale. The host must validate the
+original successful action, amount, currency and date against its recorded
+charge before issuing a receipt. No merchant-wide search or retries occur.
+
+Malformed, conflicting or mismatched evidence fails the lookup. Identical scalar
+echoes are allowed; conflicting action response codes are never converted to
+missing values. Card parsing requires four visible trailing digits of a valid
+masked card or a four-digit value; prefixes, arbitrary text and unmasked full
+card numbers are rejected. Missing card data stays absent. Ordinary formatting
+redacts identifiers and evidence. Existing financial and report parsers retain
+their current behavior.

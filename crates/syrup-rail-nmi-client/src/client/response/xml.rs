@@ -1,3 +1,5 @@
+pub(in crate::client) mod receipt;
+
 use std::borrow::Cow;
 
 use crate::{

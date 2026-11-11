@@ -16,6 +16,8 @@ transaction queries, and report parsing.
 - Public request, response, and error types live with their implementations in
   `src/requests.rs`, `src/responses.rs`, and `src/errors.rs`; `src/lib.rs` is the
   stable re-export facade.
+- `query_transaction_receipt` uses `client/response/xml/receipt.rs` for exact,
+  bounded historical payment evidence, separate from financial status parsing.
 - Private wire and lossless-JSON modules own protocol encoding and parsing.
   `client/response/xml.rs` also parses exact diagnostic lookups into
   `responses/diagnostics.rs` types without changing financial query parsing.
