@@ -70,6 +70,29 @@ historically named `dev/0.6.0` branch.
 
 ### Added
 
+- Add provider retry advice for automatic-renewal failures.
+  `RenewalDeclineRetryAdvice` (`FollowSchedule`, `StopAutomaticRetries`,
+  `RetryNoEarlierThan`) and `advised_renewal_failure_disposition` apply it to
+  the snapshotted dunning schedule: advice can end automatic dunning at the
+  current failure under the snapshotted exhaustion policy, or postpone a
+  scheduled retry, but never adds an attempt, moves one earlier, or changes
+  access policy. `renewal_failure_disposition` is unchanged.
+- Add `BillingTransactionCoordinator::renewal_decline_retry_advice`. The
+  PostgreSQL foreground, reconciled, and operator-reviewed renewal-failure
+  paths pass it the gateway account's provider key and the attempt's durable
+  processor evidence. The default follows the schedule, so hosts that do not
+  override it keep the historical behavior. Earlier failures of the period
+  are still admitted by the schedule alone, so history written before a host
+  enabled advice remains valid. `fail_review_required_renewal_for_retry`
+  makes a retry due immediately only when the advice follows the schedule;
+  stop advice ends dunning, and any `RetryNoEarlierThan` advice keeps its
+  advised retry time (the floor or a later scheduled step). No schema change.
+- Add `syrup_rail_nmi::nmi_renewal_decline_retry_advice` and
+  `NMI_RETRY_IN_A_FEW_DAYS_DELAY`. NMI codes 220-224 (invalid or expired card
+  data), 250-253 (pick up, lost, stolen, fraudulent), 261-262 (stop recurring),
+  263 (updated cardholder data available), and 461 (unsupported card) stop
+  automatic retries; 264 ("retry in a few days", no published delay) waits at
+  least three days. Every other or missing code follows the schedule.
 - Add `StatementDescriptor` (merchant name of at most 25 printable-ASCII
   bytes, optional phone of at most 20 bytes of digits, spaces, `+`, `-`, `(`,
   `)` or `.`, optional URL of at most 40 bytes without whitespace) and

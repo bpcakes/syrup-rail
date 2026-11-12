@@ -129,6 +129,7 @@ fn first_failure_decision_projects_retry_and_event_without_persistence() {
         causal_history(AutomaticRenewalFailureHistory::First {
             failure: failure(1, 200),
         }),
+        RenewalDeclineRetryAdvice::FollowSchedule,
     )
     .expect("first failure is deterministic");
     let RenewalFailureDecision::Apply(transition) = decision else {
@@ -244,6 +245,7 @@ fn first_automatic_failure_after_legacy_recovery_preserves_suspension_boundary()
             },
             timestamp(50),
         ),
+        RenewalDeclineRetryAdvice::FollowSchedule,
     )
     .expect("legacy recovery provenance admits the first automatic failure");
     let RenewalFailureDecision::Apply(transition) = decision else {
@@ -289,6 +291,7 @@ fn decision_is_idempotent_for_applied_state_and_older_attempts() {
             causal_history(AutomaticRenewalFailureHistory::First {
                 failure: failure(1, 200),
             }),
+            RenewalDeclineRetryAdvice::FollowSchedule,
         )
         .expect("applied state is a replay"),
         RenewalFailureDecision::Noop
@@ -314,6 +317,7 @@ fn decision_is_idempotent_for_applied_state_and_older_attempts() {
                 previous: failure(1, 200),
                 latest: failure(2, 300),
             }),
+            RenewalDeclineRetryAdvice::FollowSchedule,
         )
         .expect("older attempt is a replay"),
         RenewalFailureDecision::Noop
@@ -343,6 +347,7 @@ fn repeated_history_rejects_a_previous_terminal_disposition() {
                 previous: failure(1, 200),
                 latest: failure(2, 300),
             }),
+            RenewalDeclineRetryAdvice::FollowSchedule,
         ),
         Err(RenewalFailureStoreError::InvalidState(
             INVALID_RENEWAL_FAILURE_STATE
@@ -379,6 +384,7 @@ fn terminal_event_access_boundary_follows_the_snapshotted_policy() {
                 previous: failure(1, 200),
                 latest: failure(2, 300),
             }),
+            RenewalDeclineRetryAdvice::FollowSchedule,
         )
         .expect("terminal transition is deterministic");
         let RenewalFailureDecision::Apply(transition) = decision else {
@@ -405,5 +411,97 @@ fn terminal_event_access_boundary_follows_the_snapshotted_policy() {
             ] if *failure_access_ended_at == expected_access_end
                 && *access_ends_at == expected_access_end
         ));
+    }
+}
+
+#[test]
+fn stop_advice_ends_dunning_even_with_continued_access_policy() {
+    let attempt = validated_attempt(1, 150, 200);
+    let locked = locked_state(
+        FailureProjection {
+            status: SubscriptionStatus::Active,
+            next_payment_attempt_at: Some(timestamp(100)),
+            unpaid_at: None,
+        },
+        &[60, 300],
+        DunningExhaustion::RemainPastDue,
+        PastDueAccessPolicy::ContinueUntilDunningExhausted,
+    );
+    let decision = decide_renewal_failure(
+        &attempt,
+        &locked,
+        causal_history(AutomaticRenewalFailureHistory::First {
+            failure: failure(1, 200),
+        }),
+        RenewalDeclineRetryAdvice::StopAutomaticRetries,
+    )
+    .expect("advised first failure is deterministic");
+    let RenewalFailureDecision::Apply(transition) = decision else {
+        panic!("advised first failure must apply")
+    };
+    assert_eq!(
+        transition.after,
+        FailureProjection {
+            status: SubscriptionStatus::PastDue,
+            next_payment_attempt_at: None,
+            unpaid_at: None,
+        }
+    );
+    // Continued access ends once dunning is exhausted, now at this failure.
+    assert!(matches!(
+        transition.events.as_slice(),
+        [BillingEvent::SubscriptionPaymentFailed {
+            disposition: SubscriptionPaymentFailureDisposition::DunningExhausted { exhausted_at },
+            access: SubscriptionPaymentFailureAccess::Ended { access_ended_at },
+            ..
+        }] if *exhausted_at == timestamp(200) && *access_ended_at == timestamp(200)
+    ));
+}
+
+#[test]
+fn earlier_failures_are_admitted_by_the_schedule_regardless_of_later_advice() {
+    let attempt = validated_attempt(2, 250, 300);
+    let locked = locked_state(
+        FailureProjection {
+            status: SubscriptionStatus::PastDue,
+            next_payment_attempt_at: Some(timestamp(240)),
+            unpaid_at: None,
+        },
+        &[60, 300],
+        DunningExhaustion::MarkUnpaid,
+        PastDueAccessPolicy::SuspendImmediately,
+    );
+    let history = causal_history(AutomaticRenewalFailureHistory::Repeated {
+        count: 2,
+        first: failure(1, 200),
+        previous: failure(1, 200),
+        latest: failure(2, 300),
+    });
+    for (advice, expected) in [
+        (
+            RenewalDeclineRetryAdvice::StopAutomaticRetries,
+            FailureProjection {
+                status: SubscriptionStatus::Unpaid,
+                next_payment_attempt_at: None,
+                unpaid_at: Some(timestamp(300)),
+            },
+        ),
+        (
+            RenewalDeclineRetryAdvice::RetryNoEarlierThan(
+                syrup_rail::DunningRetryDelay::new(1_000).expect("positive delay"),
+            ),
+            FailureProjection {
+                status: SubscriptionStatus::PastDue,
+                next_payment_attempt_at: Some(timestamp(1_300)),
+                unpaid_at: None,
+            },
+        ),
+    ] {
+        let decision = decide_renewal_failure(&attempt, &locked, history, advice)
+            .expect("schedule-admitted history accepts later advice");
+        let RenewalFailureDecision::Apply(transition) = decision else {
+            panic!("advised repeated failure must apply")
+        };
+        assert_eq!(transition.after, expected, "{advice:?}");
     }
 }

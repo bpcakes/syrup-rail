@@ -236,8 +236,7 @@ impl TestDatabase {
         project: &str,
         install_sql: &'static str,
     ) -> Result<Self, Box<dyn Error>> {
-        let harness =
-            PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await?;
+        let harness = start_harness(project).await?;
         let lease = harness.empty_database().await?;
         let pool = PgPoolOptions::new()
             .max_connections(4)
@@ -261,6 +260,42 @@ impl TestDatabase {
         self.harness.shutdown().await?;
         Ok(())
     }
+}
+
+/// Attempts allowed for the first connection to the external test server.
+const HARNESS_START_ATTEMPTS: u32 = 3;
+
+/// Connects to the external test server, retrying a failed first connection.
+///
+/// The launcher owns server startup and readiness. The external-mode harness
+/// opens its administrative connection before creating any fixture state, so
+/// retrying that connection is safe. Every other error propagates.
+async fn start_harness(project: &str) -> Result<PostgresHarness, Box<dyn Error>> {
+    let mut attempt = 1;
+    loop {
+        match PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await
+        {
+            Ok(harness) => return Ok(harness),
+            Err(error)
+                if attempt < HARNESS_START_ATTEMPTS && is_initial_connection_error(&error) =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)))
+                    .await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn is_initial_connection_error(error: &postgres_test_harness::Error) -> bool {
+    matches!(
+        error,
+        postgres_test_harness::Error::Postgres {
+            operation: "connect to PostgreSQL test server",
+            ..
+        }
+    )
 }
 
 pub(crate) async fn create_gateway_account(

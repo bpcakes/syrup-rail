@@ -162,13 +162,13 @@ pub use renewal::{
     ChargeRenewal, MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION,
     RENEWAL_DISPATCH_LIMIT, RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS,
     RENEWAL_RATE_LIMIT_FAST_RETRY_ATTEMPTS, RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS,
-    RenewalAttemptState, RenewalDispatch, RenewalDispatchPage, RenewalDispatchPageCursor,
-    RenewalFailureDisposition, RenewalFailurePolicyError, SubscriptionRenewalLockedTerms,
-    SubscriptionRenewalOutcome, SubscriptionRenewalReservation,
+    RenewalAttemptState, RenewalDeclineRetryAdvice, RenewalDispatch, RenewalDispatchPage,
+    RenewalDispatchPageCursor, RenewalFailureDisposition, RenewalFailurePolicyError,
+    SubscriptionRenewalLockedTerms, SubscriptionRenewalOutcome, SubscriptionRenewalReservation,
     SubscriptionRenewalReservationBuildError, SubscriptionRenewalReservationOutcome,
     SubscriptionRenewalReservationRejection, SubscriptionRenewalSubmissionOutcome,
-    SubscriptionRenewalSubmissionRejection, rate_limit_retry_after_seconds,
-    renewal_attempt_idempotency_key, renewal_failure_disposition,
+    SubscriptionRenewalSubmissionRejection, advised_renewal_failure_disposition,
+    rate_limit_retry_after_seconds, renewal_attempt_idempotency_key, renewal_failure_disposition,
 };
 pub use resolution::{PaymentResolutionCode, PaymentResolutionCodeParseError};
 pub use resolver::{GatewayResolutionError, GatewayResolver, ResolvedGateway};
