@@ -500,6 +500,11 @@ mod tests {
     };
     use syrup_rail::{GatewayLifecycleQuarantine, GatewayProviderKey};
 
+    /// Bounds each step that must complete promptly, generously enough for a
+    /// loaded host. A claim blocked on the held row lock waits until the
+    /// blocker rolls back, which happens only after these steps.
+    const PROMPT_STEP_BOUND: Duration = Duration::from_secs(10);
+
     #[tokio::test]
     async fn concurrent_alert_claim_has_one_winner() -> Result<(), Box<dyn Error>> {
         let database = TestDatabase::start("rail_quar_claim").await?;
@@ -567,7 +572,7 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(PROMPT_STEP_BOUND, async {
             loop {
                 if waiting_alert_claims(&mut observer).await? >= 1 {
                     return Ok::<_, sqlx::Error>(());
@@ -579,7 +584,7 @@ mod tests {
         .map_err(|_| io::Error::other("first alert claim did not reach its row-lock wait"))??;
 
         let independent_claim = tokio::time::timeout(
-            Duration::from_millis(200),
+            PROMPT_STEP_BOUND,
             claim_gateway_lifecycle_quarantine_alert(
                 &database.pool,
                 &second_account,
@@ -601,7 +606,7 @@ mod tests {
             .await
         });
 
-        tokio::time::timeout(Duration::from_secs(1), async {
+        tokio::time::timeout(PROMPT_STEP_BOUND, async {
             loop {
                 let waiting_claims = waiting_alert_claims(&mut observer).await?;
                 if waiting_claims >= 2 || first_claim.is_finished() || second_claim.is_finished() {
