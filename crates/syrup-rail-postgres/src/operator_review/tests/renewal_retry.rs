@@ -265,6 +265,11 @@ impl BillingTransactionCoordinator for AdvisingCoordinator {
             Some("264") => syrup_rail::RenewalDeclineRetryAdvice::RetryNoEarlierThan(
                 syrup_rail::DunningRetryDelay::new(5 * 86_400).expect("positive delay"),
             ),
+            // A floor shorter than the first scheduled step, so the schedule
+            // alone sets the retry time.
+            Some("265") => syrup_rail::RenewalDeclineRetryAdvice::RetryNoEarlierThan(
+                syrup_rail::DunningRetryDelay::new(3_600).expect("positive delay"),
+            ),
             _ => syrup_rail::RenewalDeclineRetryAdvice::FollowSchedule,
         }
     }
@@ -280,7 +285,11 @@ async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), B
             events: Arc::new(Mutex::new(Vec::new())),
             fail_event: false,
         });
-        for (suffix, code) in [("adv-wait", "264"), ("adv-stop", "261")] {
+        for (suffix, code) in [
+            ("adv-wait", "264"),
+            ("adv-short", "265"),
+            ("adv-stop", "261"),
+        ] {
             let (subscription_id, attempt_id) =
                 insert_review_renewal(&database, &account, Uuid::now_v7(), suffix).await?;
             retry_policy(&database, subscription_id).await?;
@@ -314,6 +323,12 @@ async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), B
                 "264" => {
                     assert_eq!(status, "past_due");
                     assert_eq!(next_attempt_at, Some(resolved_at + chrono::Duration::days(5)));
+                }
+                // The floor does not bind, but retrying now would still
+                // precede it, so the retry keeps its scheduled step.
+                "265" => {
+                    assert_eq!(status, "past_due");
+                    assert_eq!(next_attempt_at, Some(resolved_at + chrono::Duration::days(1)));
                 }
                 _ => {
                     assert_eq!(status, "unpaid");

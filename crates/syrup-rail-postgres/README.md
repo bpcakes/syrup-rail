@@ -348,7 +348,10 @@ Advice only narrows the snapshotted schedule. `StopAutomaticRetries` ends
 automatic dunning at the current failure under the subscription's exhaustion
 policy (`RemainPastDue` or `MarkUnpaid`); `RetryNoEarlierThan` postpones a
 scheduled retry that would come sooner and leaves a later one unchanged. Advice
-never adds an attempt, moves a retry earlier, or changes past-due access. The
+never adds an attempt, moves a retry earlier, or changes the snapshotted
+past-due access policy. It can still move when access ends: under
+`ContinueUntilDunningExhausted`, stop advice ends access with dunning at the
+current failure, and a postponed retry keeps access until that later retry. The
 hook must be a pure function of its arguments: replaying the same failure must
 reach the same decision. Earlier failures of the period are admitted by the
 schedule alone, so history written before advice was enabled stays valid. An
