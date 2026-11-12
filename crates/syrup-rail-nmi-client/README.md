@@ -319,9 +319,13 @@ refunds or voids do not erase an original sale. The host must validate the
 original successful action, amount, currency and date against its recorded
 charge before issuing a receipt. No merchant-wide search or retries occur.
 
-Malformed, conflicting or mismatched evidence fails the lookup. Identical scalar
+Mismatched or ambiguous identities, structural errors, and conflicting, nested,
+oversized or mixed-empty duplicate fields fail the lookup. Identical scalar
 echoes are allowed; conflicting action response codes are never converted to
-missing values. Card parsing requires four visible trailing digits of a valid
+missing values. Only the currency and card mask are checked for shape: action
+type, date, amount, success and response code are returned as the provider sent
+them, so the host must validate them, or use the evidence method below, which
+does. Card parsing requires four visible trailing digits of a valid
 masked card or a four-digit value; prefixes, arbitrary text and unmasked full
 card numbers are rejected. Missing card data stays absent. Ordinary formatting
 redacts identifiers and evidence. Existing financial and report parsers retain
