@@ -53,9 +53,34 @@ historically named `dev/0.6.0` branch.
 - Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, `tokio`, and
   `webpki-roots` to compatible patched versions required by the release audit.
   SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
+- Require roxmltree 0.21.2 or later within the compatible 0.21 line. Its
+  iterative XML parser prevents deeply nested, byte-bounded responses from
+  exhausting the stack before structural validation.
+- Use the test harness's external-server mode, removing Testcontainers,
+  `astral-tokio-tar`, and `rustix` from the dependency graph and lockfile.
+- Guard the `RUSTSEC-2026-0459` exception: `libsqlite3-sys` must have exactly
+  one locked version, 0.30.1, and be absent from the complete workspace,
+  all-feature, all-target dependency graph. Changed or mixed locked versions,
+  reachability, and graph-resolution failures stop the check before audit.
+- Run local and CI test/SQLx gates through the Python 3
+  `scripts/with-test-postgres.py` launcher. It creates a disposable PostgreSQL
+  18 Docker container unless `POSTGRES_TEST_ADMIN_URL` supplies an external
+  test server; cleanup removes only the container the launcher owns. Raw
+  database tests require this launcher or an explicit external test URL.
 
 ### Added
 
+- Add `Client::query_transaction_receipt` and the opt-in
+  `Client::query_transaction_receipt_evidence`, with `TransactionReceiptQuery`,
+  `TransactionReceipt`, `TransactionReceiptParts`, `TransactionReceiptLookup`,
+  and `ReceiptConflictField`. Both selectors must bind exactly one transaction.
+  The evidence API distinguishes `Found`, `NotFound`, `BoundConflict` for valid
+  normalized contradictions, and `Incomplete` for individually trustworthy
+  partial facts. Hosts may compare incomplete facts with recorded payment
+  evidence but must never use them to complete a receipt. The strict receipt
+  method retains its duplicate/error behavior; financial and report parsing
+  remain unchanged. Hosts still validate the original successful action,
+  amount, currency, and date before issuing a receipt.
 - Add `StatementDescriptor` (merchant name of at most 25 printable-ASCII
   bytes, optional phone of at most 20 bytes of digits, spaces, `+`, `-`, `(`,
   `)` or `.`, optional URL of at most 40 bytes without whitespace) and

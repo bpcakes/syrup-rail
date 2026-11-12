@@ -295,4 +295,31 @@ run_sqlite_case sqlite-reachable 0.30.1 "libsqlite3-sys v0.30.1" 1 \
 run_sqlite_case sqlite-version-changed 0.31.0 "" 1 \
   'RUSTSEC-2026-0459 exception covers only an unreachable libsqlite3-sys 0.30.1.'
 
+run_mixed_sqlite_versions_case() {
+  local first="$1" second="$2"
+  local case_root
+  case_root="$(prepare_case "sqlite-mixed-$first-$second" false)"
+  printf '[[package]]\nname = "libsqlite3-sys"\nversion = "%s"\n' \
+    "$first" "$second" >>"$case_root/Cargo.lock"
+  local status=0
+  ADVISORY_TEST_REPO_ROOT="$case_root" \
+    ADVISORY_TEST_TREE_OUTPUT="" \
+    ADVISORY_TEST_TREE_CALLED="$case_root/tree-called" \
+    ADVISORY_TEST_AUDIT_ARGS="$case_root/audit-args" \
+    PATH="$test_root/bin:$PATH" \
+    "$subject" 2>"$case_root/stderr" || status=$?
+  if [[ "$status" -ne 1 || -e "$case_root/tree-called" || -e "$case_root/audit-args" ]]; then
+    printf 'mixed SQLite versions %s/%s did not stop before graph resolution and audit\n' "$first" "$second" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'RUSTSEC-2026-0459 exception covers only an unreachable libsqlite3-sys 0.30.1.' "$case_root/stderr"; then
+    printf 'mixed SQLite versions omitted the sole-version policy diagnostic\n' >&2
+    exit 1
+  fi
+  printf 'Mixed SQLite versions %s/%s rejected before graph resolution and audit.\n' "$first" "$second"
+}
+
+run_mixed_sqlite_versions_case 0.30.1 0.39.0
+run_mixed_sqlite_versions_case 0.39.0 0.30.1
+
 printf 'Dependency advisory wrapper tests passed.\n'
