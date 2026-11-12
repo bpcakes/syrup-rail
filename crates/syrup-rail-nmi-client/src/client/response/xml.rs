@@ -20,6 +20,8 @@ use super::common::{
     normalize_gateway_state, resolve_optional_scalar,
 };
 
+mod original_sale;
+
 fn normalize_report_success(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" => "1".to_owned(),
@@ -286,13 +288,20 @@ fn exact_query_response_from_xml(
             parse_expiry(expiry.as_deref())
         }
     };
+    let (response_code, response_text) = original_sale::response_evidence(
+        transaction,
+        status,
+        &diagnostics,
+        decision.response_code,
+        response_text,
+    );
     Ok(Some(ExactQueryResponse {
         outcome: PaymentOutcome {
             status,
             transaction_id,
             customer_vault_id,
             response: sensitive_gateway_field(decision.response),
-            response_code: sensitive_gateway_field(decision.response_code),
+            response_code: sensitive_gateway_field(response_code),
             response_text: sensitive_gateway_field(response_text),
             condition: sensitive_gateway_field(decision.condition),
             descriptor: PaymentDescriptor {

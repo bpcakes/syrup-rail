@@ -54,6 +54,24 @@ historically named `dev/0.6.0` branch.
   `webpki-roots` to compatible patched versions required by the release audit.
   SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
 
+- `Client::query_transaction` now keeps a failed transaction's decline reason.
+  NMI's Query API reports `response_code` and `response_text` on the original
+  sale `<action>`, not on the transaction, so a renewal decline that was first
+  resolved by reconciliation (after a lost sale response) had no response code
+  and `nmi_renewal_decline_retry_advice` followed the schedule on codes such as
+  261 and 264. The exact query now attaches the code and text of the
+  transaction's single failed `sale` action when the transaction-level fields
+  already prove a decline or determinate failure and carry no response
+  evidence of their own. An order-ID-bound failure keeps the reason even when
+  its transaction or vault ID is missing or contradictory; that identity stays
+  quarantined. The action never decides the payment status; approved and
+  indeterminate outcomes, and their stored evidence, are unchanged. A missing,
+  repeated, nested, non-sale, successful, or conflicting action, one with more
+  than one `response_code` or with disagreeing `response_text` values, or one
+  whose code is not itself a determinate decline or failure, attaches nothing.
+  A single empty or malformed action `response_text` is dropped without losing
+  the code.
+
 ### Added
 
 - Add provider retry advice for automatic-renewal failures.
