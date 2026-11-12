@@ -236,8 +236,7 @@ impl TestDatabase {
         project: &str,
         install_sql: &'static str,
     ) -> Result<Self, Box<dyn Error>> {
-        let harness =
-            PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await?;
+        let harness = start_harness(project).await?;
         let lease = harness.empty_database().await?;
         let pool = PgPoolOptions::new()
             .max_connections(4)
@@ -261,6 +260,43 @@ impl TestDatabase {
         self.harness.shutdown().await?;
         Ok(())
     }
+}
+
+/// Attempts allowed for one test server start.
+const HARNESS_START_ATTEMPTS: u32 = 3;
+
+/// Starts a test server, retrying the container startup race.
+///
+/// Under many parallel container starts, Docker Desktop can publish or forward
+/// a new container's port slightly after the container reports ready. The
+/// harness reads the port and connects once, so the race fails startup as
+/// `ContainerStart` or as a failed first connection. A failed start removes
+/// its own container, so a fresh start is safe. Every other error propagates.
+async fn start_harness(project: &str) -> Result<PostgresHarness, Box<dyn Error>> {
+    let mut attempt = 1;
+    loop {
+        match PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await
+        {
+            Ok(harness) => return Ok(harness),
+            Err(error) if attempt < HARNESS_START_ATTEMPTS && is_startup_race(&error) => {
+                tokio::time::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)))
+                    .await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn is_startup_race(error: &postgres_test_harness::Error) -> bool {
+    matches!(
+        error,
+        postgres_test_harness::Error::ContainerStart { .. }
+            | postgres_test_harness::Error::Postgres {
+                operation: "connect to PostgreSQL test server",
+                ..
+            }
+    )
 }
 
 pub(crate) async fn create_gateway_account(
