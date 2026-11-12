@@ -67,6 +67,40 @@ fn failed_sale_reason_does_not_need_response_text() {
 }
 
 #[test]
+fn declined_transaction_keeps_its_original_sale_decline_reason() {
+    let action = sale_action(
+        "<response_text>Declined-Retry in a few days</response_text>\
+         <response_code>264</response_code>",
+    );
+    for (name, gateway_state) in [
+        ("declined condition", "<condition>declined</condition>"),
+        ("declined status", "<status>declined</status>"),
+    ] {
+        let outcome = queried(&format!(
+            r#"
+            <nm_response>
+              <transaction>
+                <transaction_id>txn_declined_sale</transaction_id>
+                {gateway_state}
+                {action}
+              </transaction>
+            </nm_response>
+            "#
+        ));
+
+        assert_eq!(outcome.status, PaymentStatus::Declined, "{name}");
+        assert_eq!(exposed(&outcome.response_code), Some("264"), "{name}");
+        assert_eq!(
+            exposed(&outcome.response_text),
+            Some("Declined-Retry in a few days"),
+            "{name}"
+        );
+        assert_eq!(outcome.response, None, "{name}");
+        assert!(outcome.diagnostics.is_empty(), "{name}");
+    }
+}
+
+#[test]
 fn ambiguous_or_non_decline_actions_leave_the_failed_transaction_unchanged() {
     let declined = "<response_text>DECLINE</response_text><response_code>261</response_code>";
     let cases = [
@@ -97,6 +131,25 @@ fn ambiguous_or_non_decline_actions_leave_the_failed_transaction_unchanged() {
         (
             "missing success",
             format!("<action><action_type>sale</action_type>{declined}</action>"),
+        ),
+        (
+            "conflicting success",
+            format!(
+                "<action><action_type>sale</action_type><success>0</success>\
+                 <success>1</success>{declined}</action>"
+            ),
+        ),
+        (
+            "missing action type",
+            format!("<action><success>0</success>{declined}</action>"),
+        ),
+        (
+            "wrapped action beside the sale",
+            format!(
+                "{}<detail>{}</detail>",
+                sale_action(declined),
+                sale_action(declined)
+            ),
         ),
         (
             "approval code",
