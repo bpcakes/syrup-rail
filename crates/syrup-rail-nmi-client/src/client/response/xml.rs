@@ -20,6 +20,8 @@ use super::common::{
     normalize_gateway_state, resolve_optional_scalar,
 };
 
+mod original_sale;
+
 fn normalize_report_success(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" => "1".to_owned(),
@@ -236,7 +238,7 @@ fn exact_query_response_from_xml(
             .finish_decision(DecisionFieldKind::GatewayState),
     )
     .resolve();
-    let (response_text, _) = resolve_optional_scalar(
+    let (response_text, conflicting_response_text) = resolve_optional_scalar(
         collect_xml_scalar(transaction, &["response_text"], GatewayField).finish(),
     );
     let mut status = decision.status;
@@ -286,13 +288,29 @@ fn exact_query_response_from_xml(
             parse_expiry(expiry.as_deref())
         }
     };
+    // A failed transaction reports why it failed on its original sale action,
+    // not on the transaction. Attach that reason only as evidence for a status
+    // the transaction-level fields already settled, and only when they carry
+    // no response evidence of their own.
+    let failed_sale = (matches!(status, PaymentStatus::Declined | PaymentStatus::Failed)
+        && diagnostics.is_empty()
+        && decision.response.is_none()
+        && decision.response_code.is_none()
+        && response_text.is_none()
+        && !conflicting_response_text)
+        .then(|| original_sale::failed_sale_evidence(transaction))
+        .flatten();
+    let (response_code, response_text) = match failed_sale {
+        Some(evidence) => (Some(evidence.response_code), evidence.response_text),
+        None => (decision.response_code, response_text),
+    };
     Ok(Some(ExactQueryResponse {
         outcome: PaymentOutcome {
             status,
             transaction_id,
             customer_vault_id,
             response: sensitive_gateway_field(decision.response),
-            response_code: sensitive_gateway_field(decision.response_code),
+            response_code: sensitive_gateway_field(response_code),
             response_text: sensitive_gateway_field(response_text),
             condition: sensitive_gateway_field(decision.condition),
             descriptor: PaymentDescriptor {

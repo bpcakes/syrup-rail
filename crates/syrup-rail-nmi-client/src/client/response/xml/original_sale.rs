@@ -1,0 +1,99 @@
+//! Decline evidence carried by a queried transaction's original sale action.
+//!
+//! NMI's Query API reports a transaction's `condition` on the transaction
+//! element and the processor's `response_code` and `response_text` on each
+//! `<action>` beneath it. An exact query that reconciles a sale whose response
+//! was lost therefore sees a failed transaction with no transaction-level
+//! response code.
+//! <https://docs.nmi.com/reference/query>
+
+use crate::PaymentStatus;
+
+use super::super::common::ScalarBounds::{GatewayField, Protocol};
+use super::super::common::{
+    DecisionFieldKind, PaymentDecisionFields, ResolvedScalar, ScalarOccurrenceCollector,
+    normalize_gateway_state, resolve_optional_scalar,
+};
+use super::{collect_xml_scalar, element_children_named, normalize_report_success};
+
+/// Response code and text of the one failed sale that produced a failed
+/// transaction.
+pub(super) struct FailedSaleEvidence {
+    pub(super) response_code: String,
+    pub(super) response_text: Option<String>,
+}
+
+/// Reads the failed original sale of `transaction`.
+///
+/// This is descriptive evidence for a transaction whose own fields already
+/// prove a determinate non-approval; it never decides the payment status.
+/// It is returned only when nothing about the action is open to
+/// interpretation:
+///
+/// - the transaction has exactly one `<action>`, directly beneath it;
+/// - that action is a `sale` whose `success` is `0`;
+/// - its one `response_code` is by itself a determinate decline or failure,
+///   so an approval, an indeterminate processor error, a duplicate, or an
+///   unpublished code is never attached to a failed transaction; and
+/// - its `response_text` is absent or a single consistent value.
+///
+/// Anything else returns `None`, which leaves the outcome exactly as the
+/// transaction-level fields describe it.
+pub(super) fn failed_sale_evidence(
+    transaction: roxmltree::Node<'_, '_>,
+) -> Option<FailedSaleEvidence> {
+    let mut actions = element_children_named(transaction, "action");
+    let action = actions.next()?;
+    if actions.next().is_some() {
+        return None;
+    }
+    let nested_actions = transaction
+        .descendants()
+        .filter(|node| node.is_element() && node.has_tag_name("action"))
+        .count();
+    if nested_actions != 1 {
+        return None;
+    }
+
+    let action_type = collect_xml_scalar(action, &["action_type"], Protocol)
+        .finish_normalized(normalize_gateway_state);
+    if !matches!(&action_type, ResolvedScalar::OneConsistent(value) if normalize_gateway_state(value) == "sale")
+    {
+        return None;
+    }
+    let success = collect_xml_scalar(action, &["success"], Protocol)
+        .finish_normalized(normalize_report_success);
+    if !matches!(&success, ResolvedScalar::OneConsistent(value) if normalize_report_success(value) == "0")
+    {
+        return None;
+    }
+
+    let missing = |kind| ScalarOccurrenceCollector::default().finish_decision(kind);
+    let decision = PaymentDecisionFields::new(
+        missing(DecisionFieldKind::Response),
+        collect_xml_scalar(action, &["response_code"], Protocol)
+            .finish_decision(DecisionFieldKind::ResponseCode),
+        missing(DecisionFieldKind::GatewayState),
+        missing(DecisionFieldKind::GatewayState),
+    )
+    .resolve();
+    if !matches!(
+        decision.status,
+        PaymentStatus::Declined | PaymentStatus::Failed
+    ) || !decision.diagnostics.is_empty()
+    {
+        return None;
+    }
+    let response_code = decision.response_code?;
+
+    let (response_text, conflicting_text) = resolve_optional_scalar(
+        collect_xml_scalar(action, &["response_text"], GatewayField).finish(),
+    );
+    if conflicting_text {
+        return None;
+    }
+    Some(FailedSaleEvidence {
+        response_code,
+        response_text,
+    })
+}
