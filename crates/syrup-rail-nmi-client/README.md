@@ -122,11 +122,13 @@ failure and carry no `response`, `response_code`, or `response_text` of their
 own, the exact query attaches the `response_code` and `response_text` of the
 transaction's single failed `sale` action, so a decline first resolved by
 reconciliation keeps the reason a foreground sale response would have carried.
-The action is evidence only: it never decides the payment status, and nothing
-is attached for an approved or indeterminate transaction, for a transaction
-with no, several, nested, non-sale, or successful actions, or for an action
-whose code is repeated, conflicting, or not itself a determinate decline or
-failure.
+A missing or contradictory transaction ID on an order-ID-bound failure does not
+prevent this; the identifiers stay quarantined and diagnosed as described
+above. The action is evidence only: it never decides the payment status, and
+nothing is attached for an approved or indeterminate transaction, for a
+transaction with no, several, nested, non-sale, or successful actions, or for
+an action whose code is repeated (even as agreeing copies), conflicting, or not
+itself a determinate decline or failure.
 
 `PaymentOutcome::diagnostics()` has set semantics: values are deduplicated and
 canonically ordered. That order is not provider chronology or policy

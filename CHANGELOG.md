@@ -62,11 +62,13 @@ historically named `dev/0.6.0` branch.
   261 and 264. The exact query now attaches the code and text of the
   transaction's single failed `sale` action when the transaction-level fields
   already prove a decline or determinate failure and carry no response
-  evidence of their own. The action never decides the payment status;
-  approved and indeterminate outcomes, and their stored evidence, are
-  unchanged. A missing, repeated, non-sale, successful, or conflicting action,
-  or one whose code is not itself a determinate decline or failure, attaches
-  nothing.
+  evidence of their own. An order-ID-bound failure keeps the reason even when
+  its transaction ID is missing or contradictory; that identity stays
+  quarantined. The action never decides the payment status; approved and
+  indeterminate outcomes, and their stored evidence, are unchanged. A missing,
+  repeated, non-sale, successful, or conflicting action, one with more than
+  one `response_code`, or one whose code is not itself a determinate decline
+  or failure, attaches nothing.
 
 ### Added
 

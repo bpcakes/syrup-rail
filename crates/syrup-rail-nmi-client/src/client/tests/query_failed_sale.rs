@@ -123,6 +123,21 @@ fn ambiguous_or_non_decline_actions_leave_the_failed_transaction_unchanged() {
             sale_action("<response_code>261</response_code><response_code>202</response_code>"),
         ),
         (
+            "repeated code",
+            sale_action("<response_code>261</response_code><response_code>261</response_code>"),
+        ),
+        (
+            "numerically equivalent repeated codes",
+            sale_action("<response_code>261</response_code><response_code>0261</response_code>"),
+        ),
+        (
+            "wrapped second code",
+            sale_action(
+                "<response_code>261</response_code>\
+                 <detail><response_code>261</response_code></detail>",
+            ),
+        ),
+        (
             "nested code",
             sale_action("<response_code><value>261</value></response_code>"),
         ),
@@ -156,13 +171,64 @@ fn ambiguous_or_non_decline_actions_leave_the_failed_transaction_unchanged() {
 }
 
 #[test]
+fn an_order_bound_failure_keeps_its_decline_reason_without_a_usable_transaction_identity() {
+    let request = TransactionQuery {
+        transaction_id: None,
+        order_id: Some("order_failed_sale".to_owned()),
+    };
+    let action = sale_action(
+        "<response_text>Declined-Retry in a few days</response_text>\
+         <response_code>264</response_code>",
+    );
+    for (name, identity, diagnostic) in [
+        (
+            "missing transaction ID",
+            "",
+            PaymentOutcomeDiagnostic::MissingTransactionIdentifier,
+        ),
+        (
+            "conflicting transaction IDs",
+            "<transaction_id>txn_first</transaction_id><transaction_id>txn_second</transaction_id>",
+            PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+        ),
+    ] {
+        let xml = format!(
+            r#"
+            <nm_response>
+              <transaction>
+                {identity}
+                <order_id>order_failed_sale</order_id>
+                <condition>failed</condition>
+                {action}
+              </transaction>
+            </nm_response>
+            "#
+        );
+        let outcome = query_outcome_for_request_from_xml(&xml, &request)
+            .expect("the order-bound query should parse")
+            .expect("the bound transaction should be present");
+
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{name}");
+        assert_eq!(exposed(&outcome.response_code), Some("264"), "{name}");
+        assert_eq!(
+            exposed(&outcome.response_text),
+            Some("Declined-Retry in a few days"),
+            "{name}"
+        );
+        assert_eq!(outcome.transaction_id, None, "{name}");
+        assert_eq!(outcome.diagnostics, [diagnostic], "{name}");
+    }
+}
+
+#[test]
 fn transaction_level_response_evidence_is_never_replaced_by_an_action() {
     let action =
         sale_action("<response_text>DECLINE</response_text><response_code>261</response_code>");
-    for (name, transaction_fields, expected_code, expected_text) in [
+    for (name, transaction_fields, expected_response, expected_code, expected_text) in [
         (
             "transaction response code",
             "<response_code>300</response_code>",
+            None,
             Some("300"),
             None,
         ),
@@ -170,7 +236,45 @@ fn transaction_level_response_evidence_is_never_replaced_by_an_action() {
             "transaction response text",
             "<response_text>Summary text</response_text>",
             None,
+            None,
             Some("Summary text"),
+        ),
+        // response=3 is compatible with a determinate failure, so the
+        // transaction stays failed without diagnostics.
+        (
+            "transaction response",
+            "<response>3</response>",
+            Some("3"),
+            None,
+            None,
+        ),
+        (
+            "empty transaction response text",
+            "<response_text></response_text>",
+            None,
+            None,
+            None,
+        ),
+        (
+            "self-closing transaction response text",
+            "<response_text/>",
+            None,
+            None,
+            None,
+        ),
+        (
+            "malformed transaction response text",
+            "<response_text><b>Summary text</b></response_text>",
+            None,
+            None,
+            None,
+        ),
+        (
+            "conflicting transaction response text",
+            "<response_text>A</response_text><response_text>B</response_text>",
+            None,
+            None,
+            None,
         ),
     ] {
         let outcome = queried(&format!(
@@ -186,7 +290,11 @@ fn transaction_level_response_evidence_is_never_replaced_by_an_action() {
             "#
         ));
 
+        // The status gate passes, so only the transaction's own element keeps
+        // the action's evidence out.
         assert_eq!(outcome.status, PaymentStatus::Failed, "{name}");
+        assert!(outcome.diagnostics.is_empty(), "{name}");
+        assert_eq!(exposed(&outcome.response), expected_response, "{name}");
         assert_eq!(exposed(&outcome.response_code), expected_code, "{name}");
         assert_eq!(exposed(&outcome.response_text), expected_text, "{name}");
     }
