@@ -70,17 +70,6 @@ historically named `dev/0.6.0` branch.
 
 ### Added
 
-- Add `Client::query_transaction_receipt` and the opt-in
-  `Client::query_transaction_receipt_evidence`, with `TransactionReceiptQuery`,
-  `TransactionReceipt`, `TransactionReceiptParts`, `TransactionReceiptLookup`,
-  and `ReceiptConflictField`. Both selectors must bind exactly one transaction.
-  The evidence API distinguishes `Found`, `NotFound`, `BoundConflict` for valid
-  normalized contradictions, and `Incomplete` for individually trustworthy
-  partial facts. Hosts may compare incomplete facts with recorded payment
-  evidence but must never use them to complete a receipt. The strict receipt
-  method retains its duplicate/error behavior; financial and report parsing
-  remain unchanged. Hosts still validate the original successful action,
-  amount, currency, and date before issuing a receipt.
 - Add `StatementDescriptor` (merchant name of at most 25 printable-ASCII
   bytes, optional phone of at most 20 bytes of digits, spaces, `+`, `-`, `(`,
   `)` or `.`, optional URL of at most 40 bytes without whitespace) and
@@ -113,6 +102,17 @@ historically named `dev/0.6.0` branch.
   on supported processors and an accepted sale does not prove the descriptor
   printed; confirm acquirer support against a real statement before relying on
   it.
+- Add `Client::query_transaction_receipt` and the opt-in
+  `Client::query_transaction_receipt_evidence`, with `TransactionReceiptQuery`,
+  `TransactionReceipt`, `TransactionReceiptParts`, `TransactionReceiptLookup`,
+  and `ReceiptConflictField`. Both selectors must bind exactly one transaction.
+  The evidence API distinguishes `Found`, `NotFound`, `BoundConflict` for valid
+  normalized contradictions, and `Incomplete` for individually trustworthy
+  partial facts. Hosts may compare incomplete facts with recorded payment
+  evidence but must never use them to complete a receipt. The strict receipt
+  method retains its duplicate/error behavior; financial and report parsing
+  remain unchanged. Hosts still validate the original successful action,
+  amount, currency, and date before issuing a receipt.
 
 ## [0.5.5] - Unreleased
 
