@@ -98,7 +98,8 @@ const fn concerns_identity_only(diagnostic: PaymentOutcomeDiagnostic) -> bool {
 /// - that code is by itself a determinate decline or failure, so an
 ///   approval, an indeterminate processor error, a duplicate, or an
 ///   unpublished code is never attached to a failed transaction; and
-/// - its `response_text` is absent or a single consistent value.
+/// - its `response_text` elements, when there are several, agree. A single
+///   empty or malformed text is dropped without discarding the code.
 ///
 /// Anything else returns `None`, which leaves the outcome exactly as the
 /// transaction-level fields describe it.
@@ -139,10 +140,17 @@ fn failed_sale_evidence(transaction: roxmltree::Node<'_, '_>) -> Option<FailedSa
     }
     let response_code = decision.response_code?;
 
-    let (response_text, conflicting_text) = resolve_optional_scalar(
+    let (response_text, invalid_text) = resolve_optional_scalar(
         collect_xml_scalar(action, &["response_text"], GatewayField).finish(),
     );
-    if conflicting_text {
+    // The collector cannot tell an empty or malformed text from a conflict.
+    // Only several texts can disagree; a single unusable one is dropped, as it
+    // is at the transaction level, and leaves the code intact.
+    let text_elements = action
+        .children()
+        .filter(|child| child.is_element() && child.has_tag_name("response_text"))
+        .count();
+    if invalid_text && text_elements > 1 {
         return None;
     }
     Some(FailedSaleEvidence {

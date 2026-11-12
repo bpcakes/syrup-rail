@@ -63,12 +63,14 @@ historically named `dev/0.6.0` branch.
   transaction's single failed `sale` action when the transaction-level fields
   already prove a decline or determinate failure and carry no response
   evidence of their own. An order-ID-bound failure keeps the reason even when
-  its transaction ID is missing or contradictory; that identity stays
+  its transaction or vault ID is missing or contradictory; that identity stays
   quarantined. The action never decides the payment status; approved and
   indeterminate outcomes, and their stored evidence, are unchanged. A missing,
-  repeated, non-sale, successful, or conflicting action, one with more than
-  one `response_code`, or one whose code is not itself a determinate decline
-  or failure, attaches nothing.
+  repeated, nested, non-sale, successful, or conflicting action, one with more
+  than one `response_code` or with disagreeing `response_text` values, or one
+  whose code is not itself a determinate decline or failure, attaches nothing.
+  A single empty or malformed action `response_text` is dropped without losing
+  the code.
 
 ### Added
 

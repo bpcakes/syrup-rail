@@ -67,6 +67,28 @@ fn failed_sale_reason_does_not_need_response_text() {
 }
 
 #[test]
+fn an_unusable_action_text_is_dropped_without_losing_the_code() {
+    for (name, text) in [
+        ("empty text", "<response_text></response_text>"),
+        ("self-closing text", "<response_text/>"),
+        ("blank text", "<response_text>   </response_text>"),
+        (
+            "nested text",
+            "<response_text><b>DECLINE</b></response_text>",
+        ),
+    ] {
+        let outcome = queried(&failed_transaction(&sale_action(&format!(
+            "{text}<response_code>261</response_code>"
+        ))));
+
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{name}");
+        assert_eq!(exposed(&outcome.response_code), Some("261"), "{name}");
+        assert_eq!(outcome.response_text, None, "{name}");
+        assert!(outcome.diagnostics.is_empty(), "{name}");
+    }
+}
+
+#[test]
 fn declined_transaction_keeps_its_original_sale_decline_reason() {
     let action = sale_action(
         "<response_text>Declined-Retry in a few days</response_text>\
@@ -144,6 +166,10 @@ fn ambiguous_or_non_decline_actions_leave_the_failed_transaction_unchanged() {
             format!("<action><success>0</success>{declined}</action>"),
         ),
         (
+            "sole wrapped action",
+            format!("<detail>{}</detail>", sale_action(declined)),
+        ),
+        (
             "wrapped action beside the sale",
             format!(
                 "{}<detail>{}</detail>",
@@ -202,6 +228,13 @@ fn ambiguous_or_non_decline_actions_leave_the_failed_transaction_unchanged() {
             ),
         ),
         (
+            "empty text beside a text",
+            sale_action(
+                "<response_code>261</response_code><response_text></response_text>\
+                 <response_text>A</response_text>",
+            ),
+        ),
+        (
             "missing code",
             sale_action("<response_text>DECLINE</response_text>"),
         ),
@@ -224,7 +257,7 @@ fn ambiguous_or_non_decline_actions_leave_the_failed_transaction_unchanged() {
 }
 
 #[test]
-fn an_order_bound_failure_keeps_its_decline_reason_without_a_usable_transaction_identity() {
+fn an_order_bound_failure_keeps_its_decline_reason_without_usable_identifiers() {
     let request = TransactionQuery {
         transaction_id: None,
         order_id: Some("order_failed_sale".to_owned()),
@@ -233,16 +266,28 @@ fn an_order_bound_failure_keeps_its_decline_reason_without_a_usable_transaction_
         "<response_text>Declined-Retry in a few days</response_text>\
          <response_code>264</response_code>",
     );
-    for (name, identity, diagnostic) in [
+    // A conflict clears both identifiers, while a merely missing transaction
+    // ID leaves a valid vault ID intact.
+    for (name, identity, diagnostic, expected_vault) in [
         (
             "missing transaction ID",
-            "",
+            "<customer_vault_id>vault_failed_sale</customer_vault_id>",
             PaymentOutcomeDiagnostic::MissingTransactionIdentifier,
+            Some("vault_failed_sale"),
         ),
         (
             "conflicting transaction IDs",
             "<transaction_id>txn_first</transaction_id><transaction_id>txn_second</transaction_id>",
             PaymentOutcomeDiagnostic::InvalidOrConflictingTransactionIdentifier,
+            None,
+        ),
+        (
+            "conflicting customer vault IDs",
+            "<transaction_id>txn_failed_sale</transaction_id>\
+             <customer_vault_id>vault_first</customer_vault_id>\
+             <customer_vault_id>vault_second</customer_vault_id>",
+            PaymentOutcomeDiagnostic::InvalidOrConflictingCustomerVaultIdentifier,
+            None,
         ),
     ] {
         let xml = format!(
@@ -269,6 +314,11 @@ fn an_order_bound_failure_keeps_its_decline_reason_without_a_usable_transaction_
             "{name}"
         );
         assert_eq!(outcome.transaction_id, None, "{name}");
+        assert_eq!(
+            exposed(&outcome.customer_vault_id),
+            expected_vault,
+            "{name}"
+        );
         assert_eq!(outcome.diagnostics, [diagnostic], "{name}");
     }
 }
