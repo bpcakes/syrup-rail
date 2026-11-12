@@ -170,7 +170,7 @@ fn policy() -> StatementDescriptorPolicy {
 #[tokio::test]
 async fn first_renewal_after_a_paid_trial_is_flagged_until_its_approval_is_applied()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("desc_trial", false, false, false).await?;
+    let fixture = enrollment_fixture("desc_trial").build().await?;
     let subscription_id = enroll(&fixture, "descriptor-trial-enrollment").await?;
     mark_paid_trial(&fixture.database.pool, subscription_id).await?;
     assert_eq!(
@@ -217,7 +217,7 @@ async fn first_renewal_after_a_paid_trial_is_flagged_until_its_approval_is_appli
 #[tokio::test]
 async fn dunning_retry_keeps_trial_descriptor_until_the_same_period_is_approved()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("desc_retry", false, false, false).await?;
+    let fixture = enrollment_fixture("desc_retry").build().await?;
     let subscription_id = enroll(&fixture, "descriptor-retry-enrollment").await?;
     mark_paid_trial(&fixture.database.pool, subscription_id).await?;
     sqlx::query(
@@ -319,7 +319,7 @@ async fn dunning_retry_keeps_trial_descriptor_until_the_same_period_is_approved(
 #[tokio::test]
 async fn immediate_recurring_renewals_are_never_flagged_and_send_no_descriptor_without_a_policy()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("desc_immediate", false, false, false).await?;
+    let fixture = enrollment_fixture("desc_immediate").build().await?;
     let subscription_id = enroll(&fixture, "descriptor-immediate-enrollment").await?;
     assert_eq!(
         phase(&fixture.database.pool, subscription_id).await?,

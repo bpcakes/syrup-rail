@@ -11,9 +11,9 @@ use crate::{
 };
 
 pub use access::{
-    BillingDeletionBlockers, DeletionBlockerQuery, Entitlement, EntitlementGuard, EntitlementQuery,
-    MissingSubscriptionAction, PastDueAccess, PastDueAction, ScrubSubscriberBillingData,
-    ScrubbedBillingRows, classify_past_due_access,
+    BillingDeletionBlocker, BillingDeletionBlockers, DeletionBlockerQuery, Entitlement,
+    EntitlementGuard, EntitlementQuery, MissingSubscriptionAction, PastDueAccess, PastDueAction,
+    ScrubSubscriberBillingData, ScrubbedBillingRows, classify_past_due_access,
 };
 pub use discount::{
     AppliedSubscriptionDiscount, LimitedDiscountMonths, PercentOffBasisPoints,

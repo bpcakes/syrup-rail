@@ -78,20 +78,53 @@ fn limited_discount_allows_zero_applied_recurring_periods() {
 
 #[test]
 fn past_due_access_requires_both_continuing_policy_and_a_scheduled_payment() {
+    let scheduled = Some(Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap());
     assert_eq!(
-        classify_past_due_access(PastDueAccessPolicy::ContinueUntilDunningExhausted, true,),
+        classify_past_due_access(
+            PastDueAccessPolicy::ContinueUntilDunningExhausted,
+            scheduled
+        ),
         PastDueAccess::AllowedDuringDunning
     );
     for (policy, scheduled) in [
-        (PastDueAccessPolicy::SuspendImmediately, true),
-        (PastDueAccessPolicy::SuspendImmediately, false),
-        (PastDueAccessPolicy::ContinueUntilDunningExhausted, false),
+        (PastDueAccessPolicy::SuspendImmediately, scheduled),
+        (PastDueAccessPolicy::SuspendImmediately, None),
+        (PastDueAccessPolicy::ContinueUntilDunningExhausted, None),
     ] {
         assert_eq!(
             classify_past_due_access(policy, scheduled),
             PastDueAccess::Suspended
         );
     }
+}
+
+#[test]
+fn deletion_blockers_collect_named_reasons_independent_of_order_or_duplicates() {
+    use BillingDeletionBlocker::{ActiveSubscription, UnresolvedPayment};
+
+    let empty = BillingDeletionBlockers::new([]);
+    assert!(empty.is_empty());
+    assert!(!empty.active_subscription());
+    assert!(!empty.unresolved_payment());
+
+    let active = BillingDeletionBlockers::new([ActiveSubscription]);
+    assert!(active.active_subscription());
+    assert!(!active.unresolved_payment());
+    assert!(!active.is_empty());
+
+    let unresolved = BillingDeletionBlockers::new([UnresolvedPayment]);
+    assert!(!unresolved.active_subscription());
+    assert!(unresolved.unresolved_payment());
+    assert!(!unresolved.is_empty());
+
+    let both = BillingDeletionBlockers::new([ActiveSubscription, UnresolvedPayment]);
+    assert!(both.active_subscription());
+    assert!(both.unresolved_payment());
+    assert!(!both.is_empty());
+    assert_eq!(
+        both,
+        BillingDeletionBlockers::new([UnresolvedPayment, ActiveSubscription, UnresolvedPayment,])
+    );
 }
 
 #[test]

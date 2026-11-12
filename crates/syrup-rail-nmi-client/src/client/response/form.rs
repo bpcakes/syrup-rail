@@ -8,10 +8,11 @@ use super::super::{
     WireError,
     text::{last4, sensitive_gateway_field},
 };
+use super::common::ScalarBounds::{GatewayField, Protocol};
 use super::common::{
-    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarOccurrence,
-    ScalarOccurrenceCollector, finalize_payment_identifiers, rate_limited_wire_error,
-    resolve_optional_scalar,
+    DecisionFieldKind, IdentifierPresence, PaymentDecisionFields, ResolvedScalar, ScalarBounds,
+    ScalarOccurrence, ScalarOccurrenceCollector, finalize_payment_identifiers,
+    rate_limited_wire_error, resolve_optional_scalar,
 };
 
 pub(in crate::client) fn classic_payment_outcome_from_form(
@@ -19,13 +20,13 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
 ) -> Result<PaymentOutcome, WireError> {
     let fields: Vec<_> = form_urlencoded::parse(text.as_bytes()).collect();
     let decision = PaymentDecisionFields::new(
-        collect_classic_scalar(&fields, &["response"], false)
+        collect_classic_scalar(&fields, &["response"], Protocol)
             .finish_decision(DecisionFieldKind::Response),
-        collect_classic_scalar(&fields, &["response_code", "responsecode"], false)
+        collect_classic_scalar(&fields, &["response_code", "responsecode"], Protocol)
             .finish_decision(DecisionFieldKind::ResponseCode),
-        collect_classic_scalar(&fields, &["status"], false)
+        collect_classic_scalar(&fields, &["status"], Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
-        collect_classic_scalar(&fields, &["condition"], false)
+        collect_classic_scalar(&fields, &["condition"], Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
     )
     .resolve();
@@ -55,7 +56,7 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
         return Err(rate_limited_wire_error());
     }
     let (response_text, invalid_response_text) = resolve_optional_scalar(
-        collect_classic_scalar(&fields, &["responsetext", "response_text"], true).finish(),
+        collect_classic_scalar(&fields, &["responsetext", "response_text"], GatewayField).finish(),
     );
     let has_structured_evidence = decision.has_structured_evidence();
     let mut status = decision.status;
@@ -84,12 +85,12 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
         &mut diagnostics,
     );
     let (payment_type, _) =
-        resolve_optional_scalar(collect_classic_scalar(&fields, &["type"], true).finish());
+        resolve_optional_scalar(collect_classic_scalar(&fields, &["type"], GatewayField).finish());
     let (card_brand, _) = resolve_optional_scalar(
-        collect_classic_scalar(&fields, &["cctype", "card_type"], true).finish(),
+        collect_classic_scalar(&fields, &["cctype", "card_type"], GatewayField).finish(),
     );
     let (card_number, _) = resolve_optional_scalar(
-        collect_classic_scalar(&fields, &["cc_number", "ccnumber"], true).finish(),
+        collect_classic_scalar(&fields, &["cc_number", "ccnumber"], GatewayField).finish(),
     );
     Ok(PaymentOutcome {
         status,
@@ -122,13 +123,13 @@ pub(in crate::client) fn classic_form_has_payment_processing_evidence(
     }
     let fields: Vec<_> = form_urlencoded::parse(text.as_bytes()).collect();
     let decision = PaymentDecisionFields::new(
-        collect_classic_scalar(&fields, &["response"], false)
+        collect_classic_scalar(&fields, &["response"], Protocol)
             .finish_decision(DecisionFieldKind::Response),
-        collect_classic_scalar(&fields, &["response_code", "responsecode"], false)
+        collect_classic_scalar(&fields, &["response_code", "responsecode"], Protocol)
             .finish_decision(DecisionFieldKind::ResponseCode),
-        collect_classic_scalar(&fields, &["status"], false)
+        collect_classic_scalar(&fields, &["status"], Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
-        collect_classic_scalar(&fields, &["condition"], false)
+        collect_classic_scalar(&fields, &["condition"], Protocol)
             .finish_decision(DecisionFieldKind::GatewayState),
     )
     .resolve();
@@ -174,16 +175,15 @@ fn is_classic_form_candidate(text: &str) -> bool {
 fn collect_classic_scalar(
     fields: &[(Cow<'_, str>, Cow<'_, str>)],
     aliases: &[&'static str],
-    bounded: bool,
+    bounds: ScalarBounds,
 ) -> ScalarOccurrenceCollector {
     let mut collector = ScalarOccurrenceCollector::default();
     for (field, value) in fields {
         if aliases.iter().any(|alias| field == *alias) {
             let occurrence = ScalarOccurrence::Scalar(Cow::Borrowed(value.as_ref()));
-            if bounded {
-                collector.record_bounded(occurrence);
-            } else {
-                collector.record(occurrence);
+            match bounds {
+                GatewayField => collector.record_bounded(occurrence),
+                Protocol => collector.record(occurrence),
             }
         }
     }

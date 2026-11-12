@@ -4,7 +4,7 @@ use crate::test_support::assert_attempt_billing_address;
 #[tokio::test]
 async fn recovery_persists_billing_address_and_rejects_changed_address_replay()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("address_recovery", false, false, false).await?;
+    let fixture = enrollment_fixture("address_recovery").build().await?;
     let result = async {
         let (subscription_id, _) = enroll_with(
             &fixture,

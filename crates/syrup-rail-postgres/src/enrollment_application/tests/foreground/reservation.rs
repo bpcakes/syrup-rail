@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn foreground_service_pre_reservation_cooldown_creates_no_attempt_or_provider_io()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("service_cooldown", false, false, false).await?;
+    let fixture = enrollment_fixture("service_cooldown").build().await?;
     sqlx::query(
         r#"
         UPDATE billing_gateway_accounts
@@ -56,7 +56,7 @@ async fn foreground_service_pre_reservation_cooldown_creates_no_attempt_or_provi
 #[tokio::test]
 async fn foreground_service_resumes_the_durable_attempt_not_the_retry_candidate_id()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("service_resume", false, false, false).await?;
+    let fixture = enrollment_fixture("service_resume").build().await?;
     let original_attempt_id = fixture.command.attempt_id();
     let mut transaction = fixture.database.pool.begin().await?;
     assert!(matches!(

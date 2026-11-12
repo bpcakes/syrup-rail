@@ -249,6 +249,7 @@ application checks. CI uses `scripts/check-rust-policy.py` to retain the Rust
 file-size and `mod.rs` policies removed from Jig's native checks in 0.7.1.
 
 - `scripts/jig doctor`
+- `scripts/jig check clippy`
 - `scripts/jig check test`
 - `scripts/check-public-api.sh`
 - `cargo test -p syrup-rail-nmi-client`
@@ -268,6 +269,12 @@ An explicit URL is passed through without Docker startup or server cleanup and
 is never printed by the launcher. The caller owns that server. Database-free
 client tests can still run directly with Cargo. The launcher requires Python 3;
 its lifecycle regressions run with `python3 scripts/tests/with-test-postgres.py`.
+
+All workspace members inherit the Clippy rules in the root `Cargo.toml`.
+`clippy.toml` sets boolean function parameters to zero. Local and CI Clippy
+checks treat warnings as errors. Function-length and cognitive-complexity
+limits are deferred until the existing payment workflows and tests have been
+refactored to meet them.
 
 See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.

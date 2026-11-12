@@ -40,6 +40,15 @@ pub(super) enum IdentifierPresence {
     Optional,
 }
 
+/// Selects how a wire scalar is validated before it becomes evidence.
+#[derive(Clone, Copy)]
+pub(super) enum ScalarBounds {
+    /// Validate a protocol scalar and retain its exact spelling when possible.
+    Protocol,
+    /// Truncate retained gateway text while comparing complete values.
+    GatewayField,
+}
+
 #[derive(Default)]
 pub(in crate::client) struct ScalarOccurrenceCollector {
     values: Vec<String>,

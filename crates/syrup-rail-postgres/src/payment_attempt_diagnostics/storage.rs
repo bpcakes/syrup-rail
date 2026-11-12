@@ -10,7 +10,7 @@ use super::{
     DiagnosticCandidate, PaymentAttemptDiagnosticEligibility, PaymentAttemptDiagnosticTarget,
     PaymentAttemptDiagnosticsError, PaymentAttemptDiagnosticsOutcome,
 };
-use crate::{GatewayMutationCooldownScope, enrollment_application::set_application_timeouts};
+use crate::enrollment_application::set_application_timeouts;
 
 // Ownership is scope and subscriber plus the exact plan. Host charges have no
 // plan; they are reported as an unsupported kind rather than hidden.
@@ -76,19 +76,15 @@ const REVALIDATE_SQL: &str = r#"
 #[derive(FromRow)]
 pub(super) struct EligibilityRow {
     pub attempt_id: Uuid,
-    pub attempt_kind: String,
-    pub submitted: bool,
-    pub status: String,
-    pub has_transaction_id: bool,
+    #[sqlx(flatten)]
+    pub facts: super::DiagnosticEligibilityFacts,
 }
 
 #[derive(FromRow)]
 pub(super) struct TargetRow {
-    pub attempt_kind: String,
-    pub status: String,
-    pub submitted: bool,
+    #[sqlx(flatten)]
+    pub facts: super::DiagnosticEligibilityFacts,
     pub gateway_transaction_id: Option<String>,
-    pub has_transaction_id: bool,
     pub amount_cents: i32,
     pub currency: String,
     pub gateway_order_id: String,
@@ -278,19 +274,12 @@ async fn prepare(
         transaction.commit().await?;
         return Ok(Prepared::Done(Outcome::NotFound));
     };
-    if let PaymentAttemptDiagnosticEligibility::Ineligible(reason) =
-        PaymentAttemptDiagnosticEligibility::classify(
-            &row.attempt_kind,
-            row.submitted,
-            &row.status,
-            row.has_transaction_id,
-        )
-    {
+    if let PaymentAttemptDiagnosticEligibility::Ineligible(reason) = row.facts.eligibility() {
         transaction.commit().await?;
         return Ok(Prepared::Done(Outcome::Ineligible(reason)));
     }
     let candidate = DiagnosticCandidate::new(target.attempt_id, row)?;
-    let (account, provider) = crate::gateway_accounts::load_gateway_cooldown(
+    let cooldown = crate::gateway_accounts::load_gateway_cooldown(
         &mut *transaction,
         candidate.account_id,
         &candidate.provider_key,
@@ -298,7 +287,7 @@ async fn prepare(
     .await?
     .ok_or(sqlx::Error::RowNotFound)?;
     transaction.commit().await?;
-    if let Some(scope) = GatewayMutationCooldownScope::from_active_flags(account, provider) {
+    if let Some(scope) = cooldown.active_scope() {
         return Ok(Prepared::Done(Outcome::CooldownActive(scope)));
     }
     Ok(Prepared::Query(candidate))

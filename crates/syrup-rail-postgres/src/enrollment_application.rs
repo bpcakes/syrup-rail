@@ -740,11 +740,15 @@ impl OutcomeResolutionCommand {
         }
     }
 
-    const fn may_resolve(self, status: PaymentAttemptStatus, submitted: bool) -> bool {
+    const fn may_resolve(
+        self,
+        status: PaymentAttemptStatus,
+        submitted_at: Option<DateTime<Utc>>,
+    ) -> bool {
         status.is_resolvable()
             && match self.boundary {
-                OutcomeResolutionBoundary::Prepared => !submitted,
-                OutcomeResolutionBoundary::AdmittedNotSubmitted => submitted,
+                OutcomeResolutionBoundary::Prepared => submitted_at.is_none(),
+                OutcomeResolutionBoundary::AdmittedNotSubmitted => submitted_at.is_some(),
                 OutcomeResolutionBoundary::Submitted => true,
             }
     }
@@ -794,12 +798,12 @@ impl OutcomeApplication {
     }
 
     fn should_surface_not_submitted(&self, policy: GatewayNotSubmittedPolicy) -> bool {
-        should_surface_not_submitted_application(
-            self.applied,
-            self.payment.attempt(),
-            policy,
-            self.prepared_attempt_replay,
-        )
+        self.applied
+            || should_surface_prepared_not_submitted(
+                self.payment.attempt(),
+                policy,
+                self.prepared_attempt_replay,
+            )
     }
 }
 
@@ -818,17 +822,15 @@ pub(crate) enum PreparedAttemptReplay {
     Unsupported,
 }
 
-pub(crate) fn should_surface_not_submitted_application(
-    applied: bool,
+pub(crate) fn should_surface_prepared_not_submitted(
     attempt: &PaymentAttempt,
     policy: GatewayNotSubmittedPolicy,
     prepared_attempt_replay: PreparedAttemptReplay,
 ) -> bool {
-    applied
-        || (prepared_attempt_replay == PreparedAttemptReplay::Supported
-            && policy.restores_prepared_attempt_when_supported()
-            && attempt.status() == PaymentAttemptStatus::Pending
-            && attempt.state().timestamps().submitted_at().is_none())
+    prepared_attempt_replay == PreparedAttemptReplay::Supported
+        && policy.restores_prepared_attempt_when_supported()
+        && attempt.status() == PaymentAttemptStatus::Pending
+        && attempt.state().timestamps().submitted_at().is_none()
 }
 
 async fn resolve_pool_outcome(
@@ -871,25 +873,16 @@ impl ReconciledNonApprovedEvidence {
     }
 
     pub(crate) fn identity_conflict_diagnostics(&self) -> Vec<GatewayPaymentDiagnostic> {
-        identity_conflict_diagnostics(
-            self.transaction_id_conflict || self.discarded_transaction_id,
-            self.payment_method_reference_conflict || self.discarded_payment_method_reference,
-        )
+        [
+            (self.transaction_id_conflict || self.discarded_transaction_id)
+                .then_some(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier),
+            (self.payment_method_reference_conflict || self.discarded_payment_method_reference)
+                .then_some(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
-}
-
-fn identity_conflict_diagnostics(
-    transaction_id_conflict: bool,
-    payment_method_reference_conflict: bool,
-) -> Vec<GatewayPaymentDiagnostic> {
-    let mut diagnostics = Vec::with_capacity(2);
-    if transaction_id_conflict {
-        diagnostics.push(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier);
-    }
-    if payment_method_reference_conflict {
-        diagnostics.push(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference);
-    }
-    diagnostics
 }
 
 pub(crate) fn processor_identity_conflict_diagnostics(
@@ -897,13 +890,18 @@ pub(crate) fn processor_identity_conflict_diagnostics(
     observed: &ProcessorEvidence,
 ) -> Vec<GatewayPaymentDiagnostic> {
     let persisted = attempt.state().processor_evidence();
-    identity_conflict_diagnostics(
-        identifiers_conflict(persisted.transaction_id(), observed.transaction_id()),
+    [
+        identifiers_conflict(persisted.transaction_id(), observed.transaction_id())
+            .then_some(GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier),
         identifiers_conflict(
             persisted.payment_method_reference(),
             observed.payment_method_reference(),
-        ),
-    )
+        )
+        .then_some(GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 pub(crate) fn same_processor_transaction(
@@ -1090,7 +1088,7 @@ async fn resolve_locked_outcome(
     let applied = !is_parked_expired_period_approval(&attempt)
         && resolution.may_resolve(
             attempt.status(),
-            attempt.state().timestamps().submitted_at().is_some(),
+            attempt.state().timestamps().submitted_at(),
         );
     if applied {
         let status = resolution.resolved_status(reservation.operation(), attempt.status());
@@ -1263,13 +1261,13 @@ async fn persist_approved_evidence_without_attempt_lock(
     pool: &PgPool,
     terms: LockFreeApprovedEvidenceTerms<'_>,
     evidence: &ProcessorEvidence,
-    expired_period: bool,
+    approval_policy: crate::processor_charges::LockFreeApprovalPolicy,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    match crate::processor_charges::persist_approved_evidence_without_attempt_lock_with_expiry(
+    match crate::processor_charges::persist_approved_evidence_without_attempt_lock_with_policy(
         pool,
         terms,
         evidence,
-        expired_period,
+        approval_policy,
     )
     .await?
     {

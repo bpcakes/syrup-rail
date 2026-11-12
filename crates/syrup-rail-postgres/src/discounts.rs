@@ -18,8 +18,8 @@ use uuid::Uuid;
 
 pub use persistence::saved_subscription_discount_claim_in_transaction;
 use persistence::{
-    blocking_initial_attempt, blocking_initial_attempt_exists, claim_from_row, code_by_id,
-    code_from_row, current_subscription_exists, discount_value, duration_months,
+    DiscountCodeLookup, blocking_initial_attempt, blocking_initial_attempt_exists, claim_from_row,
+    code_by_id, code_from_row, current_subscription_exists, discount_value, duration_months,
     expire_saved_claims_for_code, find_active_code, lock_initial_attempt_rows,
     lock_initial_attempts, lock_offer, lock_subscription_aggregate, quote_for_offer,
     quote_from_row, saved_subscription_discount_claim_on_connection, set_lock_timeout,
@@ -278,7 +278,14 @@ pub async fn validate_subscription_discount_code_in_transaction(
 ) -> Result<Option<SubscriptionDiscountCodeQuote>, SubscriptionDiscountOperationError> {
     set_lock_timeout(transaction).await?;
     let offer = lock_offer(transaction, offers, billing_scope_id, plan_key).await?;
-    let row = find_active_code(transaction, billing_scope_id, plan_key, code, false).await?;
+    let row = find_active_code(
+        transaction,
+        billing_scope_id,
+        plan_key,
+        code,
+        DiscountCodeLookup::Read,
+    )
+    .await?;
     row.as_ref()
         .map(|row| quote_from_row(row, &offer))
         .transpose()
@@ -525,7 +532,7 @@ pub(crate) async fn claim_subscription_discount_on_connection(
         claim.billing_scope_id(),
         claim.plan_key(),
         claim.code(),
-        true,
+        DiscountCodeLookup::LockForUpdate,
     )
     .await?
     else {

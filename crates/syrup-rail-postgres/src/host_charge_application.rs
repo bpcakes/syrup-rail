@@ -31,7 +31,7 @@ use crate::{
         map_attempt_transition_error, mutation_error_evidence, park_locked_attempt,
         processor_identity_conflict_diagnostics, reconcile_non_approved_evidence,
         restore_prepared_attempt_submission, same_processor_transaction, set_application_timeouts,
-        should_surface_not_submitted_application,
+        should_surface_prepared_not_submitted,
     },
     processor_charges::{
         ObservedCharge, observe_processor_charge, promote_conflicting_charge_to_external_reversal,
@@ -141,12 +141,12 @@ impl HostChargeResolutionApplication {
     }
 
     fn should_surface_not_submitted(&self, policy: GatewayNotSubmittedPolicy) -> bool {
-        should_surface_not_submitted_application(
-            self.applied,
-            self.payment.attempt(),
-            policy,
-            PreparedAttemptReplay::Supported,
-        )
+        self.applied
+            || should_surface_prepared_not_submitted(
+                self.payment.attempt(),
+                policy,
+                PreparedAttemptReplay::Supported,
+            )
     }
 }
 

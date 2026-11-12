@@ -9,6 +9,9 @@ description = "A bounded, retry-free client for NMI payment APIs"
 readme = "README.md"
 publish = true
 
+[lints]
+workspace = true
+
 [dependencies]
 futures-util.workspace = true
 reqwest.workspace = true

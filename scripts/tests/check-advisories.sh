@@ -215,6 +215,24 @@ run_graph_failure_case() {
   fi
 }
 
+run_tar_warning_case() {
+  local case_root
+  case_root="$(prepare_case tar-warning false)"
+  printf '[[package]]\nname = "astral-tokio-tar"\nversion = "0.6.4"\n' >>"$case_root/Cargo.lock"
+  local status=0
+  ADVISORY_TEST_REPO_ROOT="$case_root" \
+    ADVISORY_TEST_TREE_OUTPUT="astral-tokio-tar v0.6.4" \
+    ADVISORY_TEST_TREE_CALLED="$case_root/tree-called" \
+    ADVISORY_TEST_AUDIT_ARGS="$case_root/audit-args" \
+    ADVISORY_TEST_AUDIT_EXIT=42 \
+    PATH="$test_root/bin:$PATH" \
+    "$subject" || status=$?
+  if [[ "$status" -ne 42 || "$(cat "$case_root/audit-args")" != "--deny warnings" ]]; then
+    printf 'unmaintained tar warning was suppressed or its audit failure was lost\n' >&2
+    exit 1
+  fi
+}
+
 run_success_case "rsa-absent" false "--deny warnings" false
 run_success_case "rsa-unreachable" true "--deny warnings --ignore RUSTSEC-2023-0071" true
 run_success_case "sqlite-unreachable" false "--deny warnings --ignore RUSTSEC-2026-0459" true true
@@ -230,5 +248,6 @@ run_graph_failure_case rsa
 run_graph_failure_case libsqlite3-sys
 run_audit_failure_case
 run_audit_failure_case true
+run_tar_warning_case
 
 printf 'Dependency advisory wrapper tests passed.\n'

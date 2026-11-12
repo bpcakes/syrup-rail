@@ -203,11 +203,11 @@ mod tests {
     use super::*;
     use crate::{GatewayPaymentMethodReference, GatewayTransactionId, PaymentToken};
 
-    fn recurring(first_charge_after_paid_trial: bool) -> GatewaySaleIntent {
+    fn recurring(previous_phase: crate::SubscriptionPhase) -> GatewaySaleIntent {
         GatewaySaleIntent::RecurringStoredCredential {
             payment_method_reference: GatewayPaymentMethodReference::new("vault_1").unwrap(),
             initial_transaction_id: GatewayTransactionId::new("txn_1").unwrap(),
-            first_charge_after_paid_trial,
+            first_charge_after_paid_trial: previous_phase == crate::SubscriptionPhase::PaidTrial,
         }
     }
 
@@ -343,7 +343,12 @@ mod tests {
         };
 
         let policy = StatementDescriptorPolicy::new(default.clone());
-        for intent in [&one_time, &initial, &recurring(false), &recurring(true)] {
+        for intent in [
+            &one_time,
+            &initial,
+            &recurring(crate::SubscriptionPhase::Recurring),
+            &recurring(crate::SubscriptionPhase::PaidTrial),
+        ] {
             assert_eq!(policy.descriptor_for(intent), &default);
         }
         assert_eq!(policy.first_charge_after_paid_trial(), None);
@@ -351,9 +356,16 @@ mod tests {
         let policy = policy.with_first_charge_after_paid_trial(trial_end.clone());
         assert_eq!(policy.default_descriptor(), &default);
         assert_eq!(policy.first_charge_after_paid_trial(), Some(&trial_end));
-        for intent in [&one_time, &initial, &recurring(false)] {
+        for intent in [
+            &one_time,
+            &initial,
+            &recurring(crate::SubscriptionPhase::Recurring),
+        ] {
             assert_eq!(policy.descriptor_for(intent), &default);
         }
-        assert_eq!(policy.descriptor_for(&recurring(true)), &trial_end);
+        assert_eq!(
+            policy.descriptor_for(&recurring(crate::SubscriptionPhase::PaidTrial)),
+            &trial_end
+        );
     }
 }

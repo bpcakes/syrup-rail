@@ -35,7 +35,7 @@ async fn discount_service_facade_admits_claim_and_clear_without_provider_or_host
         let resolver = Arc::new(CountingResolver {
             calls: AtomicUsize::new(0),
         });
-        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone(), false));
+        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone()));
         let service = SubscriptionBillingService::new(
             database.pool.clone(),
             offers.clone(),
@@ -198,7 +198,7 @@ async fn denied_discount_mutations_leave_claims_untouched_without_host_or_provid
         let resolver = Arc::new(CountingResolver {
             calls: AtomicUsize::new(0),
         });
-        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone(), false));
+        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone()));
         let service = SubscriptionBillingService::new(
             database.pool.clone(),
             offers.clone(),

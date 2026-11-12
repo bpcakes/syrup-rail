@@ -222,7 +222,7 @@ async fn provider_cooldown_remaining(pool: &sqlx::PgPool) -> Result<f64, sqlx::E
 #[tokio::test]
 async fn diagnostics_observe_an_owned_attempt_without_writes_at_database_time()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_observe", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_observe").build().await?;
     let initial = enroll(
         &fixture,
         "diag-observe",
@@ -311,7 +311,7 @@ async fn diagnostics_observe_an_owned_attempt_without_writes_at_database_time()
 
 #[tokio::test]
 async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_eligible", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_eligible").build().await?;
     let pool = fixture.database.pool.clone();
     let initial = enroll(
         &fixture,
@@ -625,7 +625,7 @@ async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<()
 
 #[tokio::test]
 async fn cooldowns_and_short_deadlines_stop_before_provider_io() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_stop", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_stop").build().await?;
     let pool = &fixture.database.pool;
     let initial = enroll(&fixture, "diag-stop", approved_outcome("txn_stop_initial")).await?;
     let attempt_id = initial.attempt().identity().attempt_id();
@@ -668,7 +668,7 @@ async fn cooldowns_and_short_deadlines_stop_before_provider_io() -> Result<(), B
 #[tokio::test]
 async fn rate_limited_diagnostics_extend_the_provider_cooldown_at_the_deadline()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_rate", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_rate").build().await?;
     let pool = fixture.database.pool.clone();
     let initial = enroll(&fixture, "diag-rate", approved_outcome("txn_rate_initial")).await?;
     let attempt_id = initial.attempt().identity().attempt_id();
@@ -775,7 +775,7 @@ impl PaymentGateway for RacingDiagnosticsGateway {
 #[tokio::test]
 async fn rate_limited_diagnostics_fail_a_racing_renewal_before_submission()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_race", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_race").build().await?;
     let pool = fixture.database.pool.clone();
     let initial = enroll(&fixture, "diag-race", approved_outcome("txn_race_initial")).await?;
     let subscription_id = initial.subscription().expect("subscription").id();
@@ -835,7 +835,7 @@ async fn rate_limited_diagnostics_fail_a_racing_renewal_before_submission()
 
 #[tokio::test]
 async fn configuration_rotation_before_and_during_the_query() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_rotate", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_rotate").build().await?;
     let pool = fixture.database.pool.clone();
     let initial = enroll(
         &fixture,
@@ -916,7 +916,7 @@ async fn configuration_rotation_before_and_during_the_query() -> Result<(), Box<
 #[tokio::test]
 async fn late_approval_rewrites_during_the_query_are_target_changes() -> Result<(), Box<dyn Error>>
 {
-    let fixture = enrollment_fixture("diag_target", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_target").build().await?;
     let pool = fixture.database.pool.clone();
     let declined_enrollment =
         enroll(&fixture, "diag-target", declined("txn_target_declined")).await?;
@@ -953,7 +953,7 @@ async fn late_approval_rewrites_during_the_query_are_target_changes() -> Result<
 
 #[tokio::test]
 async fn diagnostics_leave_a_concurrent_scrub_intact() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_scrub", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_scrub").build().await?;
     let pool = fixture.database.pool.clone();
     let initial = enroll(
         &fixture,
@@ -1007,7 +1007,7 @@ async fn diagnostics_leave_a_concurrent_scrub_intact() -> Result<(), Box<dyn Err
 
 #[tokio::test]
 async fn provider_results_and_failures_map_to_typed_outcomes() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_map", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_map").build().await?;
     let initial = enroll(&fixture, "diag-map", approved_outcome("txn_map_initial")).await?;
     let attempt_id = initial.attempt().identity().attempt_id();
     for (result, expected) in [
@@ -1079,7 +1079,7 @@ async fn provider_results_and_failures_map_to_typed_outcomes() -> Result<(), Box
 
 #[tokio::test]
 async fn provider_errors_are_revalidated_before_they_are_reported() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_err_reval", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_err_reval").build().await?;
     let pool = fixture.database.pool.clone();
     let initial = enroll(&fixture, "diag-err", approved_outcome("txn_err_initial")).await?;
     let attempt_id = initial.attempt().identity().attempt_id();
@@ -1197,7 +1197,7 @@ fn exhaust_pool(
 
 #[tokio::test]
 async fn post_query_work_never_outlives_the_caller_deadline() -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_deadline", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_deadline").build().await?;
     let pool = fixture.database.pool.clone();
     let initial = enroll(
         &fixture,
@@ -1334,7 +1334,7 @@ async fn assert_pool_recovers(
 #[tokio::test]
 async fn a_stalled_connection_cannot_hold_diagnostic_database_work_past_the_deadline()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("diag_stall", false, false, false).await?;
+    let fixture = enrollment_fixture("diag_stall").build().await?;
     let initial = enroll(
         &fixture,
         "diag-stall",

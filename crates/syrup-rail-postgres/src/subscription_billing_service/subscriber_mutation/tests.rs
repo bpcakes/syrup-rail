@@ -125,14 +125,19 @@ struct TestCoordinator {
 }
 
 impl TestCoordinator {
-    fn new(pool: PgPool, append_returns_error: bool) -> Self {
+    fn new(pool: PgPool) -> Self {
         Self {
             pool,
             begins: Arc::new(AtomicUsize::new(0)),
             subjects: Arc::new(Mutex::new(Vec::new())),
             lock_timeouts: Arc::new(Mutex::new(Vec::new())),
-            append_returns_error,
+            append_returns_error: false,
         }
+    }
+
+    fn with_failing_event_append(mut self) -> Self {
+        self.append_returns_error = true;
+        self
     }
 }
 
@@ -262,7 +267,7 @@ async fn cancellation_admits_exactly_once_per_call_and_commits_one_host_event()
         let resolver = Arc::new(CountingResolver {
             calls: AtomicUsize::new(0),
         });
-        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone(), false));
+        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone()));
         let service = SubscriptionBillingService::new(
             database.pool.clone(),
             offers.clone(),
@@ -365,7 +370,7 @@ async fn cancellation_rolls_back_when_host_append_or_the_canonical_mutation_fail
             offers,
             resolver.clone(),
             Arc::new(RecordingAdmission::allowed()),
-            Arc::new(TestCoordinator::new(database.pool.clone(), true)),
+            Arc::new(TestCoordinator::new(database.pool.clone()).with_failing_event_append()),
         );
         assert!(matches!(
             service
@@ -399,7 +404,7 @@ async fn cancellation_rolls_back_when_host_append_or_the_canonical_mutation_fail
             ))),
             resolver.clone(),
             Arc::new(RecordingAdmission::allowed()),
-            Arc::new(TestCoordinator::new(database.pool.clone(), false)),
+            Arc::new(TestCoordinator::new(database.pool.clone())),
         );
         assert!(matches!(
             service
@@ -445,7 +450,7 @@ async fn denied_cancellation_performs_no_database_or_provider_work() -> Result<(
         let resolver = Arc::new(CountingResolver {
             calls: AtomicUsize::new(0),
         });
-        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone(), false));
+        let coordinator = Arc::new(TestCoordinator::new(database.pool.clone()));
         let service = SubscriptionBillingService::new(
             database.pool.clone(),
             offers.clone(),
@@ -519,7 +524,7 @@ async fn provider_free_lock_timeouts_are_retryable_without_reclassifying_unknown
             offers,
             resolver.clone(),
             Arc::new(RecordingAdmission::allowed()),
-            Arc::new(TestCoordinator::new(database.pool.clone(), false)),
+            Arc::new(TestCoordinator::new(database.pool.clone())),
         );
 
         let cancel_blocker =

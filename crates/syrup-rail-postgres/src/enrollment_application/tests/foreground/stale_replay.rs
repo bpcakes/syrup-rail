@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn foreground_stale_prepared_replay_expires_before_admission_or_live_terms()
 -> Result<(), Box<dyn Error>> {
-    let fixture = enrollment_fixture("svc_stale_replay", false, false, false).await?;
+    let fixture = enrollment_fixture("svc_stale_replay").build().await?;
     let mut transaction = fixture.database.pool.begin().await?;
     assert!(matches!(
         reserve_subscription_enrollment_in_transaction(
