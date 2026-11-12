@@ -74,4 +74,30 @@ if grep -Fqx 'name = "astral-tokio-tar"' Cargo.lock; then
   fi
   set -- "$@" --ignore RUSTSEC-2026-0440
 fi
+
+# Unreachable SQLite driver exception; see the reachability and impact analysis
+# in docs/security/dependency-advisories.md. SQLx 0.9.0 keeps its optional
+# SQLite driver in the lockfile although no workspace member enables it. Never
+# exempt a reachable libsqlite3-sys, a changed version, or another advisory.
+if grep -Fqx 'name = "libsqlite3-sys"' Cargo.lock; then
+  sqlite_versions="$(awk '
+    /^name = / { selected = ($0 == "name = \"libsqlite3-sys\"") }
+    selected && /^version = / { print $3 }
+  ' Cargo.lock)"
+  if [[ "$sqlite_versions" != '"0.30.1"' ]]; then
+    echo "RUSTSEC-2026-0459 exception covers only an unreachable libsqlite3-sys 0.30.1." >&2
+    exit 1
+  fi
+  sqlite_tree="$(
+    cargo tree --locked --workspace --all-features --target all -e all \
+      --prefix none --format '{p}' |
+      reachable_package_lines libsqlite3-sys
+  )"
+  if [[ -n "$sqlite_tree" ]]; then
+    echo "RUSTSEC-2026-0459 may not be ignored because a locked libsqlite3-sys package is reachable:" >&2
+    echo "$sqlite_tree" >&2
+    exit 1
+  fi
+  set -- "$@" --ignore RUSTSEC-2026-0459
+fi
 cargo audit "$@"

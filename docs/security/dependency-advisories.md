@@ -5,8 +5,8 @@ dedicated workflow also runs it every Monday so a newly published advisory is
 detected without waiting for a repository change. The script audits the
 complete lockfile and denies vulnerabilities, warnings, unmaintained packages,
 unsound packages, and yanked releases. The SQLx 0.9.0 lockfile no longer
-contains `rsa`. The only current exception is the temporary test/tool-only
-maintenance exception below.
+contains `rsa`. The current exceptions are the temporary test/tool-only
+maintenance exception and the unreachable SQLite driver exception below.
 
 The script retains its reachability guard for historical SQLx lockfiles: any
 reachable `rsa` dependency fails the check. New exceptions require a written
@@ -39,3 +39,28 @@ warnings and vulnerabilities. Maintainers must remove the exception when a
 compatible harness/Testcontainers update drops the crate, or explicitly
 reassess it before expiry. Upgrading to current Testcontainers 0.28 alone does
 not remove the unmaintained dependency.
+
+## Unreachable SQLite driver exception
+
+`RUSTSEC-2026-0459` reports that `libsqlite3-sys` 0.6.0 through 0.38.2 bundle
+a SQLite release affected by CVE-2026-119375. A process is exposed only when
+it opens, through the bundled SQLite, a database file and `-wal` that a less
+trusted party could have written. The fix is `libsqlite3-sys` 0.39.0. See the
+[RustSec advisory](https://rustsec.org/advisories/RUSTSEC-2026-0459).
+
+The lockfile records `libsqlite3-sys 0.30.1` through SQLx's optional SQLite
+driver (`sqlx-sqlite 0.9.0`), which requires `libsqlite3-sys >=0.30.1, <0.38.0`,
+so no patched version can be locked with SQLx 0.9.0. No workspace member
+enables that driver: the workspace selects SQLx with default features disabled
+and only the `runtime-tokio`, `postgres`, `macros`, `derive`, `uuid`, `json`,
+and `chrono` features. `cargo tree --locked --workspace --all-features --target
+all -e all -i libsqlite3-sys` finds no path from any library, test, example,
+or tool, including build and dev edges. The crate is therefore never compiled
+or linked, and no Syrup Rail build opens a SQLite database.
+
+The audit script ignores only this advisory ID, and only while the locked
+version is exactly `0.30.1` and the complete workspace graph across all
+features and targets does not reach it. A reachable or changed
+`libsqlite3-sys` fails the check, as does every other warning or
+vulnerability. Maintainers must remove the exception when an SQLx upgrade
+locks a patched `libsqlite3-sys` or drops it from the lockfile.
