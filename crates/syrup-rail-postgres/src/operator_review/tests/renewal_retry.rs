@@ -336,6 +336,32 @@ async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), B
                 }
             }
         }
+        // The ordinary operator failure consults the same advice.
+        let (subscription_id, attempt_id) =
+            insert_review_renewal(&database, &account, Uuid::now_v7(), "adv-plain").await?;
+        retry_policy(&database, subscription_id).await?;
+        sqlx::query("UPDATE billing_payment_attempts SET gateway_response_code = '261' WHERE id = $1")
+            .bind(attempt_id)
+            .execute(&database.pool)
+            .await?;
+        assert!(matches!(
+            fail_review_required_attempt(
+                &database.pool,
+                &coordinator,
+                &ExactManualFailureHost,
+                PaymentAttemptId::new(attempt_id),
+            )
+            .await?,
+            ManualAttemptFailureOutcome::Failed(_)
+        ));
+        let (status, next_attempt_at): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+        )
+        .bind(subscription_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(status, "unpaid");
+        assert_eq!(next_attempt_at, None);
         assert!(crate::due_renewals(&database.pool).await?.is_empty());
         Ok::<_, Box<dyn Error>>(())
     }
