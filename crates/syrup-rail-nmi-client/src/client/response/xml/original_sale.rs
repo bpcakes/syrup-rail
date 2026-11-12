@@ -7,7 +7,7 @@
 //! response code.
 //! <https://docs.nmi.com/reference/query>
 
-use crate::PaymentStatus;
+use crate::{PaymentOutcomeDiagnostic, PaymentStatus};
 
 use super::super::common::ScalarBounds::{GatewayField, Protocol};
 use super::super::common::{
@@ -18,9 +18,45 @@ use super::{collect_xml_scalar, element_children_named, normalize_report_success
 
 /// Response code and text of the one failed sale that produced a failed
 /// transaction.
-pub(super) struct FailedSaleEvidence {
-    pub(super) response_code: String,
-    pub(super) response_text: Option<String>,
+struct FailedSaleEvidence {
+    response_code: String,
+    response_text: Option<String>,
+}
+
+/// The response code and text an exact query reports for `transaction`.
+///
+/// The transaction-level values are returned unchanged unless all of these
+/// hold, in which case the failed original sale supplies both:
+///
+/// - `status`, already resolved from the transaction-level fields alone, is a
+///   decline or determinate failure with no diagnostics; and
+/// - the transaction has no `response`, `response_code`, or `response_text`
+///   element of its own, in any shape.
+///
+/// An approved or indeterminate transaction therefore keeps exactly the
+/// evidence it had, and an action never replaces transaction-level evidence.
+pub(super) fn response_evidence(
+    transaction: roxmltree::Node<'_, '_>,
+    status: PaymentStatus,
+    diagnostics: &[PaymentOutcomeDiagnostic],
+    response_code: Option<String>,
+    response_text: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let settled_failure =
+        matches!(status, PaymentStatus::Declined | PaymentStatus::Failed) && diagnostics.is_empty();
+    let has_own_evidence = transaction.children().any(|child| {
+        child.is_element()
+            && ["response", "response_code", "response_text"]
+                .iter()
+                .any(|name| child.has_tag_name(*name))
+    });
+    if settled_failure
+        && !has_own_evidence
+        && let Some(evidence) = failed_sale_evidence(transaction)
+    {
+        return (Some(evidence.response_code), evidence.response_text);
+    }
+    (response_code, response_text)
 }
 
 /// Reads the failed original sale of `transaction`.
@@ -39,9 +75,7 @@ pub(super) struct FailedSaleEvidence {
 ///
 /// Anything else returns `None`, which leaves the outcome exactly as the
 /// transaction-level fields describe it.
-pub(super) fn failed_sale_evidence(
-    transaction: roxmltree::Node<'_, '_>,
-) -> Option<FailedSaleEvidence> {
+fn failed_sale_evidence(transaction: roxmltree::Node<'_, '_>) -> Option<FailedSaleEvidence> {
     let mut actions = element_children_named(transaction, "action");
     let action = actions.next()?;
     if actions.next().is_some() {
