@@ -75,10 +75,13 @@ historically named `dev/0.6.0` branch.
   advised retry time (the floor or a later scheduled step). No schema change.
 - Add `syrup_rail_nmi::nmi_renewal_decline_retry_advice` and
   `NMI_RETRY_IN_A_FEW_DAYS_DELAY`. NMI codes 220-224 (invalid or expired card
-  data), 250-253 (pick up, lost, stolen, fraudulent), 261-262 (stop recurring),
-  263 (updated cardholder data available), and 461 (unsupported card) stop
-  automatic retries; 264 ("retry in a few days", no published delay) waits at
-  least three days. Every other or missing code follows the schedule.
+  data), 250-252 (pick up, lost, stolen), 261-262 (stop recurring), and 263
+  (updated cardholder data available) stop automatic retries; 264 ("retry in a
+  few days", no published delay) waits at least three days. Every other or
+  missing code follows the schedule, including 253 ("fraudulent card", which
+  NMI also returns for the issuer's retryable "suspected fraud" response) and
+  461 ("unsupported card type", a processor rejection for the merchant
+  account).
 - Add `StatementDescriptor` (merchant name of at most 25 printable-ASCII
   bytes, optional phone of at most 20 bytes of digits, spaces, `+`, `-`, `(`,
   `)` or `.`, optional URL of at most 40 bytes without whitespace) and
