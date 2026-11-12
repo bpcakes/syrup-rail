@@ -509,8 +509,14 @@ pub(crate) async fn resolve_renewal_non_approved_outcome(
                 if let RenewalFailureApplication::Applied {
                     events: applied_events,
                     ..
-                } =
-                    apply_resolved_automatic_renewal_failure(connection, &resolved_attempt).await?
+                } = apply_resolved_automatic_renewal_failure(
+                    connection,
+                    &resolved_attempt,
+                    &|provider_key, evidence| {
+                        coordinator.renewal_decline_retry_advice(provider_key, evidence)
+                    },
+                )
+                .await?
                 {
                     events = applied_events;
                 }

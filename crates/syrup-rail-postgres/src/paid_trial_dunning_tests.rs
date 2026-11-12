@@ -524,6 +524,7 @@ mod access_policy;
 mod cancellation;
 mod card_metadata;
 mod consumer_edges;
+mod decline_advice;
 mod enrollment;
 mod infrastructure;
 mod migration;

@@ -330,6 +330,37 @@ renewals and enrollments for that provider; hosts bound diagnostic volume, do
 not diagnose scrubbed subscribers, and purge cached observations in their own
 scrub transaction.
 
+## Provider decline retry advice
+
+`BillingTransactionCoordinator::renewal_decline_retry_advice` defaults to
+`RenewalDeclineRetryAdvice::FollowSchedule`, which keeps the historical
+schedule-only dunning. A host opts in by overriding it, typically by matching
+the provider key and delegating to the provider adapter's interpretation, for
+example `syrup_rail_nmi::nmi_renewal_decline_retry_advice` for NMI accounts.
+Foreground application, reconciliation, and
+`fail_review_required_attempt`/`fail_review_required_renewal_for_retry` all
+call it with the attempt's gateway provider key and durable processor evidence,
+inside the same transaction, before projecting the submitted, determinate
+automatic-renewal failure. Indeterminate outcomes are not advised; the
+reconciliation that later resolves them is.
+
+Advice only narrows the snapshotted schedule. `StopAutomaticRetries` ends
+automatic dunning at the current failure under the subscription's exhaustion
+policy (`RemainPastDue` or `MarkUnpaid`); `RetryNoEarlierThan` postpones a
+scheduled retry that would come sooner and leaves a later one unchanged. Advice
+never adds an attempt, moves a retry earlier, or changes the snapshotted
+past-due access policy. It can still move when access ends: under
+`ContinueUntilDunningExhausted`, stop advice ends access with dunning at the
+current failure, and a postponed retry keeps access until that later retry. The
+hook must be a pure function of its arguments: replaying the same failure must
+reach the same decision. Earlier failures of the period are admitted by the
+schedule alone, so history written before advice was enabled stays valid. An
+operator "retry now" decision makes the retry due immediately only when the
+advice follows the schedule; stop advice ends dunning, and any
+`RetryNoEarlierThan` advice keeps its advised retry time (the floor or a later
+scheduled step), because retrying now would precede the provider's floor. No
+schema change is involved.
+
 ## Billing-period expiry
 
 `SubscriptionPeriodExpiryPolicy::Disabled` is the default and keeps the

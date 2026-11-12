@@ -82,6 +82,10 @@ command/outcome types for application-independent subscription billing.
   `SubscriptionActivationProjection`; do not add context-free pricing helpers
   that collapse those temporal facts.
 - Only submitted determinate automatic-renewal failures consume dunning.
+- `RenewalDeclineRetryAdvice` may only end automatic dunning at the current
+  failure or postpone a scheduled retry. It never adds an attempt, moves a
+  retry earlier, or changes the snapshotted exhaustion or access policy;
+  provider adapters own its derivation from processor evidence.
 - `SubscriptionPaymentFailed.access` is the canonical post-failure product
   access projection. Consumers must not derive it from the disposition or a
   current offer; it reflects snapshotted policy and causal failure history.

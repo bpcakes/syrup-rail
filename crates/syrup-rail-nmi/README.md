@@ -131,6 +131,16 @@ recency. The observation keeps NMI's gateway `response_code` separate from the
 processor's `processor_response_code`, with source `nmi_query_api`. Name,
 address, email, card, and signature fields in the response are never extracted.
 
+`nmi_renewal_decline_retry_advice` interprets a determinate automatic-renewal
+failure's durable `response_code` for the PostgreSQL integration's
+`BillingTransactionCoordinator::renewal_decline_retry_advice`. Codes 220-224,
+250-253, 261-263, and 461 stop automatic retries of the same payment method;
+264 ("retry in a few days", no published delay) postpones the next scheduled
+retry to at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days). Every other,
+missing, or unparseable code follows the subscription's dunning schedule. Hosts
+call it only for accounts whose provider key is
+`NmiPaymentGateway::provider_key()`.
+
 The raw client and adapter never retry a payment mutation. Indeterminate
 outcomes must be reconciled from the durable attempt identity before any
 replacement charge is considered. Unknown lifecycle vocabulary is quarantined

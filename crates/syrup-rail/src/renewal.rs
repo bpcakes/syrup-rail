@@ -3,11 +3,11 @@ use thiserror::Error;
 
 use crate::{
     BillingAddress, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
-    GatewayAccountId, GatewayAccountMode, GatewayProviderKey, IdempotencyKey, PaymentAttempt,
-    PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PlanKey, RenewalFailurePolicy,
-    ResolvedGateway, SubscriberId, SubscriptionId, SubscriptionPaymentStateSnapshot,
-    SubscriptionStatus,
+    DunningRetryDelay, GatewayAccountId, GatewayAccountMode, GatewayProviderKey, IdempotencyKey,
+    PaymentAttempt, PaymentAttemptFingerprint, PaymentAttemptId, PaymentAttemptIdentity,
+    PaymentAttemptKind, PaymentAttemptRequest, PaymentAttemptTarget, PaymentMethodId, PlanKey,
+    RenewalFailurePolicy, ResolvedGateway, SubscriberId, SubscriptionId,
+    SubscriptionPaymentStateSnapshot, SubscriptionStatus,
 };
 
 pub const RENEWAL_DISPATCH_LIMIT: i64 = 100;
@@ -31,19 +31,69 @@ pub enum RenewalFailurePolicyError {
     RetryTimestampOverflow,
 }
 
+/// Provider guidance for automatically retrying one submitted, determinate
+/// automatic-renewal failure with the same payment method.
+///
+/// Advice can only remove or delay the automatic attempts that the
+/// subscription's snapshotted dunning schedule allows. It never adds an
+/// attempt, moves a retry earlier, or changes the snapshotted exhaustion and
+/// access policy. Provider adapters derive it from durable processor evidence;
+/// this crate holds no provider vocabulary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenewalDeclineRetryAdvice {
+    /// The provider gave no retry guidance; the dunning schedule decides.
+    FollowSchedule,
+    /// The issuer or card network reported that retrying this payment method
+    /// cannot succeed or is not permitted. Automatic dunning ends with this
+    /// failure under the snapshotted exhaustion policy.
+    StopAutomaticRetries,
+    /// The issuer or card network asked for no retry before this delay after
+    /// the failure. A scheduled retry that would come sooner is postponed; one
+    /// that already comes later is unchanged.
+    RetryNoEarlierThan(DunningRetryDelay),
+}
+
 pub fn renewal_failure_disposition(
     policy: &RenewalFailurePolicy,
     automatic_failure_count: u16,
     failed_at: DateTime<Utc>,
 ) -> Result<RenewalFailureDisposition, RenewalFailurePolicyError> {
+    advised_renewal_failure_disposition(
+        policy,
+        automatic_failure_count,
+        failed_at,
+        RenewalDeclineRetryAdvice::FollowSchedule,
+    )
+}
+
+/// Applies provider retry advice to the snapshotted dunning schedule for the
+/// `automatic_failure_count`th (one-based) automatic failure of a period.
+pub fn advised_renewal_failure_disposition(
+    policy: &RenewalFailurePolicy,
+    automatic_failure_count: u16,
+    failed_at: DateTime<Utc>,
+    advice: RenewalDeclineRetryAdvice,
+) -> Result<RenewalFailureDisposition, RenewalFailurePolicyError> {
     let schedule_index = automatic_failure_count
         .checked_sub(1)
         .ok_or(RenewalFailurePolicyError::ZeroFailureCount)?;
-    if let Some(delay) = policy
+    let scheduled_delay = policy
         .schedule()
         .retry_delays()
         .get(usize::from(schedule_index))
-    {
+        .copied();
+    let retry_delay = match (scheduled_delay, advice) {
+        (None, _) | (Some(_), RenewalDeclineRetryAdvice::StopAutomaticRetries) => None,
+        (Some(delay), RenewalDeclineRetryAdvice::FollowSchedule) => Some(delay),
+        (Some(delay), RenewalDeclineRetryAdvice::RetryNoEarlierThan(floor)) => {
+            Some(if floor.seconds() > delay.seconds() {
+                floor
+            } else {
+                delay
+            })
+        }
+    };
+    if let Some(delay) = retry_delay {
         let retry_at = failed_at
             .checked_add_signed(Duration::seconds(i64::from(delay.seconds().get())))
             .ok_or(RenewalFailurePolicyError::RetryTimestampOverflow)?;
@@ -614,128 +664,4 @@ impl std::fmt::Debug for SubscriptionRenewalReservation {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use uuid::Uuid;
-
-    #[test]
-    fn renewal_dispatch_page_keeps_its_observed_scan_and_strict_key() {
-        let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let next_payment_attempt_at = observed_at + Duration::seconds(60);
-        let subscription_id = SubscriptionId::new(Uuid::from_u128(2));
-        let cursor = RenewalDispatchPageCursor::new(
-            observed_at,
-            next_payment_attempt_at,
-            subscription_id,
-            Some(GatewayAccountMode::Test),
-        );
-        let dispatch = RenewalDispatch::new(
-            BillingScopeId::new(Uuid::from_u128(1)),
-            subscription_id,
-            GatewayAccountMode::Test,
-            observed_at,
-            3,
-        );
-        let page = RenewalDispatchPage::new(vec![dispatch.clone()], Some(cursor));
-
-        assert_eq!(cursor.observed_at(), observed_at);
-        assert_eq!(cursor.next_payment_attempt_at(), next_payment_attempt_at);
-        assert_eq!(cursor.subscription_id(), subscription_id);
-        assert_eq!(
-            cursor.required_gateway_account_mode(),
-            Some(GatewayAccountMode::Test)
-        );
-        assert_eq!(
-            dispatch.required_gateway_account_mode(),
-            GatewayAccountMode::Test
-        );
-        assert_eq!(page.dispatches(), std::slice::from_ref(&dispatch));
-        assert_eq!(page.next_cursor(), Some(cursor));
-        assert_eq!(page.into_dispatches(), vec![dispatch]);
-    }
-
-    #[test]
-    fn retry_boundaries_are_inclusive() {
-        let now = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let mut state = RenewalAttemptState {
-            last_automatic_infrastructure_failure_at: Some(
-                now - Duration::seconds(RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS),
-            ),
-            ..RenewalAttemptState::default()
-        };
-        assert!(!state.blocks_automatic_retry(now));
-        state.last_automatic_infrastructure_failure_at = Some(
-            now - Duration::seconds(RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS.saturating_sub(1)),
-        );
-        assert!(state.blocks_automatic_retry(now));
-    }
-
-    #[test]
-    fn fifth_gateway_throttle_switches_to_daily_pacing() {
-        assert_eq!(rate_limit_retry_after_seconds(4), 60);
-        assert_eq!(
-            rate_limit_retry_after_seconds(5),
-            RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS
-        );
-    }
-
-    fn failure_policy(
-        delays: &[u32],
-        exhaustion: crate::DunningExhaustion,
-    ) -> RenewalFailurePolicy {
-        RenewalFailurePolicy::new(
-            crate::DunningSchedule::from_seconds(delays.iter().copied()).unwrap(),
-            exhaustion,
-            crate::PastDueAccessPolicy::SuspendImmediately,
-        )
-    }
-
-    #[test]
-    fn dunning_failure_count_is_one_based_and_indexes_the_current_step() {
-        let failed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let policy = failure_policy(&[60, 300], crate::DunningExhaustion::RemainPastDue);
-        assert_eq!(
-            renewal_failure_disposition(&policy, 0, failed_at),
-            Err(RenewalFailurePolicyError::ZeroFailureCount)
-        );
-        assert_eq!(
-            renewal_failure_disposition(&policy, 1, failed_at),
-            Ok(RenewalFailureDisposition::RetryScheduled {
-                retry_at: failed_at + Duration::seconds(60),
-            })
-        );
-        assert_eq!(
-            renewal_failure_disposition(&policy, 2, failed_at),
-            Ok(RenewalFailureDisposition::RetryScheduled {
-                retry_at: failed_at + Duration::seconds(300),
-            })
-        );
-        assert_eq!(
-            renewal_failure_disposition(&policy, 3, failed_at),
-            Ok(RenewalFailureDisposition::RemainPastDue {
-                exhausted_at: failed_at,
-            })
-        );
-    }
-
-    #[test]
-    fn empty_schedule_and_mark_unpaid_exhaust_immediately() {
-        let failed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let policy = failure_policy(&[], crate::DunningExhaustion::MarkUnpaid);
-        assert_eq!(
-            renewal_failure_disposition(&policy, 1, failed_at),
-            Ok(RenewalFailureDisposition::MarkUnpaid {
-                ended_at: failed_at,
-            })
-        );
-    }
-
-    #[test]
-    fn retry_timestamp_overflow_is_typed() {
-        let policy = failure_policy(&[u32::MAX], crate::DunningExhaustion::RemainPastDue);
-        assert_eq!(
-            renewal_failure_disposition(&policy, 1, DateTime::<Utc>::MAX_UTC),
-            Err(RenewalFailurePolicyError::RetryTimestampOverflow)
-        );
-    }
-}
+mod tests;

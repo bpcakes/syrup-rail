@@ -559,7 +559,12 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     .await?
     .expect("final attempt remains durable");
     assert_eq!(
-        apply_resolved_automatic_renewal_failure(&mut transaction, &latest_attempt).await?,
+        apply_resolved_automatic_renewal_failure(
+            &mut transaction,
+            &latest_attempt,
+            &crate::renewal_failure::follow_schedule,
+        )
+        .await?,
         RenewalFailureApplication::Noop
     );
     let older_attempt = find_payment_attempt_by_id_in_transaction(
@@ -570,7 +575,12 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     .await?
     .expect("older attempt remains durable");
     assert_eq!(
-        apply_resolved_automatic_renewal_failure(&mut transaction, &older_attempt).await?,
+        apply_resolved_automatic_renewal_failure(
+            &mut transaction,
+            &older_attempt,
+            &crate::renewal_failure::follow_schedule,
+        )
+        .await?,
         RenewalFailureApplication::Noop
     );
     transaction.rollback().await?;
@@ -595,9 +605,13 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     .await?
     .expect("final attempt remains durable");
     assert!(
-        apply_resolved_automatic_renewal_failure(&mut transaction, &latest_attempt)
-            .await
-            .is_err()
+        apply_resolved_automatic_renewal_failure(
+            &mut transaction,
+            &latest_attempt,
+            &crate::renewal_failure::follow_schedule,
+        )
+        .await
+        .is_err()
     );
     transaction.rollback().await?;
 

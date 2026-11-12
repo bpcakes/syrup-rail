@@ -1,10 +1,11 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Row, postgres::PgRow};
 use syrup_rail::{
-    BillingEvent, PastDueAccessPolicy, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget, PlanKey,
-    RenewalFailureDisposition, RenewalFailurePolicy, SubscriptionEndReason, SubscriptionId,
-    SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureDisposition, SubscriptionStatus,
+    BillingEvent, GatewayProviderKey, PastDueAccessPolicy, PaymentAttempt, PaymentAttemptId,
+    PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget,
+    PlanKey, ProcessorEvidence, RenewalDeclineRetryAdvice, RenewalFailureDisposition,
+    RenewalFailurePolicy, SubscriptionEndReason, SubscriptionId, SubscriptionPaymentFailureAccess,
+    SubscriptionPaymentFailureDisposition, SubscriptionStatus, advised_renewal_failure_disposition,
     renewal_failure_disposition,
 };
 use thiserror::Error;
@@ -250,6 +251,8 @@ pub(crate) async fn past_due_causal_history(
 pub(crate) enum RenewalFailureApplication {
     Applied {
         disposition: RenewalFailureDisposition,
+        /// The provider advice that shaped `disposition`.
+        advice: RenewalDeclineRetryAdvice,
         events: Vec<BillingEvent>,
     },
     Noop,
@@ -387,6 +390,7 @@ fn decide_renewal_failure(
     attempt: &ValidatedRenewalFailureAttempt,
     subscription: &LockedRenewalFailureState,
     causal_history: PastDueCausalHistory,
+    advice: RenewalDeclineRetryAdvice,
 ) -> Result<RenewalFailureDecision, RenewalFailureStoreError> {
     if subscription.next_renewal_at != attempt.period_start_at {
         return Err(invalid_state());
@@ -403,13 +407,18 @@ fn decide_renewal_failure(
     if latest_failure.resolved_at != attempt.resolved_at {
         return Err(invalid_state());
     }
-    let disposition = renewal_failure_disposition(
+    let disposition = advised_renewal_failure_disposition(
         &subscription.policy,
         history.count(),
         latest_failure.resolved_at,
+        advice,
     )
     .map_err(|_| invalid_state())?;
 
+    // An earlier failure is admitted while the schedule alone left it a retry.
+    // Its own advice is deliberately not re-derived: it may predate the host's
+    // advice or its current provider interpretation, and the retry it allowed
+    // has already happened.
     if let AutomaticRenewalFailureHistory::Repeated {
         count, previous, ..
     } = history
@@ -564,9 +573,39 @@ async fn persist_renewal_failure_transition(
     Ok(())
 }
 
+/// Host retry advice for one failure, normally
+/// `BillingTransactionCoordinator::renewal_decline_retry_advice`.
+pub(crate) type RenewalDeclineRetryAdvisor<'a> =
+    &'a (dyn Fn(&GatewayProviderKey, &ProcessorEvidence) -> RenewalDeclineRetryAdvice + Sync);
+
+/// Advice that preserves the historical schedule-only behavior.
+#[cfg(test)]
+pub(crate) fn follow_schedule(
+    _provider_key: &GatewayProviderKey,
+    _evidence: &ProcessorEvidence,
+) -> RenewalDeclineRetryAdvice {
+    RenewalDeclineRetryAdvice::FollowSchedule
+}
+
+async fn attempt_provider_key(
+    connection: &mut PgConnection,
+    attempt: &ValidatedRenewalFailureAttempt,
+) -> Result<GatewayProviderKey, RenewalFailureStoreError> {
+    let provider_key = sqlx::query_scalar::<_, String>(
+        "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
+    )
+    .bind(attempt.identity.billing_scope_id().as_uuid())
+    .bind(attempt.identity.gateway_account_id().as_uuid())
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or_else(invalid_state)?;
+    GatewayProviderKey::new(provider_key).map_err(|_| invalid_state())
+}
+
 pub(crate) async fn apply_resolved_automatic_renewal_failure(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
+    advisor: RenewalDeclineRetryAdvisor<'_>,
 ) -> Result<RenewalFailureApplication, RenewalFailureStoreError> {
     let validated = validate_resolved_renewal_attempt(attempt)?;
 
@@ -588,13 +627,16 @@ pub(crate) async fn apply_resolved_automatic_renewal_failure(
         locked.next_renewal_at,
     )
     .await?;
-    match decide_renewal_failure(&validated, &locked, history)? {
+    let provider_key = attempt_provider_key(connection, &validated).await?;
+    let advice = advisor(&provider_key, durable.state().processor_evidence());
+    match decide_renewal_failure(&validated, &locked, history, advice)? {
         RenewalFailureDecision::Noop => Ok(RenewalFailureApplication::Noop),
         RenewalFailureDecision::Apply(transition) => {
             persist_renewal_failure_transition(connection, validated.subscription_id, &transition)
                 .await?;
             Ok(RenewalFailureApplication::Applied {
                 disposition: transition.disposition,
+                advice,
                 events: transition.events,
             })
         }

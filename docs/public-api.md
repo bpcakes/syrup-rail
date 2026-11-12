@@ -212,6 +212,32 @@ the descriptor on), the recurring intent variant gains a field, and the raw
 `descriptor: None` to existing literals. Without a policy nothing changes on
 the wire.
 
+0.6.0 also adds opt-in provider retry advice for automatic-renewal declines.
+The core `RenewalDeclineRetryAdvice` is `FollowSchedule`,
+`StopAutomaticRetries`, or `RetryNoEarlierThan(DunningRetryDelay)`, and
+`advised_renewal_failure_disposition` applies it to the snapshotted dunning
+schedule: advice can end automatic dunning at the current failure under the
+snapshotted exhaustion policy, or postpone a scheduled retry to its floor, but
+never adds an attempt, moves one earlier, or changes access policy;
+`renewal_failure_disposition` is unchanged. A host enables it by overriding
+the defaulted `BillingTransactionCoordinator::renewal_decline_retry_advice`,
+which receives the attempt's gateway provider key and durable
+`ProcessorEvidence`. The default returns `FollowSchedule`, so hosts that do not
+override it keep the historical schedule-only dunning and hard declines keep
+being retried. Foreground application, reconciliation, and operator review all
+consult the same coordinator for submitted, determinate renewal failures. The
+hook must be a pure function of its arguments, because replaying a failure
+must reach the same decision. Earlier failures of the same period are still
+admitted by the schedule alone, so history written before a host enabled
+advice stays valid. `fail_review_required_renewal_for_retry` makes the retry
+due immediately only when the advice follows the schedule; stop advice ends
+dunning, and any `RetryNoEarlierThan` advice keeps its advised retry time (the
+floor or a later scheduled step). NMI hosts delegate to
+`syrup_rail_nmi::nmi_renewal_decline_retry_advice` when the provider key is
+`NmiPaymentGateway::provider_key()`; it stops on NMI codes 220-224, 250-253,
+261-263, and 461, waits at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days)
+on 264, and otherwise follows the schedule. No schema change is required.
+
 0.5.5 added an opt-in billing-period expiry policy and the operations around
 it. `SubscriptionPeriodExpiryPolicy` defaults to `Disabled`, which keeps the
 historical behavior. A host enables `RejectExpiredPeriods` by overriding the
