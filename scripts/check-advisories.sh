@@ -22,6 +22,16 @@ for exception in 'rsa:RUSTSEC-2023-0071' 'libsqlite3-sys:RUSTSEC-2026-0459'; do
   if ! grep -Fqx "name = \"$package\"" Cargo.lock; then
     continue
   fi
+  if [[ "$package" == libsqlite3-sys ]]; then
+    sqlite_versions="$(awk '
+      /^name = / { selected = ($0 == "name = \"libsqlite3-sys\"") }
+      selected && /^version = / { print $3 }
+    ' Cargo.lock)"
+    if [[ "$sqlite_versions" != '"0.30.1"' ]]; then
+      echo "RUSTSEC-2026-0459 exception covers only an unreachable libsqlite3-sys 0.30.1." >&2
+      exit 1
+    fi
+  fi
   if [[ "$graph_loaded" == false ]]; then
     # Keep graph resolution outside a filter: any Cargo failure stops the
     # wrapper before it can add an exception or invoke the audit.

@@ -35,8 +35,9 @@ cargo tree --locked --workspace --all-features --target all -e all --prefix none
 ```
 
 This includes every workspace member, target, feature, and normal/build/dev edge.
-Only when `libsqlite3-sys` is locked and **every version** is absent from this
-graph may the wrapper pass `--ignore RUSTSEC-2026-0459`. A reachable version,
+Only when the sole locked `libsqlite3-sys` version is `0.30.1` and **every
+version** is absent from this graph may the wrapper pass
+`--ignore RUSTSEC-2026-0459`. A changed locked version or a reachable version,
 including a future patched version, fails closed; graph-resolution errors stop
 before audit. Package matching is exact. The historical `rsa` guard follows the
 same rule for `RUSTSEC-2023-0071`. All other advisories and warnings remain denied,

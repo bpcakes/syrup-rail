@@ -250,4 +250,49 @@ run_audit_failure_case
 run_audit_failure_case true
 run_tar_warning_case
 
+run_sqlite_case() {
+  local name="$1" version="$2" full_tree="$3" expected_status="$4" diagnostic="${5:-}"
+  local case_root
+  case_root="$(prepare_case "$name" false)"
+  printf '[[package]]\nname = "libsqlite3-sys"\nversion = "%s"\n' "$version" >>"$case_root/Cargo.lock"
+  set +e
+  ADVISORY_TEST_REPO_ROOT="$case_root" \
+    ADVISORY_TEST_TREE_OUTPUT="$full_tree" \
+    ADVISORY_TEST_TREE_CALLED="$case_root/tree-called" \
+    ADVISORY_TEST_AUDIT_ARGS="$case_root/audit-args" \
+    PATH="$test_root/bin:$PATH" \
+    "$subject" 2>"$case_root/stderr"
+  local status=$?
+  set -e
+  if [[ "$status" -ne "$expected_status" ]]; then
+    printf 'unexpected status %s for %s\n' "$status" "$name" >&2
+    exit 1
+  fi
+  if [[ "$expected_status" == 1 ]]; then
+    if [[ -e "$case_root/audit-args" ]]; then
+      printf 'audit invoked after rejected exception for %s\n' "$name" >&2
+      exit 1
+    fi
+    if ! grep -Fq "$diagnostic" "$case_root/stderr"; then
+      printf 'rejected exception for %s omitted the policy diagnostic\n' "$name" >&2
+      exit 1
+    fi
+  else
+    if [[ ! -f "$case_root/tree-called" ]]; then
+      printf 'cargo tree was not called for %s\n' "$name" >&2
+      exit 1
+    fi
+    if [[ "$(cat "$case_root/audit-args")" != "--deny warnings --ignore RUSTSEC-2026-0459" ]]; then
+      printf 'unexpected exception arguments for %s\n' "$name" >&2
+      exit 1
+    fi
+  fi
+}
+
+run_sqlite_case sqlite-unreachable 0.30.1 "" 0
+run_sqlite_case sqlite-reachable 0.30.1 "libsqlite3-sys v0.30.1" 1 \
+  'RUSTSEC-2026-0459 may not be ignored because a locked libsqlite3-sys package is reachable'
+run_sqlite_case sqlite-version-changed 0.31.0 "" 1 \
+  'RUSTSEC-2026-0459 exception covers only an unreachable libsqlite3-sys 0.30.1.'
+
 printf 'Dependency advisory wrapper tests passed.\n'
