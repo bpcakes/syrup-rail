@@ -307,6 +307,10 @@ existing-vault renewals. By default the client omits this field.
 
 ## Original-payment receipt evidence
 
+All XML queries require roxmltree 0.21.2 or later within the compatible 0.21
+line. Its iterative element parser prevents deeply nested, byte-bounded provider
+responses from exhausting the thread stack before the client's structure checks.
+
 `Client::query_transaction_receipt` requires both original transaction and order
 IDs and makes one exact query, with the standard 256 KiB response limit and a
 100-action limit. It returns historical actions, currency and optional original

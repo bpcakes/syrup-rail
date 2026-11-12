@@ -78,6 +78,10 @@ workspace, such as `0.6.0`. The advisory check follows
 Use SQLx CLI 0.9.0 for both metadata preparation and checks. To regenerate
 metadata against the disposable PostgreSQL 18 schema-v6 database, run
 `scripts/check-sqlx.sh --prepare` and review the `.sqlx` diff.
+The test and SQLx gates use `scripts/with-test-postgres.py` to provision a
+disposable PostgreSQL 18 server through Docker. Python 3 and Docker are required
+unless `POSTGRES_TEST_ADMIN_URL` explicitly supplies an external disposable test
+server. That server remains caller-owned; see the README's test setup guidance.
 
 Commit the release preparation, push the release branch, wait for required CI
 to pass, and rerun `scripts/check-release.sh VERSION` from the clean release

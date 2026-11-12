@@ -40,6 +40,10 @@ case "${1:-}" in
     if [[ -n "${ADVISORY_TEST_TREE_OUTPUT:-}" ]]; then
       printf '%s\n' "$ADVISORY_TEST_TREE_OUTPUT"
     fi
+    if [[ "${ADVISORY_TEST_TREE_EXIT:-0}" -ne 0 ]]; then
+      printf 'fixture graph resolution failed\n' >&2
+      exit "$ADVISORY_TEST_TREE_EXIT"
+    fi
     ;;
   audit)
     shift
@@ -58,13 +62,16 @@ chmod +x "$test_root/bin/git" "$test_root/bin/cargo"
 prepare_case() {
   local name="$1"
   local rsa_locked="$2"
+  local sqlite_locked="${3:-false}"
   local case_root="$test_root/$name"
 
   mkdir -p "$case_root"
+  printf '[[package]]\nname = "other"\nversion = "1.0.0"\n' >"$case_root/Cargo.lock"
   if [[ "$rsa_locked" == true ]]; then
-    printf '[[package]]\nname = "rsa"\nversion = "0.9.10"\n' >"$case_root/Cargo.lock"
-  else
-    printf '[[package]]\nname = "other"\nversion = "1.0.0"\n' >"$case_root/Cargo.lock"
+    printf '[[package]]\nname = "rsa"\nversion = "0.9.10"\n' >>"$case_root/Cargo.lock"
+  fi
+  if [[ "$sqlite_locked" == true ]]; then
+    printf '[[package]]\nname = "libsqlite3-sys"\nversion = "0.30.1"\n' >>"$case_root/Cargo.lock"
   fi
   printf '%s\n' "$case_root"
 }
@@ -74,13 +81,16 @@ run_success_case() {
   local rsa_locked="$2"
   local expected_args="$3"
   local expect_tree="$4"
+  local sqlite_locked="${5:-false}"
   local case_root
-  case_root="$(prepare_case "$name" "$rsa_locked")"
+  case_root="$(prepare_case "$name" "$rsa_locked" "$sqlite_locked")"
   local actual="$case_root/audit-args"
   local tree_called="$case_root/tree-called"
 
   ADVISORY_TEST_REPO_ROOT="$case_root" \
-    ADVISORY_TEST_TREE_OUTPUT="" \
+    ADVISORY_TEST_TREE_OUTPUT="other v1.0.0
+rsa-helper v1.0.0
+libsqlite3-sys-helper v1.0.0" \
     ADVISORY_TEST_TREE_CALLED="$tree_called" \
     ADVISORY_TEST_AUDIT_ARGS="$actual" \
     PATH="$test_root/bin:$PATH" \
@@ -102,16 +112,23 @@ run_success_case() {
   fi
 }
 
-run_reachable_rsa_case() {
+run_reachable_package_case() {
+  local package="$1"
+  local advisory="$2"
+  local version="$3"
+  local rsa_locked=false
+  local sqlite_locked=false
+  if [[ "$package" == rsa ]]; then rsa_locked=true; else sqlite_locked=true; fi
   local case_root
-  case_root="$(prepare_case "reachable-rsa" true)"
+  case_root="$(prepare_case "reachable-$package-$version" "$rsa_locked" "$sqlite_locked")"
   local actual="$case_root/audit-args"
   local tree_called="$case_root/tree-called"
   local stderr="$case_root/stderr"
 
   set +e
   ADVISORY_TEST_REPO_ROOT="$case_root" \
-    ADVISORY_TEST_TREE_OUTPUT="rsa v0.9.10" \
+    ADVISORY_TEST_TREE_OUTPUT="other v1.0.0
+$package v$version" \
     ADVISORY_TEST_TREE_CALLED="$tree_called" \
     ADVISORY_TEST_AUDIT_ARGS="$actual" \
     PATH="$test_root/bin:$PATH" \
@@ -120,26 +137,27 @@ run_reachable_rsa_case() {
   set -e
 
   if [[ "$status" -eq 0 ]]; then
-    printf 'reachable rsa unexpectedly passed the advisory policy\n' >&2
+    printf 'reachable %s unexpectedly passed the advisory policy\n' "$package" >&2
     exit 1
   fi
   if [[ ! -f "$tree_called" ]]; then
-    printf 'cargo tree was not called for reachable rsa\n' >&2
+    printf 'cargo tree was not called for reachable %s\n' "$package" >&2
     exit 1
   fi
   if [[ -e "$actual" ]]; then
-    printf 'cargo audit was called after reachable rsa was detected\n' >&2
+    printf 'cargo audit was called after reachable %s was detected\n' "$package" >&2
     exit 1
   fi
-  if ! grep -Fq 'RUSTSEC-2023-0071 may not be ignored because a locked rsa package is reachable' "$stderr"; then
-    printf 'reachable rsa failure omitted the policy diagnostic\n' >&2
+  if ! grep -Fq "$advisory may not be ignored because a locked $package package is reachable" "$stderr"; then
+    printf 'reachable %s failure omitted the policy diagnostic\n' "$package" >&2
     exit 1
   fi
 }
 
 run_audit_failure_case() {
+  local sqlite_locked="${1:-false}"
   local case_root
-  case_root="$(prepare_case "audit-failure" false)"
+  case_root="$(prepare_case "audit-failure-$sqlite_locked" false "$sqlite_locked")"
   local actual="$case_root/audit-args"
   local tree_called="$case_root/tree-called"
 
@@ -158,19 +176,59 @@ run_audit_failure_case() {
     printf 'cargo audit failure exited with %s instead of 42\n' "$status" >&2
     exit 1
   fi
-  if [[ "$(cat "$actual")" != "--deny warnings" ]]; then
+  local expected_args="--deny warnings"
+  if [[ "$sqlite_locked" == true ]]; then
+    expected_args="$expected_args --ignore RUSTSEC-2026-0459"
+  fi
+  if [[ "$(cat "$actual")" != "$expected_args" ]]; then
     printf 'cargo audit failure received unexpected arguments\n' >&2
     exit 1
   fi
-  if [[ -e "$tree_called" ]]; then
+  if [[ "$sqlite_locked" == false && -e "$tree_called" ]]; then
     printf 'cargo tree was unexpectedly called for audit failure\n' >&2
+    exit 1
+  fi
+}
+
+run_graph_failure_case() {
+  local package="$1"
+  local rsa_locked=false
+  local sqlite_locked=false
+  if [[ "$package" == rsa ]]; then rsa_locked=true; else sqlite_locked=true; fi
+  local case_root
+  case_root="$(prepare_case "graph-failure-$package" "$rsa_locked" "$sqlite_locked")"
+  local status=0
+  ADVISORY_TEST_REPO_ROOT="$case_root" \
+    ADVISORY_TEST_TREE_OUTPUT="other v1.0.0" \
+    ADVISORY_TEST_TREE_EXIT=47 \
+    ADVISORY_TEST_TREE_CALLED="$case_root/tree-called" \
+    ADVISORY_TEST_AUDIT_ARGS="$case_root/audit-args" \
+    PATH="$test_root/bin:$PATH" \
+    "$subject" 2>"$case_root/stderr" || status=$?
+  if [[ "$status" -ne 47 || ! -f "$case_root/tree-called" || -e "$case_root/audit-args" ]]; then
+    printf 'graph resolution failure did not stop before audit for %s\n' "$package" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'fixture graph resolution failed' "$case_root/stderr"; then
+    printf 'graph resolution stderr was lost for %s\n' "$package" >&2
     exit 1
   fi
 }
 
 run_success_case "rsa-absent" false "--deny warnings" false
 run_success_case "rsa-unreachable" true "--deny warnings --ignore RUSTSEC-2023-0071" true
-run_reachable_rsa_case
+run_success_case "sqlite-unreachable" false "--deny warnings --ignore RUSTSEC-2026-0459" true true
+run_success_case "both-unreachable" true "--deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459" true true
+run_reachable_package_case rsa RUSTSEC-2023-0071 0.9.10
+run_reachable_package_case rsa RUSTSEC-2023-0071 0.9.11
+run_reachable_package_case libsqlite3-sys RUSTSEC-2026-0459 0.30.1
+# The exception is forbidden for any reachable version, including future or
+# patched versions, rather than matching only the currently locked version.
+run_reachable_package_case libsqlite3-sys RUSTSEC-2026-0459 0.39.0
+run_reachable_package_case libsqlite3-sys RUSTSEC-2026-0459 99.0.0
+run_graph_failure_case rsa
+run_graph_failure_case libsqlite3-sys
 run_audit_failure_case
+run_audit_failure_case true
 
 printf 'Dependency advisory wrapper tests passed.\n'

@@ -66,6 +66,7 @@ mod report_response;
 mod report_transport;
 mod request_bounds;
 mod transport;
+mod xml_depth;
 
 struct DropObserved<T> {
     value: T,

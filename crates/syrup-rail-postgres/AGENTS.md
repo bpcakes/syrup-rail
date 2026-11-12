@@ -479,4 +479,7 @@ and transaction orchestration.
 
 ## Common commands
 
-- `cargo test -p syrup-rail-postgres`
+- `python3 scripts/with-test-postgres.py cargo test -p syrup-rail-postgres`
+- Raw `cargo test` requires `POSTGRES_TEST_ADMIN_URL` for a disposable PostgreSQL
+  18 server. The external-mode harness owns isolated database leases; the
+  launcher owns only the independent server it creates.

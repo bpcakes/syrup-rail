@@ -253,6 +253,22 @@ file-size and `mod.rs` policies removed from Jig's native checks in 0.7.1.
 - `scripts/check-public-api.sh`
 - `cargo test -p syrup-rail-nmi-client`
 
+The canonical Jig test and SQLx commands use `scripts/with-test-postgres.py`.
+With Docker available, it starts one disposable PostgreSQL 18 server on a random
+loopback port and removes only its own container after the command exits or is
+interrupted. It uses 1 GiB of temporary storage, 300 connections and non-durable
+settings; never use this server for retained data. The harness still owns each
+isolated database lease and validates the server version.
+Set `POSTGRES_TEST_IMAGE` to a nonempty PostgreSQL 18 image override when needed.
+
+For raw database tests, use
+`python3 scripts/with-test-postgres.py cargo test -p syrup-rail-postgres`, or
+explicitly set `POSTGRES_TEST_ADMIN_URL` to a disposable PostgreSQL 18 admin URL.
+An explicit URL is passed through without Docker startup or server cleanup and
+is never printed by the launcher. The caller owns that server. Database-free
+client tests can still run directly with Cargo. The launcher requires Python 3;
+its lifecycle regressions run with `python3 scripts/tests/with-test-postgres.py`.
+
 See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.
 

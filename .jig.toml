@@ -27,8 +27,8 @@ bootstrap_command = "cargo fetch --locked"
 
 rust_fmt_check_command = "cargo fmt --all -- --check"
 rust_clippy_command = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
-rust_test_command = "cargo test --workspace --all-features"
-rust_test_locked_command = "cargo test --workspace --all-features --locked -- --test-threads=1"
+rust_test_command = "python3 scripts/with-test-postgres.py cargo test --workspace --all-features"
+rust_test_locked_command = "python3 scripts/with-test-postgres.py cargo test --workspace --all-features --locked -- --test-threads=1"
 web_package_manager = "bun"
 
 frontend_apps = []
