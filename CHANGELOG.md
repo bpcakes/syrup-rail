@@ -132,7 +132,13 @@ historically named `dev/0.6.0` branch.
   The evidence API distinguishes `Found`, `NotFound`, `BoundConflict` for valid
   normalized contradictions, and `Incomplete` for individually trustworthy
   partial facts. Hosts may compare incomplete facts with recorded payment
-  evidence but must never use them to complete a receipt. The strict receipt
+  evidence but must never use them to complete a receipt. Evidence action
+  types are validated by shape after gateway spelling normalization, not
+  against a list of known actions: an unrecognized type is returned normalized
+  and never blocks the original payment, so hosts must select the action types
+  they recognize and ignore the rest. Equivalent spellings of the transaction
+  `condition` agree; a real `condition` disagreement yields `Incomplete`, never
+  a conflict. The strict receipt
   method retains its duplicate/error behavior; financial and report parsing
   remain unchanged. Hosts still validate the original successful action,
   amount, currency, and date before issuing a receipt.

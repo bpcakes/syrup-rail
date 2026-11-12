@@ -4,6 +4,8 @@ use crate::{TransactionDiagnosticsQuery, TransactionReceiptQuery};
 const CHILD_CASE: &str = "SYRUP_RAIL_XML_DEPTH_CASE";
 const TEST_NAME: &str = "client::tests::xml_depth::deep_xml_survives_public_query_boundaries";
 
+// The parent re-runs itself through `sh` to disable core dumps.
+#[cfg(unix)]
 #[test]
 fn deep_xml_survives_public_query_boundaries() {
     if let Ok(case) = std::env::var(CHILD_CASE) {

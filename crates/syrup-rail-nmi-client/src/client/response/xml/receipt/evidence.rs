@@ -2,7 +2,7 @@ use super::*;
 use crate::{ReceiptConflictField, TransactionReceiptLookup};
 
 mod fields;
-use fields::{Evidence, action_type, amount, currency, date, response_code, success};
+use fields::{Evidence, action_type, amount, condition, currency, date, response_code, success};
 
 pub(in crate::client) fn parse(
     text: &str,
@@ -24,10 +24,8 @@ pub(in crate::client) fn parse(
     // boundary, inspect every field before considering ordinary malformation:
     // a missing currency or bad mask cannot erase a proven action conflict.
     // Current condition is lifecycle metadata, not original-payment evidence.
-    let mut evidence = Evidence {
-        malformed: field(transaction, "condition").is_err(),
-        ..Evidence::default()
-    };
+    let mut evidence = Evidence::default();
+    evidence.non_evidence_field(transaction, "condition", condition);
     let currency = evidence.field(
         transaction,
         "currency",
@@ -71,16 +69,19 @@ pub(in crate::client) fn parse(
             fields: evidence.conflicts,
         });
     }
-    if evidence.malformed || currency.is_none() {
-        return Ok(TransactionReceiptLookup::Incomplete {
-            currency,
-            card_last4,
-            actions,
-        });
-    }
+    let currency = match currency {
+        Some(currency) if !evidence.malformed => currency,
+        currency => {
+            return Ok(TransactionReceiptLookup::Incomplete {
+                currency,
+                card_last4,
+                actions,
+            });
+        }
+    };
     Ok(TransactionReceiptLookup::Found(TransactionReceipt {
         parts: TransactionReceiptParts {
-            currency: currency.ok_or_else(invalid)?,
+            currency,
             card_last4,
             actions,
         },

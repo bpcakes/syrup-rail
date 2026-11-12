@@ -340,9 +340,13 @@ Within that bound transaction, two individually valid occurrences of the same
 field must disagree after normalization to prove a conflict. Currency case,
 equal last-four mask variants, decimal amounts (`1.0`/`1.00`) and boolean success
 (`1`/`true`) are equivalent. Action types use the existing gateway spelling
-normalization and known payment actions; amounts must fit signed 64-bit minor
-units; dates must be valid `YYYYMMDDhhmmss` calendar values; response codes must
-be three ASCII digits. Unrecognized or malformed values cannot prove a conflict.
+normalization and must then be a letter followed by ASCII letters or digits, at
+most 32 characters. They are not checked against a list of known actions: a
+type this crate does not recognize is returned normalized (`check_return` as
+`checkreturn`) and never blocks the original payment, so hosts must select the
+action types they recognize and ignore the rest. Amounts must fit signed 64-bit
+minor units; dates must be valid `YYYYMMDDhhmmss` calendar values; response
+codes must be three ASCII digits. Malformed values cannot prove a conflict.
 Missing fields, invalid masks, empty echoes or malformed neighboring fields do
 not erase a conflict proved by two other valid values, including within the
 same field. No partial receipt accompanies a conflict.

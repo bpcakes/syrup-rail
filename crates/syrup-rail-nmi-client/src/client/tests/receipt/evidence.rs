@@ -88,6 +88,38 @@ fn valid_contradictions_are_typed_only_within_the_same_field_and_action() {
 }
 
 #[test]
+fn unrecognized_later_action_types_do_not_block_the_original_payment() {
+    let long = "a".repeat(33);
+    for (raw, expected) in [
+        ("check_return", Some("checkreturn")),
+        ("Level3", Some("level3")),
+        ("somefuturetype", Some("somefuturetype")),
+        (long.as_str(), None),
+        ("_", None),
+    ] {
+        let body = transaction().replace(
+            "</transaction>",
+            &format!("<action><action_type>{raw}</action_type><amount>1.00</amount><success>1</success><date>20261001120000</date></action></transaction>"),
+        );
+        let actions = match (lookup(&body).unwrap(), expected) {
+            (TransactionReceiptLookup::Found(receipt), Some(_)) => receipt.into_parts().actions,
+            (TransactionReceiptLookup::Incomplete { actions, .. }, None) => actions,
+            _ => panic!("unexpected lookup outcome for a later action type"),
+        };
+        assert_eq!(actions[0].action_type.as_ref().unwrap().expose(), "sale");
+        assert_eq!(
+            actions[1].action_type.as_ref().map(SensitiveText::expose),
+            expected
+        );
+    }
+    // A recognized and an unrecognized type on one action still conflict.
+    assert_conflict(
+        &duplicate("action_type", "sale", &["sale", "check_return"]),
+        &[ReceiptConflictField::ActionType],
+    );
+}
+
+#[test]
 fn conflicts_survive_unrelated_missing_malformed_and_later_fields() {
     let conflicting = duplicate("response_code", "100", &["100", "200"]);
     for body in [
@@ -138,6 +170,7 @@ fn invalid_occurrences_never_erase_two_valid_conflicting_occurrences() {
 #[test]
 fn normalized_echoes_are_usable_while_legacy_lookup_remains_strict() {
     for (field, original, equivalent) in [
+        ("condition", "complete", "Complete"),
         ("currency", "USD", "usd"),
         ("cc_number", "411111******1234", "****1234"),
         ("action_type", "sale", "SALE"),
@@ -171,7 +204,8 @@ fn invalid_or_empty_occurrences_suppress_their_field_without_becoming_conflicts(
         ("currency", "USD", "US"),
         ("cc_number", "411111******1234", "4111111111115678"),
         ("cc_number", "411111******1234", "garbage 5678"),
-        ("action_type", "sale", "bogus"),
+        ("action_type", "sale", "sale!"),
+        ("action_type", "sale", "3ds"),
         ("amount", "1.00", "no-amount"),
         ("amount", "1.00", "1.001"),
         ("amount", "1.00", "92233720368547758.08"),

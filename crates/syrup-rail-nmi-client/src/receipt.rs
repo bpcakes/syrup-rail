@@ -56,7 +56,8 @@ pub enum ReceiptConflictField {
 
 /// Historical receipt evidence, independent of the current financial status.
 /// The caller must select and validate the original successful payment action
-/// and compare its amount and currency to the recorded charge.
+/// and compare its amount and currency to the recorded charge. Action types
+/// are not restricted to a known list; ignore the ones you do not recognize.
 #[derive(Debug)]
 pub struct TransactionReceipt {
     pub(crate) parts: TransactionReceiptParts,
