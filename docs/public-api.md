@@ -234,9 +234,10 @@ due immediately only when the advice follows the schedule; stop advice ends
 dunning, and any `RetryNoEarlierThan` advice keeps its advised retry time (the
 floor or a later scheduled step). NMI hosts delegate to
 `syrup_rail_nmi::nmi_renewal_decline_retry_advice` when the provider key is
-`NmiPaymentGateway::provider_key()`; it stops on NMI codes 220-224, 250-253,
-261-263, and 461, waits at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days)
-on 264, and otherwise follows the schedule. No schema change is required.
+`NmiPaymentGateway::provider_key()`; it stops on NMI codes 220-224, 250-252,
+and 261-263, waits at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days) on
+264, and otherwise follows the schedule, including on 253 and 461. No schema
+change is required.
 
 0.5.5 added an opt-in billing-period expiry policy and the operations around
 it. `SubscriptionPeriodExpiryPolicy` defaults to `Disabled`, which keeps the

@@ -134,10 +134,12 @@ address, email, card, and signature fields in the response are never extracted.
 `nmi_renewal_decline_retry_advice` interprets a determinate automatic-renewal
 failure's durable `response_code` for the PostgreSQL integration's
 `BillingTransactionCoordinator::renewal_decline_retry_advice`. Codes 220-224,
-250-253, 261-263, and 461 stop automatic retries of the same payment method;
-264 ("retry in a few days", no published delay) postpones the next scheduled
-retry to at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days). Every other,
-missing, or unparseable code follows the subscription's dunning schedule. Hosts
+250-252, and 261-263 stop automatic retries of the same payment method; 264
+("retry in a few days", no published delay) postpones the next scheduled retry
+to at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days). Every other, missing,
+or unparseable code follows the subscription's dunning schedule. That includes
+253, which NMI also returns for the issuer's retryable "suspected fraud"
+response, and 461, a processor rejection for the merchant account. Hosts
 call it only for accounts whose provider key is
 `NmiPaymentGateway::provider_key()`.
 
