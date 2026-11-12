@@ -22,7 +22,15 @@ mode = os.environ.get("LAUNCHER_FIXTURE_MODE", "")
 with (root / "calls").open("a") as out:
     out.write(json.dumps(args) + "\n")
 operation = args[0]
-if operation == "create":
+if operation == "image":
+    if mode.startswith("pull_"): sys.exit(1)
+    print("sha256:" + "b" * 64)
+elif operation == "pull":
+    (root / "pulling").touch()
+    if mode == "pull_slow": time.sleep(0.6)
+    if mode == "pull_interrupt": time.sleep(30)
+    if mode == "pull_failure": sys.exit(20)
+elif operation == "create":
     if mode == "create_absent": sys.exit(17)
     owner = args[args.index("--label") + 1].split("=", 1)[1]
     if mode == "foreign_owner": owner = "someone-else"
@@ -85,6 +93,9 @@ class LauncherTests(unittest.TestCase):
         path = self.root / "calls"
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
 
+    def create_call(self):
+        return next(call for call in self.calls() if call[0] == "create")
+
     def run_launcher(self, status=0, mode=""):
         self.environment["LAUNCHER_FIXTURE_MODE"] = mode
         return subprocess.run(self.argv(status), env=self.environment, capture_output=True, text=True, timeout=10)
@@ -102,7 +113,9 @@ class LauncherTests(unittest.TestCase):
         self.assertTrue(url.endswith("@127.0.0.1:54321/postgres?sslmode=disable"))
         self.assertEqual(args, ["a b;$value"])
         self.assertNotIn(url, result.stdout + result.stderr)
-        create = self.calls()[0]
+        self.assertEqual(self.calls()[0][:2], ["image", "inspect"])
+        self.assertFalse(any(call[0] == "pull" for call in self.calls()))
+        create = self.create_call()
         self.assertIn("127.0.0.1::5432", create)
         self.assertIn("POSTGRES_INITDB_ARGS=--no-sync", create)
         self.assertIn("/var/lib/postgresql:rw,nosuid,size=1g", create)
@@ -174,6 +187,27 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse((self.root / "child").exists())
         self.assert_removed()
 
+    def test_uncached_image_pull_has_its_own_budget(self):
+        # The pull outlasts the whole (shortened) startup budget.
+        result = self.run_with_short_budget("pull_slow")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Pulling", result.stderr)
+        operations = [call[0] for call in self.calls()]
+        self.assertEqual(operations[:3], ["image", "pull", "create"])
+        self.assertEqual(self.calls()[1], ["pull", "--quiet", "--", "postgres:18"])
+        self.assert_removed()
+
+    def test_image_pull_failure_is_named_and_creates_nothing(self):
+        result = self.run_launcher(mode="pull_failure")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("image pull failed", result.stderr)
+        self.assertFalse((self.root / "child").exists())
+        self.assertEqual([call[0] for call in self.calls()], ["image", "pull"])
+
+    def test_interruption_during_image_pull_stops_promptly(self):
+        self.interrupt_at("pulling", "pull_interrupt", removed=False)
+        self.assertEqual([call[0] for call in self.calls()], ["image", "pull"])
+
     def test_foreign_container_is_never_removed(self):
         result = self.run_launcher(mode="foreign_owner")
         self.assertEqual(result.returncode, 1)
@@ -196,7 +230,7 @@ class LauncherTests(unittest.TestCase):
     def test_image_override_is_one_literal_argument(self):
         self.environment["POSTGRES_TEST_IMAGE"] = "local/postgres:18-custom"
         self.assertEqual(self.run_launcher().returncode, 0)
-        create = self.calls()[0]
+        create = self.create_call()
         self.assertEqual(create[create.index("--") + 1], "local/postgres:18-custom")
         self.assert_removed()
 
@@ -205,7 +239,7 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.run_launcher().returncode, 2)
         self.assertEqual(self.calls(), [])
 
-    def interrupt_at(self, marker, mode=""):
+    def interrupt_at(self, marker, mode="", removed=True):
         self.environment["LAUNCHER_FIXTURE_MODE"] = mode
         process = subprocess.Popen(self.argv("wait"), env=self.environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
@@ -217,7 +251,8 @@ class LauncherTests(unittest.TestCase):
             process.send_signal(signal.SIGTERM)
             process.communicate(timeout=5)
             self.assertEqual(process.returncode, 128 + signal.SIGTERM)
-            self.assert_removed()
+            if removed:
+                self.assert_removed()
         finally:
             if process.poll() is None:
                 process.kill()

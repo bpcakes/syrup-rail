@@ -13,6 +13,7 @@ import uuid
 
 ADMIN_URL = "POSTGRES_TEST_ADMIN_URL"
 OWNER_LABEL = "local.test-postgres.owner"
+PULL_SECONDS = 600
 STARTUP_SECONDS = 60
 STOP_SECONDS = 10
 
@@ -46,7 +47,7 @@ class Launcher:
             self.check_interruption()
         remaining = 30 if cleanup else min(30, self.deadline - time.monotonic())
         if remaining <= 0:
-            raise RuntimeError("PostgreSQL startup exceeded its 60 second budget")
+            raise RuntimeError(f"PostgreSQL startup exceeded its {STARTUP_SECONDS} second budget")
         return subprocess.run(
             ["docker", *args], env=self.environment, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=remaining,
@@ -61,7 +62,36 @@ class Launcher:
             raise RuntimeError(f"Docker {operation} failed (exit {result.returncode})")
         return result.stdout.strip()
 
+    def ensure_image(self):
+        # `docker create` pulls a missing image implicitly, and a cold pull
+        # cannot finish inside the startup budget. Pull it under its own.
+        present = self.docker("image", "inspect", "--format", "{{.Id}}", "--", self.image)
+        if present.returncode == 0:
+            return
+        print("Pulling the test PostgreSQL image (uncached)...", file=sys.stderr, flush=True)
+        self.check_interruption()
+        pull = subprocess.Popen(
+            ["docker", "pull", "--quiet", "--", self.image], env=self.environment,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + PULL_SECONDS
+        try:
+            # Poll so a signal stops a long pull promptly.
+            while pull.poll() is None:
+                self.check_interruption()
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f"Docker image pull exceeded its {PULL_SECONDS} second budget")
+                time.sleep(0.05)
+        finally:
+            if pull.poll() is None:
+                pull.kill()
+            pull.wait()
+        if pull.returncode:
+            raise RuntimeError(f"Docker image pull failed (exit {pull.returncode})")
+
     def start(self):
+        self.ensure_image()
+        self.deadline = time.monotonic() + STARTUP_SECONDS
         self.create_attempted = True
         result = self.docker(
             "create", "--name", self.name, "--label", f"{OWNER_LABEL}={self.owner}",

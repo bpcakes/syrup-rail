@@ -261,6 +261,8 @@ interrupted. It uses 1 GiB of temporary storage, 300 connections and non-durable
 settings; never use this server for retained data. The harness still owns each
 isolated database lease and validates the server version.
 Set `POSTGRES_TEST_IMAGE` to a nonempty PostgreSQL 18 image override when needed.
+An uncached image is pulled first under a separate 10 minute budget, so a cold
+Docker cache does not consume the 60 second server startup budget.
 
 For raw database tests, use
 `python3 scripts/with-test-postgres.py cargo test -p syrup-rail-postgres`, or

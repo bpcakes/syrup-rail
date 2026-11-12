@@ -66,7 +66,9 @@ historically named `dev/0.6.0` branch.
   `scripts/with-test-postgres.py` launcher. It creates a disposable PostgreSQL
   18 Docker container unless `POSTGRES_TEST_ADMIN_URL` supplies an external
   test server; cleanup removes only the container the launcher owns. Raw
-  database tests require this launcher or an explicit external test URL.
+  database tests require this launcher or an explicit external test URL. An
+  uncached image is pulled first under a separate 10 minute budget, so a cold
+  Docker cache does not consume the 60 second server startup budget.
 
 ### Added
 
