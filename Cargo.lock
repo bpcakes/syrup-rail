@@ -1055,7 +1055,7 @@ dependencies = [
 [[package]]
 name = "postgres-test-harness"
 version = "0.2.0"
-source = "git+https://github.com/bpcakes/postgres-test-harness.git?rev=3d525e6fc5745ce2e2437c7997de5cccdecff4ac#3d525e6fc5745ce2e2437c7997de5cccdecff4ac"
+source = "git+https://github.com/bpcakes/postgres-test-harness.git?rev=1466a803db65829bde5d3d883f0699d284813503#1466a803db65829bde5d3d883f0699d284813503"
 dependencies = [
  "sha2 0.11.0",
  "thiserror",
