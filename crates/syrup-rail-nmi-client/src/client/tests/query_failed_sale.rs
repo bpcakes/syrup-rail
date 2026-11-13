@@ -431,3 +431,60 @@ fn an_action_never_changes_a_status_the_transaction_did_not_settle_as_failed() {
         assert_eq!(outcome.response_text, None, "{condition}");
     }
 }
+
+#[test]
+fn an_unsettled_transaction_keeps_its_own_evidence_beside_a_failed_sale() {
+    let action =
+        sale_action("<response_text>DECLINE</response_text><response_code>261</response_code>");
+    for (name, fields, expected_status, expected_code, expected_text) in [
+        (
+            "approved",
+            "<response>1</response><response_code>100</response_code>\
+             <response_text>Approved</response_text><condition>complete</condition>",
+            PaymentStatus::Approved,
+            "100",
+            "Approved",
+        ),
+        (
+            "indeterminate",
+            "<response>3</response><response_code>420</response_code>\
+             <response_text>Communication error</response_text>",
+            PaymentStatus::Unknown,
+            "420",
+            "Communication error",
+        ),
+    ] {
+        let transaction = |actions: &str| {
+            queried(&format!(
+                r#"
+                <nm_response>
+                  <transaction>
+                    <transaction_id>txn_unsettled</transaction_id>
+                    {fields}
+                    {actions}
+                  </transaction>
+                </nm_response>
+                "#
+            ))
+        };
+        let alone = transaction("");
+        let beside_sale = transaction(&action);
+
+        assert_eq!(beside_sale.status, expected_status, "{name}");
+        assert_eq!(
+            exposed(&beside_sale.response_code),
+            Some(expected_code),
+            "{name}"
+        );
+        assert_eq!(
+            exposed(&beside_sale.response_text),
+            Some(expected_text),
+            "{name}"
+        );
+        assert_eq!(beside_sale.status, alone.status, "{name}");
+        assert_eq!(beside_sale.response, alone.response, "{name}");
+        assert_eq!(beside_sale.response_code, alone.response_code, "{name}");
+        assert_eq!(beside_sale.response_text, alone.response_text, "{name}");
+        assert_eq!(beside_sale.diagnostics, alone.diagnostics, "{name}");
+    }
+}
