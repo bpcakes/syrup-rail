@@ -4,6 +4,12 @@ use crate::{TransactionDiagnosticsQuery, TransactionReceiptQuery};
 const CHILD_CASE: &str = "SYRUP_RAIL_XML_DEPTH_CASE";
 const TEST_NAME: &str = "client::tests::xml_depth::deep_xml_survives_public_query_boundaries";
 
+// A child whose `--exact` filter matches no test still exits successfully, so
+// each child must also report the case it completed.
+fn completion_marker(case: &str) -> String {
+    format!("[xml-depth-ok:{case}]")
+}
+
 // The parent re-runs itself through `sh` to disable core dumps.
 #[cfg(unix)]
 #[test]
@@ -14,6 +20,7 @@ fn deep_xml_survives_public_query_boundaries() {
             .build()
             .unwrap()
             .block_on(query_nested_xml(&case));
+        println!("{}", completion_marker(&case));
         return;
     }
     // An old recursive tokenizer aborts rather than unwinds. Run each public
@@ -35,11 +42,11 @@ fn deep_xml_survives_public_query_boundaries() {
             .env("RUST_MIN_STACK", "2097152")
             .output()
             .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            output.status.success(),
-            "{case} child failed: {:?}\n{}\n{}",
+            output.status.success() && stdout.contains(&completion_marker(case)),
+            "{case} child did not complete: {:?}\n{stdout}\n{}",
             output.status,
-            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
     }
