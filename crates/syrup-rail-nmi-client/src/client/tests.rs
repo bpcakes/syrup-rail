@@ -62,10 +62,12 @@ mod json_decision;
 mod json_identity;
 mod query_failed_sale;
 mod query_response;
+mod receipt;
 mod report_response;
 mod report_transport;
 mod request_bounds;
 mod transport;
+mod xml_depth;
 
 struct DropObserved<T> {
     value: T,

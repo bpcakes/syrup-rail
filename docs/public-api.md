@@ -239,6 +239,29 @@ and 261-263, waits at least `NMI_RETRY_IN_A_FEW_DAYS_DELAY` (three days) on
 264, and otherwise follows the schedule, including on 253 and 461. No schema
 change is required.
 
+0.6.0 also adds read-only original-payment receipt evidence to the raw
+`syrup_rail_nmi_client::Client`. `query_transaction_receipt` takes a
+`TransactionReceiptQuery` carrying both the original transaction ID and order
+ID, makes one exact bounded query, and returns `Option<TransactionReceipt>`;
+`TransactionReceipt::into_parts` yields `TransactionReceiptParts` with the
+currency, optional card last four, and at most 100 historical actions,
+independently of the current financial status, so a later refund or void does
+not erase the original sale. It fails on conflicting or mismatched identities
+and on duplicate fields that are not identical, and checks the shape of the
+currency and card mask only; action values are returned as the provider sent
+them. The opt-in `query_transaction_receipt_evidence` returns a
+`TransactionReceiptLookup`: `Found`, `NotFound`, `Incomplete` with only the
+individually valid fields, or `BoundConflict` listing payload-free
+`ReceiptConflictField` kinds when two valid occurrences of one field disagree
+after normalization. It also validates action amounts, dates, success flags,
+and response codes, and accepts any well-shaped action type rather than a
+fixed list. Hosts must select the action types they recognize, validate the
+original successful action, amount, currency, and date against their recorded
+charge before issuing a receipt, and never complete a receipt from
+`Incomplete`. Neither method retries, searches merchant-wide, or changes
+financial, report, or diagnostic parsing. The
+[client README](../crates/syrup-rail-nmi-client/README.md) has the full rules.
+
 0.5.5 added an opt-in billing-period expiry policy and the operations around
 it. `SubscriptionPeriodExpiryPolicy` defaults to `Disabled`, which keeps the
 historical behavior. A host enables `RejectExpiredPeriods` by overriding the

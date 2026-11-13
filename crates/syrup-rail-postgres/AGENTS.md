@@ -489,4 +489,11 @@ and transaction orchestration.
 
 ## Common commands
 
-- `cargo test -p syrup-rail-postgres`
+- `python3 scripts/with-test-postgres.py cargo test -p syrup-rail-postgres`
+- Raw `cargo test` requires `POSTGRES_TEST_ADMIN_URL` for a disposable PostgreSQL
+  18 server. The external-mode harness owns isolated database leases; the
+  launcher owns only the independent server it creates.
+- Every fixture shares the launcher's one server, so the launcher defaults
+  `RUST_TEST_THREADS` to the available CPUs, at most 32, when it is unset. Keep
+  explicit thread settings within that server's 1 GiB storage and 300
+  connections.

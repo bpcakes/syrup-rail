@@ -20,7 +20,7 @@ if [[ "${sqlx_version##* }" != "0.9.0" ]]; then
   exit 1
 fi
 
-cargo run \
+python3 scripts/with-test-postgres.py cargo run \
   --locked \
   --manifest-path tools/sqlx-gate/Cargo.toml \
   -- \

@@ -25,6 +25,8 @@ on:
       - "scripts/check-advisories.sh"
       - "scripts/tests/check-advisories.sh"
       - "scripts/check-public-api.sh"
+      - "scripts/with-test-postgres.py"
+      - "scripts/tests/with-test-postgres.py"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
       - ".cargo/**"
@@ -57,6 +59,8 @@ on:
       - "scripts/check-advisories.sh"
       - "scripts/tests/check-advisories.sh"
       - "scripts/check-public-api.sh"
+      - "scripts/with-test-postgres.py"
+      - "scripts/tests/with-test-postgres.py"
       - "docs/public-api.md"
       - "docs/security/dependency-advisories.md"
       - ".cargo/**"
@@ -211,3 +215,5 @@ jobs:
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Run locked Rust tests
         run: scripts/jig check test-locked
+      - name: Test PostgreSQL launcher lifecycle
+        run: python3 scripts/tests/with-test-postgres.py

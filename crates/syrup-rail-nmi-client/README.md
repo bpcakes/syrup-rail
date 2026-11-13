@@ -320,3 +320,71 @@ Hosts that send their own receipts can call
 `Client::with_customer_receipts_disabled()` to explicitly send
 `customer_receipt=false` for every Classic payment and v5 sale, including
 existing-vault renewals. By default the client omits this field.
+
+## Original-payment receipt evidence
+
+All XML queries require roxmltree 0.21.2 or later within the compatible 0.21
+line. Its iterative element parser prevents deeply nested, byte-bounded provider
+responses from exhausting the thread stack before the client's structure checks.
+
+`Client::query_transaction_receipt` requires both original transaction and order
+IDs and makes one exact query, with the standard 256 KiB response limit and a
+100-action limit. It returns historical actions, currency and optional original
+card digits separately from financial `PaymentOutcome` classification, so later
+refunds or voids do not erase an original sale. The host must validate the
+original successful action, amount, currency and date against its recorded
+charge before issuing a receipt. No merchant-wide search or retries occur.
+
+Mismatched or ambiguous identities, structural errors, and conflicting, nested,
+oversized or mixed-empty duplicate fields fail the lookup. Identical scalar
+echoes are allowed; conflicting action response codes are never converted to
+missing values. Only the currency and card mask are checked for shape: action
+type, date, amount, success and response code are returned as the provider sent
+them, so the host must validate them, or use the evidence method below, which
+does. Card parsing requires four visible trailing digits of a valid
+masked card or a four-digit value; prefixes, arbitrary text and unmasked full
+card numbers are rejected. Missing card data stays absent. Ordinary formatting
+redacts identifiers and evidence. Existing financial and report parsers retain
+their current behavior.
+
+Hosts that must retain proven contradictions can opt into
+`Client::query_transaction_receipt_evidence`, returning
+`TransactionReceiptLookup::{Found, NotFound, Incomplete, BoundConflict}`. A `BoundConflict`
+contains only `ReceiptConflictField` kinds. It is emitted only after exactly one
+transaction matches both original selectors, with valid envelope, transaction
+and action structure and the same transport/action bounds. Wrong, missing,
+conflicting or ambiguous identities remain `QueryError`s and are never attributed
+to the requested payment.
+
+Within that bound transaction, two individually valid occurrences of the same
+field must disagree after normalization to prove a conflict. Currency case,
+equal last-four mask variants, decimal amounts (`1.0`/`1.00`) and boolean success
+(`1`/`true`) are equivalent. Action types use the existing gateway spelling
+normalization and must then be a letter followed by ASCII letters or digits, at
+most 32 characters. They are not checked against a list of known actions: a
+type this crate does not recognize is returned normalized (`check_return` as
+`checkreturn`) and never blocks the original payment, so hosts must select the
+action types they recognize and ignore the rest. Amounts must fit signed 64-bit
+minor units; dates must be valid `YYYYMMDDhhmmss` calendar values; response
+codes must be three ASCII digits. Malformed values cannot prove a conflict.
+Missing fields, invalid masks, empty echoes or malformed neighboring fields do
+not erase a conflict proved by two other valid values, including within the
+same field. No partial receipt accompanies a conflict.
+
+If there is no proven conflict, missing currency or malformed bound fields yield
+`Incomplete { currency, card_last4, actions }`. Every retained field is individually
+valid and consistent: an invalid, nested, oversized or mixed-empty occurrence
+suppresses that entire field, even alongside a valid-looking candidate. Independent
+facts survive so a host can compare a valid card, currency or approved sale amount
+against its recorded charge despite an unrelated bad date or mask. `Incomplete`
+must never be used to complete a receipt or populate its paid/card evidence; the
+host may retain a contradiction it proves from these facts, then leave recovery
+incomplete. Invalid identities, ambiguous structure and work limits remain errors.
+
+Missing optional card/action fields stay absent for host validation. Inconsistent
+current `condition` values yield incomplete evidence because lifecycle state is
+not original-payment evidence; differing actions remain separate history.
+`Found` values are normalized and still require the host's original-payment
+checks described above. The legacy `query_transaction_receipt` method retains
+its strict duplicate comparisons and error behavior, including for equivalent
+but differently spelled echoes.

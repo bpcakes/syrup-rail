@@ -262,23 +262,23 @@ impl TestDatabase {
     }
 }
 
-/// Attempts allowed for one test server start.
+/// Attempts allowed for the first connection to the external test server.
 const HARNESS_START_ATTEMPTS: u32 = 3;
 
-/// Starts a test server, retrying the container startup race.
+/// Connects to the external test server, retrying a failed first connection.
 ///
-/// Under many parallel container starts, Docker Desktop can publish or forward
-/// a new container's port slightly after the container reports ready. The
-/// harness reads the port and connects once, so the race fails startup as
-/// `ContainerStart` or as a failed first connection. A failed start removes
-/// its own container, so a fresh start is safe. Every other error propagates.
+/// The launcher owns server startup and readiness. The external-mode harness
+/// opens its administrative connection before creating any fixture state, so
+/// retrying that connection is safe. Every other error propagates.
 async fn start_harness(project: &str) -> Result<PostgresHarness, Box<dyn Error>> {
     let mut attempt = 1;
     loop {
         match PostgresHarness::start(HarnessConfig::new(project)?.with_connection_budget(4)?).await
         {
             Ok(harness) => return Ok(harness),
-            Err(error) if attempt < HARNESS_START_ATTEMPTS && is_startup_race(&error) => {
+            Err(error)
+                if attempt < HARNESS_START_ATTEMPTS && is_initial_connection_error(&error) =>
+            {
                 tokio::time::sleep(std::time::Duration::from_millis(250 * u64::from(attempt)))
                     .await;
                 attempt += 1;
@@ -288,14 +288,13 @@ async fn start_harness(project: &str) -> Result<PostgresHarness, Box<dyn Error>>
     }
 }
 
-fn is_startup_race(error: &postgres_test_harness::Error) -> bool {
+fn is_initial_connection_error(error: &postgres_test_harness::Error) -> bool {
     matches!(
         error,
-        postgres_test_harness::Error::ContainerStart { .. }
-            | postgres_test_harness::Error::Postgres {
-                operation: "connect to PostgreSQL test server",
-                ..
-            }
+        postgres_test_harness::Error::Postgres {
+            operation: "connect to PostgreSQL test server",
+            ..
+        }
     )
 }
 

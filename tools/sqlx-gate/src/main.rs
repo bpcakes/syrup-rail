@@ -1,7 +1,12 @@
-//! Self-provisioning SQLx metadata gate for `syrup-rail-postgres`.
+//! SQLx metadata gate for `syrup-rail-postgres`.
+//!
+//! Run it through `scripts/check-sqlx.sh`. The test harness is built in its
+//! external-server mode, so `POSTGRES_TEST_ADMIN_URL` must name a disposable
+//! PostgreSQL 18 server; `scripts/with-test-postgres.py` supplies one. The
+//! gate owns only its database lease on that server, never the server.
 //!
 //! This tool intentionally does not depend on the query-owning package: it
-//! must be able to provision PostgreSQL before new query macros have metadata.
+//! must be able to prepare a database before new query macros have metadata.
 
 #![forbid(unsafe_code)]
 
@@ -43,7 +48,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         failures.push(format!("failed to clean disposable database: {error}"));
     }
     if let Err(error) = harness_shutdown {
-        failures.push(format!("failed to stop owned PostgreSQL server: {error}"));
+        failures.push(format!(
+            "failed to shut down the PostgreSQL test harness: {error}"
+        ));
     }
 
     if failures.is_empty() {

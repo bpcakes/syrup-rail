@@ -31,6 +31,7 @@ use self::validation::{
 };
 
 mod form;
+mod receipt;
 mod request_budget;
 mod response;
 mod text;

@@ -53,6 +53,24 @@ historically named `dev/0.6.0` branch.
 - Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, `tokio`, and
   `webpki-roots` to compatible patched versions required by the release audit.
   SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
+- Require roxmltree 0.21.2 or later within the compatible 0.21 line. Its
+  iterative XML parser prevents deeply nested, byte-bounded responses from
+  exhausting the stack before structural validation.
+- Use the test harness's external-server mode, removing Testcontainers,
+  `astral-tokio-tar`, and `rustix` from the dependency graph and lockfile.
+- Guard the `RUSTSEC-2026-0459` exception: `libsqlite3-sys` must have exactly
+  one locked version, 0.30.1, and be absent from the complete workspace,
+  all-feature, all-target dependency graph. Changed or mixed locked versions,
+  reachability, and graph-resolution failures stop the check before audit.
+- Run local and CI test/SQLx gates through the Python 3
+  `scripts/with-test-postgres.py` launcher. It creates a disposable PostgreSQL
+  18 Docker container unless `POSTGRES_TEST_ADMIN_URL` supplies an external
+  test server; cleanup removes only the container the launcher owns. Raw
+  database tests require this launcher or an explicit external test URL. An
+  uncached image is pulled first under a separate 10 minute budget, so a cold
+  Docker cache does not consume the 60 second server startup budget. Because
+  every fixture shares the owned server, an unset `RUST_TEST_THREADS` defaults
+  to the available CPUs, at most 32; explicit thread settings take precedence.
 
 - `Client::query_transaction` now keeps a failed transaction's decline reason.
   NMI's Query API reports `response_code` and `response_text` on the original
@@ -132,6 +150,23 @@ historically named `dev/0.6.0` branch.
   on supported processors and an accepted sale does not prove the descriptor
   printed; confirm acquirer support against a real statement before relying on
   it.
+- Add `Client::query_transaction_receipt` and the opt-in
+  `Client::query_transaction_receipt_evidence`, with `TransactionReceiptQuery`,
+  `TransactionReceipt`, `TransactionReceiptParts`, `TransactionReceiptLookup`,
+  and `ReceiptConflictField`. Both selectors must bind exactly one transaction.
+  The evidence API distinguishes `Found`, `NotFound`, `BoundConflict` for valid
+  normalized contradictions, and `Incomplete` for individually trustworthy
+  partial facts. Hosts may compare incomplete facts with recorded payment
+  evidence but must never use them to complete a receipt. Evidence action
+  types are validated by shape after gateway spelling normalization, not
+  against a list of known actions: an unrecognized type is returned normalized
+  and never blocks the original payment, so hosts must select the action types
+  they recognize and ignore the rest. Equivalent spellings of the transaction
+  `condition` agree; a real `condition` disagreement yields `Incomplete`, never
+  a conflict. The strict receipt
+  method retains its duplicate/error behavior; financial and report parsing
+  remain unchanged. Hosts still validate the original successful action,
+  amount, currency, and date before issuing a receipt.
 
 ## [0.5.5] - Unreleased
 
