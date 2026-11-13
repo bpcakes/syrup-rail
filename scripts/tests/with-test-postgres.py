@@ -190,31 +190,84 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.child_record()[2], "48")
         self.assert_removed()
 
+    def cgroup_limit(self):
+        # Point the std-equivalent quota lookup at a fake procfs and cgroupfs.
+        self.cgroups = self.root / "cgroup"
+        self.membership = self.root / "membership"
+        self.mountinfo = self.root / "mountinfo"
+        limit = runpy.run_path(str(LAUNCHER))["cgroup_cpu_limit"]
+        limit.__globals__.update(
+            PROC_CGROUP=str(self.membership), PROC_MOUNTINFO=str(self.mountinfo),
+            CGROUP_ROOT=str(self.cgroups),
+        )
+        return limit
+
+    def assert_cgroup_limits(self, limit, cases):
+        for membership, expected in cases:
+            with self.subTest(membership=membership):
+                self.membership.write_text(membership)
+                self.assertEqual(limit(), expected)
+
+    @staticmethod
+    def write_v1_quota(directory, quota):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "cpu.cfs_quota_us").write_text(quota + "\n")
+        (directory / "cpu.cfs_period_us").write_text("100000\n")
+
     def test_cgroup_v2_quota_uses_the_tightest_ancestor(self):
-        launcher = runpy.run_path(str(LAUNCHER))
-        limit = launcher["cgroup_cpu_limit"]
-        hierarchy = self.root / "cgroup"
-        (hierarchy / "jobs" / "tests").mkdir(parents=True)
-        (hierarchy / "cpu.max").write_text("max 100000\n")
-        (hierarchy / "jobs" / "cpu.max").write_text("300000 100000\n")
-        (hierarchy / "jobs" / "tests" / "cpu.max").write_text("250000 100000\n")
-        membership = self.root / "membership"
-        limit.__globals__.update(PROC_CGROUP=str(membership), CGROUP_ROOT=str(hierarchy))
-        for line, expected in (
+        limit = self.cgroup_limit()
+        tests = self.cgroups / "jobs" / "tests"
+        tests.mkdir(parents=True)
+        for directory, quota in ((self.cgroups, "max"), (tests.parent, "300000"), (tests, "250000")):
+            (directory / "cpu.max").write_text(quota + " 100000\n")
+            (directory / "cgroup.controllers").write_text("cpu memory\n")
+        self.assert_cgroup_limits(limit, (
             ("0::/jobs/tests\n", 2),
             ("0::/jobs\n", 3),
             ("0::/\n", None),
             ("0::/../escape\n", None),
-            ("4:cpu:/jobs/tests\n", None),
-        ):
-            with self.subTest(line=line):
-                membership.write_text(line)
-                self.assertEqual(limit(), expected)
-        (hierarchy / "jobs" / "cpu.max").write_text("50000 100000\n")
-        membership.write_text("0::/jobs/tests\n")
-        self.assertEqual(limit(), 1)
-        membership.unlink()
+            ("4:memory:/jobs/tests\n", None),
+        ))
+        (tests.parent / "cpu.max").write_text("50000 100000\n")
+        self.assert_cgroup_limits(limit, (("0::/jobs/tests\n", 1),))
+        # Like std, a group without cgroup.controllers is not read as cgroup2.
+        (tests / "cgroup.controllers").unlink()
+        self.assert_cgroup_limits(limit, (("0::/jobs/tests\n", None),))
+        self.membership.unlink()
         self.assertIsNone(limit())
+
+    def test_cgroup_v1_cpu_quota_takes_precedence_over_v2(self):
+        limit = self.cgroup_limit()
+        v1 = self.cgroups / "cpu,cpuacct"
+        for directory, quota in ((v1, "-1"), (v1 / "jobs", "200000"), (v1 / "jobs" / "tests", "-1")):
+            self.write_v1_quota(directory, quota)
+        unified = self.cgroups / "jobs"
+        unified.mkdir(parents=True)
+        (unified / "cpu.max").write_text("800000 100000\n")
+        (unified / "cgroup.controllers").write_text("cpu\n")
+        self.assert_cgroup_limits(limit, (
+            ("4:cpu,cpuacct:/jobs/tests\n0::/jobs\n", 2),
+            ("0::/jobs\n4:cpu,cpuacct:/jobs/tests\n", 2),
+            ("0::/jobs\n", 8),
+            ("4:cpu,cpuacct:/elsewhere\n", None),
+        ))
+        # The /sys/fs/cgroup/cpu location is tried before cpu,cpuacct.
+        self.write_v1_quota(self.cgroups / "cpu" / "jobs" / "tests", "100000")
+        self.assert_cgroup_limits(limit, (("4:cpu,cpuacct:/jobs/tests\n", 1),))
+
+    def test_cgroup_v1_quota_follows_a_bind_mounted_cpu_hierarchy(self):
+        limit = self.cgroup_limit()
+        mount = self.root / "container-cpu"
+        self.write_v1_quota(mount, "300000")
+        self.write_v1_quota(mount / "tests", "-1")
+        self.mountinfo.write_text(
+            "30 25 0:26 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n"
+            f"31 25 0:27 /docker {mount} rw,nosuid shared:9 - cgroup cgroup rw,cpu,cpuacct\n"
+        )
+        self.assert_cgroup_limits(limit, (
+            ("5:cpu,cpuacct:/docker/tests\n", 3),
+            ("5:cpu,cpuacct:/elsewhere/tests\n", None),
+        ))
 
     def test_empty_explicit_url_does_not_create_server(self):
         self.environment["POSTGRES_TEST_ADMIN_URL"] = ""

@@ -264,8 +264,8 @@ Set `POSTGRES_TEST_IMAGE` to a nonempty PostgreSQL 18 image override when needed
 An uncached image is pulled first under a separate 10 minute budget, so a cold
 Docker cache does not consume the 60 second server startup budget.
 Every database test shares that one server, so unless `RUST_TEST_THREADS` is
-already set, the launcher sets it to the available CPUs (honoring a cgroup v2
-CPU quota), at most 32. Without that bound, one test per CPU on a large host
+already set, the launcher sets it to libtest's own default (the available CPUs,
+honoring the same cgroup CPU quota), at most 32. Without that bound, one test per CPU on a large host
 exhausts the server's storage and connections. An explicit `RUST_TEST_THREADS`
 or `-- --test-threads` takes precedence.
 

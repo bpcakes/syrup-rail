@@ -24,6 +24,7 @@ STOP_SECONDS = 10
 TEST_THREADS = "RUST_TEST_THREADS"
 MAX_DEFAULT_TEST_THREADS = 32
 PROC_CGROUP = "/proc/self/cgroup"
+PROC_MOUNTINFO = "/proc/self/mountinfo"
 CGROUP_ROOT = "/sys/fs/cgroup"
 
 
@@ -32,31 +33,100 @@ class Interrupted(Exception):
 
 
 def cgroup_cpu_limit():
-    """Return the tightest cgroup v2 CPU quota, in whole CPUs, if one applies.
+    """Return the cgroup CPU quota in whole CPUs (at least one), or None.
 
-    libtest's default honors the same quota (whole CPUs, at least one), so
-    under a cgroup v2 limit the launcher's default does not exceed libtest's
-    own choice. Unreadable or v1-only hierarchies report no quota.
+    This mirrors Rust std's available_parallelism, which sets libtest's
+    default thread count, so the launcher's default never exceeds libtest's
+    own choice. As in std, a v1 entry with the cpu controller takes
+    precedence over the v2 entry; v1 reads the CFS quota under the cgroups(7)
+    mounts or the first matching cpu mount in mountinfo; v2 reads cpu.max
+    only under the standard mount; the tightest ancestor quota applies.
     """
     try:
         with open(PROC_CGROUP) as entries:
-            path = next(line[3:].strip() for line in entries if line.startswith("0::"))
-    except (OSError, StopIteration):
+            lines = entries.read().splitlines()
+    except OSError:
         return None
+    selected = None
+    for line in lines:
+        fields = line.split(":", 2)
+        if len(fields) != 3:
+            continue
+        if fields[1] == "":
+            selected = selected or (cgroup_v2_quota, fields[2])
+        elif "cpu" in fields[1].split(","):
+            selected = (cgroup_v1_quota, fields[2])
+    if selected is None:
+        return None
+    reader, path = selected
     parts = [part for part in path.split("/") if part]
     if ".." in parts:
         return None
-    limit = None
-    for depth in range(len(parts) + 1):
-        try:
-            with open(os.path.join(CGROUP_ROOT, *parts[:depth], "cpu.max")) as quota_file:
-                quota, period = quota_file.read().split()
-            if quota != "max":
-                cpus = max(1, int(quota) // int(period))
-                limit = cpus if limit is None else min(limit, cpus)
-        except (OSError, ValueError):
-            continue
-    return limit
+    quota = reader(parts)
+    return None if quota is None else max(1, quota)
+
+
+def cgroup_v2_quota(parts):
+    if not os.path.exists(os.path.join(CGROUP_ROOT, *parts, "cgroup.controllers")):
+        return None
+
+    def read(directory):
+        text = read_text(os.path.join(directory, "cpu.max"))
+        fields = text.splitlines()[0].split(" ") if text and text.strip() else []
+        return whole_cpus(*fields[:2]) if len(fields) >= 2 else None
+
+    return tightest_quota(CGROUP_ROOT, parts, read)
+
+
+def cgroup_v1_quota(parts):
+    def read(directory):
+        limit = read_text(os.path.join(directory, "cpu.cfs_quota_us"))
+        period = read_text(os.path.join(directory, "cpu.cfs_period_us"))
+        return None if limit is None or period is None else whole_cpus(limit.strip(), period.strip())
+
+    for mount, relative in cgroup_v1_cpu_mounts(parts):
+        if os.path.exists(os.path.join(mount, *relative)):
+            return tightest_quota(mount, relative, read)
+    return None
+
+
+def cgroup_v1_cpu_mounts(parts):
+    yield os.path.join(CGROUP_ROOT, "cpu"), parts
+    yield os.path.join(CGROUP_ROOT, "cpu,cpuacct"), parts
+    # Then the first v1 cpu mount whose bind root contains this group.
+    try:
+        with open(PROC_MOUNTINFO) as mounts:
+            for line in mounts:
+                fields = line.strip().split(" ")
+                if len(fields) < 7 or fields[-3] != "cgroup" or "cpu" not in fields[-1].split(","):
+                    continue
+                root = [part for part in fields[3].split("/") if part]
+                if parts[:len(root)] == root:
+                    yield fields[4], parts[len(root):]
+                    return
+    except OSError:
+        return
+
+
+def tightest_quota(mount, parts, read):
+    # Every ancestor's quota applies, up to and including the mount root.
+    quotas = (read(os.path.join(mount, *parts[:depth])) for depth in range(len(parts), -1, -1))
+    return min((quota for quota in quotas if quota is not None), default=None)
+
+
+def whole_cpus(limit, period):
+    # A quota of "max" or -1 means unlimited and parses as no quota.
+    if not re.fullmatch(r"[0-9]+", limit) or not re.fullmatch(r"[0-9]+", period) or int(period) == 0:
+        return None
+    return int(limit) // int(period)
+
+
+def read_text(path):
+    try:
+        with open(path) as handle:
+            return handle.read()
+    except OSError:
+        return None
 
 
 def default_test_threads():
