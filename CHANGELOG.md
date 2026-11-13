@@ -68,7 +68,9 @@ historically named `dev/0.6.0` branch.
   test server; cleanup removes only the container the launcher owns. Raw
   database tests require this launcher or an explicit external test URL. An
   uncached image is pulled first under a separate 10 minute budget, so a cold
-  Docker cache does not consume the 60 second server startup budget.
+  Docker cache does not consume the 60 second server startup budget. Because
+  every fixture shares the owned server, an unset `RUST_TEST_THREADS` defaults
+  to the available CPUs, at most 32; explicit thread settings take precedence.
 
 - `Client::query_transaction` now keeps a failed transaction's decline reason.
   NMI's Query API reports `response_code` and `response_text` on the original

@@ -4,6 +4,7 @@
 import json
 import os
 from pathlib import Path
+import runpy
 import signal
 import subprocess
 import sys
@@ -73,6 +74,7 @@ class LauncherTests(unittest.TestCase):
         self.environment = os.environ.copy()
         self.environment.pop("POSTGRES_TEST_ADMIN_URL", None)
         self.environment.pop("POSTGRES_TEST_IMAGE", None)
+        self.environment.pop("RUST_TEST_THREADS", None)
         self.environment.update(
             PATH=str(self.root) + os.pathsep + os.environ["PATH"],
             LAUNCHER_FIXTURE_ROOT=str(self.root),
@@ -81,7 +83,8 @@ class LauncherTests(unittest.TestCase):
         self.child.write_text(
             "import json, os, pathlib, sys, time\n"
             "root = pathlib.Path(os.environ['LAUNCHER_FIXTURE_ROOT'])\n"
-            "(root / 'child').write_text(json.dumps([os.environ['POSTGRES_TEST_ADMIN_URL'], sys.argv[2:]]))\n"
+            "(root / 'child').write_text(json.dumps([\n"
+            "    os.environ['POSTGRES_TEST_ADMIN_URL'], sys.argv[2:], os.environ.get('RUST_TEST_THREADS')]))\n"
             "if sys.argv[1] == 'wait': time.sleep(60)\n"
             "else: sys.exit(int(sys.argv[1]))\n"
         )
@@ -96,9 +99,15 @@ class LauncherTests(unittest.TestCase):
     def create_call(self):
         return next(call for call in self.calls() if call[0] == "create")
 
-    def run_launcher(self, status=0, mode=""):
+    def run_launcher(self, status=0, mode="", preexec_fn=None):
         self.environment["LAUNCHER_FIXTURE_MODE"] = mode
-        return subprocess.run(self.argv(status), env=self.environment, capture_output=True, text=True, timeout=10)
+        return subprocess.run(
+            self.argv(status), env=self.environment, capture_output=True, text=True, timeout=10,
+            preexec_fn=preexec_fn,
+        )
+
+    def child_record(self):
+        return json.loads((self.root / "child").read_text())
 
     def assert_removed(self):
         self.assertTrue((self.root / "removed").exists())
@@ -108,7 +117,7 @@ class LauncherTests(unittest.TestCase):
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_removed()
-        url, args = json.loads((self.root / "child").read_text())
+        url, args, _threads = self.child_record()
         self.assertTrue(url.startswith("postgres://postgres:"))
         self.assertTrue(url.endswith("@127.0.0.1:54321/postgres?sslmode=disable"))
         self.assertEqual(args, ["a b;$value"])
@@ -146,9 +155,66 @@ class LauncherTests(unittest.TestCase):
         self.environment["POSTGRES_TEST_ADMIN_URL"] = explicit
         result = self.run_launcher(23)
         self.assertEqual(result.returncode, 23)
-        self.assertEqual(json.loads((self.root / "child").read_text()), [explicit, ["a b;$value"]])
+        # The caller owns this server's capacity, so no thread default is imposed.
+        self.assertEqual(self.child_record(), [explicit, ["a b;$value"], None])
         self.assertEqual(self.calls(), [])
         self.assertNotIn(explicit, result.stdout + result.stderr)
+
+    def test_owned_server_bounds_default_test_threads(self):
+        self.assertEqual(self.run_launcher().returncode, 0)
+        threads = int(self.child_record()[2])
+        try:
+            available = len(os.sched_getaffinity(0))
+        except AttributeError:
+            available = os.cpu_count() or 1
+        self.assertGreaterEqual(threads, 1)
+        self.assertLessEqual(threads, min(32, available))
+        self.assert_removed()
+
+    def test_default_test_threads_never_exceed_the_cap(self):
+        result = self.run_with_globals(MAX_DEFAULT_TEST_THREADS=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.child_record()[2], "1")
+        self.assert_removed()
+
+    @unittest.skipUnless(hasattr(os, "sched_setaffinity"), "needs CPU affinity control")
+    def test_default_test_threads_never_exceed_available_cpus(self):
+        cpu = min(os.sched_getaffinity(0))
+        result = self.run_launcher(preexec_fn=lambda: os.sched_setaffinity(0, {cpu}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.child_record()[2], "1")
+
+    def test_caller_test_threads_are_preserved(self):
+        self.environment["RUST_TEST_THREADS"] = "48"
+        self.assertEqual(self.run_launcher().returncode, 0)
+        self.assertEqual(self.child_record()[2], "48")
+        self.assert_removed()
+
+    def test_cgroup_v2_quota_uses_the_tightest_ancestor(self):
+        launcher = runpy.run_path(str(LAUNCHER))
+        limit = launcher["cgroup_cpu_limit"]
+        hierarchy = self.root / "cgroup"
+        (hierarchy / "jobs" / "tests").mkdir(parents=True)
+        (hierarchy / "cpu.max").write_text("max 100000\n")
+        (hierarchy / "jobs" / "cpu.max").write_text("300000 100000\n")
+        (hierarchy / "jobs" / "tests" / "cpu.max").write_text("250000 100000\n")
+        membership = self.root / "membership"
+        limit.__globals__.update(PROC_CGROUP=str(membership), CGROUP_ROOT=str(hierarchy))
+        for line, expected in (
+            ("0::/jobs/tests\n", 2),
+            ("0::/jobs\n", 3),
+            ("0::/\n", None),
+            ("0::/../escape\n", None),
+            ("4:cpu:/jobs/tests\n", None),
+        ):
+            with self.subTest(line=line):
+                membership.write_text(line)
+                self.assertEqual(limit(), expected)
+        (hierarchy / "jobs" / "cpu.max").write_text("50000 100000\n")
+        membership.write_text("0::/jobs/tests\n")
+        self.assertEqual(limit(), 1)
+        membership.unlink()
+        self.assertIsNone(limit())
 
     def test_empty_explicit_url_does_not_create_server(self):
         self.environment["POSTGRES_TEST_ADMIN_URL"] = ""
@@ -164,16 +230,20 @@ class LauncherTests(unittest.TestCase):
                 self.assert_removed()
                 (self.root / "removed").unlink()
 
-    def run_with_short_budget(self, mode):
+    def run_with_globals(self, mode="", **overrides):
         self.environment["LAUNCHER_FIXTURE_MODE"] = mode
-        # Shorten the same production deadline for this process-level test.
+        # Override production module settings for this process-level test.
         code = (
-            "import runpy, sys; m=runpy.run_path(sys.argv[1]); "
-            "m['Launcher'].__init__.__globals__['STARTUP_SECONDS']=0.3; "
-            "sys.exit(m['main'](sys.argv[2:]))"
+            "import json, runpy, sys; m=runpy.run_path(sys.argv[1]); "
+            "m['main'].__globals__.update(json.loads(sys.argv[2])); "
+            "sys.exit(m['main'](sys.argv[3:]))"
         )
-        argv = [sys.executable, "-c", code, *self.argv()[1:]]
+        argv = [sys.executable, "-c", code, str(LAUNCHER), json.dumps(overrides), *self.argv()[2:]]
         return subprocess.run(argv, env=self.environment, capture_output=True, text=True, timeout=5)
+
+    def run_with_short_budget(self, mode):
+        # Shorten the same production deadline for this process-level test.
+        return self.run_with_globals(mode, STARTUP_SECONDS=0.3)
 
     def test_readiness_budget_stops_before_child(self):
         result = self.run_with_short_budget("not_ready")

@@ -263,12 +263,17 @@ isolated database lease and validates the server version.
 Set `POSTGRES_TEST_IMAGE` to a nonempty PostgreSQL 18 image override when needed.
 An uncached image is pulled first under a separate 10 minute budget, so a cold
 Docker cache does not consume the 60 second server startup budget.
+Every database test shares that one server, so unless `RUST_TEST_THREADS` is
+already set, the launcher sets it to the available CPUs (honoring a cgroup v2
+CPU quota), at most 32. Without that bound, one test per CPU on a large host
+exhausts the server's storage and connections. An explicit `RUST_TEST_THREADS`
+or `-- --test-threads` takes precedence.
 
 For raw database tests, use
 `python3 scripts/with-test-postgres.py cargo test -p syrup-rail-postgres`, or
 explicitly set `POSTGRES_TEST_ADMIN_URL` to a disposable PostgreSQL 18 admin URL.
-An explicit URL is passed through without Docker startup or server cleanup and
-is never printed by the launcher. The caller owns that server. Database-free
+An explicit URL is passed through without Docker startup, server cleanup, or a
+test-thread default and is never printed by the launcher. The caller owns that server. Database-free
 client tests can still run directly with Cargo. The launcher requires Python 3;
 its lifecycle regressions run with `python3 scripts/tests/with-test-postgres.py`.
 

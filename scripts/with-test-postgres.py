@@ -16,10 +16,56 @@ OWNER_LABEL = "local.test-postgres.owner"
 PULL_SECONDS = 600
 STARTUP_SECONDS = 60
 STOP_SECONDS = 10
+# Every live test fixture shares the owned server: each copies its own
+# database onto the 1 GiB tmpfs and holds harness sessions plus up to four
+# pool connections out of 300. libtest otherwise runs one test per CPU, and
+# 128 concurrent fixtures exhaust that server. An explicit RUST_TEST_THREADS
+# or --test-threads still takes precedence.
+TEST_THREADS = "RUST_TEST_THREADS"
+MAX_DEFAULT_TEST_THREADS = 32
+PROC_CGROUP = "/proc/self/cgroup"
+CGROUP_ROOT = "/sys/fs/cgroup"
 
 
 class Interrupted(Exception):
     pass
+
+
+def cgroup_cpu_limit():
+    """Return the tightest cgroup v2 CPU quota, in whole CPUs, if one applies.
+
+    libtest's default honors the same quota (whole CPUs, at least one), so
+    under a cgroup v2 limit the launcher's default does not exceed libtest's
+    own choice. Unreadable or v1-only hierarchies report no quota.
+    """
+    try:
+        with open(PROC_CGROUP) as entries:
+            path = next(line[3:].strip() for line in entries if line.startswith("0::"))
+    except (OSError, StopIteration):
+        return None
+    parts = [part for part in path.split("/") if part]
+    if ".." in parts:
+        return None
+    limit = None
+    for depth in range(len(parts) + 1):
+        try:
+            with open(os.path.join(CGROUP_ROOT, *parts[:depth], "cpu.max")) as quota_file:
+                quota, period = quota_file.read().split()
+            if quota != "max":
+                cpus = max(1, int(quota) // int(period))
+                limit = cpus if limit is None else min(limit, cpus)
+        except (OSError, ValueError):
+            continue
+    return limit
+
+
+def default_test_threads():
+    try:
+        cpus = len(os.sched_getaffinity(0))
+    except AttributeError:
+        cpus = os.cpu_count() or 1
+    quota = cgroup_cpu_limit()
+    return max(1, min(MAX_DEFAULT_TEST_THREADS, cpus, quota or cpus))
 
 
 class Launcher:
@@ -129,6 +175,7 @@ class Launcher:
         self.check_interruption()
         environment = os.environ.copy()
         environment[ADMIN_URL] = url
+        environment.setdefault(TEST_THREADS, str(default_test_threads()))
         child = subprocess.Popen(argv, env=environment, start_new_session=True)
         forwarded = False
         stop_deadline = None
