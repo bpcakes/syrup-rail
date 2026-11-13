@@ -60,6 +60,7 @@ mod form_requests;
 mod identity_contract;
 mod json_decision;
 mod json_identity;
+mod query_failed_sale;
 mod query_response;
 mod receipt;
 mod report_response;
