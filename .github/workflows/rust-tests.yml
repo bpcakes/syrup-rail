@@ -98,7 +98,7 @@ jobs:
           rustflags: ""
           toolchain: 1.94.0
       - name: Check every workspace target at the MSRV
-        run: cargo check --workspace --all-targets --locked
+        run: cargo +1.94.0 check --workspace --all-targets --locked
 
   advisories:
     name: Dependency advisory policy
@@ -116,6 +116,7 @@ jobs:
         with:
           cache: false
           rustflags: ""
+          toolchain: 1.100.0
       - name: Install cargo-audit
         uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
         with:
@@ -140,6 +141,7 @@ jobs:
         with:
           cache: false
           rustflags: ""
+          toolchain: 1.100.0
       - name: Check explicit facades and documentation
         run: scripts/check-public-api.sh
 
@@ -159,6 +161,7 @@ jobs:
         with:
           cache: false
           rustflags: ""
+          toolchain: 1.100.0
           components: rustfmt
       - name: Run rustfmt check
         run: scripts/jig check fmt
@@ -184,6 +187,7 @@ jobs:
         with:
           cache: false
           rustflags: ""
+          toolchain: 1.100.0
           components: clippy
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
@@ -211,6 +215,7 @@ jobs:
         with:
           cache: false
           rustflags: ""
+          toolchain: 1.100.0
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
       - name: Run locked Rust tests
