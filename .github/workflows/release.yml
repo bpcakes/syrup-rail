@@ -46,6 +46,7 @@ jobs:
         with:
           cache: false
           rustflags: ""
+          toolchain: 1.100.0
           components: clippy,rustfmt
 
       - name: Install SQLx CLI

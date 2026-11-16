@@ -238,9 +238,10 @@ compile the integration boundary without contacting a database or provider.
 
 ## Development
 
-The workspace requires Rust 1.94 or later. PostgreSQL host integrations use
-SQLx 0.9.0, including their pools, transactions, and error types. Install SQLx
-CLI 0.9.0 for metadata work; see [the release guide](docs/releasing.md).
+Development and CI use Rust 1.100.0, pinned in `rust-toolchain.toml`.
+The workspace minimum supported Rust version remains 1.94. PostgreSQL host
+integrations use SQLx 0.9.0, including their pools, transactions, and error types.
+Install SQLx CLI 0.9.0 for metadata work; see [the release guide](docs/releasing.md).
 
 Jig is pinned in `.jig/runtime-version`. The launcher downloads the official
 release executable and verifies its SHA-256 checksum; CI caches only that
