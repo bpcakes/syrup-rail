@@ -28,18 +28,17 @@ use super::{
     APPROVED_STORAGE_FAILURE_TEXT, AttemptResolutionStatus, BILLING_LOCK_TIMEOUT,
     CURRENT_GRANT_CONFLICT_TEXT, CURRENT_SUBSCRIPTION_CONFLICT_TEXT, GatewayNotSubmittedPolicy,
     INCOMPLETE_APPROVAL_TEXT, INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation,
-    OutcomeResolutionBoundary, OutcomeResolutionCommand, RateLimitCooldown,
-    SubscriptionEnrollmentApplicationError, TERMINAL_APPROVAL_RACE_TEXT,
-    append_subscription_observation_diagnostics, apply_resumable_not_submitted_policy,
-    charge_is_externally_reversed, finalize_approved_application,
-    is_parked_expired_period_approval, is_retryable_evidence_error, load_applied_subscription,
-    load_subscription, lock_expected_reservation_attempt, lock_payment_method_domain,
-    lock_subscription_aggregate, mark_attempt_approved, mutation_error_evidence,
-    observe_parked_expired_period_approval, park_compensated_approved_attempt,
-    park_expired_period_approval, park_locked_attempt, park_observed_approval_if_period_expired,
-    payment_result_for_attempt, persist_approved_evidence_without_attempt_lock,
-    resolve_pool_outcome, set_application_timeouts, stop_conflicting_subscription_approval,
-    upsert_payment_method,
+    OutcomeResolutionCommand, RateLimitCooldown, SubscriptionEnrollmentApplicationError,
+    TERMINAL_APPROVAL_RACE_TEXT, append_subscription_observation_diagnostics,
+    apply_resumable_not_submitted_policy, charge_is_externally_reversed,
+    finalize_approved_application, is_parked_expired_period_approval, is_retryable_evidence_error,
+    load_applied_subscription, load_subscription, lock_expected_reservation_attempt,
+    lock_payment_method_domain, lock_subscription_aggregate, mark_attempt_approved,
+    mutation_error_evidence, observe_parked_expired_period_approval,
+    park_compensated_approved_attempt, park_expired_period_approval, park_locked_attempt,
+    park_observed_approval_if_period_expired, payment_result_for_attempt,
+    persist_approved_evidence_without_attempt_lock, resolve_pool_outcome, set_application_timeouts,
+    stop_conflicting_subscription_approval, upsert_payment_method,
 };
 
 mod approval;
@@ -162,13 +161,7 @@ pub async fn submit_admitted_subscription_enrollment(
     .map_err(|_| SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch)?;
     if reconstructed != admission.reservation
         || admission.attempt.identity() != admission.reservation.identity()
-        || admission.attempt.status() != PaymentAttemptStatus::Pending
-        || admission
-            .attempt
-            .state()
-            .timestamps()
-            .submitted_at()
-            .is_none()
+        || !admission.attempt.phase().is_admitted()
     {
         return Err(SubscriptionEnrollmentApplicationError::SubmissionIdentityMismatch);
     }
@@ -206,6 +199,7 @@ pub async fn submit_admitted_subscription_enrollment(
                 OutcomeReservation::Initial(&admission.reservation),
                 &evidence,
                 policy,
+                super::NonSubmissionProof::for_error(&admission.attempt, &error)?,
             )
             .await?;
             if application.should_surface_not_submitted(policy) {
@@ -300,10 +294,7 @@ async fn apply_subscription_enrollment_gateway_decision(
                 pool,
                 reservation,
                 outcome.evidence(),
-                AttemptResolutionStatus::Declined,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
+                OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Declined, None, None),
             )
             .await
         }
@@ -312,10 +303,7 @@ async fn apply_subscription_enrollment_gateway_decision(
                 pool,
                 reservation,
                 outcome.evidence(),
-                AttemptResolutionStatus::Failed,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
+                OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Failed, None, None),
             )
             .await
         }
@@ -382,16 +370,13 @@ pub(crate) async fn resolve_non_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionEnrollmentReservation,
     evidence: &ProcessorEvidence,
-    status: AttemptResolutionStatus,
-    resolution_code: Option<PaymentResolutionCode>,
-    cooldown: Option<RateLimitCooldown>,
-    boundary: OutcomeResolutionBoundary,
+    resolution: OutcomeResolutionCommand,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     resolve_pool_outcome(
         pool,
         OutcomeReservation::Initial(reservation),
         evidence,
-        OutcomeResolutionCommand::non_approved(status, resolution_code, cooldown, boundary),
+        resolution,
     )
     .await
     .map(OutcomeApplication::into_payment)

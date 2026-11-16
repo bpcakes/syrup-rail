@@ -74,6 +74,7 @@ async fn payment_method_admission_rejects_changed_idempotency_key_before_provide
     );
 
     let verified = crate::verify_gateway_account_mode(&resolved, GatewayAccountMode::Live).await?;
+    let admission_snapshot = admission.attempt().clone();
     let error = submit_admitted_subscription_payment_method_replacement(
         &fixture.database.pool,
         &fixture.coordinator,
@@ -97,6 +98,7 @@ async fn payment_method_admission_rejects_changed_idempotency_key_before_provide
         OutcomeReservation::PaymentMethodReplacement(&reservation),
         &mutation_error_evidence(not_transmitted.detail()),
         policy,
+        NonSubmissionProof::for_error(&admission_snapshot, &not_transmitted)?,
     )
     .await?;
     assert!(restored.should_surface_not_submitted(policy));

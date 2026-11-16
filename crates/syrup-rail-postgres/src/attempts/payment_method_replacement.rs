@@ -568,9 +568,7 @@ pub async fn admit_subscription_payment_method_replacement_in_transaction(
     if !payment_method_replacement_attempt_belongs_to_reservation(&attempt, reservation) {
         return Err(invalid_state());
     }
-    if attempt.status() != PaymentAttemptStatus::Pending
-        || attempt.state().timestamps().submitted_at().is_some()
-    {
+    if !attempt.phase().is_prepared() {
         return Ok(SubscriptionPaymentMethodReplacementSubmissionOutcome::AlreadyAdmitted(attempt));
     }
     let state_matches = attempt.request() == reservation.request()

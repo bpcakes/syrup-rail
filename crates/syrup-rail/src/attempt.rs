@@ -1,3 +1,6 @@
+mod phase;
+pub use phase::PaymentAttemptPhase;
+
 use std::fmt;
 
 use chrono::{DateTime, Utc};

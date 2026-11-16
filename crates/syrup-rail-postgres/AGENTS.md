@@ -50,6 +50,10 @@ and transaction orchestration.
   — workflow-owned provider submission, foreground/reconciled outcome
   application, and compensation paths. Initial, renewal, and payment-method replacement
   approval mutations live in their nested `approval.rs` modules.
+  `enrollment_application/resolution_command.rs` owns legal local/submitted
+  outcomes, and `non_submission.rs` binds retry restoration to the exact
+  admission generation. Host outcome commands live in
+  `host_charge_application/resolution.rs`.
 - `src/enrollment_application/recovery/evidence.rs` owns bounded recovery
   approval-evidence retries and the fallback that does not lock the attempt.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history

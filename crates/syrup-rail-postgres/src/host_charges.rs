@@ -506,9 +506,7 @@ pub async fn admit_host_charge_submission_in_transaction(
     if !host_charge_attempt_matches_reservation_without_required_mode(&observed, reservation) {
         return Err(HostChargeStoreError::InvalidState);
     }
-    if observed.status() != syrup_rail::PaymentAttemptStatus::Pending
-        || observed.state().timestamps().submitted_at().is_some()
-    {
+    if !observed.phase().is_prepared() {
         return Ok(HostChargeSubmissionOutcome::AlreadyAdmitted(observed));
     }
     if !host_charge_attempt_matches_reservation(&observed, reservation) {
@@ -537,9 +535,7 @@ pub async fn admit_host_charge_submission_in_transaction(
     if !host_charge_attempt_matches_reservation_without_required_mode(&attempt, reservation) {
         return Err(HostChargeStoreError::InvalidState);
     }
-    if attempt.status() != syrup_rail::PaymentAttemptStatus::Pending
-        || attempt.state().timestamps().submitted_at().is_some()
-    {
+    if !attempt.phase().is_prepared() {
         return Ok(HostChargeSubmissionOutcome::AlreadyAdmitted(attempt));
     }
     if !host_charge_attempt_matches_reservation(&attempt, reservation) {

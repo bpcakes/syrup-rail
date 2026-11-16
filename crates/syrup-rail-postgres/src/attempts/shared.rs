@@ -151,9 +151,9 @@ const fn attempt_replay_disposition_for(
     status: PaymentAttemptStatus,
     submitted_at: Option<DateTime<Utc>>,
 ) -> AttemptReplayDisposition {
-    match (status, submitted_at) {
-        (PaymentAttemptStatus::Pending, None) => AttemptReplayDisposition::ResumePrepared,
-        (PaymentAttemptStatus::ReviewRequired, None) => {
+    match syrup_rail::PaymentAttemptPhase::from_persisted(status, submitted_at) {
+        syrup_rail::PaymentAttemptPhase::Prepared => AttemptReplayDisposition::ResumePrepared,
+        syrup_rail::PaymentAttemptPhase::ReviewRequired if submitted_at.is_none() => {
             AttemptReplayDisposition::RepairUnsubmittedReview
         }
         _ => AttemptReplayDisposition::ReturnCanonical,

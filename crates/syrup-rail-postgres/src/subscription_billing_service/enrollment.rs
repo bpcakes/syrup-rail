@@ -132,7 +132,11 @@ impl SubscriptionBillingService {
                 .resolve_subscriber_readiness_failure(
                     SubscriberInitiatedReservation::Initial(&reservation),
                     SubscriberReadinessFailure::Cooldown(scope),
-                    OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                    OutcomeResolutionBoundary::AdmittedNotSubmitted(
+                        crate::enrollment_application::NonSubmissionProof::before_provider_call(
+                            admission.attempt(),
+                        )?,
+                    ),
                 )
                 .await;
         }

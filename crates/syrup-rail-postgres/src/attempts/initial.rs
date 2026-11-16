@@ -424,9 +424,7 @@ pub async fn admit_subscription_enrollment_submission_in_transaction(
     {
         return Err(invalid_state());
     }
-    if attempt.state().timestamps().submitted_at().is_some()
-        || attempt.status() != PaymentAttemptStatus::Pending
-    {
+    if !attempt.phase().is_prepared() {
         return Ok(SubscriptionEnrollmentSubmissionOutcome::AlreadyAdmitted(
             attempt,
         ));

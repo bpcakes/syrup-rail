@@ -21,10 +21,10 @@ use crate::{
 use super::{
     APPROVED_APPLICATION_ATTEMPTS, APPROVED_EVIDENCE_RETRY_DELAY, APPROVED_EVIDENCE_WRITE_ATTEMPTS,
     AttemptResolutionStatus, BILLING_LOCK_TIMEOUT, GatewayNotSubmittedPolicy,
-    INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation, OutcomeResolutionBoundary,
-    OutcomeResolutionCommand, RECOVERY_APPROVED_STORAGE_FAILURE_TEXT,
-    RECOVERY_INCOMPLETE_APPROVAL_TEXT, RECOVERY_STALE_STATE_TEXT, RateLimitCooldown,
-    SubscriptionEnrollmentApplicationError, advance_subscription_discount_after_successful_charge,
+    INVALID_APPLICATION_STATE, OutcomeApplication, OutcomeReservation, OutcomeResolutionCommand,
+    RECOVERY_APPROVED_STORAGE_FAILURE_TEXT, RECOVERY_INCOMPLETE_APPROVAL_TEXT,
+    RECOVERY_STALE_STATE_TEXT, RateLimitCooldown, SubscriptionEnrollmentApplicationError,
+    advance_subscription_discount_after_successful_charge,
     append_subscription_observation_diagnostics, apply_resumable_not_submitted_policy,
     charge_is_externally_reversed, disable_payment_method_if_unreferenced,
     finalize_approved_application, is_parked_expired_period_approval, is_retryable_evidence_error,
@@ -187,13 +187,7 @@ pub async fn submit_admitted_subscription_recovery(
     let resolved_gateway = gateway.resolved_gateway();
     if admission.attempt.identity() != admission.reservation.identity()
         || admission.attempt.request() != admission.reservation.request()
-        || admission.attempt.status() != PaymentAttemptStatus::Pending
-        || admission
-            .attempt
-            .state()
-            .timestamps()
-            .submitted_at()
-            .is_none()
+        || !admission.attempt.phase().is_admitted()
         || !admission
             .reservation
             .matches_submission(command, resolved_gateway)
@@ -232,6 +226,7 @@ pub async fn submit_admitted_subscription_recovery(
                 OutcomeReservation::Recovery(&admission.reservation),
                 &evidence,
                 policy,
+                super::NonSubmissionProof::for_error(&admission.attempt, &error)?,
             )
             .await?;
             if application.should_surface_not_submitted(policy) {
@@ -325,10 +320,7 @@ async fn apply_subscription_recovery_gateway_decision(
                 pool,
                 reservation,
                 outcome.evidence(),
-                AttemptResolutionStatus::Declined,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
+                OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Declined, None, None),
             )
             .await
         }
@@ -337,10 +329,7 @@ async fn apply_subscription_recovery_gateway_decision(
                 pool,
                 reservation,
                 outcome.evidence(),
-                AttemptResolutionStatus::Failed,
-                None,
-                None,
-                OutcomeResolutionBoundary::Submitted,
+                OutcomeResolutionCommand::submitted(AttemptResolutionStatus::Failed, None, None),
             )
             .await
         }
@@ -702,16 +691,13 @@ pub(crate) async fn resolve_recovery_non_approved_outcome(
     pool: &PgPool,
     reservation: &SubscriptionRecoveryReservation,
     evidence: &ProcessorEvidence,
-    status: AttemptResolutionStatus,
-    resolution_code: Option<PaymentResolutionCode>,
-    cooldown: Option<RateLimitCooldown>,
-    boundary: OutcomeResolutionBoundary,
+    resolution: OutcomeResolutionCommand,
 ) -> Result<SubscriptionEnrollmentPaymentResult, SubscriptionEnrollmentApplicationError> {
     resolve_pool_outcome(
         pool,
         OutcomeReservation::Recovery(reservation),
         evidence,
-        OutcomeResolutionCommand::non_approved(status, resolution_code, cooldown, boundary),
+        resolution,
     )
     .await
     .map(OutcomeApplication::into_payment)

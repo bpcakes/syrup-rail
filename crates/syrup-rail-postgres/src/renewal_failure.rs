@@ -2,10 +2,9 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, Row, postgres::PgRow};
 use syrup_rail::{
     BillingEvent, PastDueAccessPolicy, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity,
-    PaymentAttemptKind, PaymentAttemptStatus, PaymentAttemptTarget, PlanKey,
-    RenewalFailureDisposition, RenewalFailurePolicy, SubscriptionEndReason, SubscriptionId,
-    SubscriptionPaymentFailureAccess, SubscriptionPaymentFailureDisposition, SubscriptionStatus,
-    renewal_failure_disposition,
+    PaymentAttemptKind, PaymentAttemptTarget, PlanKey, RenewalFailureDisposition,
+    RenewalFailurePolicy, SubscriptionEndReason, SubscriptionId, SubscriptionPaymentFailureAccess,
+    SubscriptionPaymentFailureDisposition, SubscriptionStatus, renewal_failure_disposition,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -279,8 +278,8 @@ fn validate_resolved_renewal_attempt(
     };
     if attempt.kind() != PaymentAttemptKind::SubscriptionRenewal
         || !matches!(
-            attempt.status(),
-            PaymentAttemptStatus::Declined | PaymentAttemptStatus::Failed
+            attempt.phase(),
+            syrup_rail::PaymentAttemptPhase::Declined | syrup_rail::PaymentAttemptPhase::Failed
         )
         || attempt.state().resolution_code().is_some()
     {

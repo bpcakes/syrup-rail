@@ -50,10 +50,7 @@ use crate::{
     apply_reconciled_subscription_payment_method_replacement_gateway_outcome,
     apply_reconciled_subscription_recovery_gateway_outcome,
     apply_reconciled_subscription_renewal_gateway_outcome,
-    attempts::{
-        AttemptReplayDisposition, AttemptResolutionStatus, LocalAttemptPolicy,
-        attempt_replay_disposition,
-    },
+    attempts::{AttemptReplayDisposition, LocalAttemptPolicy, attempt_replay_disposition},
     enrollment_application::admit_subscription_renewal_submission_with_policy,
     enrollment_application::{
         OutcomeApplication, OutcomeResolutionBoundary, OutcomeResolutionCommand, RateLimitCooldown,
@@ -525,10 +522,7 @@ impl SubscriberInitiatedReservation<'_> {
                     pool,
                     reservation,
                     evidence,
-                    AttemptResolutionStatus::Failed,
-                    Some(code),
-                    cooldown,
-                    boundary,
+                    OutcomeResolutionCommand::local_failure(boundary, Some(code), cooldown),
                 )
                 .await
             }
@@ -537,10 +531,7 @@ impl SubscriberInitiatedReservation<'_> {
                     pool,
                     reservation,
                     evidence,
-                    AttemptResolutionStatus::Failed,
-                    Some(code),
-                    cooldown,
-                    boundary,
+                    OutcomeResolutionCommand::local_failure(boundary, Some(code), cooldown),
                 )
                 .await
             }
@@ -549,10 +540,7 @@ impl SubscriberInitiatedReservation<'_> {
                     pool,
                     reservation,
                     evidence,
-                    AttemptResolutionStatus::Failed,
-                    Some(code),
-                    cooldown,
-                    boundary,
+                    OutcomeResolutionCommand::local_failure(boundary, Some(code), cooldown),
                 )
                 .await
             }

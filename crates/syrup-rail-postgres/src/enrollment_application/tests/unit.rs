@@ -222,26 +222,15 @@ fn reservation_attempt_matching_preserves_initial_and_exact_rules() {
 
 #[test]
 fn resolution_command_keeps_boundaries_and_replacement_review_typed() {
-    let prepared = OutcomeResolutionCommand::non_approved(
-        AttemptResolutionStatus::Failed,
+    let prepared = OutcomeResolutionCommand::local_failure(
+        OutcomeResolutionBoundary::Prepared,
         None,
         Some(RateLimitCooldown::Account),
-        OutcomeResolutionBoundary::Prepared,
     );
     assert!(prepared.may_resolve(PaymentAttemptStatus::Pending, None));
     assert!(!prepared.may_resolve(PaymentAttemptStatus::Pending, Some(DateTime::UNIX_EPOCH)));
     assert!(!prepared.may_resolve(PaymentAttemptStatus::Declined, None));
     assert!(!prepared.clears_submitted_at());
-
-    let admitted = OutcomeResolutionCommand::non_approved(
-        AttemptResolutionStatus::Failed,
-        None,
-        None,
-        OutcomeResolutionBoundary::AdmittedNotSubmitted,
-    );
-    assert!(!admitted.may_resolve(PaymentAttemptStatus::Pending, None));
-    assert!(admitted.may_resolve(PaymentAttemptStatus::Pending, Some(DateTime::UNIX_EPOCH)));
-    assert!(admitted.clears_submitted_at());
 
     let unknown = OutcomeResolutionCommand::unknown(Some(RateLimitCooldown::Provider));
     assert_eq!(

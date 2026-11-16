@@ -234,7 +234,11 @@ impl SubscriptionBillingService {
         let admitted_stage = HostChargePreSubmissionStage::Reserved {
             targets,
             reservation: &reservation,
-            resolution: HostChargeBeforeSubmissionResolution::admitted_not_submitted(),
+            resolution: HostChargeBeforeSubmissionResolution::admitted_not_submitted(
+                crate::enrollment_application::NonSubmissionProof::before_provider_call(
+                    admission.attempt(),
+                )?,
+            ),
         };
         match self.host_charge_cooldown(&account, admitted_stage).await? {
             HostChargePreSubmissionOutcome::Ready(()) => {}

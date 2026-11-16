@@ -181,7 +181,11 @@ impl SubscriptionBillingService {
             self.resolve_renewal_cooldown(
                 &reservation,
                 scope,
-                OutcomeResolutionBoundary::AdmittedNotSubmitted,
+                OutcomeResolutionBoundary::AdmittedNotSubmitted(
+                    crate::enrollment_application::NonSubmissionProof::before_provider_call(
+                        admission.attempt(),
+                    )?,
+                ),
             )
             .await?;
             return Ok(SubscriptionRenewalOutcome::Noop);
@@ -410,12 +414,7 @@ impl SubscriptionBillingService {
             self.coordinator.as_ref(),
             reservation,
             &evidence,
-            OutcomeResolutionCommand::non_approved(
-                AttemptResolutionStatus::Failed,
-                Some(code),
-                None,
-                boundary,
-            ),
+            OutcomeResolutionCommand::local_failure(boundary, Some(code), None),
         )
         .await
         .map(OutcomeApplication::into_payment)
