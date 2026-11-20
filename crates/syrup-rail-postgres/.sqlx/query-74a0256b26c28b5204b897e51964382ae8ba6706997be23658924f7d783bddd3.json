@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT gateway_transaction_id, progression_state FROM billing_processor_charges",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "progression_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "progression_state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "74a0256b26c28b5204b897e51964382ae8ba6706997be23658924f7d783bddd3"
+}

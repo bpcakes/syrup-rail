@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM billing_payment_attempts\n        WHERE subscription_id = $1\n            AND billing_period_start_at = $2\n            AND attempt_kind = 'subscription_renewal'\n            AND submitted_at IS NOT NULL\n            AND status IN ('declined', 'failed')\n            AND resolution_code IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0e66e857f3b2b16847550aaf6598657711aae89e70f11876681da28ccaf1dd7b"
+}

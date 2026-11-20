@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COUNT(*) AS attempt_sequence_count,\n            COUNT(*) FILTER (\n                WHERE attempt_kind = 'subscription_renewal'\n                    AND status = 'failed'\n                    AND resolution_code = ANY($4::text[])\n                    AND gateway_configuration_id = (\n                        SELECT accounts.gateway_configuration_id\n                        FROM billing_subscriptions AS subscriptions\n                        JOIN billing_gateway_accounts AS accounts\n                            ON accounts.id = subscriptions.gateway_account_id\n                            AND accounts.billing_scope_id = subscriptions.billing_scope_id\n                        WHERE subscriptions.id = $1\n                    )\n            ) AS automatic_infrastructure_attempt_count,\n            MAX(resolved_at) FILTER (\n                WHERE attempt_kind = 'subscription_renewal'\n                    AND status = 'failed'\n                    AND resolution_code = ANY($5::text[])\n                    AND gateway_configuration_id = (\n                        SELECT accounts.gateway_configuration_id\n                        FROM billing_subscriptions AS subscriptions\n                        JOIN billing_gateway_accounts AS accounts\n                            ON accounts.id = subscriptions.gateway_account_id\n                            AND accounts.billing_scope_id = subscriptions.billing_scope_id\n                        WHERE subscriptions.id = $1\n                    )\n            ) AS last_automatic_infrastructure_failure_at,\n            COUNT(*) FILTER (\n                WHERE attempt_kind = 'subscription_renewal'\n                    AND status = 'failed'\n                    AND resolution_code = ANY($6::text[])\n            ) AS rate_limited_attempt_count,\n            MAX(resolved_at) FILTER (\n                WHERE attempt_kind = 'subscription_renewal'\n                    AND status = 'failed'\n                    AND resolution_code = ANY($6::text[])\n            ) AS last_rate_limited_at,\n            COALESCE(\n                BOOL_OR(\n                    status IN ('pending', 'unknown', 'review_required', 'approved')\n                    AND NOT (\n                        status = ANY($7::text[])\n                        AND submitted_at IS NULL\n                        AND created_at <= clock_timestamp()\n                            - ($8::bigint * interval '1 second')\n                    )\n                ),\n                false\n            ) AS has_blocking_attempt\n        FROM billing_payment_attempts\n        WHERE attempt_kind IN ('subscription_renewal', 'subscription_recovery')\n            AND subscription_id = $1\n            AND billing_period_start_at = $2\n            AND ($3::uuid IS NULL OR id <> $3)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_sequence_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "automatic_infrastructure_attempt_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_automatic_infrastructure_failure_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "rate_limited_attempt_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_rate_limited_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "has_blocking_attempt",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Uuid",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "b68f66b7679aeebb1b411c9e1c13a558341be346f2152800155cb8bc493400f8"
+}

@@ -1,0 +1,92 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_gateway_lifecycle_quarantine_resolutions (\n            quarantine_id, actor_id, reason,\n            observed_occurrence_count, observed_last_seen_at\n        ) VALUES ($1, $2, $3, $4, $5)\n        RETURNING quarantine_id, actor_id, reason,\n            observed_occurrence_count, observed_last_seen_at, resolved_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "quarantine_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "quarantine_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "actor_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "actor_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "observed_occurrence_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "observed_occurrence_count"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "observed_last_seen_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "observed_last_seen_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "resolved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "resolved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "00074e8f0734bab7882233a462d5ca6ff77bf9da685febbb99b98f9e8233f06d"
+}

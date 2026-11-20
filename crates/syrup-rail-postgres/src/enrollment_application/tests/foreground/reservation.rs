@@ -4,14 +4,14 @@ use super::*;
 async fn foreground_service_pre_reservation_cooldown_creates_no_attempt_or_provider_io()
 -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("service_cooldown").build().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_gateway_accounts
         SET mutation_rate_limited_until = clock_timestamp() + interval '1 minute'
         WHERE id = $1
         "#,
+        fixture.gateway_account.gateway_account_id,
     )
-    .bind(fixture.gateway_account.gateway_account_id)
     .execute(&fixture.database.pool)
     .await?;
     let gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome(
@@ -46,7 +46,7 @@ async fn foreground_service_pre_reservation_cooldown_creates_no_attempt_or_provi
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
-    let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_payment_attempts")
+    let attempts: i64 = checked_query_scalar!("SELECT count(*) FROM billing_payment_attempts")
         .fetch_one(&fixture.database.pool)
         .await?;
     assert_eq!(attempts, 0);

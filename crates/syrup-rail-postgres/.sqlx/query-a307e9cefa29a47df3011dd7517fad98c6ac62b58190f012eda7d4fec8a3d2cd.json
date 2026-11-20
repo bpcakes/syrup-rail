@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TRIGGER host_reject_metadata ON billing_payment_methods",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a307e9cefa29a47df3011dd7517fad98c6ac62b58190f012eda7d4fec8a3d2cd"
+}

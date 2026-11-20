@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT gateway_transaction_id, gateway_payment_method_reference FROM billing_payment_attempts WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gateway_payment_method_reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "e950f68189da3348416aeab48427bd67698b2f09f8cdfe8963236e8f1e2de168"
+}

@@ -165,10 +165,12 @@ pub(crate) async fn cancel_subscription_on_connection(
 }
 
 async fn set_lock_timeout(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(BILLING_ROW_LOCK_TIMEOUT)
-        .execute(connection)
-        .await?;
+    checked_query!(
+        "SELECT set_config('lock_timeout', $1, true)",
+        BILLING_ROW_LOCK_TIMEOUT,
+    )
+    .execute(connection)
+    .await?;
     Ok(())
 }
 
@@ -177,11 +179,13 @@ async fn lock_subscription_aggregate(
     subscriber_id: &Uuid,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id)
-        .bind(plan_key.as_str())
-        .execute(connection)
-        .await?;
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        subscriber_id,
+        plan_key.as_str(),
+    )
+    .execute(connection)
+    .await?;
     Ok(())
 }
 
@@ -193,7 +197,7 @@ async fn current_subscription(
         let Some(candidate_id) = selected_subscription_id(connection, command).await? else {
             return Ok(None);
         };
-        let row = sqlx::query(
+        let row = checked_query!(
             r#"
             SELECT id, plan_key, status, payment_method_id, amount_cents, currency,
                 current_period_start_at, current_period_end_at, next_renewal_at,
@@ -207,11 +211,11 @@ async fn current_subscription(
                 AND plan_key = $4
             FOR NO KEY UPDATE
             "#,
+            candidate_id,
+            command.billing_scope_id().into_uuid(),
+            command.subscriber_id().into_uuid(),
+            command.plan_key().as_str(),
         )
-        .bind(candidate_id)
-        .bind(command.billing_scope_id().as_uuid())
-        .bind(command.subscriber_id().as_uuid())
-        .bind(command.plan_key().as_str())
         .fetch_optional(&mut *connection)
         .await?;
         let Some(row) = row else {
@@ -247,7 +251,7 @@ async fn current_subscription_id(
     connection: &mut PgConnection,
     command: &CancelSubscription,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT id
         FROM billing_current_subscriptions
@@ -257,10 +261,10 @@ async fn current_subscription_id(
         ORDER BY current_subscription_rank, updated_at DESC, id DESC
         LIMIT 1
         "#,
+        command.billing_scope_id().into_uuid(),
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
     )
-    .bind(command.billing_scope_id().as_uuid())
-    .bind(command.subscriber_id().as_uuid())
-    .bind(command.plan_key().as_str())
     .fetch_optional(&mut *connection)
     .await
 }
@@ -272,7 +276,7 @@ async fn selected_subscription_id(
     if let Some(current) = current_subscription_id(connection, command).await? {
         return Ok(Some(current));
     }
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT id
         FROM billing_subscriptions
@@ -282,10 +286,10 @@ async fn selected_subscription_id(
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
+        command.billing_scope_id().into_uuid(),
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
     )
-    .bind(command.billing_scope_id().as_uuid())
-    .bind(command.subscriber_id().as_uuid())
-    .bind(command.plan_key().as_str())
     .fetch_optional(&mut *connection)
     .await
 }
@@ -294,7 +298,7 @@ async fn has_blocking_renewal(
     connection: &mut PgConnection,
     subscription: &Subscription,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -305,9 +309,9 @@ async fn has_blocking_renewal(
                 AND status IN ('pending', 'unknown', 'review_required', 'approved')
         )
         "#,
+        subscription.id().into_uuid(),
+        subscription.next_renewal_at(),
     )
-    .bind(subscription.id().as_uuid())
-    .bind(subscription.next_renewal_at())
     .fetch_one(&mut *connection)
     .await
 }
@@ -317,7 +321,7 @@ async fn expire_stale_payment_method_updates(
     subscription_id: SubscriptionId,
 ) -> Result<(), sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
-    sqlx::query(
+    checked_query!(
         r#"
         WITH stale_attempts AS (
             SELECT id
@@ -338,11 +342,11 @@ async fn expire_stale_payment_method_updates(
         FROM stale_attempts
         WHERE attempts.id = stale_attempts.id
         "#,
+        subscription_id.as_uuid(),
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
+        UNSUBMITTED_PAYMENT_METHOD_UPDATE_FAILED_RESPONSE_TEXT,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
-    .bind(UNSUBMITTED_PAYMENT_METHOD_UPDATE_FAILED_RESPONSE_TEXT)
     .execute(connection)
     .await?;
     Ok(())
@@ -354,7 +358,7 @@ async fn cancel_current_subscription(
     subscription_id: SubscriptionId,
     expected_status: SubscriptionStatus,
 ) -> Result<Option<(Subscription, DateTime<Utc>)>, SubscriptionCancellationError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'canceled',
@@ -372,12 +376,12 @@ async fn cancel_current_subscription(
             dunning_retry_delays_seconds, dunning_exhaustion, past_due_access,
             next_payment_attempt_at, required_gateway_account_mode, canceled_at
         "#,
+        subscription_id.as_uuid(),
+        command.billing_scope_id().into_uuid(),
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
+        expected_status.as_str(),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(command.billing_scope_id().as_uuid())
-    .bind(command.subscriber_id().as_uuid())
-    .bind(command.plan_key().as_str())
-    .bind(expected_status.as_str())
     .fetch_optional(&mut *connection)
     .await?;
     row.as_ref()

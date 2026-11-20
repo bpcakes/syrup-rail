@@ -56,7 +56,7 @@ pub(super) async fn expired_restart(
         )
         .await?;
     }
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET created_at = created_at - interval '40 days',
@@ -64,8 +64,8 @@ pub(super) async fn expired_restart(
             resolved_at = resolved_at - interval '40 days'
         WHERE id = $1
         "#,
+        enrollment.identity().attempt_id().into_uuid(),
     )
-    .bind(enrollment.identity().attempt_id().as_uuid())
     .execute(harness.pool())
     .await?;
     Ok((subscriber_id, enrollment))

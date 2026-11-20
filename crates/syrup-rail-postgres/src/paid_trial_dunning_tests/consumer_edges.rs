@@ -53,7 +53,7 @@ async fn newer_unpaid_history_allows_grants_and_deletion_scrub_without_becoming_
     ));
     transaction.commit().await?;
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET current_period_start_at = boundary.at - interval '2 days',
@@ -62,12 +62,12 @@ async fn newer_unpaid_history_allows_grants_and_deletion_scrub_without_becoming_
         FROM (SELECT clock_timestamp() AS at) boundary
         WHERE id = $1
         "#,
+        older_canceled_id.as_uuid(),
     )
-    .bind(older_canceled_id.as_uuid())
     .execute(&database.pool)
     .await?;
     let unpaid_id = syrup_rail::SubscriptionId::new(Uuid::now_v7());
-    let unpaid_created_at: DateTime<Utc> = sqlx::query_scalar(
+    let unpaid_created_at: DateTime<Utc> = checked_query_scalar!(
         r#"
         WITH clock AS MATERIALIZED (
             SELECT clock_timestamp() + interval '1 second' AS observed_at
@@ -90,20 +90,20 @@ async fn newer_unpaid_history_allows_grants_and_deletion_scrub_without_becoming_
         FROM clock
         RETURNING created_at
         "#,
+        unpaid_id.as_uuid(),
+        account.billing_scope_id,
+        subscriber_id.as_uuid(),
+        account.gateway_account_id,
+        payment_method_id.as_uuid(),
+        format!("unpaid_{}", unpaid_id.as_uuid().simple()),
     )
-    .bind(unpaid_id.as_uuid())
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id.as_uuid())
-    .bind(format!("unpaid_{}", unpaid_id.as_uuid().simple()))
     .fetch_one(&database.pool)
     .await?;
-    sqlx::query(
-        "UPDATE billing_subscriptions SET updated_at = $2 + interval '1 day' WHERE id = $1",
+    sqlx::query!(
+        "UPDATE billing_subscriptions SET updated_at = $2::timestamptz + interval '1 day' WHERE id = $1",
+        older_canceled_id.as_uuid(),
+        unpaid_created_at,
     )
-    .bind(older_canceled_id.as_uuid())
-    .bind(unpaid_created_at)
     .execute(&database.pool)
     .await?;
 
@@ -161,16 +161,17 @@ async fn newer_unpaid_history_allows_grants_and_deletion_scrub_without_becoming_
     assert!(scrubbed.payment_attempts() > 0);
     assert!(scrubbed.payment_methods() > 0);
     transaction.commit().await?;
-    let unpaid_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-            .bind(unpaid_id.as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
-    assert_eq!(unpaid_status, "unpaid");
-    let method: (String, String) = sqlx::query_as(
-        "SELECT status, gateway_payment_method_reference FROM billing_payment_methods WHERE id = $1",
+    let unpaid_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_subscriptions WHERE id = $1",
+        unpaid_id.as_uuid(),
     )
-    .bind(payment_method_id.as_uuid())
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(unpaid_status, "unpaid");
+    let method: (String, String) = checked_query_as!(
+        "SELECT status, gateway_payment_method_reference FROM billing_payment_methods WHERE id = $1",
+        payment_method_id.as_uuid(),
+    )
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(method.0, "disabled");

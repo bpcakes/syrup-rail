@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    SELECT\n        attempts.status,\n        attempts.gateway_transaction_id,\n        attempts.gateway_account_id,\n        accounts.gateway_configuration_id,\n        accounts.provider_key,\n        clock_timestamp() AS observed_at\n    FROM billing_payment_attempts AS attempts\n    INNER JOIN billing_gateway_accounts AS accounts\n        ON accounts.id = attempts.gateway_account_id\n        AND accounts.billing_scope_id = attempts.billing_scope_id\n    WHERE attempts.billing_scope_id = $1\n        AND attempts.subscriber_id = $2\n        AND attempts.id = $4\n        AND attempts.plan_key = $3\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "gateway_configuration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "gateway_configuration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "provider_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "provider_key"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "observed_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "75309e7b2ca1d53162023a66558157a06e114d011abf2315b751ea285af77a4e"
+}

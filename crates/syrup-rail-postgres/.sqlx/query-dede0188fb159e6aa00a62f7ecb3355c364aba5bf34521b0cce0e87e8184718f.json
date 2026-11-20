@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_payment_attempts SET gateway_response_code = '261' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dede0188fb159e6aa00a62f7ecb3355c364aba5bf34521b0cce0e87e8184718f"
+}

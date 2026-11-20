@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_subscriptions (\n            id, billing_scope_id, subscriber_id, plan_key, status,\n            gateway_account_id, payment_method_id, amount_cents, currency,\n            current_period_start_at, current_period_end_at, next_renewal_at,\n            initial_transaction_id, phase, recurring_period_kind,\n            recurring_period_count, trial_amount_cents, trial_period_kind,\n            trial_period_count, dunning_retry_delays_seconds,\n            dunning_exhaustion, past_due_access, next_payment_attempt_at,\n            required_gateway_account_mode\n        ) VALUES (\n            $1, $2, $3, $4, 'active', $5, $6, $7, $8, $9, $10, $10,\n            $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $10, $21\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Text",
+        "Int4",
+        "Int8Array",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1fb0e3b3d8098038d4b4b1d3b03bc3c7e2ce5091f66328b02f6d726298c9e60a"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT current_setting('lock_timeout', true)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "current_setting",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5b7af1722d37a744332174d7b42d688c136fd8410c16eb3f116b6b90d79d9645"
+}

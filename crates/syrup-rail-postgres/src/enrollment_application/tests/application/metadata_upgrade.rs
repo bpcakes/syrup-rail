@@ -52,10 +52,10 @@ async fn v052_parked_approval_reconciles_before_metadata_expiry_repair()
     assert_eq!(parked.status(), PaymentAttemptStatus::ReviewRequired);
     assert!(parked.subscription().is_none());
     let before_evidence = charge_evidence_snapshot(pool, attempt_id).await?;
-    let expiry: (Option<i16>, Option<i16>) = sqlx::query_as(
+    let expiry: (Option<i16>, Option<i16>) = checked_query_as!(
         "SELECT card_exp_month, card_exp_year FROM billing_processor_charges WHERE attempt_id = $1",
+        attempt_id.as_uuid(),
     )
-    .bind(attempt_id.as_uuid())
     .fetch_one(pool)
     .await?;
     assert_eq!(expiry, (None, None));
@@ -158,9 +158,7 @@ async fn v052_parked_approval_reconciles_before_metadata_expiry_repair()
         );
         server.await?;
         assert_eq!(financial_snapshot(pool).await?, financial);
-        let fields: (String, String, Option<i16>, Option<i16>) = sqlx::query_as(
-            "SELECT card_brand, card_last4, card_exp_month, card_exp_year FROM billing_payment_methods",
-        ).fetch_one(pool).await?;
+        let fields: (String, String, Option<i16>, Option<i16>) = checked_query_as!("SELECT card_brand, card_last4, card_exp_month, card_exp_year FROM billing_payment_methods").fetch_one(pool).await?;
         let expiry = if expected == crate::PaymentMethodMetadataRefreshOutcome::Updated {
             (Some(12), Some(2031))
         } else {
@@ -180,9 +178,10 @@ async fn charge_evidence_snapshot(
     pool: &PgPool,
     attempt: PaymentAttemptId,
 ) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         "SELECT jsonb_build_array(gateway_transaction_id, gateway_payment_method_reference, gateway_response, gateway_response_code, gateway_response_text, gateway_condition, payment_type, card_brand, card_last4, card_exp_month, card_exp_year)::text FROM billing_processor_charges WHERE attempt_id = $1",
-    ).bind(attempt.as_uuid()).fetch_one(pool).await
+        attempt.as_uuid(),
+    ).fetch_one(pool).await
 }
 
 #[tokio::test]
@@ -214,7 +213,9 @@ async fn nmi_query_repairs_all_missing_card_fields_without_financial_changes()
     assert_eq!(applied.status(), PaymentAttemptStatus::Approved);
     let financial = financial_snapshot(pool).await?;
     let identity_sql = "SELECT (to_jsonb(m) - ARRAY['card_brand', 'card_last4', 'card_exp_month', 'card_exp_year', 'updated_at']::text[])::text FROM billing_payment_methods m";
-    let identity: String = sqlx::query_scalar(identity_sql).fetch_one(pool).await?;
+    let identity: String = crate::test_support::fixture_query_scalar(identity_sql)
+        .fetch_one(pool)
+        .await?;
     let portal_query = syrup_rail::SubscriptionBillingPortalQuery::new(
         fixture.command.billing_scope_id(),
         fixture.command.subscriber_id(),
@@ -282,7 +283,7 @@ async fn nmi_query_repairs_all_missing_card_fields_without_financial_changes()
     assert!(after.entitlement().permits_product_access());
     assert_eq!(financial_snapshot(pool).await?, financial);
     assert_eq!(
-        sqlx::query_scalar::<_, String>(identity_sql)
+        crate::test_support::fixture_query_scalar::<_, String>(identity_sql)
             .fetch_one(pool)
             .await?,
         identity
@@ -298,9 +299,7 @@ async fn nmi_query_repairs_all_missing_card_fields_without_financial_changes()
 }
 
 async fn financial_snapshot(pool: &PgPool) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM billing_payment_attempts a), (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM billing_processor_charges c), (SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM billing_subscriptions s))::text",
-    ).fetch_one(pool).await
+    checked_query_scalar!("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM billing_payment_attempts a), (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM billing_processor_charges c), (SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM billing_subscriptions s))::text").fetch_one(pool).await
 }
 
 async fn query_gateway(

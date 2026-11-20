@@ -13,10 +13,12 @@ async fn phase(
     pool: &sqlx::PgPool,
     subscription_id: SubscriptionId,
 ) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT phase FROM billing_subscriptions WHERE id = $1")
-        .bind(subscription_id.as_uuid())
-        .fetch_one(pool)
-        .await
+    checked_query_scalar!(
+        "SELECT phase FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
+    )
+    .fetch_one(pool)
+    .await
 }
 
 /// The enrollment fixture activates an immediate-recurring offer. Moving the
@@ -26,7 +28,7 @@ async fn mark_paid_trial(
     pool: &sqlx::PgPool,
     subscription_id: SubscriptionId,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET phase = 'paid_trial', trial_amount_cents = 100,
@@ -34,8 +36,8 @@ async fn mark_paid_trial(
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(pool)
     .await?;
     Ok(())
@@ -50,7 +52,7 @@ async fn make_renewal_due_minutes_ago(
     subscription_id: SubscriptionId,
     minutes_ago: i32,
 ) -> Result<DateTime<Utc>, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         UPDATE billing_subscriptions
         SET current_period_start_at = now() - interval '1 month' - make_interval(mins => $2),
@@ -61,9 +63,9 @@ async fn make_renewal_due_minutes_ago(
         WHERE id = $1
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
+        minutes_ago,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(minutes_ago)
     .fetch_one(pool)
     .await
 }
@@ -220,10 +222,10 @@ async fn dunning_retry_keeps_trial_descriptor_until_the_same_period_is_approved(
     let fixture = enrollment_fixture("desc_retry").build().await?;
     let subscription_id = enroll(&fixture, "descriptor-retry-enrollment").await?;
     mark_paid_trial(&fixture.database.pool, subscription_id).await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET dunning_retry_delays_seconds = ARRAY[60]::bigint[] WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
     let period_start_at =
@@ -259,10 +261,10 @@ async fn dunning_retry_keeps_trial_descriptor_until_the_same_period_is_approved(
         "paid_trial"
     );
     let (status, due_period, retry_at): (String, DateTime<Utc>, Option<DateTime<Utc>>) =
-        sqlx::query_as(
+        checked_query_as!(
             "SELECT status, next_renewal_at, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+            subscription_id.as_uuid(),
         )
-        .bind(subscription_id.as_uuid())
         .fetch_one(&fixture.database.pool)
         .await?;
     assert_eq!(status, "past_due");
@@ -273,10 +275,10 @@ async fn dunning_retry_keeps_trial_descriptor_until_the_same_period_is_approved(
     );
 
     // Advance only dispatch eligibility: this is a retry of the same economic period.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
     let (retry, status) = submit_renewal(

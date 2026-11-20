@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_gateway_accounts SET mutation_rate_limited_until = clock_timestamp() + interval '1 hour' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "adcdce1a42cad728a9589c7e6987bffd9c6c6fd4201029b0ad9b024899b52102"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "42ac63ed74704531021484acb9f26c7c228236345b13ba5eb3e0f128962f2909"
+}

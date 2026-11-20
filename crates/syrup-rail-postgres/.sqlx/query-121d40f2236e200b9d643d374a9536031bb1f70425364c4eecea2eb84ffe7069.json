@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE billing_gateway_accounts\n                SET mutation_rate_limited_until = $2::text::timestamptz\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "121d40f2236e200b9d643d374a9536031bb1f70425364c4eecea2eb84ffe7069"
+}

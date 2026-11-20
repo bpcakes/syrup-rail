@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_gateway_lifecycle_quarantines\n        SET resolved_at = $2\n        WHERE id = $1\n            AND resolved_at IS NULL\n            AND occurrence_count = $3\n            AND last_seen_at = $4\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d9872efc198f21addf61e91b6a53f0914741cf4ad19bcd4f14e8093bdd14fcd2"
+}

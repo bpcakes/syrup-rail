@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT billing_first_name, billing_email, status, gateway_transaction_id FROM billing_payment_attempts WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_first_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_first_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_email"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_transaction_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "7548355073bbed0daee7b8295939ec1bf8159a617995d7a4ed498551db8ff469"
+}

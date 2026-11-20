@@ -123,7 +123,7 @@ pub(crate) async fn load_gateway_cooldown<'e>(
     account_id: syrup_rail::GatewayAccountId,
     provider_key: &syrup_rail::GatewayProviderKey,
 ) -> Result<Option<GatewayCooldownSnapshot>, sqlx::Error> {
-    sqlx::query_as(
+    checked_query_as!(
         r#"
         SELECT
             COALESCE(accounts.mutation_rate_limited_until > clock_timestamp(), false) AS account_active,
@@ -133,9 +133,9 @@ pub(crate) async fn load_gateway_cooldown<'e>(
             ON provider.provider_key = accounts.provider_key
         WHERE accounts.id = $1 AND accounts.provider_key = $2
         "#,
+        account_id.as_uuid(),
+        provider_key.as_str(),
     )
-    .bind(account_id.as_uuid())
-    .bind(provider_key.as_str())
     .fetch_optional(executor)
     .await
 }
@@ -173,11 +173,12 @@ mod tests {
             let mut rolled_back = database.pool.begin().await?;
             register_gateway_account(&mut rolled_back, &registration).await?;
             rolled_back.rollback().await?;
-            let rolled_back_rows: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM billing_gateway_accounts WHERE id = $1")
-                    .bind(account.as_uuid())
-                    .fetch_one(&database.pool)
-                    .await?;
+            let rolled_back_rows: i64 = checked_query_scalar!(
+                "SELECT count(*) FROM billing_gateway_accounts WHERE id = $1",
+                account.as_uuid(),
+            )
+            .fetch_one(&database.pool)
+            .await?;
             if rolled_back_rows != 0 {
                 return Err(io::Error::other("registration escaped caller rollback").into());
             }
@@ -188,26 +189,26 @@ mod tests {
 
             let provider_deadline = "2035-02-03T04:05:06Z";
             let account_deadline = "2035-03-04T05:06:07Z";
-            sqlx::query(
+            sqlx::query!(
                 r#"
                 UPDATE billing_gateway_provider_rate_limits
-                SET rate_limited_until = $2::timestamptz
+                SET rate_limited_until = $2::text::timestamptz
                 WHERE provider_key = $1
                 "#,
+                provider.as_str(),
+                provider_deadline,
             )
-            .bind(provider.as_str())
-            .bind(provider_deadline)
             .execute(&database.pool)
             .await?;
-            sqlx::query(
+            sqlx::query!(
                 r#"
                 UPDATE billing_gateway_accounts
-                SET mutation_rate_limited_until = $2::timestamptz
+                SET mutation_rate_limited_until = $2::text::timestamptz
                 WHERE id = $1
                 "#,
+                account.as_uuid(),
+                account_deadline,
             )
-            .bind(account.as_uuid())
-            .bind(account_deadline)
             .execute(&database.pool)
             .await?;
 
@@ -221,14 +222,14 @@ mod tests {
             register_gateway_account(&mut sibling_transaction, &sibling_registration).await?;
             sibling_transaction.commit().await?;
 
-            let retained_provider_deadline: String = sqlx::query_scalar(
+            let retained_provider_deadline: String = checked_query_scalar!(
                 r#"
                 SELECT rate_limited_until::text
                 FROM billing_gateway_provider_rate_limits
                 WHERE provider_key = $1
                 "#,
+                provider.as_str(),
             )
-            .bind(provider.as_str())
             .fetch_one(&database.pool)
             .await?;
             if !retained_provider_deadline.starts_with("2035-02-03 04:05:06") {
@@ -248,14 +249,14 @@ mod tests {
             let mut other_transaction = database.pool.begin().await?;
             register_gateway_account(&mut other_transaction, &other_registration).await?;
             other_transaction.commit().await?;
-            let other_provider_is_open: bool = sqlx::query_scalar(
+            let other_provider_is_open: bool = checked_query_scalar!(
                 r#"
                 SELECT rate_limited_until = '-infinity'::timestamptz
                 FROM billing_gateway_provider_rate_limits
                 WHERE provider_key = $1
                 "#,
+                other_provider.as_str(),
             )
-            .bind(other_provider.as_str())
             .fetch_one(&database.pool)
             .await?;
             if !other_provider_is_open {
@@ -281,14 +282,15 @@ mod tests {
                 return Err(io::Error::other("exact configuration was not activated").into());
             }
 
-            let stored = sqlx::query_as::<_, (Uuid, String)>(
+            let stored = checked_query_as!(
+                (Uuid, String),
                 r#"
                 SELECT gateway_configuration_id, mutation_rate_limited_until::text
                 FROM billing_gateway_accounts
                 WHERE id = $1
                 "#,
+                account.as_uuid(),
             )
-            .bind(account.as_uuid())
             .fetch_one(&database.pool)
             .await?;
             if stored.0 != next_configuration.into_uuid()

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET dunning_retry_delays_seconds = ARRAY[86400, 259200]::bigint[], dunning_exhaustion = 'mark_unpaid', past_due_access = 'continue_until_dunning_exhausted' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "56f518f01fffa9274867964ca0b0a3320b7f1bdd28cf0c852928460ef12b232e"
+}

@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, resolution_code FROM billing_payment_attempts WHERE subscription_id = $1 AND attempt_kind = 'subscription_renewal'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "resolution_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "resolution_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "5193c78f1089c62fc711aa2323dfc0ad6de989fba71b36c1b3f388d8dac55a8f"
+}

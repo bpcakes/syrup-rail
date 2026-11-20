@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT jsonb_build_array(gateway_transaction_id, gateway_payment_method_reference, gateway_response, gateway_response_code, gateway_response_text, gateway_condition, payment_type, card_brand, card_last4, card_exp_month, card_exp_year)::text FROM billing_processor_charges WHERE attempt_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "jsonb_build_array",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b2bd6239cecd69dc278f0b10ba321643228104530963336d05456a41fadfbd14"
+}

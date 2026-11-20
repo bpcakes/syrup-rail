@@ -1,0 +1,198 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, billing_scope_id, plan_key, code_normalized, display_code,\n            label, status, discount_kind, amount_off_cents, percent_off_bps,\n            currency, duration, duration_months, created_at, updated_at\n        FROM billing_subscription_discount_codes\n        WHERE id = $1 AND billing_scope_id = $2 AND plan_key = $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "code_normalized",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "code_normalized"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "display_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "display_code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "label",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "label"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "discount_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "discount_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "amount_off_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "amount_off_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "percent_off_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "percent_off_bps"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "duration",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "duration"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "duration_months",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "duration_months"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_codes",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "2fada46bf24a3bf1a7078d5fe74c6d1daaa2d6dbfee2ab0ef6c2012022cbdf2a"
+}

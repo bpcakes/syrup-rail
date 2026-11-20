@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO billing_subscription_grants (\n                    id, billing_scope_id, subscriber_id, plan_key, grant_kind,\n                    reason, starts_at, ends_at, granted_by_actor_id\n                ) VALUES (\n                    $1, $2, $3, 'base_subscription', 'promotion', 'launch',\n                    clock_timestamp() - interval '1 minute',\n                    clock_timestamp() + interval '1 day', $4\n                )\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "70acb025a9f309049cbaa1eda0235c5830dc38aec17df27151d9203559fd6ed7"
+}

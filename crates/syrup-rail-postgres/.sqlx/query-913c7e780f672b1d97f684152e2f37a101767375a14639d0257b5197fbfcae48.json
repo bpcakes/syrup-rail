@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_reconciliation_cursors (\n            billing_scope_id,\n            gateway_account_id,\n            provider_key,\n            cursor_key,\n            last_successful_end_at\n        )\n        VALUES ($1, $2, $3, $4, $5)\n        ON CONFLICT (gateway_account_id, provider_key, cursor_key) DO UPDATE\n        SET last_successful_end_at = GREATEST(\n                billing_reconciliation_cursors.last_successful_end_at,\n                EXCLUDED.last_successful_end_at\n            ),\n            updated_at = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "913c7e780f672b1d97f684152e2f37a101767375a14639d0257b5197fbfcae48"
+}

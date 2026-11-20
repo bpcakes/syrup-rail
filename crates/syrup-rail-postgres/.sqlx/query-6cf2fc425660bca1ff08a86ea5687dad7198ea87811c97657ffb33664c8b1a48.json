@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "resolution_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "resolution_code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "submitted_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "submitted_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "6cf2fc425660bca1ff08a86ea5687dad7198ea87811c97657ffb33664c8b1a48"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE billing_subscriptions\n                SET current_period_end_at = boundary.at,\n                    next_renewal_at = boundary.at,\n                    updated_at = boundary.at\n                FROM (SELECT clock_timestamp() AS at) boundary\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fffef9d7b23c8a053b013af00fdbdcd8596ed8c68eec5754bd67aff66b12ad65"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id IN (SELECT id FROM billing_subscriptions ORDER BY id LIMIT 2048)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ca10c40090f3eb3bbcc18d9e1685f36dc4f5c1524003700b049e237ac9bc41f1"
+}

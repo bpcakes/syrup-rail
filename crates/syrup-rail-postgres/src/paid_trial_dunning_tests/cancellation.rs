@@ -109,21 +109,21 @@ async fn paid_trial_and_scheduled_dunning_cancellation_preserve_exact_access_and
         .expect("approved trial creates subscription")
         .id();
     let due_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+        checked_query_scalar!("SELECT clock_timestamp() - interval '1 second'")
             .fetch_one(&database.pool)
             .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '7 days',
+        SET current_period_start_at = $2::timestamptz - interval '7 days',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
     .execute(&database.pool)
     .await?;
     let queued_dunning_job = ChargeRenewal::new(
@@ -154,10 +154,10 @@ async fn paid_trial_and_scheduled_dunning_cancellation_preserve_exact_access_and
         String,
         Option<DateTime<Utc>>,
         Option<DateTime<Utc>>,
-    ) = sqlx::query_as(
+    ) = checked_query_as!(
         "SELECT status, canceled_at, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(status, "canceled");

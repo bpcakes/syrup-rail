@@ -61,7 +61,8 @@ impl SubscriptionBillingService {
         command: ChargeRenewal,
     ) -> Result<Option<(SubscriberId, PlanKey)>, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query_as::<_, (uuid::Uuid, String, String, i32, DateTime<Utc>)>(
+        let row = checked_query_as!(
+            (uuid::Uuid, String, String, i32, DateTime<Utc>),
             r#"
             SELECT subscriber_id, plan_key, recurring_period_kind, recurring_period_count,
                 clock_timestamp()
@@ -71,11 +72,11 @@ impl SubscriptionBillingService {
                 AND next_renewal_at = $3
                 AND required_gateway_account_mode = $4
             "#,
+            command.billing_scope_id().into_uuid(),
+            command.subscription_id().into_uuid(),
+            command.period_start_at(),
+            self.required_gateway_account_mode.as_str(),
         )
-        .bind(command.billing_scope_id().as_uuid())
-        .bind(command.subscription_id().as_uuid())
-        .bind(command.period_start_at())
-        .bind(self.required_gateway_account_mode.as_str())
         .fetch_optional(&mut *transaction)
         .await?;
         transaction.commit().await?;

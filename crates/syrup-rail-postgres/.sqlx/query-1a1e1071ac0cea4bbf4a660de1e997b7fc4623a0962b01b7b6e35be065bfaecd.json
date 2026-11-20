@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_payment_methods SET card_brand = 'VISA', card_last4 = '1111', card_exp_month = 10 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1a1e1071ac0cea4bbf4a660de1e997b7fc4623a0962b01b7b6e35be065bfaecd"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET status = 'failed',\n                resolution_code = 'gateway_configuration_before_submission',\n                gateway_condition = 'failed',\n                gateway_response_text = 'concurrent canonical result',\n                resolved_at = clock_timestamp(),\n                updated_at = clock_timestamp()\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bc901167580850f4d4f19f67010ad7fcfa284e7fcc7cbe79334787fd1132f9ea"
+}

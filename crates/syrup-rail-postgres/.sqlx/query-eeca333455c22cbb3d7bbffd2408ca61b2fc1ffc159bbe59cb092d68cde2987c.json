@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_payment_attempts SET status = 'pending', gateway_transaction_id = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eeca333455c22cbb3d7bbffd2408ca61b2fc1ffc159bbe59cb092d68cde2987c"
+}

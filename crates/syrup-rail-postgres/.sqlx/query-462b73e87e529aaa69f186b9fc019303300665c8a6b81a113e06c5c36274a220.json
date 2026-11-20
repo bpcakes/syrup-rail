@@ -1,0 +1,67 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT status, current_period_end_at, past_due_access, next_payment_attempt_at\n        FROM billing_subscriptions\n        WHERE billing_scope_id = $1\n            AND subscriber_id = $2\n            AND plan_key = $3\n            AND ($4::text IS NULL OR required_gateway_account_mode = $4)\n        ORDER BY id\n        FOR SHARE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "current_period_end_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "current_period_end_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "past_due_access",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "past_due_access"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "next_payment_attempt_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_payment_attempt_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "462b73e87e529aaa69f186b9fc019303300665c8a6b81a113e06c5c36274a220"
+}

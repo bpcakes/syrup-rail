@@ -369,11 +369,12 @@ pub async fn apply_reconciled_subscription_recovery_gateway_outcome(
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
         "subscription recovery attempt was not found",
     ))?;
-    let provider_key = sqlx::query_scalar::<_, String>(
+    let provider_key = checked_query_scalar!(
+        String,
         "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
+        billing_scope_id.as_uuid(),
+        attempt.identity().gateway_account_id().into_uuid(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(attempt.identity().gateway_account_id().as_uuid())
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
@@ -602,7 +603,7 @@ async fn apply_recovery_approved_on_connection(
             ))?;
     let old_method_id = reservation.expected_state().payment_method_id();
     let method_id = upsert_payment_method(connection, &attempt, evidence).await?;
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'active', phase = 'recurring', payment_method_id = $2,
@@ -619,19 +620,17 @@ async fn apply_recovery_approved_on_connection(
             AND payment_method_id = $11 AND initial_transaction_id = $12
             AND next_renewal_at = $3
         "#,
-    )
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(method_id.as_uuid())
-    .bind(reservation.period().start_at())
-    .bind(reservation.period().end_at())
-    .bind(transaction_id.expose())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
-    .bind(reservation.expected_state().status().as_str())
-    .bind(old_method_id.as_uuid())
-    .bind(
+        reservation.subscription_id().into_uuid(),
+        method_id.as_uuid(),
+        reservation.period().start_at(),
+        reservation.period().end_at(),
+        transaction_id.expose(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        reservation.plan_key().as_str(),
+        reservation.expected_state().status().as_str(),
+        old_method_id.as_uuid(),
         reservation
             .expected_state()
             .initial_transaction_id()

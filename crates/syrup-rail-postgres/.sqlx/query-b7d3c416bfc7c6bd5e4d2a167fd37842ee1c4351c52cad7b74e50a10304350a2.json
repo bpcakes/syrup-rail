@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH unactionable AS MATERIALIZED (\n            SELECT pending.id\n            FROM billing_gateway_lifecycle_pending_updates pending\n            CROSS JOIN LATERAL (\n                SELECT COUNT(*)::bigint AS candidate_count,\n                    COALESCE(BOOL_OR(\n                        pending.gateway_transaction_id IS NOT NULL\n                        AND public.billing_canonical_gateway_transaction_id(\n                            attempts.gateway_transaction_id\n                        ) = pending.gateway_transaction_id\n                    ), false) AS has_transaction_match\n                FROM billing_payment_attempts attempts\n                WHERE attempts.billing_scope_id = $1\n                    AND attempts.gateway_account_id = $2\n                    AND attempts.status = 'approved'\n                    AND (\n                        (\n                            pending.gateway_transaction_id IS NOT NULL\n                            AND public.billing_canonical_gateway_transaction_id(\n                                attempts.gateway_transaction_id\n                            ) = pending.gateway_transaction_id\n                        )\n                        OR (\n                            pending.gateway_order_id IS NOT NULL\n                            AND (\n                                pending.gateway_transaction_id IS NULL\n                                OR public.billing_canonical_gateway_transaction_id(\n                                    attempts.gateway_transaction_id\n                                ) IS NULL\n                            )\n                            AND attempts.gateway_order_id = pending.gateway_order_id\n                        )\n                    )\n            ) matches\n            WHERE pending.billing_scope_id = $1\n                AND pending.gateway_account_id = $2\n                AND pending.expires_at > now()\n                AND pending.check_count < $3\n                AND NOT (matches.has_transaction_match OR matches.candidate_count = 1)\n            ORDER BY pending.last_checked_at NULLS FIRST,\n                pending.first_seen_at,\n                pending.id\n            LIMIT $4\n            FOR UPDATE OF pending SKIP LOCKED\n        )\n        UPDATE billing_gateway_lifecycle_pending_updates pending\n        SET last_checked_at = now(),\n            check_count = pending.check_count + 1\n        FROM unactionable\n        WHERE pending.id = unactionable.id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b7d3c416bfc7c6bd5e4d2a167fd37842ee1c4351c52cad7b74e50a10304350a2"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE billing_gateway_provider_rate_limits\n                SET rate_limited_until = $2::text::timestamptz\n                WHERE provider_key = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c826aafd35c205bf679bfcf5afd019d292e887b6e1edd3fc1c186ae08fd9aa4a"
+}

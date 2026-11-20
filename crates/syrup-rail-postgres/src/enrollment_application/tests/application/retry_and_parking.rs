@@ -248,18 +248,18 @@ async fn provider_not_submitted_throttle_atomically_extends_the_account_cooldown
         result.payment().attempt().state().resolution_code(),
         Some(PaymentResolutionCode::GatewayAccountRateLimitedBeforeSubmission)
     );
-    let deadlines: (bool, bool) = sqlx::query_as(
+    let deadlines: (bool, bool) = checked_query_as!(
         r#"
         SELECT
-            mutation_rate_limited_until > clock_timestamp(),
-            provider.rate_limited_until > clock_timestamp()
+            mutation_rate_limited_until > clock_timestamp() AS account_limited,
+            provider.rate_limited_until > clock_timestamp() AS provider_limited
         FROM billing_gateway_accounts AS account
         INNER JOIN billing_gateway_provider_rate_limits AS provider
             ON provider.provider_key = account.provider_key
         WHERE account.id = $1
         "#,
+        fixture.gateway_account.gateway_account_id,
     )
-    .bind(fixture.gateway_account.gateway_account_id)
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(deadlines, (true, false));
@@ -285,12 +285,12 @@ async fn event_failure_rolls_back_application_and_durably_parks_approval()
         PaymentAttemptStatus::ReviewRequired
     );
     assert!(result.subscription().is_none());
-    let counts: (i64, i64, i64) = sqlx::query_as(
+    let counts: (i64, i64, i64) = checked_query_as!(
         r#"
         SELECT
-            (SELECT count(*) FROM billing_payment_methods),
-            (SELECT count(*) FROM billing_subscriptions),
-            (SELECT count(*) FROM billing_processor_charges)
+            (SELECT count(*) FROM billing_payment_methods) AS payment_methods,
+            (SELECT count(*) FROM billing_subscriptions) AS subscriptions,
+            (SELECT count(*) FROM billing_processor_charges) AS processor_charges
         "#,
     )
     .fetch_one(&fixture.database.pool)
@@ -304,7 +304,7 @@ async fn event_failure_rolls_back_application_and_durably_parks_approval()
 async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
 -> Result<(), Box<dyn Error>> {
     let fixture = application_fixture("charge_fallback").build().await?;
-    sqlx::raw_sql(
+    crate::test_support::fixture_raw_sql(
         r#"
         CREATE FUNCTION host_reject_attempt_status_update()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -340,9 +340,9 @@ async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
         Some("txn_charge_fallback")
     );
     assert!(result.subscription().is_none());
-    let durable: (i64, String, Option<String>) = sqlx::query_as(
+    let durable: (i64, String, Option<String>) = checked_query_as!(
         r#"
-        SELECT count(*), min(progression_state), min(gateway_transaction_id)
+        SELECT count(*), min(progression_state) AS progression, min(gateway_transaction_id) AS transaction
         FROM billing_processor_charges
         "#,
     )
@@ -356,9 +356,10 @@ async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
             Some("txn_charge_fallback".to_owned())
         )
     );
-    let subscription_count: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_subscriptions")
-        .fetch_one(&fixture.database.pool)
-        .await?;
+    let subscription_count: i64 =
+        checked_query_scalar!("SELECT count(*) FROM billing_subscriptions")
+            .fetch_one(&fixture.database.pool)
+            .await?;
     assert_eq!(subscription_count, 0);
     fixture.cleanup().await
 }
@@ -367,7 +368,7 @@ async fn failed_attempt_parking_falls_back_to_permanent_charge_observation()
 async fn later_exact_approval_identifies_a_transactionless_fallback_charge()
 -> Result<(), Box<dyn Error>> {
     let fixture = application_fixture("identify_charge").build().await?;
-    sqlx::raw_sql(
+    crate::test_support::fixture_raw_sql(
         r#"
         CREATE FUNCTION host_reject_attempt_status_update()
         RETURNS trigger LANGUAGE plpgsql AS $$
@@ -394,12 +395,12 @@ async fn later_exact_approval_identifies_a_transactionless_fallback_charge()
     .await?;
     assert_eq!(parked.attempt().status(), PaymentAttemptStatus::Pending);
     let before: Option<String> =
-        sqlx::query_scalar("SELECT gateway_transaction_id FROM billing_processor_charges")
+        checked_query_scalar!("SELECT gateway_transaction_id FROM billing_processor_charges")
             .fetch_one(&fixture.database.pool)
             .await?;
     assert!(before.is_none());
 
-    sqlx::query("DROP TRIGGER host_reject_attempt_status_update ON billing_payment_attempts")
+    sqlx::query!("DROP TRIGGER host_reject_attempt_status_update ON billing_payment_attempts")
         .execute(&fixture.database.pool)
         .await?;
     let exact = approved_outcome("txn_identified_later");
@@ -411,8 +412,8 @@ async fn later_exact_approval_identifies_a_transactionless_fallback_charge()
     )
     .await?;
     assert_eq!(applied.attempt().status(), PaymentAttemptStatus::Approved);
-    let identified: (String, String) = sqlx::query_as(
-        "SELECT gateway_transaction_id, progression_state FROM billing_processor_charges",
+    let identified: (String, String) = checked_query_as!(
+        "SELECT gateway_transaction_id, progression_state FROM billing_processor_charges"
     )
     .fetch_one(&fixture.database.pool)
     .await?;
@@ -427,7 +428,7 @@ async fn later_exact_approval_identifies_a_transactionless_fallback_charge()
 async fn approval_after_terminal_failure_is_parked_with_reversal_required_charge()
 -> Result<(), Box<dyn Error>> {
     let fixture = application_fixture("terminal_race").build().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed', resolved_at = clock_timestamp(),
@@ -436,8 +437,8 @@ async fn approval_after_terminal_failure_is_parked_with_reversal_required_charge
             gateway_response_text = 'local failure', updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        fixture.reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(fixture.reservation.identity().attempt_id().as_uuid())
     .execute(&fixture.database.pool)
     .await?;
     let result = apply_subscription_enrollment_gateway_outcome(
@@ -460,7 +461,7 @@ async fn approval_after_terminal_failure_is_parked_with_reversal_required_charge
     );
     assert!(result.subscription().is_none());
     let progression: String =
-        sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
+        checked_query_scalar!("SELECT progression_state FROM billing_processor_charges")
             .fetch_one(&fixture.database.pool)
             .await?;
     assert_eq!(progression, "external_reversal_required");

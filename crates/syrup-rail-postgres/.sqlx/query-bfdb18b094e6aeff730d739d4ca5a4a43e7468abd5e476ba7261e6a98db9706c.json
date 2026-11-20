@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO billing_processor_charges (\n                id, attempt_id, billing_scope_id, gateway_account_id,\n                gateway_order_id, gateway_transaction_id, gateway_response,\n                gateway_response_code, gateway_response_text, gateway_condition,\n                charge_role, progression_state, observed_at, attempt_kind,\n                host_charge_target_id, amount_cents, currency,\n                external_reversal_required_at\n            ) VALUES (\n                $1, $2, $3, $4, $5, 'txn-operator-additional', '1', '100',\n                'Approved additional charge', 'complete', 'additional',\n                'external_reversal_required', clock_timestamp(), 'host_charge',\n                $6, 500, 'USD', clock_timestamp()\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bfdb18b094e6aeff730d739d4ca5a4a43e7468abd5e476ba7261e6a98db9706c"
+}

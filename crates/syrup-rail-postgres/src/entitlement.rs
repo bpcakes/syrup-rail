@@ -179,11 +179,10 @@ async fn require_entitlement_for_update_with_lock_timeout(
     let mut transaction = transaction.inner;
     let admission = async {
         let previous_lock_timeout: String =
-            sqlx::query_scalar("SELECT current_setting('lock_timeout', true)")
+            checked_query_scalar!("SELECT current_setting('lock_timeout', true)")
                 .fetch_one(&mut *transaction)
                 .await?;
-        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(lock_timeout)
+        checked_query!("SELECT set_config('lock_timeout', $1, true)", lock_timeout,)
             .execute(&mut *transaction)
             .await?;
         let access = lock_and_classify_entitlement(&mut transaction, guard).await?;
@@ -199,10 +198,12 @@ async fn require_entitlement_for_update_with_lock_timeout(
 
     match access {
         GuardAccess::Paid | GuardAccess::PaidThroughCancellation | GuardAccess::Granted => {
-            if let Err(error) = sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-                .bind(previous_lock_timeout)
-                .execute(&mut *transaction)
-                .await
+            if let Err(error) = checked_query!(
+                "SELECT set_config('lock_timeout', $1, true)",
+                previous_lock_timeout,
+            )
+            .execute(&mut *transaction)
+            .await
             {
                 return rollback_guard_failure(transaction, EntitlementGuardError::Sql(error))
                     .await;
@@ -239,13 +240,15 @@ async fn lock_and_classify_entitlement(
     connection: &mut PgConnection,
     guard: &EntitlementGuard,
 ) -> Result<GuardAccess, sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(guard.subscriber_id().as_uuid())
-        .bind(guard.plan_key().as_str())
-        .execute(&mut *connection)
-        .await?;
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        guard.subscriber_id().into_uuid(),
+        guard.plan_key().as_str(),
+    )
+    .execute(&mut *connection)
+    .await?;
 
-    let subscriptions = sqlx::query_as::<_, GuardSubscriptionState>(
+    let subscriptions: Vec<GuardSubscriptionState> = checked_query_as!(
         r#"
         SELECT status, current_period_end_at, past_due_access, next_payment_attempt_at
         FROM billing_subscriptions
@@ -256,18 +259,16 @@ async fn lock_and_classify_entitlement(
         ORDER BY id
         FOR SHARE
         "#,
-    )
-    .bind(guard.billing_scope_id().as_uuid())
-    .bind(guard.subscriber_id().as_uuid())
-    .bind(guard.plan_key().as_str())
-    .bind(
+        guard.billing_scope_id().into_uuid(),
+        guard.subscriber_id().into_uuid(),
+        guard.plan_key().as_str(),
         guard
             .required_gateway_account_mode()
             .map(GatewayAccountMode::as_str),
     )
     .fetch_all(&mut *connection)
     .await?;
-    let grants = sqlx::query_as::<_, GuardGrantTimeState>(
+    let grants: Vec<GuardGrantTimeState> = checked_query_as!(
         r#"
         SELECT starts_at, ends_at, revoked_at
         FROM billing_subscription_grants
@@ -277,13 +278,13 @@ async fn lock_and_classify_entitlement(
         ORDER BY id
         FOR SHARE
         "#,
+        guard.billing_scope_id().into_uuid(),
+        guard.subscriber_id().into_uuid(),
+        guard.plan_key().as_str(),
     )
-    .bind(guard.billing_scope_id().as_uuid())
-    .bind(guard.subscriber_id().as_uuid())
-    .bind(guard.plan_key().as_str())
     .fetch_all(&mut *connection)
     .await?;
-    let access_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+    let access_at: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
         .fetch_one(&mut *connection)
         .await?;
 
@@ -368,7 +369,7 @@ where
     let initial_policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
     let subscription_charge_policy =
         LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         WITH clock AS MATERIALIZED (
             SELECT clock_timestamp() AS observed_at
@@ -535,18 +536,16 @@ where
             LIMIT 1
         ) applied ON true
         "#,
-    )
-    .bind(query.billing_scope_id().as_uuid())
-    .bind(query.subscriber_id().as_uuid())
-    .bind(query.plan_key().as_str())
-    .bind(
+        query.billing_scope_id().into_uuid(),
+        query.subscriber_id().into_uuid(),
+        query.plan_key().as_str(),
         query
             .required_gateway_account_mode()
             .map(GatewayAccountMode::as_str),
+        initial_policy.stale_after_seconds(),
+        subscription_charge_policy.stale_after_seconds(),
+        LocalAttemptPolicy::expirable_status_values(),
     )
-    .bind(initial_policy.stale_after_seconds())
-    .bind(subscription_charge_policy.stale_after_seconds())
-    .bind(LocalAttemptPolicy::expirable_status_values())
     .fetch_one(executor)
     .await?;
 

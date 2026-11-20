@@ -1,0 +1,57 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, charge_role,\n            gateway_payment_method_reference IS NOT DISTINCT FROM $2\n                AND gateway_response IS NOT DISTINCT FROM $3\n                AND gateway_response_code IS NOT DISTINCT FROM $4\n                AND gateway_response_text IS NOT DISTINCT FROM $5\n                AND gateway_condition IS NOT DISTINCT FROM $6\n                AND payment_type IS NOT DISTINCT FROM $7\n                AND card_brand IS NOT DISTINCT FROM $8\n                AND card_last4 IS NOT DISTINCT FROM $9\n                AND card_exp_month IS NOT DISTINCT FROM $10\n                AND card_exp_year IS NOT DISTINCT FROM $11 AS evidence_matches\n        FROM billing_processor_charges\n        WHERE attempt_id = $1\n            AND billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "charge_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "charge_role"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "evidence_matches",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int2",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "62dfdb3d4defdfbd6e96e13d0c2dea4813ee843387c056c050e80c0495c85aab"
+}

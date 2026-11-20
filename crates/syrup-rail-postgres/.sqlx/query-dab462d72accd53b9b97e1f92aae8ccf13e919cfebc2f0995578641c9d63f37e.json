@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_methods\n            SET card_brand = '   ',\n                card_last4 = NULL,\n                card_exp_month = NULL,\n                card_exp_year = NULL\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dab462d72accd53b9b97e1f92aae8ccf13e919cfebc2f0995578641c9d63f37e"
+}

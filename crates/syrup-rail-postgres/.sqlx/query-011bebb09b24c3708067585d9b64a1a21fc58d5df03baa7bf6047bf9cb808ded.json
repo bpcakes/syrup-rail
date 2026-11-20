@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT relation.relname, catalog_constraint.conname\n        FROM pg_catalog.pg_constraint AS catalog_constraint\n        INNER JOIN pg_catalog.pg_class AS relation\n            ON relation.oid = catalog_constraint.conrelid\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = relation.relnamespace\n        WHERE namespace.nspname = 'public'\n            AND relation.relname = ANY($1)\n            AND catalog_constraint.conname LIKE 'billing\\_%' ESCAPE '\\'\n            AND NOT catalog_constraint.convalidated\n        ORDER BY relation.relname, catalog_constraint.conname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "relname",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relname"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "conname",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_constraint",
+            "name": "conname"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "011bebb09b24c3708067585d9b64a1a21fc58d5df03baa7bf6047bf9cb808ded"
+}

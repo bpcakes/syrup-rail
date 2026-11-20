@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT billing_scope_id, subscriber_id, plan_key\n        FROM billing_payment_attempts\n        WHERE gateway_account_id = $1\n            AND attempt_kind = 'subscription_initial'\n            AND status = ANY($2::text[])\n            AND submitted_at IS NULL\n            AND created_at <= clock_timestamp()\n                - ($3::bigint * interval '1 second')\n        ORDER BY billing_scope_id, subscriber_id, plan_key\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "subscriber_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscriber_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "plan_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4ee4602a6f88c860ab403500c864fd4ac275aadb02f86d3b16e9812cfde1d033"
+}

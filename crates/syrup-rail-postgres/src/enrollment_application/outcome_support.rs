@@ -107,7 +107,7 @@ pub(crate) async fn rate_limit_cooldown_identity_is_durable(
     connection: &mut PgConnection,
     identity: PaymentAttemptIdentity,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -120,13 +120,13 @@ pub(crate) async fn rate_limit_cooldown_identity_is_durable(
                 AND required_gateway_account_mode = $6
         )
         "#,
+        identity.attempt_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        identity.gateway_configuration_id().into_uuid(),
+        identity.required_gateway_account_mode().as_str(),
     )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(identity.required_gateway_account_mode().as_str())
     .fetch_one(&mut *connection)
     .await
 }
@@ -146,21 +146,21 @@ pub(crate) async fn persist_rate_limit_cooldown(
         )
         .await;
     }
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE billing_gateway_accounts
         SET mutation_rate_limited_until = GREATEST(
                 COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),
-                clock_timestamp() + make_interval(secs => $4)
+                clock_timestamp() + make_interval(secs => $4::bigint)
             )
         WHERE id = $1 AND billing_scope_id = $2
             AND gateway_configuration_id = $3
         "#,
+        identity.gateway_account_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.gateway_configuration_id().into_uuid(),
+        syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS,
     )
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS)
     .execute(&mut *connection)
     .await?;
     Ok(if result.rows_affected() == 1 {
@@ -176,27 +176,28 @@ pub(crate) async fn persist_bound_provider_rate_limit_cooldown(
     gateway_account_id: syrup_rail::GatewayAccountId,
     provider_key: &GatewayProviderKey,
 ) -> Result<RateLimitCooldownPersistence, sqlx::Error> {
-    let current_provider = sqlx::query_scalar::<_, String>(
+    let current_provider = checked_query_scalar!(
+        String,
         r#"
         SELECT provider_key
         FROM billing_gateway_accounts
         WHERE id = $1 AND billing_scope_id = $2
         FOR UPDATE
         "#,
+        gateway_account_id.as_uuid(),
+        billing_scope_id.as_uuid(),
     )
-    .bind(gateway_account_id.as_uuid())
-    .bind(billing_scope_id.as_uuid())
     .fetch_optional(&mut *connection)
     .await?;
     if current_provider.as_deref() != Some(provider_key.as_str()) {
         return Ok(RateLimitCooldownPersistence::IdentityChanged);
     }
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE billing_gateway_provider_rate_limits AS provider_limits
         SET rate_limited_until = GREATEST(
             provider_limits.rate_limited_until,
-            clock_timestamp() + make_interval(secs => $4)
+            clock_timestamp() + make_interval(secs => $4::bigint)
         )
         FROM billing_gateway_accounts AS accounts
         WHERE provider_limits.provider_key = $1
@@ -204,11 +205,11 @@ pub(crate) async fn persist_bound_provider_rate_limit_cooldown(
             AND accounts.id = $2
             AND accounts.billing_scope_id = $3
         "#,
+        provider_key.as_str(),
+        gateway_account_id.as_uuid(),
+        billing_scope_id.as_uuid(),
+        syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS,
     )
-    .bind(provider_key.as_str())
-    .bind(gateway_account_id.as_uuid())
-    .bind(billing_scope_id.as_uuid())
-    .bind(syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS)
     .execute(&mut *connection)
     .await?;
     Ok(if result.rows_affected() == 1 {

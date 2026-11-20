@@ -1,0 +1,102 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, gateway_account_id, payment_method_id, initial_transaction_id,\n            status, currency, required_gateway_account_mode\n        FROM billing_subscriptions\n        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3\n        ORDER BY updated_at DESC, id DESC\n        LIMIT 1\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "payment_method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "payment_method_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "initial_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "initial_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "required_gateway_account_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a09171be8b5561a98add28ddf76ef5ffe83d2df049528068d8da312ec107319e"
+}

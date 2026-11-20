@@ -74,14 +74,14 @@ async fn exact_attempt_claim_is_canonical_bounded_and_account_scoped() -> Result
             insert_stale_enrollment(&database.pool, account, subscriber_id, "plan_a").await?;
         let second =
             insert_stale_enrollment(&database.pool, account, subscriber_id, "plan_b").await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
                 UPDATE billing_payment_attempts
                 SET status = 'review_required', review_required_at = created_at
                 WHERE id = $1
                 "#,
+            first,
         )
-        .bind(first)
         .execute(&database.pool)
         .await?;
         for position in 2..=RECONCILIATION_PHASE_BATCH_SIZE {
@@ -96,15 +96,15 @@ async fn exact_attempt_claim_is_canonical_bounded_and_account_scoped() -> Result
         let sibling_attempt =
             insert_stale_enrollment(&database.pool, sibling, Uuid::now_v7(), "sibling_plan")
                 .await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET submitted_at = created_at
             WHERE gateway_account_id IN ($1, $2)
             "#,
+            account.gateway_account_id,
+            sibling.gateway_account_id,
         )
-        .bind(account.gateway_account_id)
-        .bind(sibling.gateway_account_id)
         .execute(&database.pool)
         .await?;
         let local_unsubmitted =
@@ -228,10 +228,12 @@ async fn stale_payment_method_replacement_cleanup_is_bounded_and_account_scoped(
             0,
         )
         .await?;
-        sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
-            .bind(unsubmitted_review)
-            .execute(&database.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+            unsubmitted_review,
+        )
+        .execute(&database.pool)
+        .await?;
         for position in 1..=RECONCILIATION_PHASE_BATCH_SIZE {
             let _ = insert_stale_payment_method_replacement(
                 &database.pool,
@@ -267,10 +269,10 @@ async fn stale_payment_method_replacement_cleanup_is_bounded_and_account_scoped(
             .await?,
             1,
         );
-        let sibling_status: String = sqlx::query_scalar(
+        let sibling_status: String = checked_query_scalar!(
             "SELECT status FROM billing_payment_attempts WHERE gateway_account_id = $1",
+            sibling.gateway_account_id,
         )
-        .bind(sibling.gateway_account_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(sibling_status, "pending");
@@ -298,22 +300,22 @@ async fn insert_stale_payment_method_replacement(
     let subscription_id = Uuid::now_v7();
     let attempt_id = Uuid::now_v7();
     let transaction_id = format!("txn{position}ref");
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_methods (
                 id, billing_scope_id, subscriber_id, gateway_account_id,
                 gateway_payment_method_reference, status
             ) VALUES ($1, $2, $3, $4, $5, 'active')
             "#,
+        payment_method_id,
+        billing_scope_id,
+        subscriber_id,
+        gateway_account_id,
+        format!("method{position}ref"),
     )
-    .bind(payment_method_id)
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
-    .bind(gateway_account_id)
-    .bind(format!("method{position}ref"))
     .execute(pool)
     .await?;
-    sqlx::query(
+    checked_query!(
         r#"
             WITH clock AS MATERIALIZED (
                 SELECT clock_timestamp() AS observed_at
@@ -336,16 +338,16 @@ async fn insert_stale_payment_method_replacement(
                 observed_at + interval '1 day'
             FROM clock
             "#,
+        subscription_id,
+        billing_scope_id,
+        subscriber_id,
+        gateway_account_id,
+        payment_method_id,
+        &transaction_id,
     )
-    .bind(subscription_id)
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
-    .bind(gateway_account_id)
-    .bind(payment_method_id)
-    .bind(&transaction_id)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -365,18 +367,18 @@ async fn insert_stale_payment_method_replacement(
                 clock_timestamp() - interval '4 minutes'
             )
             "#,
+        attempt_id,
+        billing_scope_id,
+        subscriber_id,
+        subscription_id,
+        payment_method_id,
+        format!("idem{position}"),
+        format!("fingerprint{position}"),
+        gateway_account_id,
+        gateway_configuration_id,
+        format!("order{position}ref"),
+        transaction_id,
     )
-    .bind(attempt_id)
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
-    .bind(subscription_id)
-    .bind(payment_method_id)
-    .bind(format!("idem{position}"))
-    .bind(format!("fingerprint{position}"))
-    .bind(gateway_account_id)
-    .bind(gateway_configuration_id)
-    .bind(format!("order{position}ref"))
-    .bind(transaction_id)
     .execute(pool)
     .await?;
     Ok(attempt_id)
@@ -400,11 +402,11 @@ async fn stale_enrollment_cleanup_uses_the_persisted_plan_lock_and_account_scope
             insert_stale_enrollment(&database.pool, sibling, Uuid::now_v7(), "plan_c").await?;
 
         let mut lock_holder = database.pool.begin().await?;
-        sqlx::query(
+        checked_query!(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+            subscriber_id,
+            plan_a,
         )
-        .bind(subscriber_id)
-        .bind(plan_a)
         .execute(&mut *lock_holder)
         .await?;
 
@@ -469,11 +471,11 @@ async fn pending_charge_classification_skips_a_busy_persisted_plan_without_starv
                 .await?;
 
         let mut lock_holder = database.pool.begin().await?;
-        sqlx::query(
+        checked_query!(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+            subscriber_id,
+            "plan_a",
         )
-        .bind(subscriber_id)
-        .bind("plan_a")
         .execute(&mut *lock_holder)
         .await?;
 
@@ -585,7 +587,7 @@ async fn insert_pending_processor_charge(
     let attempt_id = Uuid::now_v7();
     let charge_id = Uuid::now_v7();
     let order_id = format!("order-{attempt_id}");
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -608,19 +610,19 @@ async fn insert_pending_processor_charge(
                 'remain_past_due', 'suspend_immediately'
             )
             "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        plan_key,
+        format!("idem-{attempt_id}"),
+        format!("fingerprint-{attempt_id}"),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        &order_id,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(format!("idem-{attempt_id}"))
-    .bind(format!("fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(&order_id)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_processor_charges (
                 id, attempt_id, billing_scope_id, gateway_account_id,
@@ -635,25 +637,27 @@ async fn insert_pending_processor_charge(
                 'subscription_initial', $8, 100, 'USD'
             )
             "#,
+        charge_id,
+        attempt_id,
+        account.billing_scope_id,
+        account.gateway_account_id,
+        order_id,
+        format!("transaction-{attempt_id}"),
+        age_seconds,
+        plan_key,
     )
-    .bind(charge_id)
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(order_id)
-    .bind(format!("transaction-{attempt_id}"))
-    .bind(age_seconds)
-    .bind(plan_key)
     .execute(pool)
     .await?;
     Ok(charge_id)
 }
 
 async fn charge_progression(pool: &sqlx::PgPool, charge_id: Uuid) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges WHERE id = $1")
-        .bind(charge_id)
-        .fetch_one(pool)
-        .await
+    checked_query_scalar!(
+        "SELECT progression_state FROM billing_processor_charges WHERE id = $1",
+        charge_id,
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn insert_stale_enrollment(
@@ -663,7 +667,7 @@ async fn insert_stale_enrollment(
     plan_key: &str,
 ) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -689,24 +693,26 @@ async fn insert_stale_enrollment(
                 ARRAY[]::bigint[], 'remain_past_due', 'suspend_immediately'
             )
             "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        plan_key,
+        format!("idem-{attempt_id}"),
+        format!("fingerprint-{attempt_id}"),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("order_{}", attempt_id.simple()),
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(format!("idem-{attempt_id}"))
-    .bind(format!("fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("order_{}", attempt_id.simple()))
     .execute(pool)
     .await?;
     Ok(attempt_id)
 }
 
 async fn attempt_status(pool: &sqlx::PgPool, attempt_id: Uuid) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-        .bind(attempt_id)
-        .fetch_one(pool)
-        .await
+    checked_query_scalar!(
+        "SELECT status FROM billing_payment_attempts WHERE id = $1",
+        attempt_id,
+    )
+    .fetch_one(pool)
+    .await
 }

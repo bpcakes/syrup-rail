@@ -83,10 +83,10 @@ async fn enrollment_reservation_is_token_free_replayable_and_plan_bearing()
     assert!(attempt.state().timestamps().submitted_at().is_none());
     transaction.commit().await?;
 
-    let persisted: String = sqlx::query_scalar(
+    let persisted: String = checked_query_scalar!(
         "SELECT to_jsonb(attempts)::text FROM billing_payment_attempts attempts WHERE id = $1",
+        attempt.identity().attempt_id().into_uuid(),
     )
-    .bind(attempt.identity().attempt_id().as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert!(!persisted.contains("token-secret"));
@@ -226,13 +226,13 @@ async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offe
         other => return Err(format!("unexpected reservation outcome: {other:?}").into()),
     };
     transaction.commit().await?;
-    sqlx::query(
-            "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '29 minutes 59 seconds' WHERE id = $1",
-        )
-        .bind(before_boundary_attempt.identity().attempt_id().as_uuid())
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '29 minutes 59 seconds' WHERE id = $1",
+        before_boundary_attempt.identity().attempt_id().into_uuid(),
+    )
         .execute(&database.pool)
         .await?;
-    sqlx::query(
+    crate::test_support::fixture_query(
         "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
     )
     .bind(account.billing_scope_id)
@@ -252,11 +252,12 @@ async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offe
         )
     );
     transaction.rollback().await?;
-    let before_boundary_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-            .bind(before_boundary_attempt.identity().attempt_id().as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
+    let before_boundary_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_payment_attempts WHERE id = $1",
+        before_boundary_attempt.identity().attempt_id().into_uuid(),
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(before_boundary_status, "pending");
 
     set_offer(&database, account.billing_scope_id, plan_key, 1_000).await?;
@@ -284,13 +285,13 @@ async fn same_key_stale_replay_expires_at_the_exact_boundary_without_a_live_offe
         other => return Err(format!("unexpected reservation outcome: {other:?}").into()),
     };
     transaction.commit().await?;
-    sqlx::query(
-            "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '30 minutes' WHERE id = $1",
-        )
-        .bind(boundary_attempt.identity().attempt_id().as_uuid())
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '30 minutes' WHERE id = $1",
+        boundary_attempt.identity().attempt_id().into_uuid(),
+    )
         .execute(&database.pool)
         .await?;
-    sqlx::query(
+    crate::test_support::fixture_query(
         "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
     )
     .bind(account.billing_scope_id)
@@ -368,7 +369,7 @@ async fn legacy_unsubmitted_review_replay_expires_before_live_policy() -> Result
         other => return Err(format!("unexpected reservation outcome: {other:?}").into()),
     };
     transaction.commit().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'review_required',
@@ -376,11 +377,11 @@ async fn legacy_unsubmitted_review_replay_expires_before_live_policy() -> Result
             created_at = clock_timestamp() - interval '31 minutes'
         WHERE id = $1
         "#,
+        prepared.identity().attempt_id().into_uuid(),
     )
-    .bind(prepared.identity().attempt_id().as_uuid())
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    crate::test_support::fixture_query(
         "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
     )
     .bind(account.billing_scope_id)
@@ -546,10 +547,12 @@ async fn saved_discount_survives_repricing_but_not_pre_submission_expiry()
         SubscriptionEnrollmentReservationOutcome::Reserved(_)
     ));
     transaction.commit().await?;
-    sqlx::query("UPDATE billing_subscription_discount_claims SET status = 'expired' WHERE id = $1")
-        .bind(claim_b)
-        .execute(&database.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_subscription_discount_claims SET status = 'expired' WHERE id = $1",
+        claim_b,
+    )
+    .execute(&database.pool)
+    .await?;
     let mut transaction = database.pool.begin().await?;
     let rejected = admit_subscription_enrollment_submission_in_transaction(
         &mut transaction,

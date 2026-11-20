@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '29 minutes 59 seconds' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b2469558d7a9684b71877bdb69899c9a65ab7e94637fbff5ac18d9fca510c370"
+}

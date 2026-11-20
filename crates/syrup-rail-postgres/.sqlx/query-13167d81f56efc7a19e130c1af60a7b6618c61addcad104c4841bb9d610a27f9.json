@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id FROM billing_subscriptions\n        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3\n            AND (\n                status IN ('active', 'past_due')\n                OR (status = 'canceled' AND current_period_end_at > clock_timestamp())\n            )\n        ORDER BY updated_at DESC, id DESC\n        FOR NO KEY UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "13167d81f56efc7a19e130c1af60a7b6618c61addcad104c4841bb9d610a27f9"
+}

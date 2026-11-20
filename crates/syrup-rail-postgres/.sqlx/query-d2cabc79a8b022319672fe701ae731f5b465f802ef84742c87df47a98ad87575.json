@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, gateway_payment_method_reference FROM billing_payment_methods WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gateway_payment_method_reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d2cabc79a8b022319672fe701ae731f5b465f802ef84742c87df47a98ad87575"
+}

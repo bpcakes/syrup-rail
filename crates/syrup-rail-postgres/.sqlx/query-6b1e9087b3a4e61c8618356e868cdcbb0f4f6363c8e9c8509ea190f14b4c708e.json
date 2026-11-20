@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_payment_attempts (\n            required_gateway_account_mode,\n            id, billing_scope_id, subscriber_id, plan_key, subscription_id,\n            payment_method_id, attempt_kind, status, idempotency_key,\n            request_fingerprint, amount_cents, currency,\n            billing_period_start_at, billing_period_end_at,\n            gateway_account_id, gateway_configuration_id, gateway_order_id,\n            subscription_expected_payment_method_id,\n            subscription_expected_initial_transaction_id,\n            subscription_expected_status, resolved_at, created_at, updated_at\n        )\n        SELECT\n            'live',\n            md5('renewal-plan-attempt-' || value)::uuid,\n            $1,\n            md5('renewal-plan-subscriber-' || value)::uuid,\n            'plan-shape',\n            md5('renewal-plan-subscription-' || value)::uuid,\n            md5('renewal-plan-method-' || value)::uuid,\n            'subscription_recovery',\n            'failed',\n            'renewal-plan-idempotency-' || value,\n            'renewal-plan-fingerprint-' || value,\n            1900,\n            'USD',\n            scheduled_at,\n            scheduled_at + interval '1 month',\n            $2,\n            $3,\n            'renewal-plan-order-' || value,\n            md5('renewal-plan-method-' || value)::uuid,\n            'renewal-plan-transaction-' || value,\n            'active',\n            scheduled_at - interval '1 second',\n            scheduled_at - interval '2 seconds',\n            scheduled_at - interval '1 second'\n        FROM generate_series(1, $5::integer) AS fixture(value)\n        CROSS JOIN LATERAL (\n            SELECT $4::timestamptz\n                - ((value - 1) / 4) * interval '1 second' AS scheduled_at\n        ) AS schedule\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6b1e9087b3a4e61c8618356e868cdcbb0f4f6363c8e9c8509ea190f14b4c708e"
+}

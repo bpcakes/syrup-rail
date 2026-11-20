@@ -13,9 +13,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::attempts::{
-    PAYMENT_ATTEMPT_SELECT, find_payment_attempt_by_id_on_connection,
-    lock_payment_attempt_by_id_on_connection, lock_subscription_aggregate,
-    payment_attempt_from_row, set_enrollment_timeouts,
+    find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
+    lock_subscription_aggregate, payment_attempt_from_row, payment_attempt_query,
+    set_enrollment_timeouts,
 };
 use crate::processor_charge_persistence::{
     attestation_by_charge, attestation_matches_source, processor_charge_from_row,
@@ -211,10 +211,10 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
     set_enrollment_timeouts(&mut transaction).await?;
 
     for _ in 0..2 {
-        let has_existing_charge: bool = sqlx::query_scalar(
+        let has_existing_charge: bool = checked_query_scalar!(
             "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
+            identity.attempt_id().into_uuid(),
         )
-        .bind(identity.attempt_id().as_uuid())
         .fetch_one(&mut *transaction)
         .await?;
         let role = if has_existing_charge {
@@ -222,7 +222,8 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
         } else {
             "primary"
         };
-        let inserted = sqlx::query_scalar::<_, Uuid>(
+        let inserted = checked_query_scalar!(
+            Uuid,
             r#"
             INSERT INTO billing_processor_charges (
                 id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
@@ -249,37 +250,35 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
             ON CONFLICT DO NOTHING
             RETURNING id
             "#,
-        )
-        .bind(Uuid::now_v7())
-        .bind(identity.attempt_id().as_uuid())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(terms.gateway_order_id.expose())
-        .bind(transaction_id)
-        .bind(
+            Uuid::now_v7(),
+            identity.attempt_id().into_uuid(),
+            identity.billing_scope_id().into_uuid(),
+            identity.gateway_account_id().into_uuid(),
+            terms.gateway_order_id.expose(),
+            transaction_id,
             evidence
                 .payment_method_reference()
                 .map(|value| value.expose()),
+            evidence.response().map(GatewayDiagnostic::expose),
+            evidence.response_code().map(GatewayDiagnostic::expose),
+            evidence.response_text().map(GatewayDiagnostic::expose),
+            evidence.condition().map(GatewayDiagnostic::expose),
+            descriptor.payment_type().map(GatewayDiagnostic::expose),
+            descriptor.card_brand().map(GatewayDiagnostic::expose),
+            descriptor.card_last_four().map(|value| value.expose()),
+            descriptor.card_exp_month(),
+            descriptor.card_exp_year(),
+            role,
+            terms.attempt_kind.as_str(),
+            terms.plan_key.as_str(),
+            terms.host_charge_target_id,
+            terms.amount_cents,
+            terms.currency.as_str(),
+            matches!(
+                approval_policy,
+                LockFreeApprovalPolicy::ReverseExpiredPeriod
+            ),
         )
-        .bind(evidence.response().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-        .bind(evidence.condition().map(GatewayDiagnostic::expose))
-        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_last_four().map(|value| value.expose()))
-        .bind(descriptor.card_exp_month())
-        .bind(descriptor.card_exp_year())
-        .bind(role)
-        .bind(terms.attempt_kind.as_str())
-        .bind(terms.plan_key.as_str())
-        .bind(terms.host_charge_target_id)
-        .bind(terms.amount_cents)
-        .bind(terms.currency.as_str())
-        .bind(matches!(
-            approval_policy,
-            LockFreeApprovalPolicy::ReverseExpiredPeriod
-        ))
         .fetch_optional(&mut *transaction)
         .await?;
         if inserted.is_some() {
@@ -288,7 +287,7 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
         }
     }
 
-    let evidence_matches = sqlx::query_scalar::<_, bool>(
+    let evidence_matches: Option<bool> = checked_query_scalar!(
         r#"
         SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3
             AND gateway_response IS NOT DISTINCT FROM $4
@@ -303,23 +302,21 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
         FROM billing_processor_charges
         WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
         "#,
-    )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(transaction_id)
-    .bind(
+        identity.attempt_id().into_uuid(),
+        transaction_id,
         evidence
             .payment_method_reference()
             .map(|value| value.expose()),
+        evidence.response().map(GatewayDiagnostic::expose),
+        evidence.response_code().map(GatewayDiagnostic::expose),
+        evidence.response_text().map(GatewayDiagnostic::expose),
+        evidence.condition().map(GatewayDiagnostic::expose),
+        descriptor.payment_type().map(GatewayDiagnostic::expose),
+        descriptor.card_brand().map(GatewayDiagnostic::expose),
+        descriptor.card_last_four().map(|value| value.expose()),
+        descriptor.card_exp_month(),
+        descriptor.card_exp_year(),
     )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
     .fetch_optional(&mut *transaction)
     .await?;
     if evidence_matches == Some(true) {
@@ -327,7 +324,7 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
         return Ok(LockFreeApprovedEvidenceOutcome::ExactReplay);
     }
     if let Some(transaction_id) = transaction_id {
-        let owned_elsewhere: bool = sqlx::query_scalar(
+        let owned_elsewhere: bool = checked_query_scalar!(
             r#"
             SELECT EXISTS (
                 SELECT 1 FROM billing_processor_charges
@@ -335,10 +332,10 @@ pub(crate) async fn persist_approved_evidence_without_attempt_lock_with_policy(
                     AND attempt_id <> $3
             )
             "#,
+            identity.gateway_account_id().into_uuid(),
+            transaction_id,
+            identity.attempt_id().into_uuid(),
         )
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(transaction_id)
-        .bind(identity.attempt_id().as_uuid())
         .fetch_one(&mut *transaction)
         .await?;
         if owned_elsewhere {
@@ -381,9 +378,7 @@ async fn store_once(
 ) -> Result<CompensatingProcessorChargeOutcome, ProcessorChargeStoreError> {
     let mut transaction = pool.begin().await?;
     set_enrollment_timeouts(&mut transaction).await?;
-    let query = format!("{PAYMENT_ATTEMPT_SELECT} WHERE id = $1");
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(attempt_id.as_uuid())
+    let row = payment_attempt_query!(" WHERE id = $1"; attempt_id.as_uuid())
         .fetch_optional(&mut *transaction)
         .await?;
     let preloaded_attempt = row
@@ -491,9 +486,7 @@ pub async fn observe_processor_charge_in_transaction(
     evidence: &ProcessorEvidence,
     initial_progression: ProcessorChargeProgression,
 ) -> Result<ProcessorChargeObservationOutcome, ProcessorChargeStoreError> {
-    let query = format!("{PAYMENT_ATTEMPT_SELECT} WHERE id = $1");
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(attempt_id.as_uuid())
+    let row = payment_attempt_query!(" WHERE id = $1"; attempt_id.as_uuid())
         .fetch_optional(&mut *connection)
         .await?;
     let attempt = row
@@ -565,10 +558,10 @@ pub(crate) async fn observe_processor_charge(
 ) -> Result<ObservedCharge, ProcessorChargeStoreError> {
     let identity = attempt.identity();
     let transaction_id = evidence.transaction_id().map(GatewayTransactionId::expose);
-    let has_existing_charge: bool = sqlx::query_scalar(
+    let has_existing_charge: bool = checked_query_scalar!(
         "SELECT EXISTS (SELECT 1 FROM billing_processor_charges WHERE attempt_id = $1)",
+        identity.attempt_id().into_uuid(),
     )
-    .bind(identity.attempt_id().as_uuid())
     .fetch_one(&mut *connection)
     .await?;
     if let Some(transaction_id) = transaction_id {
@@ -600,17 +593,11 @@ pub(crate) async fn observe_processor_charge(
         initial_progression,
     );
     let descriptor = evidence.descriptor();
-    let conflict_clause = if identified {
-        "ON CONFLICT (gateway_account_id, gateway_transaction_id) \
-         WHERE billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NOT NULL \
-         DO NOTHING RETURNING id"
-    } else {
-        "ON CONFLICT (attempt_id) \
-         WHERE billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL \
-         DO NOTHING RETURNING id"
-    };
-    let insert = format!(
-        r#"
+    macro_rules! insert_charge {
+        ($conflict:literal) => {
+            checked_query_scalar!(
+                Uuid,
+                r#"
         INSERT INTO billing_processor_charges (
             id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
             gateway_transaction_id, gateway_payment_method_reference,
@@ -627,46 +614,55 @@ pub(crate) async fn observe_processor_charge(
             CASE WHEN $18 = 'applied' THEN clock_timestamp() END,
             $20, $21, $22, $23, $24
         )
-        {conflict_clause}
-        "#
-    );
-    let inserted = sqlx::query_scalar::<_, Uuid>(sqlx::AssertSqlSafe(insert))
-        .bind(Uuid::now_v7())
-        .bind(identity.attempt_id().as_uuid())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(attempt.request().gateway_order_id().expose())
-        .bind(transaction_id)
-        .bind(
-            evidence
-                .payment_method_reference()
-                .map(|value| value.expose()),
+        "# + $conflict,
+                Uuid::now_v7(),
+                identity.attempt_id().into_uuid(),
+                identity.billing_scope_id().into_uuid(),
+                identity.gateway_account_id().into_uuid(),
+                attempt.request().gateway_order_id().expose(),
+                transaction_id,
+                evidence
+                    .payment_method_reference()
+                    .map(|value| value.expose()),
+                evidence.response().map(GatewayDiagnostic::expose),
+                evidence.response_code().map(GatewayDiagnostic::expose),
+                evidence.response_text().map(GatewayDiagnostic::expose),
+                evidence.condition().map(GatewayDiagnostic::expose),
+                descriptor.payment_type().map(GatewayDiagnostic::expose),
+                descriptor.card_brand().map(GatewayDiagnostic::expose),
+                descriptor.card_last_four().map(|value| value.expose()),
+                descriptor.card_exp_month(),
+                descriptor.card_exp_year(),
+                role.as_str(),
+                progression.as_str(),
+                Option::<&str>::None,
+                attempt.kind().as_str(),
+                attempt.request().target().plan_key().map(PlanKey::as_str),
+                attempt
+                    .request()
+                    .target()
+                    .host_charge_target_id()
+                    .map(|value| *value.as_uuid()),
+                attempt.request().amount().cents(),
+                attempt.request().amount().currency().as_str().to_owned(),
+            )
+        };
+    }
+    let inserted = if identified {
+        insert_charge!(
+            " ON CONFLICT (gateway_account_id, gateway_transaction_id)
+              WHERE billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NOT NULL
+              DO NOTHING RETURNING id"
         )
-        .bind(evidence.response().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-        .bind(evidence.condition().map(GatewayDiagnostic::expose))
-        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_last_four().map(|value| value.expose()))
-        .bind(descriptor.card_exp_month())
-        .bind(descriptor.card_exp_year())
-        .bind(role.as_str())
-        .bind(progression.as_str())
-        .bind(Option::<&str>::None)
-        .bind(attempt.kind().as_str())
-        .bind(attempt.request().target().plan_key().map(PlanKey::as_str))
-        .bind(
-            attempt
-                .request()
-                .target()
-                .host_charge_target_id()
-                .map(|value| *value.as_uuid()),
+    } else {
+        insert_charge!(
+            " ON CONFLICT (attempt_id)
+              WHERE billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL
+              DO NOTHING RETURNING id"
         )
-        .bind(attempt.request().amount().cents())
-        .bind(attempt.request().amount().currency().as_str())
-        .fetch_optional(&mut *connection)
-        .await?;
+    }
+    .fetch_optional(&mut *connection)
+    .await?;
     if let Some(id) = inserted {
         return Ok(ObservedCharge::Owned(ChargeRecord {
             id,
@@ -739,9 +735,9 @@ async fn transition_processor_charge(
     }
     let expected_progressions = expected_progressions
         .iter()
-        .map(|progression| progression.as_str())
+        .map(|progression| progression.as_str().to_owned())
         .collect::<Vec<_>>();
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         UPDATE billing_processor_charges
         SET progression_state = $3,
@@ -781,12 +777,12 @@ async fn transition_processor_charge(
             gateway_condition, payment_type, card_brand, card_last4,
             card_exp_month, card_exp_year, observed_at
         "#,
+        charge_id.as_uuid(),
+        &expected_progressions,
+        progression.as_str(),
+        state_code.map(ProcessorChargeStateCode::as_str),
+        preserve_existing_state_code,
     )
-    .bind(charge_id.as_uuid())
-    .bind(expected_progressions)
-    .bind(progression.as_str())
-    .bind(state_code.map(ProcessorChargeStateCode::as_str))
-    .bind(preserve_existing_state_code)
     .fetch_optional(&mut *connection)
     .await?
     .ok_or(ProcessorChargeStoreError::InvalidState(

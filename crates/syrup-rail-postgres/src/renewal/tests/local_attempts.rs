@@ -24,15 +24,15 @@ async fn stale_unsubmitted_charge_does_not_block_renewal_dispatch() -> Result<()
         None,
     )
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET created_at = clock_timestamp() - interval '31 minutes',
             updated_at = clock_timestamp() - interval '31 minutes'
         WHERE subscription_id = $1
         "#,
+        subscription.subscription_id,
     )
-    .bind(subscription.subscription_id)
     .execute(&database.pool)
     .await?;
 

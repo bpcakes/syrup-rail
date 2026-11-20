@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            table_relation.relname AS table_name,\n            index_relation.relname AS index_name,\n            concat_ws(\n                '|',\n                table_relation.relname,\n                index_relation.relname,\n                pg_catalog.pg_get_indexdef(index_relation.oid)\n            ) AS definition,\n            catalog_index.indisvalid AS is_valid,\n            catalog_index.indisready AS is_ready,\n            catalog_index.indislive AS is_live,\n            CASE\n                WHEN NOT catalog_index.indisvalid\n                    AND index_relation.relname ~ $2\n                THEN (\n                    SELECT shadow_lock.pid\n                    FROM pg_catalog.pg_class AS canonical_index_relation\n                    INNER JOIN pg_catalog.pg_index AS canonical_index\n                        ON canonical_index.indexrelid = canonical_index_relation.oid\n                    INNER JOIN pg_catalog.pg_locks AS shadow_lock\n                        ON shadow_lock.locktype = 'relation'\n                        AND shadow_lock.relation = index_relation.oid\n                        AND shadow_lock.database = (\n                            SELECT database.oid\n                            FROM pg_catalog.pg_database AS database\n                            WHERE database.datname = current_database()\n                        )\n                        AND shadow_lock.mode = 'ShareUpdateExclusiveLock'\n                        AND shadow_lock.granted\n                    INNER JOIN pg_catalog.pg_stat_progress_create_index AS progress\n                        ON progress.pid = shadow_lock.pid\n                        AND progress.datid = shadow_lock.database\n                        AND progress.relid = table_relation.oid\n                        AND (\n                            -- PostgreSQL 18 reports the transient index before\n                            -- the swap and the new canonical index afterward.\n                            progress.index_relid IN (\n                                index_relation.oid,\n                                canonical_index_relation.oid\n                            )\n                            -- Table-wide reindex reports only its current\n                            -- index while retaining session locks for every\n                            -- index it is rebuilding on this table.\n                            OR 1 < (\n                                SELECT count(*)\n                                FROM pg_catalog.pg_index AS scope_index\n                                INNER JOIN pg_catalog.pg_locks AS scope_lock\n                                    ON scope_lock.pid = shadow_lock.pid\n                                    AND scope_lock.locktype = 'relation'\n                                    AND scope_lock.database = shadow_lock.database\n                                    AND scope_lock.relation = scope_index.indexrelid\n                                    AND scope_lock.mode = 'ShareUpdateExclusiveLock'\n                                    AND scope_lock.granted\n                                WHERE scope_index.indrelid = table_relation.oid\n                                    AND scope_index.indisvalid\n                                    AND scope_index.indisready\n                                    AND scope_index.indislive\n                            )\n                        )\n                        AND progress.command = 'REINDEX CONCURRENTLY'\n                        -- Table-wide reindex gathering locks skipped invalid\n                        -- indexes only before progress leaves initialization.\n                        AND progress.phase <> 'initializing'\n                    INNER JOIN pg_catalog.pg_locks AS canonical_index_lock\n                        ON canonical_index_lock.pid = shadow_lock.pid\n                        AND canonical_index_lock.locktype = 'relation'\n                        AND canonical_index_lock.database = shadow_lock.database\n                        AND canonical_index_lock.relation = canonical_index_relation.oid\n                        AND canonical_index_lock.mode = 'ShareUpdateExclusiveLock'\n                        AND canonical_index_lock.granted\n                    INNER JOIN pg_catalog.pg_locks AS table_lock\n                        ON table_lock.pid = shadow_lock.pid\n                        AND table_lock.locktype = 'relation'\n                        AND table_lock.database = shadow_lock.database\n                        AND table_lock.relation = table_relation.oid\n                        AND table_lock.mode = 'ShareUpdateExclusiveLock'\n                        AND table_lock.granted\n                    WHERE canonical_index.indrelid = table_relation.oid\n                        AND canonical_index.indisvalid\n                        AND canonical_index.indisready\n                        AND canonical_index.indislive\n                        AND canonical_index_relation.relname !~ $2\n                        AND pg_catalog.starts_with(\n                            canonical_index_relation.relname,\n                            pg_catalog.regexp_replace(\n                                index_relation.relname,\n                                $2,\n                                ''\n                            )\n                        )\n                    ORDER BY canonical_index_relation.oid\n                    LIMIT 1\n                )\n            END AS active_concurrent_reindex_pid\n        FROM pg_catalog.pg_index AS catalog_index\n        INNER JOIN pg_catalog.pg_class AS table_relation\n            ON table_relation.oid = catalog_index.indrelid\n        INNER JOIN pg_catalog.pg_class AS index_relation\n            ON index_relation.oid = catalog_index.indexrelid\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = table_relation.relnamespace\n        WHERE namespace.nspname = 'public'\n            AND table_relation.relname = ANY($1)\n            AND index_relation.relname LIKE 'billing\\_%' ESCAPE '\\'\n        ORDER BY table_relation.relname, index_relation.relname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table_name",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relname"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "index_name",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relname"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "definition",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_valid",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisvalid"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "is_ready",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisready"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "is_live",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indislive"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "active_concurrent_reindex_pid",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "9d29fee42e00c89f636c142fa6e8003886b1a65a326abaa2e34a227b2caed2b0"
+}

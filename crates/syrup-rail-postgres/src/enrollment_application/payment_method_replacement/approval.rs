@@ -171,7 +171,7 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
             ))?;
     let method_id = upsert_payment_method(connection, &attempt, evidence).await?;
     let expected = reservation.expected_state();
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT status, payment_method_id, initial_transaction_id,
             required_gateway_account_mode
@@ -180,12 +180,12 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
             AND gateway_account_id = $4 AND plan_key = $5
         FOR UPDATE
         "#,
+        reservation.subscription_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        reservation.plan_key().as_str(),
     )
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
@@ -246,7 +246,7 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
         ));
     }
     if baseline_matches {
-        let updated = sqlx::query(
+        let updated = sqlx::query!(
             r#"
             UPDATE billing_subscriptions
             SET payment_method_id = $2, initial_transaction_id = $3,
@@ -257,17 +257,17 @@ pub(super) async fn apply_locked_payment_method_replacement_approved_outcome(
                 AND payment_method_id = $8 AND initial_transaction_id = $9
                 AND required_gateway_account_mode = $10
             "#,
+            reservation.subscription_id().into_uuid(),
+            method_id.as_uuid(),
+            transaction_id.expose(),
+            identity.billing_scope_id().into_uuid(),
+            identity.subscriber_id().into_uuid(),
+            identity.gateway_account_id().into_uuid(),
+            reservation.plan_key().as_str(),
+            expected.payment_method_id().into_uuid(),
+            expected.expected_initial_transaction_id().expose(),
+            identity.required_gateway_account_mode().as_str(),
         )
-        .bind(reservation.subscription_id().as_uuid())
-        .bind(method_id.as_uuid())
-        .bind(transaction_id.expose())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.subscriber_id().as_uuid())
-        .bind(identity.gateway_account_id().as_uuid())
-        .bind(reservation.plan_key().as_str())
-        .bind(expected.payment_method_id().as_uuid())
-        .bind(expected.expected_initial_transaction_id().expose())
-        .bind(identity.required_gateway_account_mode().as_str())
         .execute(&mut *connection)
         .await?;
         if updated.rows_affected() != 1 {

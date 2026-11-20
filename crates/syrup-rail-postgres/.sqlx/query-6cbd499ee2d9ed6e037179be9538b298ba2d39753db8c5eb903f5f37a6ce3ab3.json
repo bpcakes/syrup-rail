@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO billing_processor_charges (\n                id, attempt_id, billing_scope_id, gateway_account_id,\n                gateway_order_id, gateway_transaction_id, gateway_response,\n                gateway_response_code, gateway_response_text,\n                gateway_condition, charge_role, progression_state,\n                observed_at, attempt_kind, plan_key, amount_cents, currency\n            ) VALUES (\n                $1, $2, $3, $4, $5, $6, '1', '100', 'Approved',\n                'complete', 'primary', 'pending',\n                clock_timestamp() - ($7::bigint * interval '1 second'),\n                'subscription_initial', $8, 100, 'USD'\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6cbd499ee2d9ed6e037179be9538b298ba2d39753db8c5eb903f5f37a6ce3ab3"
+}

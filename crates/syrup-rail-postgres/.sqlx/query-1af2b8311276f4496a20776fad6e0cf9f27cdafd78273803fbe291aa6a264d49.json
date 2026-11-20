@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT gateway_response_text\n            FROM billing_payment_attempts\n            WHERE id IN ($1, $2)\n            ORDER BY attempt_kind\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_response_text",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_response_text"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "1af2b8311276f4496a20776fad6e0cf9f27cdafd78273803fbe291aa6a264d49"
+}

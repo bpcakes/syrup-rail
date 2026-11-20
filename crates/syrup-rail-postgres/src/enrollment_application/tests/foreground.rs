@@ -79,25 +79,26 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
         .expect("approved enrollment creates subscription")
         .id();
     let requested_period_start_at = Utc::now() - ChronoDuration::hours(1);
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '1 month',
+        SET current_period_start_at = $2::timestamptz - interval '1 month',
             current_period_end_at = $2, next_renewal_at = $2,
             next_payment_attempt_at = $2,
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        requested_period_start_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(requested_period_start_at)
     .execute(&fixture.database.pool)
     .await?;
-    let period_start_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT next_renewal_at FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id.as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let period_start_at: DateTime<Utc> = checked_query_scalar!(
+        "SELECT next_renewal_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
 
     let gateway = Arc::new(ScriptedGateway::for_sale_with_readiness(
         [Ok(GatewayAccountMode::Test), Ok(GatewayAccountMode::Test)],
@@ -151,7 +152,7 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
         other => return Err(format!("unexpected stale update reservation: {other:?}").into()),
     };
     transaction.commit().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'review_required',
@@ -159,8 +160,8 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        stale_update_id.as_uuid(),
     )
-    .bind(stale_update_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
 
@@ -185,11 +186,12 @@ async fn foreground_automatic_renewal_uses_stored_credential_once_and_skips_stal
     assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 2);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
-    let stale_update_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-            .bind(stale_update_id.as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let stale_update_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_payment_attempts WHERE id = $1",
+        stale_update_id.as_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
     assert_eq!(stale_update_status, "failed");
 
     assert!(matches!(
@@ -413,11 +415,12 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             .payment_method_id()
             .expect("applied attempt carries replacement method")
     );
-    let old_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_payment_methods WHERE id = $1")
-            .bind(old_method_id.as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let old_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_payment_methods WHERE id = $1",
+        old_method_id.as_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
     assert_eq!(old_status, "disabled");
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
     assert_eq!(gateway.account_mode_calls.load(Ordering::SeqCst), 2);
@@ -442,12 +445,12 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions \
          SET initial_transaction_id = 'txn_external_change', updated_at = clock_timestamp() \
          WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
     let replay_after_state_change = service.replace_payment_method(command).await?;
@@ -456,12 +459,12 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(gateway.store_calls.load(Ordering::SeqCst), 1);
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions \
          SET initial_transaction_id = 'txn_method_new', updated_at = clock_timestamp() \
          WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
 
@@ -494,7 +497,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         }
     };
     transaction.commit().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'review_required',
@@ -503,8 +506,8 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        stale_attempt_id.as_uuid(),
     )
-    .bind(stale_attempt_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
     let mut transaction = fixture.database.pool.begin().await?;
@@ -580,12 +583,12 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
         SubscriptionPaymentMethodReplacementAdmissionOutcome::Admitted(_) => {}
         other => return Err(format!("unexpected parked replacement admission: {other:?}").into()),
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions \
          SET initial_transaction_id = 'txn_external_before_park', updated_at = clock_timestamp() \
          WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
 
@@ -613,12 +616,12 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
     assert_eq!(parked_resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(parked_admission.calls.load(Ordering::SeqCst), 0);
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions \
          SET initial_transaction_id = 'txn_method_new', updated_at = clock_timestamp() \
          WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
     let conflicting_reconciliation = parked_service
@@ -643,11 +646,11 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
         ]
     );
-    let preserved_review_identity: (Option<String>, Option<String>) = sqlx::query_as(
+    let preserved_review_identity: (Option<String>, Option<String>) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference \
          FROM billing_payment_attempts WHERE id = $1",
+        parked.attempt().identity().attempt_id().into_uuid(),
     )
-    .bind(parked.attempt().identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -657,7 +660,7 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             Some("vault_method_parked".to_owned()),
         )
     );
-    let current_method_reference: String = sqlx::query_scalar(
+    let current_method_reference: String = checked_query_scalar!(
         r#"
         SELECT method.gateway_payment_method_reference
         FROM billing_subscriptions AS subscription
@@ -665,8 +668,8 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             ON method.id = subscription.payment_method_id
         WHERE subscription.id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(current_method_reference, "vault_method_new");
@@ -694,15 +697,15 @@ async fn foreground_payment_method_replacement_applies_once_and_replays_before_a
             GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
         ]
     );
-    let additional_progression: String = sqlx::query_scalar(
+    let additional_progression: String = checked_query_scalar!(
         r#"
         SELECT progression_state
         FROM billing_processor_charges
         WHERE attempt_id = $1 AND gateway_transaction_id = $2
         "#,
+        result.attempt().identity().attempt_id().into_uuid(),
+        additional_transaction_id,
     )
-    .bind(result.attempt().identity().attempt_id().as_uuid())
-    .bind(additional_transaction_id)
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(additional_progression, "reconciliation_required");

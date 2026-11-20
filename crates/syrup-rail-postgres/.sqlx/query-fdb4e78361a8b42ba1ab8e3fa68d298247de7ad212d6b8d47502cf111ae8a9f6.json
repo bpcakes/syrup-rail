@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT pg_get_constraintdef(oid)\n            FROM pg_constraint\n            WHERE conname = 'billing_payment_attempts_resolution_code_check'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pg_get_constraintdef",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "fdb4e78361a8b42ba1ab8e3fa68d298247de7ad212d6b8d47502cf111ae8a9f6"
+}

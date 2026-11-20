@@ -18,10 +18,12 @@ async fn a_full_page_of_target_skips_does_not_starve_unclaimed_work() -> Result<
                 insert_host_charge(&database.pool, account, base + Duration::seconds(offset))
                     .await?;
             first_skipped_attempt.get_or_insert(skipped.0);
-            sqlx::query("DELETE FROM host_reconciliation_targets WHERE id = $1")
-                .bind(skipped.1)
-                .execute(&database.pool)
-                .await?;
+            crate::test_support::fixture_query(
+                "DELETE FROM host_reconciliation_targets WHERE id = $1",
+            )
+            .bind(skipped.1)
+            .execute(&database.pool)
+            .await?;
         }
         let releasable = insert_host_charge(
             &database.pool,
@@ -47,10 +49,10 @@ async fn a_full_page_of_target_skips_does_not_starve_unclaimed_work() -> Result<
         );
 
         let (created_at, claimed_at): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
-            sqlx::query_as(
+            checked_query_as!(
                 "SELECT created_at, updated_at FROM billing_payment_attempts WHERE id = $1",
+                first_skipped_attempt.expect("one skipped attempt"),
             )
-            .bind(first_skipped_attempt.expect("one skipped attempt"))
             .fetch_one(&database.pool)
             .await?;
         assert!(claimed_at > created_at);
@@ -58,15 +60,15 @@ async fn a_full_page_of_target_skips_does_not_starve_unclaimed_work() -> Result<
         // Simulate a scheduler cadence longer than the retry interval. The
         // older unclaimed row must still sort before all previously skipped
         // rows once those claims are eligible again.
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET updated_at = clock_timestamp() - interval '2 minutes'
             WHERE gateway_account_id = $1 AND id <> $2 AND status = 'pending'
             "#,
+            account.gateway_account_id,
+            releasable.0,
         )
-        .bind(account.gateway_account_id)
-        .bind(releasable.0)
         .execute(&database.pool)
         .await?;
 
@@ -108,10 +110,12 @@ async fn a_locked_oldest_attempt_does_not_block_a_later_candidate() -> Result<()
         let later =
             insert_host_charge(&database.pool, account, Utc::now() - Duration::minutes(31)).await?;
         let mut blocker = database.pool.begin().await?;
-        sqlx::query("SELECT id FROM billing_payment_attempts WHERE id = $1 FOR UPDATE")
-            .bind(oldest.0)
-            .execute(&mut *blocker)
-            .await?;
+        checked_query!(
+            "SELECT id FROM billing_payment_attempts WHERE id = $1 FOR UPDATE",
+            oldest.0,
+        )
+        .execute(&mut *blocker)
+        .await?;
 
         let summary = fail_stale_unsubmitted_host_charges(
             &database.pool,
@@ -203,11 +207,13 @@ impl HostChargeTargetStore for LockFirstAttemptTargets {
                 .begin()
                 .await
                 .map_err(HostChargeTargetError::new)?;
-            sqlx::query("SELECT id FROM billing_payment_attempts WHERE id = $1 FOR UPDATE")
-                .bind(attempt_id)
-                .execute(&mut *blocker)
-                .await
-                .map_err(HostChargeTargetError::new)?;
+            checked_query!(
+                "SELECT id FROM billing_payment_attempts WHERE id = $1 FOR UPDATE",
+                attempt_id,
+            )
+            .execute(&mut *blocker)
+            .await
+            .map_err(HostChargeTargetError::new)?;
             *self.blocker.lock().await = Some(blocker);
         }
         Ok(outcome)

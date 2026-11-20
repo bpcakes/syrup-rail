@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id\n        FROM billing_current_subscriptions\n        WHERE billing_scope_id = $1\n            AND subscriber_id = $2\n            AND plan_key = $3\n        ORDER BY current_subscription_rank, updated_at DESC, id DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_current_subscriptions",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "adcb27df7722235faa9f13a3cef933a591cafc77765c75cf9c14e88e877df02d"
+}

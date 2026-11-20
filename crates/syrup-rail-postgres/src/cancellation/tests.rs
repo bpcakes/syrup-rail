@@ -80,11 +80,12 @@ async fn cancellation_is_exact_idempotent_and_preserves_the_payment_method()
         if method_after != method_before {
             return Err(io::Error::other("cancellation changed the payment method").into());
         }
-        let untouched_status: String =
-            sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-                .bind(untouched.subscription_id)
-                .fetch_one(&database.pool)
-                .await?;
+        let untouched_status: String = checked_query_scalar!(
+            "SELECT status FROM billing_subscriptions WHERE id = $1",
+            untouched.subscription_id,
+        )
+        .fetch_one(&database.pool)
+        .await?;
         if untouched_status != "active" {
             return Err(io::Error::other("cancellation crossed the plan boundary").into());
         }
@@ -167,11 +168,12 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
         if !matches!(outcome, CancelSubscriptionOutcome::Canceled { .. }) {
             return Err(io::Error::other("stale update still blocked cancellation").into());
         }
-        let stale_status: String =
-            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-                .bind(stale_attempt)
-                .fetch_one(&database.pool)
-                .await?;
+        let stale_status: String = checked_query_scalar!(
+            "SELECT status FROM billing_payment_attempts WHERE id = $1",
+            stale_attempt,
+        )
+        .fetch_one(&database.pool)
+        .await?;
         if stale_status != "failed" {
             return Err(io::Error::other("stale update was not failed atomically").into());
         }
@@ -197,10 +199,12 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
                 ),
         )
         .await?;
-        sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
-            .bind(stale_review_attempt)
-            .execute(&database.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+            stale_review_attempt,
+        )
+        .execute(&database.pool)
+        .await?;
         let mut transaction = database.pool.begin().await?;
         let outcome =
             cancel_subscription_in_transaction(&mut transaction, &stale_review.command()).await?;
@@ -210,11 +214,12 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
                 io::Error::other("stale unsubmitted review still blocked cancellation").into(),
             );
         }
-        let stale_review_status: String =
-            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-                .bind(stale_review_attempt)
-                .fetch_one(&database.pool)
-                .await?;
+        let stale_review_status: String = checked_query_scalar!(
+            "SELECT status FROM billing_payment_attempts WHERE id = $1",
+            stale_review_attempt,
+        )
+        .fetch_one(&database.pool)
+        .await?;
         if stale_review_status != "failed" {
             return Err(
                 io::Error::other("stale unsubmitted review was not failed atomically").into(),
@@ -263,11 +268,12 @@ async fn cancellation_cleans_only_stale_updates_and_respects_active_blockers()
         if !matches!(outcome, CancelSubscriptionOutcome::Canceled { .. }) {
             return Err(io::Error::other("stale renewal still blocked cancellation").into());
         }
-        let stale_renewal_status: String =
-            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-                .bind(stale_renewal_attempt)
-                .fetch_one(&database.pool)
-                .await?;
+        let stale_renewal_status: String = checked_query_scalar!(
+            "SELECT status FROM billing_payment_attempts WHERE id = $1",
+            stale_renewal_attempt,
+        )
+        .fetch_one(&database.pool)
+        .await?;
         if stale_renewal_status != "failed" {
             return Err(io::Error::other("stale renewal was not failed atomically").into());
         }
@@ -315,11 +321,12 @@ async fn caller_rollback_restores_cancellation() -> Result<(), Box<dyn Error>> {
             return Err(io::Error::other("rollback fixture was not canceled").into());
         }
         transaction.rollback().await?;
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-                .bind(fixture.subscription_id)
-                .fetch_one(&database.pool)
-                .await?;
+        let status: String = checked_query_scalar!(
+            "SELECT status FROM billing_subscriptions WHERE id = $1",
+            fixture.subscription_id,
+        )
+        .fetch_one(&database.pool)
+        .await?;
         if status != "active" {
             return Err(io::Error::other("caller rollback did not restore subscription").into());
         }
@@ -356,10 +363,12 @@ async fn contended_stale_charge_remains_a_cancellation_blocker() -> Result<(), B
         .await?;
 
         let mut blocker = database.pool.begin().await?;
-        sqlx::query("SELECT id FROM billing_payment_attempts WHERE id = $1 FOR UPDATE")
-            .bind(attempt_id)
-            .execute(&mut *blocker)
-            .await?;
+        checked_query!(
+            "SELECT id FROM billing_payment_attempts WHERE id = $1 FOR UPDATE",
+            attempt_id,
+        )
+        .execute(&mut *blocker)
+        .await?;
 
         let mut cancellation = database.pool.begin().await?;
         let outcome =
@@ -371,11 +380,12 @@ async fn contended_stale_charge_remains_a_cancellation_blocker() -> Result<(), B
             ))
             .into());
         }
-        let locked_status: String =
-            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-                .bind(attempt_id)
-                .fetch_one(&database.pool)
-                .await?;
+        let locked_status: String = checked_query_scalar!(
+            "SELECT status FROM billing_payment_attempts WHERE id = $1",
+            attempt_id,
+        )
+        .fetch_one(&database.pool)
+        .await?;
         if locked_status != "pending" {
             return Err(io::Error::other("contended stale charge was mutated").into());
         }
@@ -390,11 +400,12 @@ async fn contended_stale_charge_remains_a_cancellation_blocker() -> Result<(), B
                 io::Error::other("released stale charge still blocked cancellation").into(),
             );
         }
-        let released_status: String =
-            sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-                .bind(attempt_id)
-                .fetch_one(&database.pool)
-                .await?;
+        let released_status: String = checked_query_scalar!(
+            "SELECT status FROM billing_payment_attempts WHERE id = $1",
+            attempt_id,
+        )
+        .fetch_one(&database.pool)
+        .await?;
         if released_status != "failed" {
             return Err(io::Error::other("released stale charge was not cleaned up").into());
         }
@@ -432,24 +443,24 @@ async fn insert_subscription(
     let subscription_id = Uuid::now_v7();
     let suffix = subscription_id.simple();
     let initial_transaction_id = format!("txn_{suffix}");
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_methods (
                 id, billing_scope_id, subscriber_id, gateway_account_id,
                 gateway_payment_method_reference, status
             ) VALUES ($1, $2, $3, $4, $5, 'active')
             "#,
+        payment_method_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        format!("vault_{suffix}"),
     )
-    .bind(payment_method_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(format!("vault_{suffix}"))
     .execute(pool)
     .await?;
     let period_start = Utc::now() - Duration::days(1);
     let period_end = period_start + Duration::days(30);
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_subscriptions (
             required_gateway_account_mode,
@@ -466,17 +477,17 @@ async fn insert_subscription(
                 'remain_past_due', 'suspend_immediately', $9
             )
             "#,
+        subscription_id,
+        account.billing_scope_id,
+        subscriber_id,
+        plan_key,
+        status.as_str(),
+        account.gateway_account_id,
+        payment_method_id,
+        period_start,
+        period_end,
+        &initial_transaction_id,
     )
-    .bind(subscription_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(status.as_str())
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id)
-    .bind(period_start)
-    .bind(period_end)
-    .bind(&initial_transaction_id)
     .execute(pool)
     .await?;
     Ok(SubscriptionFixture {
@@ -496,7 +507,7 @@ async fn insert_payment_method_update(
     created_at: DateTime<Utc>,
 ) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -514,20 +525,20 @@ async fn insert_payment_method_update(
                 $9, $10, $11, $6, $12, $13, $13
             )
             "#,
+        attempt_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        fixture.plan_key.as_str(),
+        fixture.subscription_id,
+        fixture.payment_method_id,
+        format!("idem_{attempt_id}"),
+        format!("fingerprint_{attempt_id}"),
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        format!("order_{attempt_id}"),
+        &fixture.initial_transaction_id,
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(fixture.plan_key.as_str())
-    .bind(fixture.subscription_id)
-    .bind(fixture.payment_method_id)
-    .bind(format!("idem_{attempt_id}"))
-    .bind(format!("fingerprint_{attempt_id}"))
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(format!("order_{attempt_id}"))
-    .bind(&fixture.initial_transaction_id)
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok(attempt_id)
@@ -539,7 +550,7 @@ async fn insert_renewal(
     created_at: DateTime<Utc>,
 ) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -557,22 +568,22 @@ async fn insert_renewal(
                 $15, $15
             )
             "#,
+        attempt_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        fixture.plan_key.as_str(),
+        fixture.subscription_id,
+        fixture.payment_method_id,
+        format!("idem_{attempt_id}"),
+        format!("fingerprint_{attempt_id}"),
+        fixture.period_end,
+        fixture.period_end + Duration::days(30),
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        format!("order_{attempt_id}"),
+        &fixture.initial_transaction_id,
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(fixture.plan_key.as_str())
-    .bind(fixture.subscription_id)
-    .bind(fixture.payment_method_id)
-    .bind(format!("idem_{attempt_id}"))
-    .bind(format!("fingerprint_{attempt_id}"))
-    .bind(fixture.period_end)
-    .bind(fixture.period_end + Duration::days(30))
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(format!("order_{attempt_id}"))
-    .bind(&fixture.initial_transaction_id)
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok(attempt_id)
@@ -583,7 +594,7 @@ async fn insert_failed_renewal(
     fixture: &SubscriptionFixture,
 ) -> Result<(), sqlx::Error> {
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -602,21 +613,21 @@ async fn insert_failed_renewal(
                 clock_timestamp() - interval '1 minute'
             )
             "#,
+        attempt_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        fixture.plan_key.as_str(),
+        fixture.subscription_id,
+        fixture.payment_method_id,
+        format!("idem_{attempt_id}"),
+        format!("fingerprint_{attempt_id}"),
+        fixture.period_end,
+        fixture.period_end + Duration::days(30),
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        format!("order_{attempt_id}"),
+        &fixture.initial_transaction_id,
     )
-    .bind(attempt_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(fixture.plan_key.as_str())
-    .bind(fixture.subscription_id)
-    .bind(fixture.payment_method_id)
-    .bind(format!("idem_{attempt_id}"))
-    .bind(format!("fingerprint_{attempt_id}"))
-    .bind(fixture.period_end)
-    .bind(fixture.period_end + Duration::days(30))
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(format!("order_{attempt_id}"))
-    .bind(&fixture.initial_transaction_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -626,10 +637,10 @@ async fn payment_method_snapshot(
     pool: &sqlx::PgPool,
     payment_method_id: Uuid,
 ) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         "SELECT to_jsonb(method)::text FROM billing_payment_methods method WHERE id = $1",
+        payment_method_id,
     )
-    .bind(payment_method_id)
     .fetch_one(pool)
     .await
 }

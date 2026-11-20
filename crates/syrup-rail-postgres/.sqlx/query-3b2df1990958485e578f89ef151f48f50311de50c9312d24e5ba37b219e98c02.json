@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_gateway_provider_rate_limits (provider_key)\n        VALUES ($1)\n        ON CONFLICT (provider_key) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3b2df1990958485e578f89ef151f48f50311de50c9312d24e5ba37b219e98c02"
+}

@@ -16,7 +16,7 @@ impl crate::SubscriptionOfferStore for TestOfferStore {
         billing_scope_id: BillingScopeId,
         plan_key: &PlanKey,
     ) -> Result<Option<syrup_rail::SubscriptionOffer>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (i32, String)>(
+        let row = crate::test_support::fixture_query_as::<_, (i32, String)>(
             r#"
                 SELECT amount_cents, currency FROM host_subscription_offers
                 WHERE billing_scope_id = $1 AND plan_key = $2 FOR SHARE
@@ -97,7 +97,7 @@ impl syrup_rail::PaymentGateway for NeverCalledGateway {
 }
 
 async fn install_host_offers(database: &TestDatabase) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
             CREATE TABLE host_subscription_offers (
                 billing_scope_id uuid NOT NULL,
@@ -119,7 +119,7 @@ async fn set_offer(
     plan_key: &str,
     amount_cents: i32,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    crate::test_support::fixture_query(
         r#"
             INSERT INTO host_subscription_offers (
                 billing_scope_id, plan_key, amount_cents, currency
@@ -202,7 +202,7 @@ async fn create_discount_code(
     plan_key: &str,
 ) -> Result<Uuid, sqlx::Error> {
     let code_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_subscription_discount_codes (
                 id, billing_scope_id, plan_key, code_normalized, display_code,
@@ -213,10 +213,10 @@ async fn create_discount_code(
                 'active', 'percent_off', 2000, 'USD', 'limited_months', 3
             )
             "#,
+        code_id,
+        scope_id,
+        plan_key,
     )
-    .bind(code_id)
-    .bind(scope_id)
-    .bind(plan_key)
     .execute(&database.pool)
     .await?;
     Ok(code_id)
@@ -230,7 +230,7 @@ async fn create_saved_claim(
     code_id: Uuid,
 ) -> Result<Uuid, sqlx::Error> {
     let claim_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_subscription_discount_claims (
                 id, billing_scope_id, subscriber_id, plan_key,
@@ -244,12 +244,12 @@ async fn create_saved_claim(
                 1000, 800, 'saved'
             )
             "#,
+        claim_id,
+        scope_id,
+        subscriber_id,
+        plan_key,
+        code_id,
     )
-    .bind(claim_id)
-    .bind(scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(code_id)
     .execute(&database.pool)
     .await?;
     Ok(claim_id)

@@ -1,0 +1,89 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT billing_address_line1, billing_address_line2, billing_address_city, billing_address_region, billing_address_postal_code, billing_address_country FROM billing_payment_attempts WHERE billing_scope_id = $1 AND id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_address_line1",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_line1"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_address_line2",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_line2"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "billing_address_city",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_city"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "billing_address_region",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_region"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "billing_address_postal_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_postal_code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "billing_address_country",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_country"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "a4c966eaedfe5a560de13e238befe11b593c4656d1b1568314de2a2fd765e877"
+}

@@ -277,6 +277,24 @@ and transaction orchestration.
   transition the host target before canonical attempt failure, commit both
   changes atomically, and never perform gateway I/O.
 
+## SQL query policy
+
+- Compile-check every production statement and every test query against
+  canonical schema v6. Use `sqlx::query!`, `sqlx::query_as!`, or
+  `sqlx::query_scalar!` with bound values. For an existing shared row codec,
+  use the macros in `src/checked_sql.rs` to pass the checked statement and
+  bindings to that codec. Keep each finite SQL variant in a checked macro
+  expansion. The Clippy gate rejects direct runtime query builders.
+- Use the runtime helpers in `src/test_support.rs` for fixture-owned
+  relations, dynamically generated fixture statements, and SQL scripts.
+  Historical schema and cutover fixtures exercise SQL on the versions under
+  test. Use `scripts/jig check test` to verify execution and row decoding on
+  PostgreSQL 18.
+- Use SQLx and SQLx CLI 0.9.0 with Rust 1.94 or later. After changing a checked
+  statement or the canonical schema, regenerate the crate's committed `.sqlx`
+  metadata with `scripts/check-sqlx.sh --prepare`. Verify it against a disposable
+  PostgreSQL 18 database installed with schema v6 using `scripts/jig check sqlx`.
+
 ## Invariants
 
 - No runtime migrator in production service construction.
@@ -286,9 +304,6 @@ and transaction orchestration.
   forward-only upgrade artifacts through their own migrations. The retained
   `assert_runtime_schema_v5_compatible` and `assert_runtime_schema_v4_compatible`
   check only their pre-cutover states.
-- Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
-- Use SQLx and SQLx CLI 0.9.0 with Rust 1.94 or later. Regenerate metadata
-  with `scripts/check-sqlx.sh --prepare` against the unchanged schema v6.
 - Recovery admission relies on the exactly pinned `sqlx-core` transaction-depth
   API to reject nested transactions. Keep this guard and its database tests
   when upgrading SQLx; `Connection::is_in_transaction` alone is insufficient.

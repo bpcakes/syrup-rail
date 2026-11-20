@@ -41,22 +41,22 @@ pub(super) async fn insert_due_subscription_at(
     let subscriber_id = Uuid::now_v7();
     let payment_method_id = Uuid::now_v7();
     let initial_transaction_id = format!("txn_{}", subscription_id.simple());
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
             gateway_payment_method_reference, status
         ) VALUES ($1, $2, $3, $4, $5, 'active')
         "#,
+        payment_method_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        format!("vault_{}", payment_method_id.simple()),
     )
-    .bind(payment_method_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(format!("vault_{}", payment_method_id.simple()))
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscriptions (
             required_gateway_account_mode,
@@ -73,16 +73,16 @@ pub(super) async fn insert_due_subscription_at(
             'remain_past_due', 'suspend_immediately', $8
         )
         "#,
+        subscription_id,
+        account.billing_scope_id,
+        subscriber_id,
+        plan_key,
+        account.gateway_account_id,
+        payment_method_id,
+        due_at - Duration::days(32),
+        due_at,
+        &initial_transaction_id,
     )
-    .bind(subscription_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id)
-    .bind(due_at - Duration::days(32))
-    .bind(due_at)
-    .bind(&initial_transaction_id)
     .execute(pool)
     .await?;
     Ok(DueSubscriptionFixture {
@@ -100,7 +100,7 @@ pub(super) async fn insert_due_subscription_population(
     due_at: DateTime<Utc>,
     population: i32,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
@@ -115,13 +115,13 @@ pub(super) async fn insert_due_subscription_population(
             'active'
         FROM generate_series(1, $3::integer) AS fixture(value)
         "#,
+        account.billing_scope_id,
+        account.gateway_account_id,
+        population,
     )
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(population)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscriptions (
             required_gateway_account_mode,
@@ -159,14 +159,14 @@ pub(super) async fn insert_due_subscription_population(
                 - ((value - 1) / 4) * interval '1 second' AS scheduled_at
         ) AS schedule
         "#,
+        account.billing_scope_id,
+        account.gateway_account_id,
+        due_at,
+        population,
     )
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(due_at)
-    .bind(population)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -210,12 +210,12 @@ pub(super) async fn insert_due_subscription_population(
                 - ((value - 1) / 4) * interval '1 second' AS scheduled_at
         ) AS schedule
         "#,
+        account.billing_scope_id,
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        due_at,
+        population,
     )
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(due_at)
-    .bind(population)
     .execute(pool)
     .await?;
     Ok(())
@@ -226,7 +226,7 @@ pub(super) async fn update_due_at(
     subscription_id: Uuid,
     due_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET current_period_end_at = $2,
@@ -234,9 +234,9 @@ pub(super) async fn update_due_at(
             next_payment_attempt_at = $2
         WHERE id = $1
         "#,
+        subscription_id,
+        due_at,
     )
-    .bind(subscription_id)
-    .bind(due_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -254,7 +254,7 @@ pub(super) async fn insert_renewal_attempt(
     resolved_at: Option<DateTime<Utc>>,
 ) -> Result<(), sqlx::Error> {
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -274,25 +274,25 @@ pub(super) async fn insert_renewal_attempt(
             $6, $18, 'active'
         )
         "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscription.subscriber_id,
+        &subscription.plan_key,
+        subscription.subscription_id,
+        subscription.payment_method_id,
+        kind,
+        status,
+        format!("attempt-{}", attempt_id.simple()),
+        format!("fingerprint-{}", attempt_id.simple()),
+        period_start_at,
+        period_start_at + Duration::days(28),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("order_{}", attempt_id.simple()),
+        resolution_code,
+        resolved_at,
+        &subscription.initial_transaction_id,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscription.subscriber_id)
-    .bind(&subscription.plan_key)
-    .bind(subscription.subscription_id)
-    .bind(subscription.payment_method_id)
-    .bind(kind)
-    .bind(status)
-    .bind(format!("attempt-{}", attempt_id.simple()))
-    .bind(format!("fingerprint-{}", attempt_id.simple()))
-    .bind(period_start_at)
-    .bind(period_start_at + Duration::days(28))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("order_{}", attempt_id.simple()))
-    .bind(resolution_code)
-    .bind(resolved_at)
-    .bind(&subscription.initial_transaction_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -305,7 +305,7 @@ pub(super) async fn insert_pending_payment_method_update(
     created_at: DateTime<Utc>,
 ) -> Result<Uuid, sqlx::Error> {
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -323,20 +323,20 @@ pub(super) async fn insert_pending_payment_method_update(
             0, 'USD', $9, $10, $11, $6, $12, $13, $13
         )
         "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscription.subscriber_id,
+        &subscription.plan_key,
+        subscription.subscription_id,
+        subscription.payment_method_id,
+        format!("method-update-{}", attempt_id.simple()),
+        format!("method-update-fingerprint-{}", attempt_id.simple()),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("method-update-order_{}", attempt_id.simple()),
+        &subscription.initial_transaction_id,
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscription.subscriber_id)
-    .bind(&subscription.plan_key)
-    .bind(subscription.subscription_id)
-    .bind(subscription.payment_method_id)
-    .bind(format!("method-update-{}", attempt_id.simple()))
-    .bind(format!("method-update-fingerprint-{}", attempt_id.simple()))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("method-update-order_{}", attempt_id.simple()))
-    .bind(&subscription.initial_transaction_id)
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok(attempt_id)

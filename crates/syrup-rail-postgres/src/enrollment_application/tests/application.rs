@@ -54,13 +54,13 @@ async fn indeterminate_processor_error_exits_empty_reconciliation_through_manual
         result.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::IndeterminatePaymentOutcome]
     );
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_payment_attempts \
          SET created_at = clock_timestamp() - interval '31 minutes', \
              submitted_at = clock_timestamp() - interval '31 minutes' \
          WHERE id = $1",
+        result.attempt().identity().attempt_id().into_uuid(),
     )
-    .bind(result.attempt().identity().attempt_id().as_uuid())
     .execute(&fixture.database.pool)
     .await?;
 
@@ -72,11 +72,12 @@ async fn indeterminate_processor_error_exits_empty_reconciliation_through_manual
         )
         .await?
     );
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-            .bind(result.attempt().identity().attempt_id().as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let status: String = checked_query_scalar!(
+        "SELECT status FROM billing_payment_attempts WHERE id = $1",
+        result.attempt().identity().attempt_id().into_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
     assert_eq!(status, "review_required");
 
     let manual = fail_review_required_attempt(
@@ -90,11 +91,12 @@ async fn indeterminate_processor_error_exits_empty_reconciliation_through_manual
         return Err(format!("expected manual failure, got {manual:?}").into());
     };
     assert_eq!(failed.status(), PaymentAttemptStatus::Failed);
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-            .bind(result.attempt().identity().attempt_id().as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let status: String = checked_query_scalar!(
+        "SELECT status FROM billing_payment_attempts WHERE id = $1",
+        result.attempt().identity().attempt_id().into_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
     assert_eq!(status, "failed");
     fixture.cleanup().await
 }
@@ -152,15 +154,15 @@ async fn approved_application_projects_the_locked_attempt_not_mismatched_reserva
 async fn reconciled_initial_approval_uses_durable_attempt_after_configuration_rotation()
 -> Result<(), Box<dyn Error>> {
     let fixture = application_fixture("rec_initial").build().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_gateway_accounts
         SET gateway_configuration_id = $2, updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        fixture.gateway_account.gateway_account_id,
+        Uuid::now_v7(),
     )
-    .bind(fixture.gateway_account.gateway_account_id)
-    .bind(Uuid::now_v7())
     .execute(&fixture.database.pool)
     .await?;
     let outcome = approved_outcome("txn_reconciled_approved");
@@ -257,11 +259,11 @@ async fn reconciled_initial_outcomes_cannot_replace_an_established_processor_ide
         approved.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference]
     );
-    let identity: (Option<String>, Option<String>) = sqlx::query_as(
+    let identity: (Option<String>, Option<String>) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference \
          FROM billing_payment_attempts WHERE id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -271,11 +273,11 @@ async fn reconciled_initial_outcomes_cannot_replace_an_established_processor_ide
             Some("vault_initial_durable".to_owned()),
         )
     );
-    let conflicting_charge: (String, Option<String>, String) = sqlx::query_as(
+    let conflicting_charge: (String, Option<String>, String) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference, progression_state \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -325,11 +327,11 @@ async fn unresolved_same_transaction_approval_with_immutable_conflicting_metadat
             "processor charge replay evidence changed"
         )
     ));
-    let charge: (Option<String>, Option<String>, String) = sqlx::query_as(
+    let charge: (Option<String>, Option<String>, String) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference, progression_state \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -372,11 +374,11 @@ async fn terminal_initial_reconciliation_reports_conflicts_without_rewriting_the
         same_transaction_conflict.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference]
     );
-    let applied_charge_count: i64 = sqlx::query_scalar(
+    let applied_charge_count: i64 = checked_query_scalar!(
         "SELECT count(*) FROM billing_processor_charges \
          WHERE attempt_id = $1 AND progression_state = 'applied'",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(applied_charge_count, 1);
@@ -420,12 +422,12 @@ async fn terminal_initial_reconciliation_reports_conflicts_without_rewriting_the
         approval_replay.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
     );
-    let charges: Vec<(String, String)> = sqlx::query_as(
+    let charges: Vec<(String, String)> = checked_query_as!(
         "SELECT gateway_transaction_id, progression_state \
          FROM billing_processor_charges WHERE attempt_id = $1 \
          ORDER BY gateway_transaction_id",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_all(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -438,15 +440,15 @@ async fn terminal_initial_reconciliation_reports_conflicts_without_rewriting_the
             ("txn_initial_winner".to_owned(), "applied".to_owned()),
         ]
     );
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_processor_charges \
          SET progression_state = 'reconciliation_required', \
              reconciliation_required_at = clock_timestamp(), \
              external_reversal_required_at = NULL \
          WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+        fixture.command.attempt_id().into_uuid(),
+        "txn_initial_late_approval",
     )
-    .bind(fixture.command.attempt_id().as_uuid())
-    .bind("txn_initial_late_approval")
     .execute(&fixture.database.pool)
     .await?;
     let promoted_replay = apply_reconciled_subscription_enrollment_gateway_outcome(
@@ -462,12 +464,12 @@ async fn terminal_initial_reconciliation_reports_conflicts_without_rewriting_the
         promoted_replay.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
     );
-    let promoted_progression: String = sqlx::query_scalar(
+    let promoted_progression: String = checked_query_scalar!(
         "SELECT progression_state FROM billing_processor_charges \
          WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+        fixture.command.attempt_id().into_uuid(),
+        "txn_initial_late_approval",
     )
-    .bind(fixture.command.attempt_id().as_uuid())
-    .bind("txn_initial_late_approval")
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(promoted_progression, "external_reversal_required");
@@ -562,10 +564,12 @@ async fn unsubmitted_review_attempt_replays_across_gateway_mode_change()
         other => return Err(format!("unexpected initial reservation: {other:?}").into()),
     };
     transaction.commit().await?;
-    sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
-        .bind(attempt_id.as_uuid())
-        .execute(&fixture.database.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+        attempt_id.as_uuid(),
+    )
+    .execute(&fixture.database.pool)
+    .await?;
 
     let resolved = scripted_resolved_gateway(fixture.gateway_account, Arc::new(NeverCalledGateway));
     let test_reservation = SubscriptionEnrollmentReservation::from_command(
@@ -614,11 +618,11 @@ async fn stale_initial_attempt_expires_before_cross_mode_replay_policy()
         other => return Err(format!("unexpected initial reservation: {other:?}").into()),
     };
     transaction.commit().await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_payment_attempts \
          SET created_at = clock_timestamp() - interval '31 minutes' WHERE id = $1",
+        attempt_id.as_uuid(),
     )
-    .bind(attempt_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
 
@@ -669,7 +673,7 @@ async fn renewal_mode_capability_mismatch_cannot_reach_the_low_level_submission(
         .expect("approved enrollment creates a subscription")
         .id();
     let requested_due_at = chrono::Utc::now() - ChronoDuration::days(1);
-    let due_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+    let due_at: chrono::DateTime<chrono::Utc> = checked_query_scalar!(
         r#"
         UPDATE billing_subscriptions
         SET current_period_start_at = $2,
@@ -680,10 +684,10 @@ async fn renewal_mode_capability_mismatch_cannot_reach_the_low_level_submission(
         WHERE id = $1
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
+        requested_due_at - ChronoDuration::days(30),
+        requested_due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(requested_due_at - ChronoDuration::days(30))
-    .bind(requested_due_at)
     .fetch_one(&fixture.database.pool)
     .await?;
 
@@ -749,7 +753,7 @@ async fn recovery_admission_rejects_changed_contact_before_provider_io()
         .expect("approved enrollment creates a subscription")
         .id();
     let due_at = chrono::Utc::now() - ChronoDuration::days(1);
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'past_due',
@@ -760,10 +764,10 @@ async fn recovery_admission_rejects_changed_contact_before_provider_io()
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        due_at - ChronoDuration::days(30),
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at - ChronoDuration::days(30))
-    .bind(due_at)
     .execute(&fixture.database.pool)
     .await?;
 

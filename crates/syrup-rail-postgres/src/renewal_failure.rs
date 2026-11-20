@@ -155,7 +155,7 @@ async fn automatic_renewal_failure_history(
     subscription_id: SubscriptionId,
     period_start_at: DateTime<Utc>,
 ) -> Result<AutomaticRenewalFailureHistory, RenewalFailureStoreError> {
-    let rows = sqlx::query(
+    let rows = checked_query!(
         r#"
         SELECT id, resolved_at
         FROM billing_payment_attempts
@@ -167,9 +167,9 @@ async fn automatic_renewal_failure_history(
             AND resolution_code IS NULL
         ORDER BY resolved_at ASC, id ASC
         "#,
+        subscription_id.as_uuid(),
+        period_start_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(period_start_at)
     .fetch_all(&mut *connection)
     .await?;
 
@@ -203,7 +203,7 @@ async fn legacy_recovery_failure_access_ended_at(
     subscription_id: SubscriptionId,
     period_start_at: DateTime<Utc>,
 ) -> Result<Option<DateTime<Utc>>, RenewalFailureStoreError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT resolved_at
         FROM billing_payment_attempts
@@ -218,9 +218,9 @@ async fn legacy_recovery_failure_access_ended_at(
         ORDER BY resolved_at ASC NULLS FIRST, id ASC
         LIMIT 1
         "#,
+        subscription_id.as_uuid(),
+        period_start_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(period_start_at)
     .fetch_optional(&mut *connection)
     .await?;
     row.map(|row| {
@@ -350,7 +350,7 @@ async fn load_locked_renewal_failure_state(
     connection: &mut PgConnection,
     attempt: &ValidatedRenewalFailureAttempt,
 ) -> Result<LockedRenewalFailureState, RenewalFailureStoreError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT status, next_renewal_at, next_payment_attempt_at, unpaid_at,
             dunning_retry_delays_seconds, dunning_exhaustion, past_due_access
@@ -361,11 +361,11 @@ async fn load_locked_renewal_failure_state(
             AND plan_key = $4
         FOR NO KEY UPDATE
         "#,
+        attempt.subscription_id.as_uuid(),
+        attempt.identity.billing_scope_id().into_uuid(),
+        attempt.identity.subscriber_id().into_uuid(),
+        attempt.plan_key.as_str(),
     )
-    .bind(attempt.subscription_id.as_uuid())
-    .bind(attempt.identity.billing_scope_id().as_uuid())
-    .bind(attempt.identity.subscriber_id().as_uuid())
-    .bind(attempt.plan_key.as_str())
     .fetch_optional(&mut *connection)
     .await?
     .ok_or_else(invalid_state)?;
@@ -545,7 +545,7 @@ async fn persist_renewal_failure_transition(
     subscription_id: SubscriptionId,
     transition: &RenewalFailureTransition,
 ) -> Result<(), RenewalFailureStoreError> {
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET status = $2,
@@ -557,14 +557,14 @@ async fn persist_renewal_failure_transition(
             AND next_payment_attempt_at IS NOT DISTINCT FROM $6
             AND unpaid_at IS NOT DISTINCT FROM $7
         "#,
+        subscription_id.as_uuid(),
+        transition.after.status.as_str(),
+        transition.after.next_payment_attempt_at,
+        transition.after.unpaid_at,
+        transition.before.status.as_str(),
+        transition.before.next_payment_attempt_at,
+        transition.before.unpaid_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(transition.after.status.as_str())
-    .bind(transition.after.next_payment_attempt_at)
-    .bind(transition.after.unpaid_at)
-    .bind(transition.before.status.as_str())
-    .bind(transition.before.next_payment_attempt_at)
-    .bind(transition.before.unpaid_at)
     .execute(&mut *connection)
     .await?;
     if updated.rows_affected() != 1 {
@@ -591,11 +591,12 @@ async fn attempt_provider_key(
     connection: &mut PgConnection,
     attempt: &ValidatedRenewalFailureAttempt,
 ) -> Result<GatewayProviderKey, RenewalFailureStoreError> {
-    let provider_key = sqlx::query_scalar::<_, String>(
+    let provider_key = checked_query_scalar!(
+        String,
         "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
+        attempt.identity.billing_scope_id().into_uuid(),
+        attempt.identity.gateway_account_id().into_uuid(),
     )
-    .bind(attempt.identity.billing_scope_id().as_uuid())
-    .bind(attempt.identity.gateway_account_id().as_uuid())
     .fetch_optional(&mut *connection)
     .await?
     .ok_or_else(invalid_state)?;

@@ -12,15 +12,15 @@ async fn legacy_unsubmitted_initial_review_is_failed_locally_and_unblocks_enroll
         let plan_key = "legacy_review";
         let legacy =
             insert_stale_enrollment(&database.pool, account, subscriber_id, plan_key).await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'review_required',
                 gateway_response_text = 'legacy empty exact-query observation'
             WHERE id = $1
             "#,
+            legacy,
         )
-        .bind(legacy)
         .execute(&database.pool)
         .await?;
 
@@ -40,10 +40,10 @@ async fn legacy_unsubmitted_initial_review_is_failed_locally_and_unblocks_enroll
             .await?,
             1
         );
-        let state: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        let state: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts WHERE id = $1",
+            legacy,
         )
-        .bind(legacy)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(state.0, "failed");
@@ -125,16 +125,16 @@ async fn stale_local_subscription_charges_fail_without_exact_query() -> Result<(
             attempt_status(&database.pool, sibling_attempt).await?,
             "pending"
         );
-        let messages: Vec<String> = sqlx::query_scalar(
+        let messages: Vec<String> = checked_query_scalar!(
             r#"
             SELECT gateway_response_text
             FROM billing_payment_attempts
             WHERE id IN ($1, $2)
             ORDER BY attempt_kind
             "#,
+            renewal,
+            recovery,
         )
-        .bind(renewal)
-        .bind(recovery)
         .fetch_all(&database.pool)
         .await?;
         assert_eq!(
@@ -166,15 +166,17 @@ async fn stale_empty_query_for_submitted_unknown_renewal_requires_review_without
             Utc::now() - Duration::minutes(31),
         )
         .await?;
-        sqlx::query("UPDATE billing_payment_attempts SET submitted_at = created_at WHERE id = $1")
-            .bind(attempt_id)
-            .execute(&database.pool)
-            .await?;
-        let subscription_before: (String, Option<DateTime<Utc>>) = sqlx::query_as(
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET submitted_at = created_at WHERE id = $1",
+            attempt_id,
+        )
+        .execute(&database.pool)
+        .await?;
+        let subscription_before: (String, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, next_payment_attempt_at FROM billing_subscriptions \
              WHERE id = (SELECT subscription_id FROM billing_payment_attempts WHERE id = $1)",
+            attempt_id,
         )
-        .bind(attempt_id)
         .fetch_one(&database.pool)
         .await?;
 
@@ -197,11 +199,11 @@ async fn stale_empty_query_for_submitted_unknown_renewal_requires_review_without
             attempt_status(&database.pool, attempt_id).await?,
             "review_required"
         );
-        let subscription_after: (String, Option<DateTime<Utc>>) = sqlx::query_as(
+        let subscription_after: (String, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, next_payment_attempt_at FROM billing_subscriptions \
              WHERE id = (SELECT subscription_id FROM billing_payment_attempts WHERE id = $1)",
+            attempt_id,
         )
-        .bind(attempt_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(subscription_after, subscription_before);
@@ -226,22 +228,22 @@ async fn insert_subscription_charge_attempt(
     let attempt_id = Uuid::now_v7();
     let transaction_id = format!("initial_{}", attempt_id.simple());
     let period_start_at = Utc::now() - Duration::days(1);
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
             gateway_payment_method_reference, status
         ) VALUES ($1, $2, $3, $4, $5, 'active')
         "#,
+        payment_method_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        format!("method_{}", attempt_id.simple()),
     )
-    .bind(payment_method_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(format!("method_{}", attempt_id.simple()))
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscriptions (
             required_gateway_account_mode,
@@ -254,22 +256,22 @@ async fn insert_subscription_charge_attempt(
         ) VALUES (
             'live',
             $1, $2, $3, 'test_plan', 'active', $4, $5, 100, 'USD',
-            $6 - interval '1 month', $6, $6, $7, 'recurring',
+            $6::timestamptz - interval '1 month', $6, $6, $7, 'recurring',
             'calendar_months', 1, ARRAY[]::bigint[], 'remain_past_due',
             'suspend_immediately', $6
         )
         "#,
+        subscription_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        payment_method_id,
+        period_start_at,
+        &transaction_id,
     )
-    .bind(subscription_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id)
-    .bind(period_start_at)
-    .bind(&transaction_id)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -284,26 +286,26 @@ async fn insert_subscription_charge_attempt(
         ) VALUES (
             'live',
             $1, $2, $3, 'test_plan', $4, $5, $6, $7, $8, $9, 100, 'USD',
-            $10, $10 + interval '1 month', $11, $12, $13,
+            $10, $10::timestamptz + interval '1 month', $11, $12, $13,
             $5, $14, 'active', $15, $15
         )
         "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        subscription_id,
+        payment_method_id,
+        kind,
+        status,
+        format!("idem_{}", attempt_id.simple()),
+        format!("fingerprint_{}", attempt_id.simple()),
+        period_start_at,
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("order_{}", attempt_id.simple()),
+        transaction_id,
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(subscription_id)
-    .bind(payment_method_id)
-    .bind(kind)
-    .bind(status)
-    .bind(format!("idem_{}", attempt_id.simple()))
-    .bind(format!("fingerprint_{}", attempt_id.simple()))
-    .bind(period_start_at)
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("order_{}", attempt_id.simple()))
-    .bind(transaction_id)
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok(attempt_id)

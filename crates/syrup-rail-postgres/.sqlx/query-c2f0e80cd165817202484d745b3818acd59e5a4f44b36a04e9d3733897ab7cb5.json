@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT periods_applied, periods_total, status FROM billing_subscription_discounts WHERE subscription_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "periods_applied",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "periods_applied"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "periods_total",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "periods_total"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "status"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "c2f0e80cd165817202484d745b3818acd59e5a4f44b36a04e9d3733897ab7cb5"
+}

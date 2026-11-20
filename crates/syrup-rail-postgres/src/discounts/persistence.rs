@@ -29,11 +29,11 @@ pub(super) fn validate_discount_cadence(
 }
 
 pub(super) async fn set_lock_timeout(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    checked_query!(
+        "SELECT set_config('lock_timeout', $1, true) AS lock_timeout, set_config('statement_timeout', $2, true)",
+        BILLING_ROW_LOCK_TIMEOUT,
+        BILLING_OPERATION_TIMEOUT,
     )
-    .bind(BILLING_ROW_LOCK_TIMEOUT)
-    .bind(BILLING_OPERATION_TIMEOUT)
     .execute(connection)
     .await?;
     Ok(())
@@ -44,11 +44,13 @@ pub(super) async fn lock_subscription_aggregate(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id.as_uuid())
-        .bind(plan_key.as_str())
-        .execute(connection)
-        .await?;
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
+    )
+    .execute(connection)
+    .await?;
     Ok(())
 }
 
@@ -61,10 +63,10 @@ pub(super) async fn current_subscription_exists(
         let Some(candidate) = candidate else {
             return Ok(false);
         };
-        let locked: Option<Uuid> = sqlx::query_scalar(
+        let locked: Option<Uuid> = checked_query_scalar!(
             "SELECT id FROM billing_subscriptions WHERE id = $1 FOR NO KEY UPDATE",
+            candidate,
         )
-        .bind(candidate)
         .fetch_optional(&mut *connection)
         .await?;
         if locked.is_some() && current_subscription_id(connection, claim).await? == Some(candidate)
@@ -81,16 +83,16 @@ pub(super) async fn current_subscription_id(
     connection: &mut PgConnection,
     claim: &SubscriptionDiscountClaim,
 ) -> Result<Option<Uuid>, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT id FROM billing_current_subscriptions
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
         ORDER BY current_subscription_rank, updated_at DESC, id DESC LIMIT 1
         "#,
+        claim.billing_scope_id().into_uuid(),
+        claim.subscriber_id().into_uuid(),
+        claim.plan_key().as_str(),
     )
-    .bind(claim.billing_scope_id().as_uuid())
-    .bind(claim.subscriber_id().as_uuid())
-    .bind(claim.plan_key().as_str())
     .fetch_optional(&mut *connection)
     .await
 }
@@ -107,25 +109,27 @@ pub(super) async fn find_active_code(
     code: &SubscriptionDiscountCode,
     lookup: DiscountCodeLookup,
 ) -> Result<Option<PgRow>, sqlx::Error> {
-    let lock = match lookup {
-        DiscountCodeLookup::Read => "",
-        DiscountCodeLookup::LockForUpdate => "FOR UPDATE",
-    };
-    // The lock clause is a closed choice of literals; all values remain bound.
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        r#"
+    macro_rules! active_code {
+        ($lock:literal) => {
+            checked_query!(
+                r#"
         SELECT id, billing_scope_id, plan_key, code_normalized, display_code,
             label, status, discount_kind, amount_off_cents, percent_off_bps,
             currency, duration, duration_months, created_at, updated_at
         FROM billing_subscription_discount_codes
         WHERE billing_scope_id = $1 AND plan_key = $2
             AND code_normalized = $3 AND status = 'active'
-        {lock}
-        "#,
-    )))
-    .bind(billing_scope_id.as_uuid())
-    .bind(plan_key.as_str())
-    .bind(code.as_str())
+        "# + $lock,
+                billing_scope_id.as_uuid(),
+                plan_key.as_str(),
+                code.as_str()
+            )
+        };
+    }
+    match lookup {
+        DiscountCodeLookup::Read => active_code!(""),
+        DiscountCodeLookup::LockForUpdate => active_code!(" FOR UPDATE"),
+    }
     .fetch_optional(&mut *connection)
     .await
 }
@@ -136,7 +140,7 @@ pub(super) async fn code_by_id(
     plan_key: &PlanKey,
     id: DiscountCodeId,
 ) -> Result<Option<PgRow>, sqlx::Error> {
-    sqlx::query(
+    checked_query!(
         r#"
         SELECT id, billing_scope_id, plan_key, code_normalized, display_code,
             label, status, discount_kind, amount_off_cents, percent_off_bps,
@@ -144,10 +148,10 @@ pub(super) async fn code_by_id(
         FROM billing_subscription_discount_codes
         WHERE id = $1 AND billing_scope_id = $2 AND plan_key = $3
         "#,
+        id.as_uuid(),
+        billing_scope_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(id.as_uuid())
-    .bind(billing_scope_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_optional(&mut *connection)
     .await
 }
@@ -158,16 +162,16 @@ pub(super) async fn expire_saved_claims_for_code(
     plan_key: &PlanKey,
     discount_code_id: DiscountCodeId,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscription_discount_claims SET status = 'expired'
         WHERE billing_scope_id = $1 AND plan_key = $2
             AND discount_code_id = $3 AND status = 'saved'
         "#,
+        billing_scope_id.as_uuid(),
+        plan_key.as_str(),
+        discount_code_id.as_uuid(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(plan_key.as_str())
-    .bind(discount_code_id.as_uuid())
     .execute(connection)
     .await?;
     Ok(())
@@ -194,7 +198,7 @@ pub(super) async fn saved_subscription_discount_claim_on_connection(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<Option<SubscriptionDiscountClaimRecord>, SubscriptionDiscountOperationError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, billing_scope_id, subscriber_id, plan_key,
             discount_code_id, code_snapshot, label_snapshot, discount_kind,
@@ -207,10 +211,10 @@ pub(super) async fn saved_subscription_discount_claim_on_connection(
             AND status = 'saved'
         ORDER BY claimed_at DESC, id DESC LIMIT 1 FOR UPDATE
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_optional(&mut *connection)
     .await?;
     row.as_ref().map(claim_from_row).transpose()
@@ -235,17 +239,18 @@ pub(super) async fn lock_initial_attempt_rows(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
+    checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id FROM billing_payment_attempts
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
             AND attempt_kind = 'subscription_initial'
         ORDER BY created_at, id FOR UPDATE
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_all(&mut *connection)
     .await?;
     Ok(())
@@ -270,7 +275,7 @@ pub(super) async fn blocking_initial_attempt(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM billing_payment_attempts attempts
@@ -295,10 +300,10 @@ pub(super) async fn blocking_initial_attempt(
                 )
         )
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_one(&mut *connection)
     .await
 }

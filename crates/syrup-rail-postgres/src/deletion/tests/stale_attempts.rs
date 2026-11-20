@@ -16,41 +16,43 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
         let provider = "test_gateway";
         let account = Uuid::now_v7();
         let configuration = Uuid::now_v7();
-        sqlx::query("INSERT INTO billing_gateway_provider_rate_limits (provider_key) VALUES ($1)")
-            .bind(provider)
+        sqlx::query!(
+            "INSERT INTO billing_gateway_provider_rate_limits (provider_key) VALUES ($1)",
+            provider,
+        )
             .execute(&database.pool)
             .await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_gateway_accounts (
                 id, billing_scope_id, provider_key, gateway_configuration_id
             ) VALUES ($1, $2, $3, $4)
             "#,
+            account,
+            scope,
+            provider,
+            configuration,
         )
-        .bind(account)
-        .bind(scope)
-        .bind(provider)
-        .bind(configuration)
         .execute(&database.pool)
         .await?;
         let method = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_methods (
                 id, billing_scope_id, subscriber_id, gateway_account_id,
                 gateway_payment_method_reference, status
             ) VALUES ($1, $2, $3, $4, $5, 'active')
             "#,
+            method,
+            scope,
+            subscriber,
+            account,
+            format!("vault_{}", method.simple()),
         )
-        .bind(method)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(account)
-        .bind(format!("vault_{}", method.simple()))
         .execute(&database.pool)
         .await?;
         let subscription = Uuid::now_v7();
-        sqlx::query(
+        checked_query!(
             r#"
             WITH clock AS MATERIALIZED (
                 SELECT clock_timestamp() AS observed_at
@@ -74,18 +76,18 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
                 observed_at + interval '1 day'
             FROM clock
             "#,
+            subscription,
+            scope,
+            subscriber,
+            account,
+            method,
+            format!("txn_{}", subscription.simple()),
         )
-        .bind(subscription)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(account)
-        .bind(method)
-        .bind(format!("txn_{}", subscription.simple()))
         .execute(&database.pool)
         .await?;
         let attempt = Uuid::now_v7();
         let target = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -99,16 +101,16 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
                 'USD', $7, $8, $9
             )
             "#,
+            attempt,
+            scope,
+            subscriber,
+            target,
+            format!("delete-{}", attempt.simple()),
+            format!("host_charge:{target}:100:USD"),
+            account,
+            configuration,
+            format!("delete-order-{}", attempt.simple()),
         )
-        .bind(attempt)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(target)
-        .bind(format!("delete-{}", attempt.simple()))
-        .bind(format!("host_charge:{target}:100:USD"))
-        .bind(account)
-        .bind(configuration)
-        .bind(format!("delete-order-{}", attempt.simple()))
         .execute(&database.pool)
         .await?;
 
@@ -134,16 +136,16 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
         }
         transaction.rollback().await?;
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_subscriptions SET status = 'canceled', canceled_at = clock_timestamp(), next_payment_attempt_at = NULL WHERE id = $1",
+            subscription,
         )
-        .bind(subscription)
         .execute(&database.pool)
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_payment_attempts SET created_at = clock_timestamp() - interval '31 minutes', updated_at = clock_timestamp() - interval '31 minutes' WHERE id = $1",
+            attempt,
         )
-        .bind(attempt)
         .execute(&database.pool)
         .await?;
         let mut transaction = database.pool.begin().await?;
@@ -155,10 +157,10 @@ async fn deletion_blockers_are_scoped_subscriber_wide_and_transaction_local()
             );
         }
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_payment_attempts SET status = 'failed', resolved_at = clock_timestamp() WHERE id = $1",
+            attempt,
         )
-        .bind(attempt)
         .execute(&database.pool)
         .await?;
         let mut transaction = database.pool.begin().await?;

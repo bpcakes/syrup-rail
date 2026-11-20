@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT discounts.periods_applied, discounts.status, subscriptions.amount_cents\n        FROM billing_subscription_discounts AS discounts\n        JOIN billing_subscriptions AS subscriptions ON subscriptions.id = discounts.subscription_id\n        WHERE discounts.subscription_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "periods_applied",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "periods_applied"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "amount_cents"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b945b369beb71a9c882395c88cdd5b389473203b0c074c33211feb2d43d8ff04"
+}

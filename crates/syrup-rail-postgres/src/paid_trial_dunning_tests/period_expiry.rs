@@ -13,6 +13,7 @@ use syrup_rail::{
 };
 
 use super::*;
+use crate::test_support::{fixture_query, fixture_query_scalar, fixture_raw_sql};
 use crate::{
     ExternalReversalAttestationOutcome, ExternalReversalHostStore, ExternalReversalHostStoreError,
     ExternalReversalHostTransitionOutcome, SubscriptionEnrollmentApplicationError,
@@ -166,22 +167,22 @@ impl Harness {
         subscription_id: syrup_rail::SubscriptionId,
         ends_in: ChronoDuration,
     ) -> Result<DateTime<Utc>, sqlx::Error> {
-        let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let now: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
             .fetch_one(self.pool())
             .await?;
         let start_at = now + ends_in - ChronoDuration::days(1);
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_subscriptions
             SET recurring_period_kind = 'fixed_days', recurring_period_count = 1,
-                current_period_start_at = $2 - interval '7 days',
+                current_period_start_at = $2::timestamptz - interval '7 days',
                 current_period_end_at = $2, next_renewal_at = $2,
                 next_payment_attempt_at = $2
             WHERE id = $1
             "#,
+            subscription_id.as_uuid(),
+            start_at,
         )
-        .bind(subscription_id.as_uuid())
-        .bind(start_at)
         .execute(self.pool())
         .await?;
         Ok(start_at)
@@ -190,10 +191,10 @@ impl Harness {
     /// Waits until `end_at` is at or before the database clock.
     async fn wait_until_ended(&self, end_at: DateTime<Utc>) -> Result<(), sqlx::Error> {
         loop {
-            let ended: bool = sqlx::query_scalar("SELECT $1::timestamptz <= clock_timestamp()")
-                .bind(end_at)
-                .fetch_one(self.pool())
-                .await?;
+            let ended: bool =
+                checked_query_scalar!("SELECT $1::timestamptz <= clock_timestamp()", end_at,)
+                    .fetch_one(self.pool())
+                    .await?;
             if ended {
                 return Ok(());
             }
@@ -319,14 +320,14 @@ async fn subscription_projection(
     pool: &PgPool,
     subscription_id: syrup_rail::SubscriptionId,
 ) -> Result<SubscriptionProjection, sqlx::Error> {
-    sqlx::query_as(
+    checked_query_as!(
         r#"
         SELECT status, current_period_end_at, next_renewal_at,
             next_payment_attempt_at, unpaid_at, past_due_access
         FROM billing_subscriptions WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(pool)
     .await
 }
@@ -335,39 +336,53 @@ async fn attempt_disposition(
     pool: &PgPool,
     attempt_id: PaymentAttemptId,
 ) -> Result<(String, Option<String>), sqlx::Error> {
-    sqlx::query_as("SELECT status, resolution_code FROM billing_payment_attempts WHERE id = $1")
-        .bind(attempt_id.as_uuid())
-        .fetch_one(pool)
-        .await
+    checked_query_as!(
+        "SELECT status, resolution_code FROM billing_payment_attempts WHERE id = $1",
+        attempt_id.as_uuid(),
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn attempt_charges(
     pool: &PgPool,
     attempt_id: PaymentAttemptId,
 ) -> Result<Vec<(Uuid, String, Option<String>, i32)>, sqlx::Error> {
-    sqlx::query_as(
+    checked_query_as!(
         r#"
         SELECT id, progression_state, state_code, amount_cents
         FROM billing_processor_charges WHERE attempt_id = $1 ORDER BY id
         "#,
+        attempt_id.as_uuid(),
     )
-    .bind(attempt_id.as_uuid())
     .fetch_all(pool)
+    .await
+}
+
+async fn subscriber_lifecycles(
+    pool: &PgPool,
+    subscriber_id: SubscriberId,
+) -> Result<i64, sqlx::Error> {
+    checked_query_scalar!(
+        "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
+        subscriber_id.as_uuid(),
+    )
+    .fetch_one(pool)
     .await
 }
 
 /// Counts approved provider sales recorded for one subscriber: every
 /// processor charge across that subscriber's attempts.
 async fn subscriber_sales(pool: &PgPool, subscriber_id: SubscriberId) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT count(*)
         FROM billing_processor_charges AS charges
         JOIN billing_payment_attempts AS attempts ON attempts.id = charges.attempt_id
         WHERE attempts.subscriber_id = $1
         "#,
+        subscriber_id.as_uuid(),
     )
-    .bind(subscriber_id.as_uuid())
     .fetch_one(pool)
     .await
 }
@@ -378,7 +393,7 @@ async fn age_for_reconciliation(
     pool: &PgPool,
     attempt_id: PaymentAttemptId,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET created_at = created_at - interval '2 hours',
@@ -386,8 +401,8 @@ async fn age_for_reconciliation(
             updated_at = clock_timestamp() - interval '1 hour'
         WHERE id = $1
         "#,
+        attempt_id.as_uuid(),
     )
-    .bind(attempt_id.as_uuid())
     .execute(pool)
     .await?;
     Ok(())
@@ -773,15 +788,15 @@ async fn late_restart_approval_creates_no_successor_until_reversal_clears_the_fe
         // The provider approval arrives after the calendar month bought from
         // submission has already ended.
         let attempt_id = reservation.identity().attempt_id();
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET created_at = created_at - interval '40 days',
                 submitted_at = submitted_at - interval '40 days'
             WHERE id = $1
             "#,
+            attempt_id.as_uuid(),
         )
-        .bind(attempt_id.as_uuid())
         .execute(harness.pool())
         .await?;
 
@@ -800,12 +815,7 @@ async fn late_restart_approval_creates_no_successor_until_reversal_clears_the_fe
                 Some(EXPIRED_APPROVAL.to_owned())
             )
         );
-        let lifecycles: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
-        )
-        .bind(subscriber_id.as_uuid())
-        .fetch_one(harness.pool())
-        .await?;
+        let lifecycles = subscriber_lifecycles(harness.pool(), subscriber_id).await?;
         assert_eq!(
             lifecycles, 0,
             "an expired restart must not create a successor"
@@ -1049,7 +1059,7 @@ async fn recovery_admission_commits_the_callers_transaction_before_yielding_auth
 -> Result<(), Box<dyn Error>> {
     let harness = Harness::start("pe_recover_admit").await?;
     let result = async {
-        sqlx::raw_sql(
+        fixture_raw_sql(
             r#"
             CREATE TABLE host_recovery_operations (
                 id uuid PRIMARY KEY,
@@ -1091,10 +1101,11 @@ async fn recovery_admission_commits_the_callers_transaction_before_yielding_auth
         transaction.commit().await?;
         let attempt_id = reservation.identity().attempt_id();
         let submitted = |pool: PgPool| async move {
-            sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            checked_query_scalar!(
+                Option<DateTime<Utc>>,
                 "SELECT submitted_at FROM billing_payment_attempts WHERE id = $1",
+                attempt_id.as_uuid(),
             )
-            .bind(attempt_id.as_uuid())
             .fetch_one(&pool)
             .await
         };
@@ -1102,7 +1113,7 @@ async fn recovery_admission_commits_the_callers_transaction_before_yielding_auth
         // A host write whose deferred constraint fails at commit: the whole
         // transaction rolls back and no authority is produced.
         let mut transaction = harness.pool().begin().await?;
-        sqlx::query("INSERT INTO host_recovery_operations (id, parent_id) VALUES ($1, $2)")
+        fixture_query("INSERT INTO host_recovery_operations (id, parent_id) VALUES ($1, $2)")
             .bind(Uuid::now_v7())
             .bind(Uuid::now_v7())
             .execute(&mut *transaction)
@@ -1121,7 +1132,7 @@ async fn recovery_admission_commits_the_callers_transaction_before_yielding_auth
             "{failed_commit:?}"
         );
         assert_eq!(submitted(harness.pool().clone()).await?, None);
-        let host_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM host_recovery_operations")
+        let host_rows: i64 = fixture_query_scalar("SELECT count(*) FROM host_recovery_operations")
             .fetch_one(harness.pool())
             .await?;
         assert_eq!(host_rows, 0);
@@ -1147,7 +1158,7 @@ async fn recovery_admission_commits_the_callers_transaction_before_yielding_auth
         // admission together, then yields one-shot authority.
         let operation_id = Uuid::now_v7();
         let mut transaction = harness.pool().begin().await?;
-        sqlx::query("INSERT INTO host_recovery_operations (id) VALUES ($1)")
+        fixture_query("INSERT INTO host_recovery_operations (id) VALUES ($1)")
             .bind(operation_id)
             .execute(&mut *transaction)
             .await?;
@@ -1163,7 +1174,7 @@ async fn recovery_admission_commits_the_callers_transaction_before_yielding_auth
         assert_eq!(admission.attempt().identity().attempt_id(), attempt_id);
         assert!(submitted(harness.pool().clone()).await?.is_some());
         let host_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM host_recovery_operations WHERE id = $1")
+            fixture_query_scalar("SELECT count(*) FROM host_recovery_operations WHERE id = $1")
                 .bind(operation_id)
                 .fetch_one(harness.pool())
                 .await?;
@@ -1317,10 +1328,10 @@ async fn retirement_rechecks_target_period_expiry_and_money_under_locks()
             &declined_outcome("retire_gates_decline"),
         )
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_subscriptions SET next_payment_attempt_at = next_renewal_at WHERE id = $1",
+            subscription_id.as_uuid(),
         )
-        .bind(subscription_id.as_uuid())
         .execute(harness.pool())
         .await?;
         let mut transaction = harness.pool().begin().await?;
@@ -1523,10 +1534,10 @@ async fn past_due_access_policy_change_is_idempotent_and_reaches_entitlement()
         let (unpaid_owner, unpaid_id) = harness.trial(continue_policy()?, "policy_unpaid").await?;
         let (canceled_owner, canceled_id) =
             harness.trial(continue_policy()?, "policy_canceled").await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_subscriptions SET status = 'unpaid', unpaid_at = clock_timestamp(), next_payment_attempt_at = NULL WHERE id = $1",
+            unpaid_id.as_uuid(),
         )
-        .bind(unpaid_id.as_uuid())
         .execute(harness.pool())
         .await?;
         let mut transaction = harness.pool().begin().await?;
@@ -1724,15 +1735,15 @@ async fn compensation_parking_keeps_the_typed_expiry_disposition() -> Result<(),
             SubscriptionEnrollmentAdmissionOutcome::Admitted(_)
         ));
         let restart_id = enrollment.identity().attempt_id();
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET created_at = created_at - interval '40 days',
                 submitted_at = submitted_at - interval '40 days'
             WHERE id = $1
             "#,
+            restart_id.as_uuid(),
         )
-        .bind(restart_id.as_uuid())
         .execute(harness.pool())
         .await?;
         let parked = apply_subscription_enrollment_gateway_outcome(
@@ -1750,12 +1761,7 @@ async fn compensation_parking_keeps_the_typed_expiry_disposition() -> Result<(),
                 Some(EXPIRED_APPROVAL.to_owned())
             )
         );
-        let lifecycles: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
-        )
-        .bind(subscriber_id.as_uuid())
-        .fetch_one(harness.pool())
-        .await?;
+        let lifecycles = subscriber_lifecycles(harness.pool(), subscriber_id).await?;
         assert_eq!(lifecycles, 0);
         Ok::<_, Box<dyn Error>>(())
     }
@@ -1822,11 +1828,11 @@ async fn evidence_only_fallback_still_records_the_expiry_disposition() -> Result
         // and compensation parking both time out and only the attempt-locked
         // evidence path can record the approval.
         let mut holder = harness.pool().begin().await?;
-        sqlx::query(
+        checked_query!(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+            subscriber_id.as_uuid(),
+            "identity_pro",
         )
-        .bind(subscriber_id.as_uuid())
-        .bind("identity_pro")
         .execute(&mut *holder)
         .await?;
         let observed = apply_subscription_renewal_gateway_outcome(
@@ -1912,7 +1918,7 @@ async fn late_approval_of_a_declined_restart_is_parked_for_its_expired_period()
             attempt_disposition(harness.pool(), attempt_id).await?.0,
             "declined"
         );
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET created_at = created_at - interval '40 days',
@@ -1920,8 +1926,8 @@ async fn late_approval_of_a_declined_restart_is_parked_for_its_expired_period()
                 resolved_at = resolved_at - interval '40 days'
             WHERE id = $1
             "#,
+            attempt_id.as_uuid(),
         )
-        .bind(attempt_id.as_uuid())
         .execute(harness.pool())
         .await?;
 
@@ -1956,12 +1962,7 @@ async fn late_approval_of_a_declined_restart_is_parked_for_its_expired_period()
             attempt_disposition(harness.pool(), attempt_id).await?,
             parked
         );
-        let lifecycles: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
-        )
-        .bind(subscriber_id.as_uuid())
-        .fetch_one(harness.pool())
-        .await?;
+        let lifecycles = subscriber_lifecycles(harness.pool(), subscriber_id).await?;
         assert_eq!(lifecycles, 0);
         Ok::<_, Box<dyn Error>>(())
     }
@@ -1982,7 +1983,7 @@ async fn expiry_precedes_grant_conflicts_that_can_later_clear() -> Result<(), Bo
         )
         .await?;
         // A grant became active after submission and before the approval.
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_subscription_grants (
                 id, billing_scope_id, subscriber_id, plan_key, grant_kind, reason,
@@ -1992,11 +1993,11 @@ async fn expiry_precedes_grant_conflicts_that_can_later_clear() -> Result<(), Bo
                 clock_timestamp() - interval '1 hour', clock_timestamp() + interval '1 day', $4
             )
             "#,
+            Uuid::now_v7(),
+            harness.account.billing_scope_id,
+            subscriber_id.as_uuid(),
+            Uuid::now_v7(),
         )
-        .bind(Uuid::now_v7())
-        .bind(harness.account.billing_scope_id)
-        .bind(subscriber_id.as_uuid())
-        .bind(Uuid::now_v7())
         .execute(harness.pool())
         .await?;
         let late = apply_subscription_enrollment_gateway_outcome(
@@ -2073,12 +2074,7 @@ async fn compensation_parks_a_late_approval_of_a_declined_restart() -> Result<()
             attempt_disposition(harness.pool(), attempt_id).await?,
             parked
         );
-        let lifecycles: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
-        )
-        .bind(subscriber_id.as_uuid())
-        .fetch_one(harness.pool())
-        .await?;
+        let lifecycles = subscriber_lifecycles(harness.pool(), subscriber_id).await?;
         assert_eq!(lifecycles, 0);
         Ok::<_, Box<dyn Error>>(())
     }
@@ -2098,11 +2094,11 @@ async fn evidence_only_late_approval_of_an_old_declined_restart_reaches_operator
             expired_restart(&harness, "old-declined-restart", RestartOutcome::Declined).await?;
         let attempt_id = enrollment.identity().attempt_id();
         let mut holder = harness.pool().begin().await?;
-        sqlx::query(
+        checked_query!(
             "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+            subscriber_id.as_uuid(),
+            "identity_pro",
         )
-        .bind(subscriber_id.as_uuid())
-        .bind("identity_pro")
         .execute(&mut *holder)
         .await?;
         for _ in 0..2 {
@@ -2137,12 +2133,7 @@ async fn evidence_only_late_approval_of_an_old_declined_restart_reaches_operator
         };
         assert_eq!(attestation.prior_resolution_code(), EXPIRED_APPROVAL);
         assert_eq!(attempt.status(), PaymentAttemptStatus::Declined);
-        let lifecycles: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
-        )
-        .bind(subscriber_id.as_uuid())
-        .fetch_one(harness.pool())
-        .await?;
+        let lifecycles = subscriber_lifecycles(harness.pool(), subscriber_id).await?;
         assert_eq!(lifecycles, 0);
         Ok::<_, Box<dyn Error>>(())
     }

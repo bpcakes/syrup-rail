@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT concat_ws(\n            '|',\n            relation.relname,\n            pg_catalog.pg_get_viewdef(relation.oid, true)\n        )\n        FROM pg_catalog.pg_class AS relation\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = relation.relnamespace\n        WHERE namespace.nspname = 'public'\n            AND relation.relkind = 'v'\n            AND relation.relname = ANY($1)\n        ORDER BY relation.relname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "concat_ws",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "94d3b061e63fec8d5bf6d6e5926e549591c60036147fd2c46236751bcae9a597"
+}

@@ -5,7 +5,7 @@ pub(super) async fn initial_attempt_is_stale(
     attempt_id: PaymentAttemptId,
 ) -> Result<bool, sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT attempt_kind = 'subscription_initial'
             AND status = ANY($2::text[])
@@ -15,10 +15,10 @@ pub(super) async fn initial_attempt_is_stale(
         FROM billing_payment_attempts
         WHERE id = $1
         "#,
+        attempt_id.as_uuid(),
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
     )
-    .bind(attempt_id.as_uuid())
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -29,7 +29,8 @@ pub(super) async fn current_subscription_exists(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let rows = checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
@@ -39,10 +40,10 @@ pub(super) async fn current_subscription_exists(
             )
         ORDER BY updated_at DESC, id DESC FOR NO KEY UPDATE
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_all(&mut **transaction)
     .await?;
     Ok(!rows.is_empty())
@@ -54,7 +55,8 @@ pub(super) async fn active_grant_exists(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<bool, sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let rows = checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id FROM billing_subscription_grants
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
@@ -62,10 +64,10 @@ pub(super) async fn active_grant_exists(
             AND starts_at <= clock_timestamp() AND ends_at > clock_timestamp()
         ORDER BY ends_at DESC, id DESC FOR UPDATE
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_all(&mut **transaction)
     .await?;
     Ok(!rows.is_empty())
@@ -77,7 +79,7 @@ pub(super) async fn unresolved_initial_charge_exists(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -92,10 +94,10 @@ pub(super) async fn unresolved_initial_charge_exists(
                 )
         )
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -106,7 +108,7 @@ pub(super) async fn blocking_initial_attempt_exists(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM billing_payment_attempts
@@ -122,10 +124,10 @@ pub(super) async fn blocking_initial_attempt_exists(
                 )
         )
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -175,14 +177,15 @@ pub(super) async fn gateway_identity_matches_scope(
     transaction: &mut Transaction<'_, Postgres>,
     expected: &ExpectedGatewayIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+    let row = checked_query_as!(
+        (Uuid, Uuid, String),
         r#"
         SELECT id, gateway_configuration_id, provider_key
         FROM billing_gateway_accounts
         WHERE billing_scope_id = $1 FOR SHARE
         "#,
+        expected.billing_scope_id().into_uuid(),
     )
-    .bind(expected.billing_scope_id().as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
     Ok(
@@ -311,7 +314,9 @@ pub(super) async fn insert_initial_attempt(
         .iter()
         .map(|delay| i64::from(delay.seconds().get()))
         .collect::<Vec<_>>();
-    let result = sqlx::query(
+    let billing_address =
+        crate::attempts::billing_address_columns(request.billing_contact().address());
+    let result = sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             id, billing_scope_id, subscriber_id, plan_key, attempt_kind, status,
@@ -353,46 +358,51 @@ pub(super) async fn insert_initial_attempt(
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
+        identity.attempt_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        plan_key.as_str(),
+        request.idempotency_key().expose(),
+        request.fingerprint().expose(),
+        request.amount().cents(),
+        request.amount().currency().as_str().to_owned(),
+        identity.gateway_account_id().into_uuid(),
+        identity.gateway_configuration_id().into_uuid(),
+        request.gateway_order_id().expose(),
+        discount.map(|discount| discount.claim_id().into_uuid()),
+        discount.map(|discount| discount.code_id().into_uuid()),
+        snapshot.map(|snapshot| snapshot.code().as_str()),
+        snapshot.and_then(|snapshot| snapshot.label()),
+        kind.map(|kind| kind.as_str()),
+        kind.and_then(discount_amount_off),
+        kind.and_then(discount_percent_off),
+        snapshot.map(|snapshot| snapshot.currency().as_str()),
+        duration.map(|duration| duration.as_str()),
+        duration.and_then(discount_duration_months),
+        snapshot.map(|snapshot| snapshot.base_charge().cents()),
+        snapshot.map(|snapshot| snapshot.discounted_charge().cents()),
+        i16::try_from(terms_version.get()).map_err(|_| invalid_state())?,
+        offer.start().as_str(),
+        trial.map(|trial| trial.charge().cents()),
+        trial.map(|trial| trial.period().as_str()),
+        trial.map(|trial| i32::from(trial.period().count().get())),
+        recurring.charge().cents(),
+        recurring.period().as_str(),
+        i32::from(recurring.period().count().get()),
+        &retry_delays,
+        offer.renewal_failure().exhaustion().as_str(),
+        offer.renewal_failure().past_due_access().as_str(),
+        request.billing_contact().first_name(),
+        request.billing_contact().last_name(),
+        request.billing_contact().email(),
+        identity.required_gateway_account_mode().as_str(),
+        billing_address.line1,
+        billing_address.line2,
+        billing_address.city,
+        billing_address.region,
+        billing_address.postal_code,
+        billing_address.country,
     )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(plan_key.as_str())
-    .bind(request.idempotency_key().expose())
-    .bind(request.fingerprint().expose())
-    .bind(request.amount().cents())
-    .bind(request.amount().currency().as_str())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(request.gateway_order_id().expose())
-    .bind(discount.map(|discount| discount.claim_id().into_uuid()))
-    .bind(discount.map(|discount| discount.code_id().into_uuid()))
-    .bind(snapshot.map(|snapshot| snapshot.code().as_str()))
-    .bind(snapshot.and_then(|snapshot| snapshot.label()))
-    .bind(kind.map(|kind| kind.as_str()))
-    .bind(kind.and_then(discount_amount_off))
-    .bind(kind.and_then(discount_percent_off))
-    .bind(snapshot.map(|snapshot| snapshot.currency().as_str()))
-    .bind(duration.map(|duration| duration.as_str()))
-    .bind(duration.and_then(discount_duration_months))
-    .bind(snapshot.map(|snapshot| snapshot.base_charge().cents()))
-    .bind(snapshot.map(|snapshot| snapshot.discounted_charge().cents()))
-    .bind(i16::try_from(terms_version.get()).map_err(|_| invalid_state())?)
-    .bind(offer.start().as_str())
-    .bind(trial.map(|trial| trial.charge().cents()))
-    .bind(trial.map(|trial| trial.period().as_str()))
-    .bind(trial.map(|trial| i32::from(trial.period().count().get())))
-    .bind(recurring.charge().cents())
-    .bind(recurring.period().as_str())
-    .bind(i32::from(recurring.period().count().get()))
-    .bind(retry_delays)
-    .bind(offer.renewal_failure().exhaustion().as_str())
-    .bind(offer.renewal_failure().past_due_access().as_str())
-    .bind(request.billing_contact().first_name())
-    .bind(request.billing_contact().last_name())
-    .bind(request.billing_contact().email())
-    .bind(identity.required_gateway_account_mode().as_str())
-    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -426,7 +436,7 @@ pub(super) async fn reject_locked_prepared_initial(
     message: &'static str,
 ) -> Result<SubscriptionEnrollmentSubmissionOutcome, PaymentAttemptStoreError> {
     let identity = attempt.identity();
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed', gateway_response_text = $2,
@@ -434,9 +444,9 @@ pub(super) async fn reject_locked_prepared_initial(
             updated_at = clock_timestamp()
         WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL
         "#,
+        identity.attempt_id().into_uuid(),
+        message,
     )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(message)
     .execute(&mut **transaction)
     .await?;
     if result.rows_affected() != 1 {

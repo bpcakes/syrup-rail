@@ -95,10 +95,12 @@ async fn deletion_blockers_cover_every_attempt_kind_and_submission_boundary()
                     "{kind}: {}",
                     case.label,
                 );
-                sqlx::query("DELETE FROM billing_payment_attempts WHERE id = $1")
-                    .bind(attempt_id)
-                    .execute(&mut *connection)
-                    .await?;
+                sqlx::query!(
+                    "DELETE FROM billing_payment_attempts WHERE id = $1",
+                    attempt_id,
+                )
+                .execute(&mut *connection)
+                .await?;
             }
         }
         Ok::<_, Box<dyn Error>>(())
@@ -113,26 +115,26 @@ async fn blocker_fixture(pool: &PgPool) -> Result<BlockerFixture, sqlx::Error> {
     let account = create_gateway_account(pool, "deletion_matrix").await?;
     let subscriber_id = Uuid::now_v7();
     let payment_method_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
             gateway_payment_method_reference, status
         ) VALUES ($1, $2, $3, $4, $5, 'active')
         "#,
+        payment_method_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        format!("vault_{}", payment_method_id.simple()),
     )
-    .bind(payment_method_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(format!("vault_{}", payment_method_id.simple()))
     .execute(pool)
     .await?;
 
     let subscription_id = Uuid::now_v7();
     let period_start = Utc::now() - Duration::days(1);
     let period_end = period_start + Duration::days(30);
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscriptions (
             required_gateway_account_mode,
@@ -150,25 +152,25 @@ async fn blocker_fixture(pool: &PgPool) -> Result<BlockerFixture, sqlx::Error> {
             'suspend_immediately', $7
         )
         "#,
+        subscription_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        payment_method_id,
+        period_start,
+        period_end,
     )
-    .bind(subscription_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id)
-    .bind(period_start)
-    .bind(period_end)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'canceled', canceled_at = clock_timestamp(),
             next_payment_attempt_at = NULL
         WHERE id = $1
         "#,
+        subscription_id,
     )
-    .bind(subscription_id)
     .execute(pool)
     .await?;
     Ok(BlockerFixture {
@@ -203,7 +205,7 @@ async fn insert_attempt(
     let subscription_id = (subscription_charge || method_update).then_some(fixture.subscription_id);
     let initial_terms_version = initial.then_some(2_i16);
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -234,40 +236,40 @@ async fn insert_attempt(
             $30, $31, $32, $33, $33
         )
         "#,
+        attempt_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        (!host_charge).then_some("matrix_plan"),
+        host_target_id,
+        subscription_id,
+        payment_method_id,
+        kind,
+        case.status,
+        format!("matrix_{}", attempt_id.simple()),
+        format!("matrix:{kind}:{}", attempt_id.simple()),
+        if method_update { 0 } else { 100 },
+        subscription_charge.then_some(period_start),
+        subscription_charge.then_some(period_end),
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        format!("matrix_order_{}", attempt_id.simple()),
+        submitted_at,
+        review_required_at,
+        method_update.then_some(fixture.payment_method_id),
+        method_update.then_some("txn_matrix_initial"),
+        subscription_charge.then_some(fixture.payment_method_id),
+        subscription_charge.then_some("txn_matrix_initial"),
+        subscription_charge.then_some("active"),
+        initial_terms_version,
+        initial.then_some("recurring_immediately"),
+        initial.then_some(100_i32),
+        initial.then_some("calendar_months"),
+        initial.then_some(1_i32),
+        initial.then_some(&[] as &[i64]),
+        initial.then_some("remain_past_due"),
+        initial.then_some("suspend_immediately"),
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind((!host_charge).then_some("matrix_plan"))
-    .bind(host_target_id)
-    .bind(subscription_id)
-    .bind(payment_method_id)
-    .bind(kind)
-    .bind(case.status)
-    .bind(format!("matrix_{}", attempt_id.simple()))
-    .bind(format!("matrix:{kind}:{}", attempt_id.simple()))
-    .bind(if method_update { 0 } else { 100 })
-    .bind(subscription_charge.then_some(period_start))
-    .bind(subscription_charge.then_some(period_end))
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(format!("matrix_order_{}", attempt_id.simple()))
-    .bind(submitted_at)
-    .bind(review_required_at)
-    .bind(method_update.then_some(fixture.payment_method_id))
-    .bind(method_update.then_some("txn_matrix_initial"))
-    .bind(subscription_charge.then_some(fixture.payment_method_id))
-    .bind(subscription_charge.then_some("txn_matrix_initial"))
-    .bind(subscription_charge.then_some("active"))
-    .bind(initial_terms_version)
-    .bind(initial.then_some("recurring_immediately"))
-    .bind(initial.then_some(100_i32))
-    .bind(initial.then_some("calendar_months"))
-    .bind(initial.then_some(1_i32))
-    .bind(initial.then_some(Vec::<i64>::new()))
-    .bind(initial.then_some("remain_past_due"))
-    .bind(initial.then_some("suspend_immediately"))
-    .bind(created_at)
     .execute(connection)
     .await?;
     Ok(attempt_id)

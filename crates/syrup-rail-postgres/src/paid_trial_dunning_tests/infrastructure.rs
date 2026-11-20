@@ -10,22 +10,22 @@ async fn infrastructure_failure_is_paced_for_twenty_four_hours_without_consuming
     let subscriber_id = SubscriberId::new(Uuid::now_v7());
     let payment_method_id = Uuid::now_v7();
     let subscription_id = syrup_rail::SubscriptionId::new(Uuid::now_v7());
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
             gateway_payment_method_reference, status
         ) VALUES ($1, $2, $3, $4, $5, 'active')
         "#,
+        payment_method_id,
+        account.billing_scope_id,
+        subscriber_id.as_uuid(),
+        account.gateway_account_id,
+        format!("vault_{}", payment_method_id.simple()),
     )
-    .bind(payment_method_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(account.gateway_account_id)
-    .bind(format!("vault_{}", payment_method_id.simple()))
     .execute(&database.pool)
     .await?;
-    let due_at: DateTime<Utc> = sqlx::query_scalar(
+    let due_at: DateTime<Utc> = checked_query_scalar!(
         r#"
         WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
         INSERT INTO billing_subscriptions (
@@ -46,17 +46,17 @@ async fn infrastructure_failure_is_paced_for_twenty_four_hours_without_consuming
         FROM clock
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
+        account.billing_scope_id,
+        subscriber_id.as_uuid(),
+        account.gateway_account_id,
+        payment_method_id,
+        format!("initial_{}", subscription_id.as_uuid().simple()),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id)
-    .bind(format!("initial_{}", subscription_id.as_uuid().simple()))
     .fetch_one(&database.pool)
     .await?;
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    checked_query!(
         r#"
         WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
         INSERT INTO billing_payment_attempts (
@@ -72,26 +72,26 @@ async fn infrastructure_failure_is_paced_for_twenty_four_hours_without_consuming
             required_gateway_account_mode
         ) SELECT
             $1, $2, $3, 'identity_pro', $4, $5, 'subscription_renewal',
-            'failed', $6, $7, 2900, 'USD', $8, $8 + interval '1 month',
+            'failed', $6, $7, 2900, 'USD', $8, $8::timestamptz + interval '1 month',
             $9, $10, $11, $12, observed_at,
             observed_at - interval '25 hours', observed_at,
             $5, subscriptions.initial_transaction_id, 'active', 'live'
         FROM clock
         JOIN billing_subscriptions AS subscriptions ON subscriptions.id = $4
         "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id.as_uuid(),
+        subscription_id.as_uuid(),
+        payment_method_id,
+        format!("infra_{}", attempt_id.simple()),
+        format!("infra_fingerprint_{}", attempt_id.simple()),
+        due_at,
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("infra_order_{}", attempt_id.simple()),
+        PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission.as_str(),
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(subscription_id.as_uuid())
-    .bind(payment_method_id)
-    .bind(format!("infra_{}", attempt_id.simple()))
-    .bind(format!("infra_fingerprint_{}", attempt_id.simple()))
-    .bind(due_at)
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("infra_order_{}", attempt_id.simple()))
-    .bind(PaymentResolutionCode::GatewayLiveReadinessFailedBeforeSubmission.as_str())
     .execute(&database.pool)
     .await?;
 
@@ -130,25 +130,26 @@ async fn infrastructure_failure_is_paced_for_twenty_four_hours_without_consuming
     ));
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET resolved_at = clock_timestamp() - interval '24 hours',
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        attempt_id,
     )
-    .bind(attempt_id)
     .execute(&database.pool)
     .await?;
     let due = due_renewals(&database.pool).await?;
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].subscription_id(), subscription_id);
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id.as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
+    let status: String = checked_query_scalar!(
+        "SELECT status FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(status, "active");
 
     database.cleanup().await

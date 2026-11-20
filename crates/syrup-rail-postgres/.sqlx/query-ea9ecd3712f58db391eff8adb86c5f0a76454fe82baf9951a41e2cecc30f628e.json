@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE billing_gateway_provider_rate_limits\n                    SET rate_limited_until = clock_timestamp() + interval '1 minute'\n                    WHERE provider_key = 'nmi'\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ea9ecd3712f58db391eff8adb86c5f0a76454fe82baf9951a41e2cecc30f628e"
+}

@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT billing_scope_id, subscriber_id, id, subscription_id FROM billing_payment_attempts WHERE gateway_transaction_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "subscriber_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscriber_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "subscription_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "aad17812f04321b890c7adbfabf846ce19a7f7e774de9d551a0d1746e088e3de"
+}

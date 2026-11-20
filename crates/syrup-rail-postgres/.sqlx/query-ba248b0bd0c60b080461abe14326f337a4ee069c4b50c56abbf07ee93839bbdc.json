@@ -1,0 +1,96 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "-- Composition contract: this fragment uses $4/$10/$12 and opens\n-- eligible_subscriptions. The caller may insert a $13 mode predicate, then a\n-- continuation keyset whose placeholders depend on that mode predicate.\n-- NOT MATERIALIZED removes the old mandatory full-candidate evaluation and\n-- lets PostgreSQL stop an ordered index plan at the outer LIMIT. Plan choice\n-- remains cost-based and must be rehearsed against representative host data.\nWITH eligible_subscriptions AS NOT MATERIALIZED (\n    SELECT\n        subscriptions.billing_scope_id,\n        subscriptions.id,\n        subscriptions.required_gateway_account_mode,\n        subscriptions.next_renewal_at,\n        subscriptions.next_payment_attempt_at,\n        accounts.gateway_configuration_id\n    FROM billing_subscriptions AS subscriptions\n    JOIN billing_gateway_accounts AS accounts\n        ON accounts.billing_scope_id = subscriptions.billing_scope_id\n        AND accounts.id = subscriptions.gateway_account_id\n    JOIN billing_gateway_provider_rate_limits AS provider_limits\n        ON provider_limits.provider_key = accounts.provider_key\n    WHERE subscriptions.status IN ('active', 'past_due')\n        AND subscriptions.next_payment_attempt_at <= $10::timestamptz\n        AND provider_limits.rate_limited_until <= $10::timestamptz\n        AND (\n            accounts.mutation_rate_limited_until IS NULL\n            OR accounts.mutation_rate_limited_until <= $10::timestamptz\n        )\n        AND NOT EXISTS (\n            SELECT 1\n            FROM billing_payment_attempts AS update_attempts\n            WHERE update_attempts.subscription_id = subscriptions.id\n                AND update_attempts.attempt_kind = 'subscription_payment_method_update'\n                AND update_attempts.status IN ('pending', 'unknown', 'review_required')\n                AND NOT (\n                    update_attempts.status = ANY($12::text[])\n                    AND update_attempts.submitted_at IS NULL\n                    AND update_attempts.created_at <= $10::timestamptz\n                        - ($4::bigint * interval '1 second')\n                )\n        )\n        AND subscriptions.required_gateway_account_mode = $13::text\n-- Composition contract: this fragment closes eligible_subscriptions and uses\n-- $1-$3/$5-$12. Its caller appends the LIMIT placeholder after any mode and\n-- continuation binds.\n)\nSELECT subscriptions.billing_scope_id, subscriptions.id,\n    subscriptions.required_gateway_account_mode,\n    subscriptions.next_renewal_at,\n    subscriptions.next_payment_attempt_at,\n    COALESCE(renewal_attempts.attempt_sequence_count, 0)::bigint\n        AS attempt_sequence_count\nFROM eligible_subscriptions AS subscriptions\nLEFT JOIN LATERAL (\n    SELECT\n        COUNT(*) FILTER (\n            WHERE attempts.attempt_kind = 'subscription_renewal'\n                AND attempts.status = 'failed'\n                AND attempts.resolution_code = ANY($1::text[])\n                AND attempts.gateway_configuration_id IS NOT DISTINCT FROM\n                    subscriptions.gateway_configuration_id\n        ) AS automatic_infrastructure_attempt_count,\n        MAX(attempts.resolved_at) FILTER (\n            WHERE attempts.attempt_kind = 'subscription_renewal'\n                AND attempts.status = 'failed'\n                AND attempts.resolution_code = ANY($2::text[])\n                AND attempts.gateway_configuration_id IS NOT DISTINCT FROM\n                    subscriptions.gateway_configuration_id\n        ) AS last_automatic_infrastructure_failure_at,\n        COUNT(*) FILTER (\n            WHERE attempts.attempt_kind = 'subscription_renewal'\n                AND attempts.status = 'failed'\n                AND attempts.resolution_code = ANY($3::text[])\n        ) AS rate_limited_attempt_count,\n        MAX(attempts.resolved_at) FILTER (\n            WHERE attempts.attempt_kind = 'subscription_renewal'\n                AND attempts.status = 'failed'\n                AND attempts.resolution_code = ANY($3::text[])\n        ) AS last_rate_limited_at,\n        COUNT(*) AS attempt_sequence_count,\n        BOOL_OR(\n            attempts.status IN ('pending', 'unknown', 'review_required', 'approved')\n            AND NOT (\n                attempts.status = ANY($12::text[])\n                AND attempts.submitted_at IS NULL\n                AND attempts.created_at <= $10::timestamptz\n                    - ($11::bigint * interval '1 second')\n            )\n        ) AS has_blocking_attempt\n    FROM billing_payment_attempts AS attempts\n    WHERE attempts.subscription_id = subscriptions.id\n        AND attempts.billing_period_start_at = subscriptions.next_renewal_at\n        AND attempts.attempt_kind IN ('subscription_renewal', 'subscription_recovery')\n) AS renewal_attempts ON true\nWHERE COALESCE(renewal_attempts.has_blocking_attempt, false) = false\n    AND COALESCE(renewal_attempts.automatic_infrastructure_attempt_count, 0)\n        < $5\n    AND (\n        renewal_attempts.last_automatic_infrastructure_failure_at IS NULL\n        OR renewal_attempts.last_automatic_infrastructure_failure_at\n            <= $10::timestamptz - ($6::bigint * interval '1 second')\n    )\n    AND (\n        renewal_attempts.last_rate_limited_at IS NULL\n        OR renewal_attempts.last_rate_limited_at <= $10::timestamptz\n            - (\n                CASE WHEN COALESCE(\n                    renewal_attempts.rate_limited_attempt_count,\n                    0\n                ) >= $7 THEN $8::bigint ELSE $9::bigint END\n                * interval '1 second'\n            )\n    )\nORDER BY subscriptions.next_payment_attempt_at ASC, subscriptions.id ASC\nLIMIT $14\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "required_gateway_account_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "next_renewal_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_renewal_at"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "next_payment_attempt_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_payment_attempt_at"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "attempt_sequence_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Int8",
+        "TextArray",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "ba248b0bd0c60b080461abe14326f337a4ee069c4b50c56abbf07ee93839bbdc"
+}

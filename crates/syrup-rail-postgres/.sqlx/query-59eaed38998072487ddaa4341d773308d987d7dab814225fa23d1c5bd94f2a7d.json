@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH cursor_value AS (\n            SELECT (\n                SELECT cursors.last_successful_end_at\n                FROM billing_reconciliation_cursors cursors\n                WHERE cursors.billing_scope_id = $1\n                    AND cursors.gateway_account_id = $2\n                    AND cursors.provider_key = $3\n                    AND cursors.cursor_key = $4\n                FOR UPDATE\n            ) AS cursor_at\n        )\n        SELECT cursor_at,\n            CASE WHEN cursor_at IS NULL THEN (\n                SELECT MIN(COALESCE(attempts.resolved_at, attempts.updated_at))\n                FROM billing_payment_attempts attempts\n                WHERE attempts.billing_scope_id = $1\n                    AND attempts.gateway_account_id = $2\n                    AND attempts.status = 'approved'\n                    AND (\n                        public.billing_canonical_gateway_transaction_id(\n                            attempts.gateway_transaction_id\n                        ) IS NOT NULL\n                        OR attempts.gateway_order_id IS NOT NULL\n                    )\n            ) END AS first_approved_at\n        FROM cursor_value\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cursor_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "first_approved_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "59eaed38998072487ddaa4341d773308d987d7dab814225fa23d1c5bd94f2a7d"
+}

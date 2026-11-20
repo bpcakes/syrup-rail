@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_processor_charges SET progression_state = 'reconciliation_required', reconciliation_required_at = clock_timestamp(), external_reversal_required_at = NULL WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fe2b2f80dea01629c196b64efe4b4d3427eef4e3d32a9bf9a090b0bd591dff2"
+}

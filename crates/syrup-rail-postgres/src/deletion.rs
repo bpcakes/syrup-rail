@@ -27,7 +27,7 @@ pub async fn scrub_subscriber_billing_data(
     // Payment methods are shared across plan aggregates. Enter every affected
     // subscriber/account mutation domain in deterministic account order before
     // locking either the attempts or methods that carry its mutable projection.
-    let gateway_account_ids = sqlx::query_scalar::<_, uuid::Uuid>(
+    let gateway_account_ids: Vec<uuid::Uuid> = checked_query_scalar!(
         r#"
         SELECT gateway_account_id
         FROM (
@@ -43,9 +43,9 @@ pub async fn scrub_subscriber_billing_data(
         ) AS affected_accounts
         ORDER BY gateway_account_id
         "#,
+        billing_scope_id,
+        subscriber_id,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
     .fetch_all(&mut *connection)
     .await?;
     for gateway_account_id in &gateway_account_ids {
@@ -67,7 +67,7 @@ pub async fn scrub_subscriber_billing_data(
     )
     .await?;
 
-    let payment_attempts = sqlx::query(
+    let payment_attempts = sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET billing_first_name = NULL,
@@ -90,14 +90,14 @@ pub async fn scrub_subscriber_billing_data(
             updated_at = now()
         WHERE billing_scope_id = $1 AND subscriber_id = $2
         "#,
+        billing_scope_id,
+        subscriber_id,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
     .execute(&mut *connection)
     .await?
     .rows_affected();
 
-    let payment_methods = sqlx::query(
+    let payment_methods = sqlx::query!(
         r#"
         UPDATE billing_payment_methods
         SET status = 'disabled',
@@ -118,9 +118,9 @@ pub async fn scrub_subscriber_billing_data(
             updated_at = now()
         WHERE billing_scope_id = $1 AND subscriber_id = $2
         "#,
+        billing_scope_id,
+        subscriber_id,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -137,10 +137,12 @@ pub(crate) async fn lock_payment_method_scrub_domain(
     subscriber_id: SubscriberId,
     gateway_account_id: &uuid::Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('syrup-rail:payment-method:' || $1::uuid::text || ':' || $2::uuid::text || ':' || $3::uuid::text, 0))")
-        .bind(billing_scope_id.as_uuid())
-        .bind(gateway_account_id)
-        .bind(subscriber_id.as_uuid())
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended('syrup-rail:payment-method:' || $1::uuid::text || ':' || $2::uuid::text || ':' || $3::uuid::text, 0))",
+        billing_scope_id.as_uuid(),
+        gateway_account_id,
+        subscriber_id.as_uuid(),
+    )
         .execute(connection).await?;
     Ok(())
 }
@@ -154,10 +156,15 @@ mod tests {
     use uuid::Uuid;
 
     use super::scrub_subscriber_billing_data;
-    use crate::test_support::{GatewayAccountFixture, TestDatabase, create_gateway_account};
+    use crate::test_support::{
+        GatewayAccountFixture, TestDatabase, create_gateway_account, fixture_raw_sql,
+    };
 
     mod blocker_matrix;
+    mod snapshots;
     mod stale_attempts;
+
+    use snapshots::{nonnull_count, projection, row_snapshot, table_columns};
 
     struct ScrubFixture {
         account: GatewayAccountFixture,
@@ -375,15 +382,15 @@ mod tests {
             if nonnull_count(&database.pool, attempt, SCRUBBED_ATTEMPT_COLUMNS).await? != 0 {
                 return Err(io::Error::other("attempt billing projection was not cleared").into());
             }
-            let method_rewritten: bool = sqlx::query_scalar(
+            let method_rewritten: bool = checked_query_scalar!(
                 r#"
                 SELECT status = 'disabled'
                     AND gateway_payment_method_reference = 'erased:' || id::text
                 FROM billing_payment_methods
                 WHERE id = $1
                 "#,
+                fixture.payment_method_id,
             )
-            .bind(fixture.payment_method_id)
             .fetch_one(&database.pool)
             .await?;
             if !method_rewritten
@@ -423,7 +430,7 @@ mod tests {
             )
             .await?;
             let charge_before = processor_charge_snapshot(&database.pool, &fixture).await?;
-            sqlx::raw_sql(
+            fixture_raw_sql(
                 r#"
                 CREATE FUNCTION test_fail_billing_method_scrub()
                 RETURNS trigger
@@ -498,7 +505,7 @@ mod tests {
             lock_payment_method_domain(&mut held, &fixture).await?;
 
             let mut blocked = database.pool.begin().await?;
-            sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            sqlx::query!("SET LOCAL lock_timeout = '100ms'")
                 .execute(&mut *blocked)
                 .await?;
             let error = scrub_subscriber_billing_data(&mut blocked, scrub_command(&fixture))
@@ -561,7 +568,7 @@ mod tests {
             .await?;
 
             let mut blocked = database.pool.begin().await?;
-            sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            sqlx::query!("SET LOCAL lock_timeout = '100ms'")
                 .execute(&mut *blocked)
                 .await?;
             let error = scrub_subscriber_billing_data(&mut blocked, scrub_command(&fixture))
@@ -615,7 +622,7 @@ mod tests {
         let account = create_gateway_account(pool, "test_gateway").await?;
         let subscriber_id = Uuid::now_v7();
         let payment_method_id = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_methods (
                 id, billing_scope_id, subscriber_id, gateway_account_id,
@@ -630,18 +637,18 @@ mod tests {
                 'Suite 2', 'Boston', 'MA', '02110', 'US'
             )
             "#,
+            payment_method_id,
+            account.billing_scope_id,
+            subscriber_id,
+            account.gateway_account_id,
+            format!("vault_{}", payment_method_id.simple()),
         )
-        .bind(payment_method_id)
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
-        .bind(account.gateway_account_id)
-        .bind(format!("vault_{}", payment_method_id.simple()))
         .execute(pool)
         .await?;
 
         let payment_attempt_id = Uuid::now_v7();
         let host_charge_target_id = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -672,23 +679,23 @@ mod tests {
                 'settled transaction', now(), now()
             )
             "#,
+            payment_attempt_id,
+            account.billing_scope_id,
+            subscriber_id,
+            host_charge_target_id,
+            format!("scrub-{}", payment_attempt_id.simple()),
+            format!("host_charge:{host_charge_target_id}:1200:USD"),
+            account.gateway_account_id,
+            account.gateway_configuration_id,
+            format!("order-{}", payment_attempt_id.simple()),
+            format!("transaction-{}", payment_attempt_id.simple()),
+            format!("vault-{}", payment_attempt_id.simple()),
         )
-        .bind(payment_attempt_id)
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
-        .bind(host_charge_target_id)
-        .bind(format!("scrub-{}", payment_attempt_id.simple()))
-        .bind(format!("host_charge:{host_charge_target_id}:1200:USD"))
-        .bind(account.gateway_account_id)
-        .bind(account.gateway_configuration_id)
-        .bind(format!("order-{}", payment_attempt_id.simple()))
-        .bind(format!("transaction-{}", payment_attempt_id.simple()))
-        .bind(format!("vault-{}", payment_attempt_id.simple()))
         .execute(pool)
         .await?;
 
         let processor_charge_id = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_processor_charges (
                 id, attempt_id, billing_scope_id, gateway_account_id,
@@ -712,9 +719,9 @@ mod tests {
             FROM billing_payment_attempts
             WHERE id = $1
             "#,
+            payment_attempt_id,
+            processor_charge_id,
         )
-        .bind(payment_attempt_id)
-        .bind(processor_charge_id)
         .execute(pool)
         .await?;
 
@@ -727,99 +734,23 @@ mod tests {
         })
     }
 
-    async fn table_columns(pool: &PgPool, table: &str) -> Result<Vec<String>, sqlx::Error> {
-        sqlx::query_scalar(
-            r#"
-            SELECT column_name::text
-            FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = $1
-            "#,
-        )
-        .bind(table)
-        .fetch_all(pool)
-        .await
-    }
-
-    /// Serializes only the listed columns of one fixed billing row.
-    async fn projection(
-        pool: &PgPool,
-        (table, id): (&str, Uuid),
-        columns: &[&str],
-    ) -> Result<String, sqlx::Error> {
-        let query = format!(
-            r#"
-            SELECT COALESCE(jsonb_object_agg(fields.key, fields.value), '{{}}'::jsonb)::text
-            FROM public.{} AS rows, jsonb_each(to_jsonb(rows)) AS fields
-            WHERE rows.id = $1 AND fields.key = ANY($2)
-            "#,
-            fixed_table(table)
-        );
-        sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
-            .bind(id)
-            .bind(columns)
-            .fetch_one(pool)
-            .await
-    }
-
-    /// Counts the listed columns of one fixed billing row that are not NULL.
-    async fn nonnull_count(
-        pool: &PgPool,
-        (table, id): (&str, Uuid),
-        columns: &[&str],
-    ) -> Result<i64, sqlx::Error> {
-        let query = format!(
-            r#"
-            SELECT count(*)
-            FROM public.{} AS rows, jsonb_each(to_jsonb(rows)) AS fields
-            WHERE rows.id = $1 AND fields.key = ANY($2) AND fields.value <> 'null'::jsonb
-            "#,
-            fixed_table(table)
-        );
-        sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
-            .bind(id)
-            .bind(columns)
-            .fetch_one(pool)
-            .await
-    }
-
-    fn fixed_table(table: &str) -> &'static str {
-        match table {
-            "billing_payment_attempts" => "billing_payment_attempts",
-            "billing_payment_methods" => "billing_payment_methods",
-            _ => unreachable!("test projection table is fixed"),
-        }
-    }
-
     async fn processor_charge_snapshot(
         pool: &PgPool,
         fixture: &ScrubFixture,
     ) -> Result<String, sqlx::Error> {
-        sqlx::query_scalar(
+        checked_query_scalar!(
             "SELECT to_jsonb(charges)::text FROM billing_processor_charges AS charges WHERE id = $1",
+            fixture.processor_charge_id,
         )
-        .bind(fixture.processor_charge_id)
         .fetch_one(pool)
         .await
-    }
-
-    async fn row_snapshot(pool: &PgPool, table: &str, id: Uuid) -> Result<String, sqlx::Error> {
-        let query = match table {
-            "billing_payment_attempts" => {
-                "SELECT to_jsonb(rows)::text FROM billing_payment_attempts AS rows WHERE id = $1"
-            }
-            "billing_payment_methods" => {
-                "SELECT to_jsonb(rows)::text FROM billing_payment_methods AS rows WHERE id = $1"
-            }
-            _ => unreachable!("test snapshot table is fixed"),
-        };
-        sqlx::query_scalar(query).bind(id).fetch_one(pool).await
     }
 
     async fn lock_payment_method_domain(
         transaction: &mut Transaction<'_, Postgres>,
         fixture: &ScrubFixture,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
+        checked_query!(
             r#"
             SELECT pg_advisory_xact_lock(
                 hashtextextended(
@@ -831,10 +762,10 @@ mod tests {
                 )
             )
             "#,
+            fixture.account.billing_scope_id,
+            fixture.account.gateway_account_id,
+            fixture.subscriber_id,
         )
-        .bind(fixture.account.billing_scope_id)
-        .bind(fixture.account.gateway_account_id)
-        .bind(fixture.subscriber_id)
         .execute(&mut **transaction)
         .await?;
         Ok(())

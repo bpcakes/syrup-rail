@@ -13,7 +13,7 @@ impl ExternalReversalHostStore for ExactHostRelease {
         release: ExternalReversalHostChargeRelease,
     ) -> Result<ExternalReversalHostTransitionOutcome, ExternalReversalHostStoreError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let changed = sqlx::query(
+        let changed = crate::test_support::fixture_query(
             r#"
                 UPDATE host_targets SET released = true
                 WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
@@ -47,7 +47,7 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     let subscriber_id = Uuid::now_v7();
     let target_id = Uuid::now_v7();
     let order_id = format!("ck_{}", attempt_id.simple());
-    sqlx::query(
+    sqlx::query!(
         r#"
             CREATE TABLE host_targets (
                 id uuid PRIMARY KEY, billing_scope_id uuid NOT NULL,
@@ -57,7 +57,7 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     )
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    crate::test_support::fixture_query(
         "INSERT INTO host_targets (id, billing_scope_id, subscriber_id) VALUES ($1, $2, $3)",
     )
     .bind(target_id)
@@ -65,7 +65,7 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     .bind(subscriber_id)
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -79,19 +79,19 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
                 500, 'USD', $7, $8, $9, clock_timestamp()
             )
             "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        target_id,
+        format!("idem-{attempt_id}"),
+        format!("fingerprint-{attempt_id}"),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        &order_id,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(target_id)
-    .bind(format!("idem-{attempt_id}"))
-    .bind(format!("fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(&order_id)
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_processor_charges (
                 id, attempt_id, billing_scope_id, gateway_account_id,
@@ -106,16 +106,16 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
                 clock_timestamp(), 'host_charge', $6, 500, 'USD', clock_timestamp()
             )
             "#,
+        charge_id,
+        attempt_id,
+        account.billing_scope_id,
+        account.gateway_account_id,
+        &order_id,
+        target_id,
     )
-    .bind(charge_id)
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(&order_id)
-    .bind(target_id)
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_processor_charges (
                 id, attempt_id, billing_scope_id, gateway_account_id,
@@ -131,13 +131,13 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
                 $6, 500, 'USD', clock_timestamp()
             )
             "#,
+        additional_charge_id,
+        attempt_id,
+        account.billing_scope_id,
+        account.gateway_account_id,
+        &order_id,
+        target_id,
     )
-    .bind(additional_charge_id)
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(&order_id)
-    .bind(target_id)
     .execute(&database.pool)
     .await?;
 
@@ -224,10 +224,12 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
     assert_eq!(attestation.actor_id(), actor);
     assert_eq!(host.calls.load(Ordering::SeqCst), 1);
     assert!(
-        sqlx::query_scalar::<_, bool>("SELECT released FROM host_targets WHERE id = $1")
-            .bind(target_id)
-            .fetch_one(&database.pool)
-            .await?
+        crate::test_support::fixture_query_scalar::<_, bool>(
+            "SELECT released FROM host_targets WHERE id = $1"
+        )
+        .bind(target_id)
+        .fetch_one(&database.pool)
+        .await?
     );
 
     assert!(matches!(
@@ -257,9 +259,10 @@ async fn external_reversal_is_exact_atomic_replayable_and_conflict_safe()
         .await?,
         ExternalReversalAttestationOutcome::ReplayConflict
     );
-    let counts: (i64, String) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint, MIN(progression_state) FROM billing_processor_charges WHERE id = $1",
-        ).bind(charge_id).fetch_one(&database.pool).await?;
+    let counts: (i64, String) = checked_query_as!(
+        "SELECT COUNT(*)::bigint, MIN(progression_state) FROM billing_processor_charges WHERE id = $1",
+        charge_id,
+    ).fetch_one(&database.pool).await?;
     assert_eq!(counts, (1, "externally_reversed".to_owned()));
 
     database.cleanup().await?;
@@ -275,7 +278,7 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
     let charge_id = Uuid::now_v7();
     let subscriber_id = Uuid::now_v7();
     let order_id = format!("subscription_{}", attempt_id.simple());
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -305,18 +308,18 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
                 'remain_past_due', 'suspend_immediately'
             )
             "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        format!("idem-{attempt_id}"),
+        format!("fingerprint-{attempt_id}"),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        &order_id,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(format!("idem-{attempt_id}"))
-    .bind(format!("fingerprint-{attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(&order_id)
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_processor_charges (
                 id, attempt_id, billing_scope_id, gateway_account_id,
@@ -332,12 +335,12 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
                 'subscription_initial', 'base', 500, 'USD', clock_timestamp()
             )
             "#,
+        charge_id,
+        attempt_id,
+        account.billing_scope_id,
+        account.gateway_account_id,
+        &order_id,
     )
-    .bind(charge_id)
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(account.gateway_account_id)
-    .bind(&order_id)
     .execute(&database.pool)
     .await?;
 
@@ -359,11 +362,12 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
         attested,
         ExternalReversalAttestationOutcome::Attested { .. }
     ));
-    let state_code: String =
-        sqlx::query_scalar("SELECT state_code FROM billing_processor_charges WHERE id = $1")
-            .bind(charge_id)
-            .fetch_one(&database.pool)
-            .await?;
+    let state_code: String = checked_query_scalar!(
+        "SELECT state_code FROM billing_processor_charges WHERE id = $1",
+        charge_id,
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(
         state_code,
         PaymentResolutionCode::SubscriptionInitialCurrentGrantConflict.as_str()

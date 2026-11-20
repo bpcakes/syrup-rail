@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET submitted_at = created_at\n            WHERE gateway_account_id IN ($1, $2)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "444aacec842c0739c0279373af641797190b6af6c28f03606cb28e0ba90319a6"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT concat_ws(\n            '|',\n            catalog_function.proname,\n            pg_catalog.pg_get_function_identity_arguments(\n                catalog_function.oid\n            ),\n            pg_catalog.pg_get_functiondef(catalog_function.oid)\n        )\n        FROM pg_catalog.pg_proc AS catalog_function\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = catalog_function.pronamespace\n        WHERE namespace.nspname = 'public'\n            AND catalog_function.prokind = 'f'\n            AND catalog_function.proname = ANY($1)\n        ORDER BY\n            catalog_function.proname,\n            pg_catalog.pg_get_function_identity_arguments(\n                catalog_function.oid\n            )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "concat_ws",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "39e3517180c84b4fa5e38acadd17cbc1d6eeddadc426fb625fd35e95c79c371a"
+}

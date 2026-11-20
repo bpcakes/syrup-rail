@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT subscriptions.status, subscriptions.phase,\n                    subscriptions.next_payment_attempt_at, attempts.resolved_at\n                FROM billing_subscriptions AS subscriptions\n                JOIN billing_payment_attempts AS attempts\n                    ON attempts.subscription_id = subscriptions.id\n                WHERE subscriptions.id = $1 AND attempts.id = $2\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "phase",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "phase"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "next_payment_attempt_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_payment_attempt_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "resolved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "resolved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "13e46c2e293137dd3117dcda0db9a751cba0db2be0bb12ca72aba7d959a39a92"
+}

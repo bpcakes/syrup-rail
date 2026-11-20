@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM billing_payment_attempts a WHERE billing_scope_id = $1), (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM billing_processor_charges c WHERE billing_scope_id = $1), (SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM billing_subscriptions s WHERE billing_scope_id = $1))::text",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "jsonb_build_array",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5c0ae21e616b6fda4e721f36a593f0efca6015550d29b4bbf2be1e136d5f3a48"
+}

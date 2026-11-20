@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscriptions\n        SET status = 'active', phase = 'recurring', payment_method_id = $2,\n            current_period_start_at = $3, current_period_end_at = $4,\n            next_renewal_at = $4, next_payment_attempt_at = $4,\n            initial_transaction_id = $5,\n            updated_at = clock_timestamp()\n        WHERE id = $1 AND billing_scope_id = $6 AND subscriber_id = $7\n            AND gateway_account_id = $8 AND plan_key = $9\n            -- Reservation of new v2 recoveries requires past_due. Application\n            -- also honors exact active authority snapshotted by durable v1\n            -- attempts that survive the maintenance cutover.\n            AND status = $10 AND status IN ('active', 'past_due')\n            AND payment_method_id = $11 AND initial_transaction_id = $12\n            AND next_renewal_at = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "07441dcd674f523f95963a30a92cf578cfc0b3ba1f59ced989b663e4de99d852"
+}

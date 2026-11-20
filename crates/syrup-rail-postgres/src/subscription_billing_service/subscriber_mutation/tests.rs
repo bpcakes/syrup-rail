@@ -154,7 +154,7 @@ impl BillingTransactionCoordinator for TestCoordinator {
             .begin()
             .await
             .map_err(BillingTransactionError::new)?;
-        let locked: Option<Uuid> = sqlx::query_scalar(
+        let locked: Option<Uuid> = crate::test_support::fixture_query_scalar(
             r#"
             SELECT subscriber_id
             FROM test_billing_subjects
@@ -202,11 +202,13 @@ impl BillingTransaction for TestTransaction {
             BillingEvent::SubscriptionCanceled { .. } => "subscription_canceled",
             _ => "unexpected",
         };
-        sqlx::query("INSERT INTO test_billing_outbox (event_kind) VALUES ($1)")
-            .bind(event_kind)
-            .execute(&mut **self.transaction.as_mut().expect("active test transaction"))
-            .await
-            .map_err(BillingEventWriteError::new)?;
+        crate::test_support::fixture_query(
+            "INSERT INTO test_billing_outbox (event_kind) VALUES ($1)",
+        )
+        .bind(event_kind)
+        .execute(&mut **self.transaction.as_mut().expect("active test transaction"))
+        .await
+        .map_err(BillingEventWriteError::new)?;
         if self.append_returns_error {
             return Err(BillingEventWriteError::new(io::Error::other(
                 "injected outbox failure",

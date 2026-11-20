@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET status = $2,\n            subscription_id = COALESCE($3, subscription_id),\n            payment_method_id = COALESCE($4, payment_method_id),\n            gateway_transaction_id = $5,\n            gateway_payment_method_reference = $6,\n            gateway_response = $7, gateway_response_code = $8,\n            gateway_response_text = $9, gateway_condition = $10,\n            payment_type = $11, card_brand = $12, card_last4 = $13,\n            card_exp_month = $14, card_exp_year = $15,\n            resolution_code = $16,\n            resolved_at = CASE WHEN $2 IN ('approved', 'declined', 'failed')\n                THEN clock_timestamp() ELSE resolved_at END,\n            review_required_at = CASE WHEN $2 = 'review_required'\n                THEN COALESCE(review_required_at, clock_timestamp()) ELSE review_required_at END,\n            updated_at = clock_timestamp()\n        WHERE id = $1 AND status IN ('pending', 'unknown', 'review_required')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int2",
+        "Int2",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eafb035ae203b58d77a845eba943c26460b5eadd06ba0c25a47bd7dcc3813686"
+}

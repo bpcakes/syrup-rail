@@ -1,0 +1,39 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH due AS MATERIALIZED (\n            SELECT EXISTS (\n                SELECT 1\n                FROM billing_gateway_lifecycle_quarantines\n                WHERE billing_scope_id = $1\n                    AND gateway_account_id = $2\n                    AND resolved_at IS NULL\n                    AND (\n                        last_operator_alerted_at IS NULL\n                        OR last_operator_alerted_at\n                            <= now() - ($3::bigint * interval '1 second')\n                    )\n            ) AS should_claim\n        ),\n        claimed AS (\n            UPDATE billing_gateway_lifecycle_quarantines\n            SET last_operator_alerted_at = now()\n            WHERE billing_scope_id = $1\n                AND gateway_account_id = $2\n                AND resolved_at IS NULL\n                AND (SELECT should_claim FROM due)\n            RETURNING id\n        )\n        SELECT\n            COUNT(*)::bigint AS unresolved_count,\n            MIN(first_seen_at) AS oldest_first_seen_at,\n            MAX(last_seen_at) AS latest_last_seen_at\n        FROM billing_gateway_lifecycle_quarantines\n        WHERE billing_scope_id = $1\n            AND gateway_account_id = $2\n            AND resolved_at IS NULL\n        HAVING EXISTS (SELECT 1 FROM claimed)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "unresolved_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "oldest_first_seen_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "latest_last_seen_at",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "90f16ab77d1c89f359b4e2bed4c474485affb6fc23bfffe3c4118df649bf92f9"
+}

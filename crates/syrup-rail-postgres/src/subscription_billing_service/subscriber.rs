@@ -60,15 +60,16 @@ impl SubscriptionBillingService {
         billing_scope_id: BillingScopeId,
         gateway_configuration_id: syrup_rail::GatewayConfigurationId,
     ) -> Result<GatewayAccountSnapshot, SubscriptionBillingServiceError> {
-        let row = sqlx::query_as::<_, (uuid::Uuid, String)>(
+        let row = checked_query_as!(
+            (uuid::Uuid, String),
             r#"
             SELECT id, provider_key
             FROM billing_gateway_accounts
             WHERE billing_scope_id = $1 AND gateway_configuration_id = $2
             "#,
+            billing_scope_id.as_uuid(),
+            gateway_configuration_id.as_uuid(),
         )
-        .bind(billing_scope_id.as_uuid())
-        .bind(gateway_configuration_id.as_uuid())
         .fetch_optional(&self.pool)
         .await?
         .ok_or(SubscriptionBillingServiceError::GatewayConfigurationChanged)?;

@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                count(*) FILTER (WHERE id <> $4),\n                count(*) FILTER (WHERE id = $4) AS in_flight_count\n            FROM billing_payment_attempts\n            WHERE billing_scope_id = $1\n                AND subscriber_id = $2\n                AND plan_key = $3\n                AND attempt_kind = 'subscription_initial'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "in_flight_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "0a1002aae163eac161e57910a007b77a097fc9d8e6e42750881bbff3bbd20bbe"
+}

@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT charges.id, charges.attempt_id,\n            attempts.billing_scope_id, attempts.subscriber_id,\n            attempts.attempt_kind, attempts.plan_key, attempts.host_charge_target_id\n        FROM billing_processor_charges charges\n        INNER JOIN billing_payment_attempts attempts ON attempts.id = charges.attempt_id\n        WHERE charges.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "attempt_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "attempt_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "subscriber_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscriber_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "host_charge_target_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "host_charge_target_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "f79fc0d5a709d6ccde0a27df232201af9c3f2d7849c15748f4ba5ca00eb097cb"
+}

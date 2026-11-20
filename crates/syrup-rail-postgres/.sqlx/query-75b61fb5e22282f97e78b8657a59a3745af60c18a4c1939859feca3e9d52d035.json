@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_payment_attempts (\n            required_gateway_account_mode,\n            id, billing_scope_id, subscriber_id, plan_key, subscription_id,\n            payment_method_id, attempt_kind, status, idempotency_key,\n            request_fingerprint, amount_cents, currency, gateway_account_id,\n            gateway_configuration_id, gateway_order_id,\n            payment_method_update_expected_payment_method_id,\n            payment_method_update_expected_initial_transaction_id,\n            resolved_at, created_at, updated_at\n        )\n        SELECT\n            'live',\n            md5('payment-history-plan-attempt-' || value)::uuid,\n            $1,\n            $2,\n            $3,\n            $4,\n            $5,\n            'subscription_payment_method_update',\n            'failed',\n            'payment-history-plan-idempotency-' || value,\n            'payment-history-plan-fingerprint-' || value,\n            0,\n            'USD',\n            $6,\n            $7,\n            'payment-history-plan-order-' || value,\n            $5,\n            $8,\n            observed_at,\n            observed_at,\n            observed_at\n        FROM generate_series(1, $10::integer) AS fixture(value)\n        CROSS JOIN LATERAL (\n            SELECT $9::timestamptz\n                - ((value - 1) / 4) * interval '1 second' AS observed_at\n        ) AS clock\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "75b61fb5e22282f97e78b8657a59a3745af60c18a4c1939859feca3e9d52d035"
+}

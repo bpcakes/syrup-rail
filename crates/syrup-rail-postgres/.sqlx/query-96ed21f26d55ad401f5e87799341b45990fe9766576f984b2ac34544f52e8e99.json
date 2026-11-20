@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO billing_payment_attempts (\n                id, billing_scope_id, subscriber_id, plan_key, subscription_id,\n                payment_method_id, attempt_kind, status, idempotency_key,\n                request_fingerprint, amount_cents, currency,\n                billing_period_start_at, billing_period_end_at,\n                gateway_account_id, gateway_configuration_id, gateway_order_id,\n                subscription_expected_payment_method_id,\n                subscription_expected_initial_transaction_id,\n                subscription_expected_status,\n                required_gateway_account_mode\n            )\n            SELECT\n                $1, subscriptions.billing_scope_id, subscriptions.subscriber_id,\n                subscriptions.plan_key, subscriptions.id,\n                subscriptions.payment_method_id, 'subscription_recovery',\n                'pending', $2, $3, subscriptions.amount_cents,\n                subscriptions.currency, subscriptions.next_renewal_at,\n                subscriptions.next_renewal_at + interval '1 month',\n                subscriptions.gateway_account_id,\n                accounts.gateway_configuration_id, $4,\n                subscriptions.payment_method_id,\n                subscriptions.initial_transaction_id, 'past_due', 'live'\n            FROM billing_subscriptions AS subscriptions\n            INNER JOIN billing_gateway_accounts AS accounts\n                ON accounts.id = subscriptions.gateway_account_id\n                AND accounts.billing_scope_id = subscriptions.billing_scope_id\n            WHERE subscriptions.id = $5\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "96ed21f26d55ad401f5e87799341b45990fe9766576f984b2ac34544f52e8e99"
+}

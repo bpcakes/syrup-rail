@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_processor_charges\n        SET progression_state = 'externally_reversed',\n            state_code = $2,\n            externally_reversed_at = COALESCE(externally_reversed_at, clock_timestamp()),\n            updated_at = clock_timestamp()\n        WHERE id = $1 AND progression_state = 'external_reversal_required'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8de5679f5241e420715ea2e1dcdb9c656b1be3a444e8e2a7ffd5b893415c0886"
+}

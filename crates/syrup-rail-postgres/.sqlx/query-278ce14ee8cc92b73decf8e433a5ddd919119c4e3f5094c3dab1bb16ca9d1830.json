@@ -1,0 +1,45 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_payment_methods (\n            id, billing_scope_id, subscriber_id, gateway_account_id,\n            gateway_payment_method_reference, status, payment_type, card_brand,\n            card_last4, card_exp_month, card_exp_year, billing_name, billing_email,\n            billing_address_line1, billing_address_line2, billing_address_city,\n            billing_address_region, billing_address_postal_code, billing_address_country\n        ) VALUES (\n            $1, $2, $3, $4, $5, 'active', $6, $7, $8, $9, $10, $11, $12,\n            $13, $14, $15, $16, $17, $18\n        )\n        ON CONFLICT (gateway_account_id, subscriber_id, gateway_payment_method_reference)\n        DO UPDATE SET status = 'active', payment_type = EXCLUDED.payment_type,\n            card_brand = EXCLUDED.card_brand, card_last4 = EXCLUDED.card_last4,\n            card_exp_month = EXCLUDED.card_exp_month,\n            card_exp_year = EXCLUDED.card_exp_year,\n            billing_name = EXCLUDED.billing_name,\n            billing_email = EXCLUDED.billing_email,\n            billing_address_line1 = CASE WHEN EXCLUDED.billing_address_line1 IS NULL\n                THEN billing_payment_methods.billing_address_line1\n                ELSE EXCLUDED.billing_address_line1 END,\n            billing_address_line2 = CASE WHEN EXCLUDED.billing_address_line1 IS NULL\n                THEN billing_payment_methods.billing_address_line2\n                ELSE EXCLUDED.billing_address_line2 END,\n            billing_address_city = CASE WHEN EXCLUDED.billing_address_line1 IS NULL\n                THEN billing_payment_methods.billing_address_city\n                ELSE EXCLUDED.billing_address_city END,\n            billing_address_region = CASE WHEN EXCLUDED.billing_address_line1 IS NULL\n                THEN billing_payment_methods.billing_address_region\n                ELSE EXCLUDED.billing_address_region END,\n            billing_address_postal_code = CASE WHEN EXCLUDED.billing_address_line1 IS NULL\n                THEN billing_payment_methods.billing_address_postal_code\n                ELSE EXCLUDED.billing_address_postal_code END,\n            billing_address_country = CASE WHEN EXCLUDED.billing_address_line1 IS NULL\n                THEN billing_payment_methods.billing_address_country\n                ELSE EXCLUDED.billing_address_country END,\n            updated_at = clock_timestamp()\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int2",
+        "Int2",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "278ce14ee8cc92b73decf8e433a5ddd919119c4e3f5094c3dab1bb16ca9d1830"
+}

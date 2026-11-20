@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM billing_processor_charges evidence\n            INNER JOIN billing_payment_attempts attempts\n                ON attempts.id = evidence.attempt_id\n            WHERE attempts.billing_scope_id = $1\n                AND attempts.subscriber_id = $2\n                AND attempts.plan_key = $3\n                AND attempts.attempt_kind = 'subscription_initial'\n                AND evidence.progression_state IN (\n                    'pending',\n                    'reconciliation_required',\n                    'external_reversal_required'\n                )\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "5382e10d3d48222b811063255151ea28219bff8b9b99d7595f0ec4716cf72f6a"
+}

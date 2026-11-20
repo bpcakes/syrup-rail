@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT gateway_account_id\n        FROM (\n            SELECT gateway_account_id\n            FROM billing_payment_attempts\n            WHERE billing_scope_id = $1 AND subscriber_id = $2\n\n            UNION\n\n            SELECT gateway_account_id\n            FROM billing_payment_methods\n            WHERE billing_scope_id = $1 AND subscriber_id = $2\n        ) AS affected_accounts\n        ORDER BY gateway_account_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f7767c054139a2ee3726d521a789391c2efe8f84bcd91412bf92f9477b54d205"
+}

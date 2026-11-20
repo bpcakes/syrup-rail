@@ -159,7 +159,7 @@ pub async fn claim_gateway_lifecycle_quarantine_alert(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    let owns_claim: bool = sqlx::query_scalar(
+    let owns_claim: bool = checked_query_scalar!(
         r#"
         SELECT pg_try_advisory_xact_lock(
             hashtextextended(
@@ -169,16 +169,16 @@ pub async fn claim_gateway_lifecycle_quarantine_alert(
             )
         )
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
     .fetch_one(&mut *transaction)
     .await?;
     if !owns_claim {
         transaction.rollback().await?;
         return Ok(None);
     }
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         WITH due AS MATERIALIZED (
             SELECT EXISTS (
@@ -213,10 +213,10 @@ pub async fn claim_gateway_lifecycle_quarantine_alert(
             AND resolved_at IS NULL
         HAVING EXISTS (SELECT 1 FROM claimed)
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        alert_after_seconds,
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(alert_after_seconds)
     .fetch_optional(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -240,7 +240,7 @@ pub async fn gateway_lifecycle_quarantine_review_page(
             "gateway lifecycle quarantine review page size is invalid",
         ));
     }
-    let rows = sqlx::query(
+    let rows = checked_query!(
         r#"
         WITH page AS (
             SELECT quarantine.id,
@@ -284,10 +284,10 @@ pub async fn gateway_lifecycle_quarantine_review_page(
         ) history ON TRUE
         ORDER BY page.first_seen_at, page.id
         "#,
+        cursor.as_ref().map(|(first_seen_at, _)| first_seen_at),
+        cursor.as_ref().map(|(_, id)| id),
+        limit,
     )
-    .bind(cursor.as_ref().map(|(first_seen_at, _)| first_seen_at))
-    .bind(cursor.as_ref().map(|(_, id)| id))
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     rows.into_iter().map(review_record).collect()
@@ -308,15 +308,15 @@ pub async fn resolve_gateway_lifecycle_quarantine(
     }
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
-    let quarantine = sqlx::query(
+    let quarantine = checked_query!(
         r#"
         SELECT occurrence_count, last_seen_at, resolved_at
         FROM billing_gateway_lifecycle_quarantines
         WHERE id = $1
         FOR UPDATE
         "#,
+        quarantine_id,
     )
-    .bind(quarantine_id)
     .fetch_optional(&mut *transaction)
     .await?;
     let Some(quarantine) = quarantine else {
@@ -333,7 +333,7 @@ pub async fn resolve_gateway_lifecycle_quarantine(
         .try_get::<Option<DateTime<Utc>>, _>("resolved_at")?
         .is_some()
     {
-        let existing = sqlx::query(
+        let existing = checked_query!(
             r#"
             SELECT quarantine_id, actor_id, reason,
                 observed_occurrence_count, observed_last_seen_at, resolved_at
@@ -342,10 +342,10 @@ pub async fn resolve_gateway_lifecycle_quarantine(
                 AND observed_occurrence_count = $2
                 AND observed_last_seen_at = $3
             "#,
+            quarantine_id,
+            expected_occurrence_count,
+            expected_last_seen_at,
         )
-        .bind(quarantine_id)
-        .bind(expected_occurrence_count)
-        .bind(expected_last_seen_at)
         .fetch_optional(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -359,7 +359,7 @@ pub async fn resolve_gateway_lifecycle_quarantine(
             _ => GatewayLifecycleQuarantineResolutionOutcome::AlreadyResolved,
         });
     }
-    let resolution = sqlx::query(
+    let resolution = checked_query!(
         r#"
         INSERT INTO billing_gateway_lifecycle_quarantine_resolutions (
             quarantine_id, actor_id, reason,
@@ -368,16 +368,16 @@ pub async fn resolve_gateway_lifecycle_quarantine(
         RETURNING quarantine_id, actor_id, reason,
             observed_occurrence_count, observed_last_seen_at, resolved_at
         "#,
+        quarantine_id,
+        actor_id.as_uuid(),
+        reason.expose(),
+        expected_occurrence_count,
+        expected_last_seen_at,
     )
-    .bind(quarantine_id)
-    .bind(actor_id.as_uuid())
-    .bind(reason.expose())
-    .bind(expected_occurrence_count)
-    .bind(expected_last_seen_at)
     .fetch_one(&mut *transaction)
     .await?;
     let resolved_at: DateTime<Utc> = resolution.try_get("resolved_at")?;
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE billing_gateway_lifecycle_quarantines
         SET resolved_at = $2
@@ -386,11 +386,11 @@ pub async fn resolve_gateway_lifecycle_quarantine(
             AND occurrence_count = $3
             AND last_seen_at = $4
         "#,
+        quarantine_id,
+        resolved_at,
+        expected_occurrence_count,
+        expected_last_seen_at,
     )
-    .bind(quarantine_id)
-    .bind(resolved_at)
-    .bind(expected_occurrence_count)
-    .bind(expected_last_seen_at)
     .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() != 1 {
@@ -545,7 +545,7 @@ mod tests {
         .await?;
 
         let mut blocker = database.pool.begin().await?;
-        sqlx::query(
+        checked_query!(
             r#"
             SELECT id
             FROM billing_gateway_lifecycle_quarantines
@@ -554,9 +554,9 @@ mod tests {
                 AND resolved_at IS NULL
             FOR UPDATE
             "#,
+            first_account.billing_scope_id().into_uuid(),
+            first_account.gateway_account_id().into_uuid(),
         )
-        .bind(first_account.billing_scope_id().as_uuid())
-        .bind(first_account.gateway_account_id().as_uuid())
         .fetch_one(&mut *blocker)
         .await?;
         let mut observer = database.pool.acquire().await?;
@@ -641,7 +641,7 @@ mod tests {
     }
 
     async fn waiting_alert_claims(observer: &mut sqlx::PgConnection) -> Result<i64, sqlx::Error> {
-        sqlx::query_scalar(
+        checked_query_scalar!(
             r#"
             SELECT COUNT(*)::bigint
             FROM pg_catalog.pg_stat_activity

@@ -47,7 +47,7 @@ async fn recovery_attempt_matches_replay_context(
         return Ok(false);
     };
     let identity = attempt.identity();
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM billing_subscriptions
@@ -67,14 +67,14 @@ async fn recovery_attempt_matches_replay_context(
                 )
         )
         "#,
+        expected_state.subscription_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        plan_key.as_str(),
+        period.start_at(),
+        attempt.status().as_str(),
+        identity.required_gateway_account_mode().as_str(),
     )
-    .bind(expected_state.subscription_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(plan_key.as_str())
-    .bind(period.start_at())
-    .bind(attempt.status().as_str())
-    .bind(identity.required_gateway_account_mode().as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -201,7 +201,7 @@ async fn recovery_subscription_state_matches(
 ) -> Result<bool, sqlx::Error> {
     let identity = reservation.identity();
     let expected = reservation.expected_state();
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM billing_subscriptions
@@ -214,16 +214,16 @@ async fn recovery_subscription_state_matches(
                 AND next_renewal_at = $9
         )
         "#,
+        reservation.subscription_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        reservation.plan_key().as_str(),
+        expected.status().as_str(),
+        expected.payment_method_id().into_uuid(),
+        expected.initial_transaction_id().expose(),
+        reservation.period().start_at(),
     )
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
-    .bind(expected.status().as_str())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(expected.initial_transaction_id().expose())
-    .bind(reservation.period().start_at())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -235,7 +235,9 @@ async fn insert_recovery_attempt(
     let identity = reservation.identity();
     let request = reservation.request();
     let expected = reservation.expected_state();
-    let result = sqlx::query(
+    let billing_address =
+        crate::attempts::billing_address_columns(request.billing_contact().address());
+    let result = sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             id, billing_scope_id, subscriber_id, plan_key, subscription_id,
@@ -256,30 +258,35 @@ async fn insert_recovery_attempt(
         )
         ON CONFLICT DO NOTHING
         "#,
+        identity.attempt_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        reservation.plan_key().as_str(),
+        reservation.subscription_id().into_uuid(),
+        expected.payment_method_id().into_uuid(),
+        request.idempotency_key().expose(),
+        request.fingerprint().expose(),
+        request.amount().cents(),
+        request.amount().currency().as_str().to_owned(),
+        reservation.period().start_at(),
+        reservation.period().end_at(),
+        identity.gateway_account_id().into_uuid(),
+        identity.gateway_configuration_id().into_uuid(),
+        request.gateway_order_id().expose(),
+        request.billing_contact().first_name(),
+        request.billing_contact().last_name(),
+        request.billing_contact().email(),
+        expected.payment_method_id().into_uuid(),
+        expected.initial_transaction_id().expose(),
+        expected.status().as_str(),
+        identity.required_gateway_account_mode().as_str(),
+        billing_address.line1,
+        billing_address.line2,
+        billing_address.city,
+        billing_address.region,
+        billing_address.postal_code,
+        billing_address.country,
     )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(request.idempotency_key().expose())
-    .bind(request.fingerprint().expose())
-    .bind(request.amount().cents())
-    .bind(request.amount().currency().as_str())
-    .bind(reservation.period().start_at())
-    .bind(reservation.period().end_at())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(request.gateway_order_id().expose())
-    .bind(request.billing_contact().first_name())
-    .bind(request.billing_contact().last_name())
-    .bind(request.billing_contact().email())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(expected.initial_transaction_id().expose())
-    .bind(expected.status().as_str())
-    .bind(identity.required_gateway_account_mode().as_str())
-    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected() == 1)
@@ -390,7 +397,7 @@ pub async fn reserve_subscription_recovery_in_transaction(
         .await;
     }
 
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, gateway_account_id, payment_method_id, amount_cents, currency,
             next_renewal_at, initial_transaction_id, status,
@@ -404,10 +411,10 @@ pub async fn reserve_subscription_recovery_in_transaction(
         LIMIT 1
         FOR UPDATE
         "#,
+        command.billing_scope_id().into_uuid(),
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
     )
-    .bind(command.billing_scope_id().as_uuid())
-    .bind(command.subscriber_id().as_uuid())
-    .bind(command.plan_key().as_str())
     .fetch_optional(&mut **transaction)
     .await?;
     let Some(row) = row else {

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_gateway_accounts\n        SET gateway_configuration_id = $2, updated_at = clock_timestamp()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9be8e74287b1d50eb82273c5b678126f5d80598c446c51ed5d14f50a36ee124d"
+}
