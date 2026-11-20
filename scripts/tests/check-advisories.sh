@@ -322,4 +322,41 @@ run_mixed_sqlite_versions_case() {
 run_mixed_sqlite_versions_case 0.30.1 0.39.0
 run_mixed_sqlite_versions_case 0.39.0 0.30.1
 
+# chrono is reachable, so its unmaintained notice is ignored without a graph
+# check. Only that advisory ID is ignored: any other audit failure, such as a
+# vulnerability advisory against chrono, keeps its exit status.
+run_chrono_case() {
+  local name="$1" rsa_locked="$2" audit_exit="$3" expected_args="$4" expect_tree="$5"
+  local case_root
+  case_root="$(prepare_case "$name" "$rsa_locked")"
+  printf '[[package]]\nname = "chrono"\nversion = "0.4.45"\n' >>"$case_root/Cargo.lock"
+  local status=0
+  ADVISORY_TEST_REPO_ROOT="$case_root" \
+    ADVISORY_TEST_TREE_OUTPUT="chrono v0.4.45" \
+    ADVISORY_TEST_TREE_CALLED="$case_root/tree-called" \
+    ADVISORY_TEST_AUDIT_ARGS="$case_root/audit-args" \
+    ADVISORY_TEST_AUDIT_EXIT="$audit_exit" \
+    PATH="$test_root/bin:$PATH" \
+    "$subject" || status=$?
+  if [[ "$status" -ne "$audit_exit" ]]; then
+    printf 'chrono case %s exited with %s instead of %s\n' "$name" "$status" "$audit_exit" >&2
+    exit 1
+  fi
+  if [[ "$(cat "$case_root/audit-args")" != "$expected_args" ]]; then
+    printf 'unexpected cargo audit arguments for %s\n' "$name" >&2
+    printf 'expected: %s\n' "$expected_args" >&2
+    printf 'actual:   %s\n' "$(cat "$case_root/audit-args")" >&2
+    exit 1
+  fi
+  if [[ "$expect_tree" == false && -e "$case_root/tree-called" ]]; then
+    printf 'cargo tree was unexpectedly called for %s\n' "$name" >&2
+    exit 1
+  fi
+}
+
+run_chrono_case chrono-locked false 0 "--deny warnings --ignore RUSTSEC-2026-0543" false
+run_chrono_case chrono-other-advisory false 42 "--deny warnings --ignore RUSTSEC-2026-0543" false
+run_chrono_case chrono-after-rsa true 0 \
+  "--deny warnings --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0543" true
+
 printf 'Dependency advisory wrapper tests passed.\n'

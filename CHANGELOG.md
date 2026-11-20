@@ -64,6 +64,10 @@ historically named `dev/0.6.0` branch.
 - Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, `tokio`, and
   `webpki-roots` to compatible patched versions required by the release audit.
   SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
+- Ignore only the informational `RUSTSEC-2026-0543` notice that `chrono` is
+  unmaintained. `chrono` is reachable and part of the public API, so replacing
+  it needs its own breaking release; every other `chrono` advisory stays
+  denied. See `docs/security/dependency-advisories.md`.
 - Require roxmltree 0.21.2 or later within the compatible 0.21 line. Its
   iterative XML parser prevents deeply nested, byte-bounded responses from
   exhausting the stack before structural validation.
