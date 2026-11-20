@@ -124,9 +124,11 @@ async fn canonical_catalog_fingerprint(
     // Read the MVCC-visible pg_proc tuple directly rather than calling
     // pg_get_functiondef(oid), which consults SysCache (latest committed
     // catalog) and can tear a REPEATABLE READ snapshot across an online
-    // function replacement. Ownership and ACLs are host-owned and excluded.
-    // The row records argument and return types as type OIDs, which are the
-    // same in every database only for built-in types; a test keeps canonical
+    // function replacement. Each definition column is named, so a
+    // PostgreSQL-compatible server with extra pg_proc columns computes the
+    // same fingerprint; ownership and ACLs are host-owned and left out. The
+    // row records argument and return types as type OIDs, which are the same
+    // in every database only for built-in types; a test keeps canonical
     // function signatures to those.
     let function_definitions = sqlx::query_scalar::<_, String>(
         r#"
@@ -134,9 +136,32 @@ async fn canonical_catalog_fingerprint(
             namespace.nspname,
             language.lanname,
             pg_catalog.pg_get_expr(routine.proargdefaults, 0),
-            to_jsonb(routine) - ARRAY[
-                'oid', 'proowner', 'proacl', 'pronamespace', 'prolang', 'proargdefaults'
-            ]
+            jsonb_build_object(
+                'proname', routine.proname,
+                'procost', routine.procost,
+                'prorows', routine.prorows,
+                'provariadic', routine.provariadic,
+                'prosupport', routine.prosupport,
+                'prokind', routine.prokind,
+                'prosecdef', routine.prosecdef,
+                'proleakproof', routine.proleakproof,
+                'proisstrict', routine.proisstrict,
+                'proretset', routine.proretset,
+                'provolatile', routine.provolatile,
+                'proparallel', routine.proparallel,
+                'pronargs', routine.pronargs,
+                'pronargdefaults', routine.pronargdefaults,
+                'prorettype', routine.prorettype,
+                'proargtypes', routine.proargtypes,
+                'proallargtypes', routine.proallargtypes,
+                'proargmodes', routine.proargmodes,
+                'proargnames', routine.proargnames,
+                'protrftypes', routine.protrftypes,
+                'prosrc', routine.prosrc,
+                'probin', routine.probin,
+                'prosqlbody', routine.prosqlbody,
+                'proconfig', routine.proconfig
+            )
         )::text
         FROM pg_catalog.pg_proc AS routine
         INNER JOIN pg_catalog.pg_namespace AS namespace
