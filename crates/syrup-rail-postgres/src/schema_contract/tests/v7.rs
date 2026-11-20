@@ -243,3 +243,60 @@ async fn v6_to_v7_upgrade_rolls_back_on_lock_timeout_and_refuses_a_rerun_or_v5()
     cleanup?;
     v5_cleanup
 }
+
+/// Runs the runtime's attempt reads on `pool`, so each caches its
+/// prepared statement there.
+async fn read_attempts_on(
+    pool: &PgPool,
+    scope_id: Uuid,
+    attempt_id: Uuid,
+    gateway_account_id: Uuid,
+) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let attempt = crate::attempts::find_payment_attempt_by_id_in_transaction(
+        &mut transaction,
+        syrup_rail::BillingScopeId::new(scope_id),
+        syrup_rail::PaymentAttemptId::new(attempt_id),
+    )
+    .await?;
+    assert!(attempt.is_some(), "fixture attempt must be readable");
+    transaction.commit().await?;
+    crate::claim_exact_reconciliation_attempts(
+        pool,
+        syrup_rail::GatewayAccountId::new(gateway_account_id),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_attempt_reads_cached_on_v6_survive_the_v7_upgrade() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start_v3("sr_cached_v7").await?;
+    let result = async {
+        populated_v4(&database).await?;
+        database.upgrade_v4_to_v5().await?;
+        database.upgrade_v5_to_v6().await?;
+        let (scope_id, attempt_id, gateway_account_id): (Uuid, Uuid, Uuid) = sqlx::query_as(
+            "SELECT billing_scope_id, id, gateway_account_id FROM billing_payment_attempts \
+             ORDER BY created_at, id LIMIT 1",
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        // One connection, so the second round reuses the statements the first
+        // round prepared against the v6 catalog.
+        let serving = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with((*database.pool.connect_options()).clone())
+            .await?;
+        read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id).await?;
+
+        database.upgrade_v6_to_v7().await?;
+        assert_v7_conforms(&database.pool).await?;
+        read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id).await?;
+        serving.close().await;
+        Ok::<(), Box<dyn Error>>(())
+    }
+    .await;
+    database.cleanup().await?;
+    result
+}

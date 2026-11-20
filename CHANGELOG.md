@@ -13,6 +13,12 @@ All notable changes to the Syrup Rail crates are documented in this file.
 - `assert_runtime_schema_v6_or_v7_compatible` accepts exactly the v6 or v7
   catalog, and `assert_runtime_schema_v7_compatible` accepts exactly v7.
 
+### Fixed
+
+- The reconciliation claim returned attempts with `RETURNING attempts.*`. A
+  statement cached on a pooled connection would fail once v7 appends a column.
+  It now names the schema-v6 attempt columns, which every attempt read shares.
+
 ### Action required for hosts
 
 - Replace the startup call to `assert_runtime_schema_v6_compatible` with

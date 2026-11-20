@@ -27,7 +27,9 @@ the address it was checked against.
 
 The runtime in this release reads and writes only schema-v6 columns, by name,
 so it is correct on either catalog and calls
-`assert_runtime_schema_v6_or_v7_compatible`. A runtime that writes
+`assert_runtime_schema_v6_or_v7_compatible`. No runtime query projects
+attempts with `*`, so statements a pooled connection prepared against v6 keep
+working after the upgrade commits. A runtime that writes
 `gateway_avs_response` will require v7.
 
 ## Cutover
