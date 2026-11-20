@@ -125,6 +125,9 @@ async fn canonical_catalog_fingerprint(
     // pg_get_functiondef(oid), which consults SysCache (latest committed
     // catalog) and can tear a REPEATABLE READ snapshot across an online
     // function replacement. Ownership and ACLs are host-owned and excluded.
+    // The row records argument and return types as type OIDs, which are the
+    // same in every database only for built-in types; a test keeps canonical
+    // function signatures to those.
     let function_definitions = sqlx::query_scalar::<_, String>(
         r#"
         SELECT jsonb_build_array(

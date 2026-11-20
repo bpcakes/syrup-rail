@@ -58,8 +58,13 @@ scans the table. Writers do not stop.
    The artifact's 100-millisecond `lock_timeout` stays under the runtime's
    250-millisecond billing lock timeout, so a blocked upgrade gives up before
    queued billing statements fail. On a timeout the transaction rolls back
-   with no change and can be retried. The artifact refuses a database that is
-   not schema v6 and a rerun.
+   with no change and can be retried. A running autovacuum of
+   `billing_payment_attempts` also blocks the lock, and the timeout expires
+   before PostgreSQL would cancel that vacuum for the waiting `ALTER TABLE`
+   (after `deadlock_timeout`, 1 second by default), so retries keep timing out
+   until it finishes; an anti-wraparound vacuum is never cancelled. Check
+   `pg_stat_progress_vacuum` for the table and apply once it is idle. The
+   artifact refuses a database that is not schema v6 and a rerun.
 3. Optionally confirm the result with `assert_runtime_schema_v7_compatible`.
 
 ## Recovery

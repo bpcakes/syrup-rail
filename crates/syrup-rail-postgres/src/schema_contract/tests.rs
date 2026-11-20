@@ -47,6 +47,7 @@ fn opaque_fixture_uuid_is_unique_and_cannot_resemble_card_data() {
     assert!(!syrup_rail::string_contains_raw_card_data(&second));
 }
 
+mod fingerprint;
 mod fixtures;
 mod storage_fixtures;
 mod upgrade;
