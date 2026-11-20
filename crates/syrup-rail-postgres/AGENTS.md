@@ -12,7 +12,8 @@ and transaction orchestration.
 - `schema/v7/install.sql` — current authoritative fresh-install DDL;
   `schema/v7/upgrade_from_v6.sql` is the one-transaction, online forward-only
   v6 upgrade that appends the nullable
-  `billing_payment_attempts.gateway_avs_response` column.
+  `billing_payment_attempts.gateway_avs_response` column and replaces
+  `billing_host_charge_ledger_admission` to require it empty before `submit`.
 - `schema/v6/**` — immutable shipped version-6 distribution artifacts,
   including the one-transaction, stopped-writer v5 cutover
   (`upgrade_from_v5.sql`) that widens the attempt resolution-code and
@@ -33,11 +34,11 @@ and transaction orchestration.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
 - `src/schema_contract.rs` — production read-only v6-or-v7 runtime
   compatibility assertion, the exact v7 and v6 assertions, the retained v5
-  and v4 pre-cutover assertions, and canonical
-  catalog conformance. Version-specific, upgrade, and
-  shared fixture tests live under `src/schema_contract/tests/`; checked-in
-  install/upgrade SQL constants remain behind tests or the explicit
-  `schema-contract-test-support` feature.
+  and v4 pre-cutover assertions, and canonical catalog conformance;
+  `src/schema_contract/fingerprint.rs` owns snapshot-consistent catalog
+  fingerprinting. Version-specific, upgrade, and shared fixture tests live
+  under `src/schema_contract/tests/`; checked-in install/upgrade SQL constants
+  remain behind tests or the explicit `schema-contract-test-support` feature.
   `src/schema_contract/tests/upgrade/retry_reclassification.rs` owns the
   executable contract for the read-only cutover audit.
 - `src/gateway_accounts.rs` — transaction-local gateway account registration
@@ -109,7 +110,8 @@ and transaction orchestration.
 - `src/cancellation.rs` — caller-transaction exact-plan cancellation,
   attempt fences, stale update cleanup, and canonical event production.
 - `src/deletion.rs` — transaction-local mutable billing-data scrubbing;
-  `src/deletion/blockers.rs` owns the canonical account-deletion blocker query.
+  `src/deletion/blockers.rs` owns the canonical account-deletion blocker query,
+  and `src/deletion/tests.rs` classifies scrubbed and retained columns.
 - `src/reconciliation.rs` — deterministic registered-account reconciliation
   candidate selection and bounded local account phases;
   `src/reconciliation/classification.rs` owns pending-charge locking and state
@@ -300,7 +302,11 @@ and transaction orchestration.
 - Recovery admission relies on the exactly pinned `sqlx-core` transaction-depth
   API to reject nested transactions. Keep this guard and its database tests
   when upgrading SQLx; `Connection::is_in_transaction` alone is insufficient.
-- Provider wire strings belong in `syrup-rail-nmi`, not here.
+- Provider wire strings belong in `syrup-rail-nmi`, not here. Because
+  `scrub_subscriber_billing_data` retains `gateway_avs_response` without a SQL
+  `CHECK` constraint in schema v7, any future writer must validate and bound it
+  against a closed provider AVS code vocabulary (never raw provider text or
+  address fragments) before persisting.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
   `assert_v3_conforms`, `assert_v4_conforms`, `assert_v5_conforms`,
   `assert_v6_conforms`, and `assert_v7_conforms` wrappers are also read-only;

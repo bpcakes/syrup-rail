@@ -110,7 +110,8 @@ current contract. New hosts install
 [`schema/v7/install.sql`](crates/syrup-rail-postgres/schema/v7/install.sql).
 Existing schema-v6 hosts follow the
 [`v6` to `v7` guide](crates/syrup-rail-postgres/schema/v7/README.md), an
-online single-transaction upgrade that appends one nullable attempt column;
+online single-transaction upgrade that appends one nullable attempt column and
+updates host-charge submit admission;
 deploy a build that accepts v6 or v7 at startup first. Schema-v5 hosts first
 follow the checked-in
 [`v5` to `v6` cutover guide](crates/syrup-rail-postgres/schema/v6/README.md),

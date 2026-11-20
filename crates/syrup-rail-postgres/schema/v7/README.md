@@ -5,19 +5,24 @@ byte-for-byte into an immutable host migration. Existing schema-v6 hosts apply
 `upgrade_from_v6.sql` once, in one transaction. Do not run `install.sql` over
 v6 and do not edit any shipped artifact under `schema/v1` through `schema/v6`.
 
-Version 7 appends one nullable column and changes nothing else:
+Version 7 appends one nullable column and replaces one function to cover it:
 
 - `billing_payment_attempts.gateway_avs_response text` holds the provider's
   address-verification result code from the attempt's original response.
+- `billing_host_charge_ledger_admission` additionally requires a pending
+  host-charge attempt to have no AVS result before `submit` admission, as it
+  already requires for the other gateway response columns.
 
 No row, constraint, index, trigger, view, or other column changes, and the
 upgrade infers nothing about historical rows: they keep `NULL`. Unlike the
 attempt's other gateway response columns, which
 `billing_payment_attempts_gateway_text_check` bounds to 512 octets, the value
 carries no CHECK constraint, so the upgrade stays catalog-only. This release
-never writes it; a runtime that does must bound the value itself before
-writing. Subscriber scrubbing retains it with `gateway_response_code`, because
-it is a closed provider code and not the address it was checked against.
+never writes it; a runtime that does must bound the value and recognize it from
+the provider adapter's closed AVS result-code vocabulary (never persisting raw
+provider text or address fragments), because subscriber scrubbing retains it
+with `gateway_response_code` as a closed decision code rather than the address
+it was checked against.
 
 ## Runtime compatibility
 
@@ -31,13 +36,17 @@ The runtime in this release reads and writes only schema-v6 columns, by name,
 so it is correct on either catalog and calls
 `assert_runtime_schema_v6_or_v7_compatible`. No runtime query projects
 attempts with `*`, so statements a pooled connection prepared against v6 keep
-working after the upgrade commits. A runtime that writes
-`gateway_avs_response` will require v7.
+working after the upgrade commits. Serving roles require table-level `SELECT`
+on `billing_payment_attempts` (not v6-only column grants), because catalog
+validation and the canonical trigger and admission functions inspect the
+table's full column set. A runtime that writes `gateway_avs_response` will
+require v7.
 
 ## Cutover
 
-The upgrade is online. Adding a nullable column without a default changes only
-the catalog: it neither rewrites nor scans the table. Writers do not stop.
+The upgrade is online. Adding a nullable column without a default and
+replacing the admission function change only the catalog: neither rewrites nor
+scans the table. Writers do not stop.
 
 1. Deploy a build that calls `assert_runtime_schema_v6_or_v7_compatible` and
    make it the oldest permitted rollback target. A build that calls

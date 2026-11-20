@@ -1,9 +1,13 @@
 //! Read-only canonical schema conformance and feature-gated artifact support.
 
+mod fingerprint;
+
 use std::collections::BTreeSet;
 
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
+
+use fingerprint::require_catalog_fingerprint;
 
 /// The only PostgreSQL major version supported by this crate and schema
 /// contract.
@@ -71,15 +75,15 @@ pub const V6_TO_V7_UPGRADE_SQL: &str = include_str!("../schema/v7/upgrade_from_v
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-const V1_CATALOG_FINGERPRINT: u64 = 0xc949_7313_2b48_83d9;
+const V1_CATALOG_FINGERPRINT: u64 = 0x6296_b37b_cb1b_77d7;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-const V2_CATALOG_FINGERPRINT: u64 = 0x373b_9c1c_8b27_5be0;
+const V2_CATALOG_FINGERPRINT: u64 = 0x242f_cbb1_4ba4_e048;
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
-const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
-const V5_CATALOG_FINGERPRINT: u64 = 0xfe31_5b97_ddbf_a4d0;
-const V6_CATALOG_FINGERPRINT: u64 = 0xaa6f_82cd_d624_57bd;
-const V7_CATALOG_FINGERPRINT: u64 = 0xd3fd_eba9_f196_9fb4;
+const V3_CATALOG_FINGERPRINT: u64 = 0x8706_4d53_470f_e9ce;
+const V4_CATALOG_FINGERPRINT: u64 = 0xb788_cffc_078a_02fe;
+const V5_CATALOG_FINGERPRINT: u64 = 0xee42_717f_287d_2358;
+const V6_CATALOG_FINGERPRINT: u64 = 0xf1cb_3bff_c4e7_ab43;
+const V7_CATALOG_FINGERPRINT: u64 = 0x2f00_0ddc_a7c5_3b96;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
@@ -432,7 +436,7 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 /// `schema-contract-test-support` feature.
 ///
 /// This function is not part of the ordinary production facade because the
-/// current runtime requires schema v6. It does not install, upgrade, preflight,
+/// current runtime requires schema v6 or v7. It does not install, upgrade, preflight,
 /// audit, or otherwise mutate the schema. It runs the full canonical v3 catalog conformance
 /// and fingerprint check used by the schema-contract tests in one
 /// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
@@ -463,7 +467,8 @@ pub async fn assert_runtime_schema_v3_compatible(
 /// Asserts that a host database is exactly the canonical schema-v7 catalog.
 ///
 /// Version 7 appends the nullable
-/// `billing_payment_attempts.gateway_avs_response` column through the online
+/// `billing_payment_attempts.gateway_avs_response` column and replaces
+/// `billing_host_charge_ledger_admission` through the online
 /// `schema/v7/upgrade_from_v6.sql`. This runtime does not yet write that
 /// column, so hosts on this release call
 /// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing
@@ -505,16 +510,12 @@ pub async fn assert_runtime_schema_v6_or_v7_compatible(
 
 /// Asserts that a host database is exactly the canonical schema-v6 contract.
 ///
-/// It rejects schema v7. Hosts that may run against a schema-v7 catalog,
-/// including as a rollback target, use
-/// [`assert_runtime_schema_v6_or_v7_compatible`] instead.
-///
-/// Call this after the host has applied its immutable Syrup Rail install or
-/// forward-only upgrade migration through its normal migration deployment.
-/// This function is read-only and requires PostgreSQL major version 18. It
-/// rejects a schema-v5 database: 0.5.5 can persist typed billing-period expiry
-/// dispositions and must not accept billing work until
-/// `schema/v6/upgrade_from_v5.sql` has committed.
+/// It rejects schema v7. Hosts on this release call
+/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing work
+/// so the build remains compatible across the online v7 upgrade and as a
+/// rollback target; this exact check confirms the pre-upgrade v6 catalog in a
+/// host's migration workflow. It is read-only, requires PostgreSQL major
+/// version 18, and rejects schema v5.
 pub async fn assert_runtime_schema_v6_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -530,9 +531,9 @@ pub async fn assert_runtime_schema_v6_compatible(
 /// Asserts that a host database still matches the canonical schema-v5
 /// contract.
 ///
-/// The 0.5.5 runtime requires schema v6; use
-/// [`assert_runtime_schema_v6_compatible`] before accepting billing work. This
-/// read-only check remains available so hosts can confirm the pre-cutover
+/// The current runtime requires schema v6 or v7; use
+/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing work.
+/// This read-only check remains available so hosts can confirm the pre-cutover
 /// state before applying `schema/v6/upgrade_from_v5.sql`. It requires
 /// PostgreSQL major version 18.
 pub async fn assert_runtime_schema_v5_compatible(
@@ -550,10 +551,10 @@ pub async fn assert_runtime_schema_v5_compatible(
 /// Asserts that a host database still matches the canonical schema-v4
 /// contract.
 ///
-/// The 0.5.5 runtime requires schema v6; use
-/// [`assert_runtime_schema_v6_compatible`] before accepting billing work. This
-/// read-only check remains available for hosts that still need to confirm a
-/// schema-v4 state before applying `schema/v5/upgrade_from_v4.sql`. It
+/// The current runtime requires schema v6 or v7; use
+/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing work.
+/// This read-only check remains available for hosts that still need to confirm
+/// a schema-v4 state before applying `schema/v5/upgrade_from_v4.sql`. It
 /// requires PostgreSQL major version 18.
 pub async fn assert_runtime_schema_v4_compatible(
     pool: &PgPool,
@@ -1431,213 +1432,6 @@ async fn catalog_index_shape(
     .bind(index_name)
     .fetch_optional(&mut *connection)
     .await
-}
-
-async fn require_catalog_fingerprint(
-    connection: &mut PgConnection,
-    version: u16,
-    expected: &[u64],
-    billing_indexes: &[BillingIndexCatalogEntry],
-) -> Result<(), SchemaConformanceError> {
-    let actual = canonical_catalog_fingerprint(connection, billing_indexes).await?;
-    if expected.contains(&actual) {
-        Ok(())
-    } else {
-        let expected = expected
-            .iter()
-            .map(|fingerprint| format!("{fingerprint:#018x}"))
-            .collect::<Vec<_>>()
-            .join(" or ");
-        Err(contract_error(
-            version,
-            format!(
-                "canonical catalog fingerprint differs: expected {expected}, found {actual:#018x}"
-            ),
-        ))
-    }
-}
-
-async fn canonical_catalog_fingerprint(
-    connection: &mut PgConnection,
-    billing_indexes: &[BillingIndexCatalogEntry],
-) -> Result<u64, SchemaConformanceError> {
-    let tables = REQUIRED_TABLES
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let views = REQUIRED_VIEWS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let functions = REQUIRED_FUNCTIONS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-    let triggers = REQUIRED_TRIGGERS
-        .iter()
-        .map(|name| (*name).to_owned())
-        .collect::<Vec<_>>();
-
-    let columns = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            table_name,
-            ordinal_position::text,
-            column_name,
-            data_type,
-            udt_name,
-            is_nullable,
-            COALESCE(column_default, '')
-        )
-        FROM information_schema.columns
-        WHERE table_schema = 'public'
-            AND table_name = ANY($1)
-        ORDER BY table_name, ordinal_position
-        "#,
-    )
-    .bind(&tables)
-    .fetch_all(&mut *connection)
-    .await?;
-    let constraints = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            relation.relname,
-            catalog_constraint.conname,
-            catalog_constraint.contype::text,
-            pg_catalog.pg_get_constraintdef(catalog_constraint.oid, true)
-        )
-        FROM pg_catalog.pg_constraint AS catalog_constraint
-        INNER JOIN pg_catalog.pg_class AS relation
-            ON relation.oid = catalog_constraint.conrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND relation.relname = ANY($1)
-            AND catalog_constraint.contype <> 'n'
-            AND catalog_constraint.conname LIKE 'billing\_%' ESCAPE '\'
-        ORDER BY relation.relname, catalog_constraint.conname
-        "#,
-    )
-    .bind(&tables)
-    .fetch_all(&mut *connection)
-    .await?;
-    let indexes = billing_indexes
-        .iter()
-        .filter(|index| index.active_concurrent_reindex_pid.is_none())
-        .map(|index| index.definition.clone())
-        .collect::<Vec<_>>();
-    let view_definitions = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            relation.relname,
-            pg_catalog.pg_get_viewdef(relation.oid, true)
-        )
-        FROM pg_catalog.pg_class AS relation
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND relation.relkind = 'v'
-            AND relation.relname = ANY($1)
-        ORDER BY relation.relname
-        "#,
-    )
-    .bind(&views)
-    .fetch_all(&mut *connection)
-    .await?;
-    let function_definitions = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            catalog_function.proname,
-            pg_catalog.pg_get_function_identity_arguments(
-                catalog_function.oid
-            ),
-            pg_catalog.pg_get_functiondef(catalog_function.oid)
-        )
-        FROM pg_catalog.pg_proc AS catalog_function
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = catalog_function.pronamespace
-        WHERE namespace.nspname = 'public'
-            AND catalog_function.prokind = 'f'
-            AND catalog_function.proname = ANY($1)
-        ORDER BY
-            catalog_function.proname,
-            pg_catalog.pg_get_function_identity_arguments(
-                catalog_function.oid
-            )
-        "#,
-    )
-    .bind(&functions)
-    .fetch_all(&mut *connection)
-    .await?;
-    let trigger_definitions = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT concat_ws(
-            '|',
-            relation.relname,
-            catalog_trigger.tgname,
-            catalog_trigger.tgenabled::text,
-            pg_catalog.pg_get_triggerdef(catalog_trigger.oid, true)
-        )
-        FROM pg_catalog.pg_trigger AS catalog_trigger
-        INNER JOIN pg_catalog.pg_class AS relation
-            ON relation.oid = catalog_trigger.tgrelid
-        INNER JOIN pg_catalog.pg_namespace AS namespace
-            ON namespace.oid = relation.relnamespace
-        WHERE namespace.nspname = 'public'
-            AND NOT catalog_trigger.tgisinternal
-            AND catalog_trigger.tgname = ANY($1)
-        ORDER BY relation.relname, catalog_trigger.tgname
-        "#,
-    )
-    .bind(&triggers)
-    .fetch_all(&mut *connection)
-    .await?;
-
-    Ok(catalog_fingerprint([
-        ("columns", columns.as_slice()),
-        ("constraints", constraints.as_slice()),
-        ("indexes", indexes.as_slice()),
-        ("views", view_definitions.as_slice()),
-        ("functions", function_definitions.as_slice()),
-        ("triggers", trigger_definitions.as_slice()),
-    ]))
-}
-
-#[cfg(test)]
-async fn canonical_catalog_fingerprint_for_pool(
-    pool: &PgPool,
-) -> Result<u64, SchemaConformanceError> {
-    let mut connection = pool.acquire().await?;
-    let billing_indexes = load_billing_index_catalog(&mut connection).await?;
-    canonical_catalog_fingerprint(&mut connection, &billing_indexes).await
-}
-
-fn catalog_fingerprint<'a>(categories: impl IntoIterator<Item = (&'a str, &'a [String])>) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    fn add_bytes(mut state: u64, bytes: &[u8]) -> u64 {
-        for byte in bytes {
-            state ^= u64::from(*byte);
-            state = state.wrapping_mul(PRIME);
-        }
-        state
-    }
-
-    let mut state = OFFSET_BASIS;
-    for (category, rows) in categories {
-        state = add_bytes(state, category.as_bytes());
-        state = add_bytes(state, &rows.len().to_be_bytes());
-        for row in rows {
-            state = add_bytes(state, &row.len().to_be_bytes());
-            state = add_bytes(state, row.as_bytes());
-        }
-    }
-    state
 }
 
 fn require_exact_set(

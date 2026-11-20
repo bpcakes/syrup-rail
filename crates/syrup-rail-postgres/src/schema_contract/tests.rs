@@ -15,7 +15,7 @@ use super::{
     V7_CATALOG_FINGERPRINT, V7_INSTALL_SQL, active_reindex_shadows, assert_schema_conforms,
     assert_v1_conforms, assert_v2_conforms, assert_v3_conforms, assert_v4_conforms,
     assert_v5_conforms, assert_v6_conforms, assert_v7_conforms,
-    canonical_catalog_fingerprint_for_pool as canonical_catalog_fingerprint,
+    fingerprint::canonical_catalog_fingerprint_for_pool as canonical_catalog_fingerprint,
     load_billing_index_catalog, require_index_contract, require_supported_postgres_version_num,
     require_unchanged_active_reindex_shadows, retry_reindex_transition_once,
     validate_index_contract,

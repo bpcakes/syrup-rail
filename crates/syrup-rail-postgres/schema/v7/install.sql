@@ -2440,6 +2440,7 @@ BEGIN
                 AND attempts.gateway_response IS NULL
                 AND attempts.gateway_response_code IS NULL
                 AND attempts.gateway_response_text IS NULL
+                AND attempts.gateway_avs_response IS NULL
                 AND attempts.gateway_condition IS NULL
                 AND attempts.resolution_code IS NULL
                 AND attempts.payment_type IS NULL
@@ -2510,6 +2511,7 @@ BEGIN
             AND attempts.gateway_response IS NULL
             AND attempts.gateway_response_code IS NULL
             AND attempts.gateway_response_text IS NULL
+            AND attempts.gateway_avs_response IS NULL
             AND attempts.gateway_condition IS NULL
             AND attempts.resolution_code IS NULL
             AND attempts.payment_type IS NULL

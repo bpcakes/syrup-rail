@@ -33,8 +33,9 @@ Fix stable issues on `master` and carry applicable fixes forward into
 Version 0.6.0 upgrades SQLx to 0.9.0 and Rust to 1.94, starting from the
 IdentityPro-consumed `3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a` behavior.
 The public SQLx pool, connection, transaction, and error types make this a
-breaking package release. It preserves schema v6 byte-for-byte; hosts already
-on v6 need no database migration for this upgrade.
+breaking package release. It preserves schema v6 byte-for-byte and adds schema
+v7 with `assert_runtime_schema_v6_or_v7_compatible`, so hosts already on v6
+need no database migration before deploying 0.6.0.
 
 Before integrating `dev/0.6.0`, assign its unfinished features a later release
 number. Preserve the shipped schema v5 (billing addresses), v6 (typed
