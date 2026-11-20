@@ -53,8 +53,12 @@ scans the table. Writers do not stop.
    `assert_runtime_schema_v6_compatible` refuses to start once v7 commits.
 2. Apply `upgrade_from_v6.sql` in one host-owned transaction and commit it.
    `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock for the catalog change and
-   holds it until that transaction commits, so commit promptly. While the
-   request waits, every later statement on the attempt table queues behind it.
+   holds it until that transaction commits, so commit promptly. Run nothing
+   else in that transaction: the lock and the artifact's `lock_timeout` both
+   last until it ends, so a migration runner that batches several migrations
+   into one transaction must give this artifact a transaction of its own.
+   While the request waits, every later statement on the attempt table queues
+   behind it.
    The artifact's 100-millisecond `lock_timeout` stays under the runtime's
    250-millisecond billing lock timeout, so a blocked upgrade gives up before
    queued billing statements fail. On a timeout the transaction rolls back

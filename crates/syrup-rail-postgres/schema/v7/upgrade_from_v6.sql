@@ -1,6 +1,8 @@
 -- Forward-only Syrup Rail schema upgrade from version 6 to version 7.
 --
--- Apply these bytes once inside a host-owned transaction. Version 7 appends
+-- Apply these bytes once inside a host-owned transaction that does nothing
+-- else: the lock and the lock_timeout below last until it ends, so do not
+-- batch other migrations into it. Version 7 appends
 -- one nullable column, billing_payment_attempts.gateway_avs_response, which
 -- holds the provider's address-verification result code for the attempt's
 -- original response. It also replaces billing_host_charge_ledger_admission so
