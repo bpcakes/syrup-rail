@@ -2,7 +2,7 @@
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
 SQLx operations, and high-level subscription billing service. Version 0.6.0
-supports PostgreSQL 18 only and uses schema v6.
+supports PostgreSQL 18 only and runs on schema v6 or v7.
 
 ```toml
 [dependencies]
@@ -16,15 +16,18 @@ Upgrade the host's SQLx CLI to 0.9.0 and regenerate its query metadata.
 Schema v6 artifacts are unchanged from 0.5.5, so an existing v6 host needs no
 database migration for this package upgrade.
 
-New hosts install `schema/v6/install.sql` through their normal migration
-system. Existing schema-v5 hosts stop every billing writer and commit
+New hosts install `schema/v7/install.sql` through their normal migration
+system. Existing schema-v6 hosts may commit the online
+`schema/v7/upgrade_from_v6.sql` following `schema/v7/README.md`, but only after
+every serving and rollback-target build accepts v6 or v7 at startup. Existing
+schema-v5 hosts stop every billing writer and commit
 `schema/v6/upgrade_from_v5.sql` in one transaction, following
 `schema/v6/README.md`; old 0.5.4 binaries must not restart after that commit.
 Schema-v4 hosts first commit `schema/v5/upgrade_from_v4.sql` the same way,
 following `schema/v5/README.md`. Hosts still on schema v3 first complete the
 staged v4 cutover (`schema/v4/prepare_from_v3.sql`,
 `schema/v4/validate_from_v3.sql`, `schema/v4/index_from_v3.sql` outside a
-transaction, and `schema/v4/upgrade_from_v3.sql`). Schemas v1 through v5 are
+transaction, and `schema/v4/upgrade_from_v3.sql`). Schemas v1 through v6 are
 immutable. The
 detailed versioned guides explain the required lock, maintenance, and
 rehearsal boundaries.
@@ -34,7 +37,7 @@ verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v6_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v6_or_v7_compatible(pool).await?;
 # Ok(())
 # }
 ```

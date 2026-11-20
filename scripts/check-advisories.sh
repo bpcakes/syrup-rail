@@ -47,4 +47,10 @@ for exception in 'rsa:RUSTSEC-2023-0071' 'libsqlite3-sys:RUSTSEC-2026-0459'; do
   fi
   set -- "$@" --ignore "$advisory"
 done
+# chrono is reachable by design, so this exception has no reachability guard.
+# It names only the informational unmaintained notice: a vulnerability or
+# unsoundness advisory against chrono has its own ID and stays denied.
+if grep -Fqx 'name = "chrono"' Cargo.lock; then
+  set -- "$@" --ignore RUSTSEC-2026-0543
+fi
 cargo audit "$@"

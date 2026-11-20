@@ -416,7 +416,7 @@ async fn exercise_completion_before_the_first_catalog_load(
         &mut validator,
         2,
         V2_CURRENT_SUBSCRIPTION_COLUMNS,
-        V2_CATALOG_FINGERPRINT,
+        &[V2_CATALOG_FINGERPRINT],
     )
     .await;
     validator.rollback().await?;

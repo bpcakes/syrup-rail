@@ -33,15 +33,16 @@ Fix stable issues on `master` and carry applicable fixes forward into
 Version 0.6.0 upgrades SQLx to 0.9.0 and Rust to 1.94, starting from the
 IdentityPro-consumed `3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a` behavior.
 The public SQLx pool, connection, transaction, and error types make this a
-breaking package release. It preserves schema v6 byte-for-byte; hosts already
-on v6 need no database migration for this upgrade.
+breaking package release. It preserves schema v6 byte-for-byte and adds schema
+v7 with `assert_runtime_schema_v6_or_v7_compatible`, so hosts already on v6
+need no database migration before deploying 0.6.0.
 
 Before integrating `dev/0.6.0`, assign its unfinished features a later release
-number. Preserve the shipped schema v5 (billing addresses) and v6 (typed
-billing-period expiry codes) artifacts. Renumber that branch's unreleased
-schemas to v7 or later and provide an upgrade from v6; do not ship a different
-schema under v5 or v6. If 0.5.x needs maintenance, branch from the last 0.5.x
-revision.
+number. Preserve the shipped schema v5 (billing addresses), v6 (typed
+billing-period expiry codes), and v7 (attempt AVS result column) artifacts.
+Renumber that branch's unreleased schemas to v8 or later and provide an
+upgrade from v7; do not ship a different schema under v5, v6, or v7. If 0.5.x
+needs maintenance, branch from the last 0.5.x revision.
 Publishing from a maintenance branch requires an explicit update to the
 workflow ref check and the `release` environment's allowed branches.
 
@@ -76,7 +77,7 @@ Replace `VERSION` with the exact stable semantic version recorded in the
 workspace, such as `0.6.0`. The advisory check follows
 [`security/dependency-advisories.md`](security/dependency-advisories.md).
 Use SQLx CLI 0.9.0 for both metadata preparation and checks. To regenerate
-metadata against the disposable PostgreSQL 18 schema-v6 database, run
+metadata against the disposable PostgreSQL 18 schema-v7 database, run
 `scripts/check-sqlx.sh --prepare` and review the `.sqlx` diff.
 The test and SQLx gates use `scripts/with-test-postgres.py` to provision a
 disposable PostgreSQL 18 server through Docker. Python 3 and Docker are required

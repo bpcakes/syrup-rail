@@ -6,7 +6,8 @@ All notable changes to the Syrup Rail crates are documented in this file.
 
 Breaking SQLx upgrade from the IdentityPro-consumed 0.5.5 revision
 `3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`. Existing billing behavior and every
-schema-v6 artifact are preserved; dynamic statement descriptors are opt-in.
+schema-v6 artifact are preserved; schema v7 adds an unwritten attempt AVS
+result column, and dynamic statement descriptors are opt-in.
 This release does not include the separate unfinished features on the
 historically named `dev/0.6.0` branch.
 
@@ -17,8 +18,11 @@ historically named `dev/0.6.0` branch.
   trait implementations now use SQLx 0.9.0 types; SQLx 0.8 types are incompatible.
 - Upgrade host SQLx dependencies and SQLx CLI to 0.9.0, adapt host queries to
   its query-string API, and regenerate host query metadata with that CLI.
-- Keep the existing schema-v6 installation and startup assertion. No database
-  migration is required for a host already consuming 0.5.5 on schema v6.
+- Replace the startup call to `assert_runtime_schema_v6_compatible` with
+  `assert_runtime_schema_v6_or_v7_compatible` and deploy that build before any
+  build applies the online v7 upgrade, so it remains a valid rollback target.
+  No database migration is required for a host already consuming 0.5.5 on
+  schema v6 to deploy 0.6.0; the exact v6 assertion rejects a v7 catalog.
 - `GatewaySaleRequest::into_parts` now returns `GatewaySaleRequestParts`
   instead of a tuple. A gateway decorator that rebuilds the request it
   forwards must carry `descriptor` across with `with_descriptor`, or the
@@ -49,10 +53,21 @@ historically named `dev/0.6.0` branch.
   retaining bound values, SQL statements, and transaction behavior.
 - Preserve recovery's top-level transaction requirement through the exactly
   pinned SQLx core transaction-depth API.
-- Regenerate PostgreSQL query metadata against the unchanged schema v6.
+- Regenerate PostgreSQL query metadata against schema v7.
+- Name schema-v6 attempt columns explicitly in `claim_exact_reconciliation_attempts`
+  instead of returning `attempts.*`, so statements cached on pooled connections
+  keep working across the online schema-v7 column addition.
+- Fingerprint canonical PostgreSQL functions from their MVCC-visible `pg_proc`
+  tuples rather than `pg_get_functiondef(oid)` so a `REPEATABLE READ` startup
+  snapshot spanning an online function replacement stays consistent; every
+  pinned catalog fingerprint constant updates from that calculation change.
 - Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, `tokio`, and
   `webpki-roots` to compatible patched versions required by the release audit.
   SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
+- Ignore only the informational `RUSTSEC-2026-0543` notice that `chrono` is
+  unmaintained. `chrono` is reachable and part of the public API, so replacing
+  it needs its own breaking release; every other `chrono` advisory stays
+  denied. See `docs/security/dependency-advisories.md`.
 - Require roxmltree 0.21.2 or later within the compatible 0.21 line. Its
   iterative XML parser prevents deeply nested, byte-bounded responses from
   exhausting the stack before structural validation.
@@ -92,6 +107,14 @@ historically named `dev/0.6.0` branch.
 
 ### Added
 
+- Add schema v7 (`schema/v7/install.sql`, online `schema/v7/upgrade_from_v6.sql`),
+  appending the nullable `billing_payment_attempts.gateway_avs_response` column
+  and replacing `billing_host_charge_ledger_admission` so `submit` admission
+  also requires a pending host-charge attempt to have no AVS result. No row,
+  constraint, index, trigger, or view changes; this release does not write the
+  column yet.
+- Add `assert_runtime_schema_v6_or_v7_compatible`, accepting exactly the v6 or
+  v7 catalog, and `assert_runtime_schema_v7_compatible`, accepting exactly v7.
 - Add provider retry advice for automatic-renewal failures.
   `RenewalDeclineRetryAdvice` (`FollowSchedule`, `StopAutomaticRetries`,
   `RetryNoEarlierThan`) and `advised_renewal_failure_disposition` apply it to

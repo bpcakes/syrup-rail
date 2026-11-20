@@ -352,9 +352,13 @@ than being expired automatically.
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v6_compatible` after host migrations and before
-serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v6 only;
-the assertion is read-only and does not install or upgrade a schema.
+Use `assert_runtime_schema_v6_or_v7_compatible` after host migrations and
+before serving billing traffic. This release supports PostgreSQL 18 and schema
+v6 or v7, and writes only schema-v6 columns; the assertion is read-only and does
+not install or upgrade a schema. `assert_runtime_schema_v7_compatible` and
+`assert_runtime_schema_v6_compatible` each accept exactly one version; the exact
+v6 check rejects a v7 catalog, so a host that may run against v7, including as a
+rollback target, must not use it.
 `assert_runtime_schema_v5_compatible` remains for confirming the pre-cutover
 state before a host commits `schema/v6/upgrade_from_v5.sql` with every billing
 writer stopped, and `assert_runtime_schema_v4_compatible` likewise before
