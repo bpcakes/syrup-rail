@@ -1,0 +1,141 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT attempts.id,\n            attempts.billing_scope_id,\n            attempts.subscriber_id,\n            attempts.attempt_kind,\n            attempts.host_charge_target_id,\n            attempts.amount_cents,\n            attempts.gateway_lifecycle_status,\n            attempts.gateway_lifecycle_at,\n            attempts.refunded_amount_cents,\n            COALESCE((\n                $1::text IS NOT NULL\n                AND public.billing_canonical_gateway_transaction_id(\n                    attempts.gateway_transaction_id\n                ) = $1\n            ), false) AS matched_transaction_id,\n            COALESCE((\n                $2::text IS NOT NULL\n                AND (\n                    $1::text IS NULL\n                    OR public.billing_canonical_gateway_transaction_id(\n                        attempts.gateway_transaction_id\n                    ) IS NULL\n                )\n                AND attempts.gateway_order_id = $2\n            ), false) AS matched_order_id\n        FROM billing_payment_attempts attempts\n        WHERE attempts.billing_scope_id = $3\n            AND attempts.gateway_account_id = $4\n            AND attempts.status = 'approved'\n            AND (\n                (\n                    $1::text IS NOT NULL\n                    AND public.billing_canonical_gateway_transaction_id(\n                        attempts.gateway_transaction_id\n                    ) = $1\n                )\n                OR (\n                    $2::text IS NOT NULL\n                    AND (\n                        $1::text IS NULL\n                        OR public.billing_canonical_gateway_transaction_id(\n                            attempts.gateway_transaction_id\n                        ) IS NULL\n                    )\n                    AND attempts.gateway_order_id = $2\n                )\n            )\n        ORDER BY attempts.created_at, attempts.id\n        FOR UPDATE OF attempts\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "subscriber_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscriber_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "host_charge_target_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "host_charge_target_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "gateway_lifecycle_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_status"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "gateway_lifecycle_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "refunded_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "refunded_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "matched_transaction_id",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "matched_order_id",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true,
+      false,
+      null,
+      null
+    ]
+  },
+  "hash": "7ec9c111b8b96e6aef089a4db21ea24e2eb1ee38007f98b3fd9d72cf6106e668"
+}

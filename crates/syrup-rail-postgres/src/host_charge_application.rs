@@ -500,7 +500,7 @@ async fn apply_host_charge_approved(
     }
     let connection = transaction.connection();
     set_application_timeouts(connection).await?;
-    let effective_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+    let effective_at: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
         .fetch_one(&mut *connection)
         .await?;
     let target_outcome = targets
@@ -742,7 +742,7 @@ async fn resolve_host_charge_non_approved(
     }
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
-    let effective_at = sqlx::query_scalar("SELECT clock_timestamp()")
+    let effective_at = checked_query_scalar!("SELECT clock_timestamp()")
         .fetch_one(&mut *transaction)
         .await?;
     let target_outcome = targets
@@ -829,11 +829,11 @@ async fn resolve_host_charge_non_approved(
         .await?;
     }
     if resolution.boundary == OutcomeResolutionBoundary::AdmittedNotSubmitted {
-        let cleared = sqlx::query(
+        let cleared = sqlx::query!(
             "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1 AND status = $2",
+            identity.attempt_id().into_uuid(),
+            status.as_str(),
         )
-        .bind(identity.attempt_id().as_uuid())
-        .bind(status.as_str())
         .execute(&mut *transaction)
         .await?;
         if cleared.rows_affected() != 1 {

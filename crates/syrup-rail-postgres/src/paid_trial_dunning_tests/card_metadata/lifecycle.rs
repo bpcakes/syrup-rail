@@ -41,10 +41,10 @@ async fn card_metadata_lifecycle_reconciliation_during_query_preserves_repair()
         Some(Utc::now()),
     )?;
     crate::apply_gateway_lifecycle_evidence(&db.pool, &NoHostTargets, &account, &evidence).await?;
-    let status: String = sqlx::query_scalar(
+    let status: String = checked_query_scalar!(
         "SELECT gateway_lifecycle_status FROM billing_payment_attempts WHERE id = $1",
+        fixture.attempt_id.as_uuid(),
     )
-    .bind(fixture.attempt_id.as_uuid())
     .fetch_one(&db.pool)
     .await?;
     assert_eq!(status, "settled");

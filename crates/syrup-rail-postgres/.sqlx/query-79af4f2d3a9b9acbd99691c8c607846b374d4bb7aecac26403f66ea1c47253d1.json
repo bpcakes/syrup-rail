@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET billing_first_name = NULL,\n            billing_last_name = NULL,\n            billing_email = NULL,\n            billing_address_line1 = NULL,\n            billing_address_line2 = NULL,\n            billing_address_city = NULL,\n            billing_address_region = NULL,\n            billing_address_postal_code = NULL,\n            billing_address_country = NULL,\n            gateway_response = NULL,\n            gateway_response_text = NULL,\n            gateway_payment_method_reference = NULL,\n            payment_type = NULL,\n            card_brand = NULL,\n            card_last4 = NULL,\n            card_exp_month = NULL,\n            card_exp_year = NULL,\n            updated_at = now()\n        WHERE billing_scope_id = $1 AND subscriber_id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "79af4f2d3a9b9acbd99691c8c607846b374d4bb7aecac26403f66ea1c47253d1"
+}

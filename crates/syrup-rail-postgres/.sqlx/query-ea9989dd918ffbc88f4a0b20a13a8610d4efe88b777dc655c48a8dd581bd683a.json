@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM billing_gateway_accounts AS accounts\n            LEFT JOIN billing_gateway_provider_rate_limits AS provider_limits\n                ON provider_limits.provider_key = accounts.provider_key\n            WHERE provider_limits.provider_key IS NULL\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ea9989dd918ffbc88f4a0b20a13a8610d4efe88b777dc655c48a8dd581bd683a"
+}

@@ -46,7 +46,7 @@ pub async fn create_subscription_grant(
     )
     .await?;
 
-    let subscriptions: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
+    let subscriptions: Vec<(String, DateTime<Utc>)> = checked_query_as!(
         r#"
         SELECT status, current_period_end_at
         FROM billing_subscriptions
@@ -56,13 +56,13 @@ pub async fn create_subscription_grant(
         ORDER BY id
         FOR NO KEY UPDATE
         "#,
+        creation.billing_scope_id().into_uuid(),
+        creation.subscriber_id().into_uuid(),
+        creation.plan_key().as_str(),
     )
-    .bind(creation.billing_scope_id().as_uuid())
-    .bind(creation.subscriber_id().as_uuid())
-    .bind(creation.plan_key().as_str())
     .fetch_all(&mut **transaction)
     .await?;
-    let existing_grants: Vec<GrantTimeState> = sqlx::query_as(
+    let existing_grants: Vec<GrantTimeState> = checked_query_as!(
         r#"
         SELECT starts_at, ends_at, revoked_at
         FROM billing_subscription_grants
@@ -72,13 +72,13 @@ pub async fn create_subscription_grant(
         ORDER BY id
         FOR UPDATE
         "#,
+        creation.billing_scope_id().into_uuid(),
+        creation.subscriber_id().into_uuid(),
+        creation.plan_key().as_str(),
     )
-    .bind(creation.billing_scope_id().as_uuid())
-    .bind(creation.subscriber_id().as_uuid())
-    .bind(creation.plan_key().as_str())
     .fetch_all(&mut **transaction)
     .await?;
-    let mutation_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+    let mutation_now: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
         .fetch_one(&mut **transaction)
         .await?;
 
@@ -108,7 +108,7 @@ pub async fn create_subscription_grant(
         return Ok(SubscriptionGrantCreationOutcome::PendingApprovedProcessorEvidence);
     }
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_grants (
             id,
@@ -125,16 +125,16 @@ pub async fn create_subscription_grant(
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $7, $7)
         "#,
+        creation.id().into_uuid(),
+        creation.billing_scope_id().into_uuid(),
+        creation.subscriber_id().into_uuid(),
+        creation.plan_key().as_str(),
+        creation.kind().as_str(),
+        creation.reason().as_str(),
+        mutation_now,
+        creation.ends_at(),
+        creation.granted_by_actor_id().into_uuid(),
     )
-    .bind(creation.id().as_uuid())
-    .bind(creation.billing_scope_id().as_uuid())
-    .bind(creation.subscriber_id().as_uuid())
-    .bind(creation.plan_key().as_str())
-    .bind(creation.kind().as_str())
-    .bind(creation.reason().as_str())
-    .bind(mutation_now)
-    .bind(creation.ends_at())
-    .bind(creation.granted_by_actor_id().as_uuid())
     .execute(&mut **transaction)
     .await?;
 
@@ -159,7 +159,7 @@ pub async fn revoke_subscription_grant(
     )
     .await?;
 
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id,
             billing_scope_id,
@@ -182,18 +182,18 @@ pub async fn revoke_subscription_grant(
             AND plan_key = $4
         FOR UPDATE
         "#,
+        revocation.id().into_uuid(),
+        revocation.billing_scope_id().into_uuid(),
+        revocation.subscriber_id().into_uuid(),
+        revocation.plan_key().as_str(),
     )
-    .bind(revocation.id().as_uuid())
-    .bind(revocation.billing_scope_id().as_uuid())
-    .bind(revocation.subscriber_id().as_uuid())
-    .bind(revocation.plan_key().as_str())
     .fetch_optional(&mut **transaction)
     .await?;
     let Some(row) = row else {
         return Ok(SubscriptionGrantRevocationOutcome::NotFound);
     };
     let record = grant_from_row(&row)?;
-    let mutation_now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+    let mutation_now: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
         .fetch_one(&mut **transaction)
         .await?;
     if record.revoked_at().is_some() {
@@ -205,7 +205,7 @@ pub async fn revoke_subscription_grant(
         return Ok(SubscriptionGrantRevocationOutcome::Expired);
     }
 
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscription_grants
         SET revoked_at = $2,
@@ -214,11 +214,11 @@ pub async fn revoke_subscription_grant(
             updated_at = $2
         WHERE id = $1
         "#,
+        revocation.id().into_uuid(),
+        mutation_now,
+        revocation.revoked_by_actor_id().into_uuid(),
+        revocation.reason().as_str(),
     )
-    .bind(revocation.id().as_uuid())
-    .bind(mutation_now)
-    .bind(revocation.revoked_by_actor_id().as_uuid())
-    .bind(revocation.reason().as_str())
     .execute(&mut **transaction)
     .await?;
 
@@ -233,10 +233,12 @@ pub async fn revoke_subscription_grant(
 }
 
 async fn set_lock_timeout(transaction: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(BILLING_ROW_LOCK_TIMEOUT)
-        .execute(&mut **transaction)
-        .await?;
+    checked_query!(
+        "SELECT set_config('lock_timeout', $1, true)",
+        BILLING_ROW_LOCK_TIMEOUT,
+    )
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -245,15 +247,15 @@ async fn lock_subscription_aggregate(
     subscriber_id: &Uuid,
     plan_key: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    checked_query!(
         r#"
         SELECT pg_advisory_xact_lock(
             hashtextextended($1::uuid::text || ':' || $2, 0)
         )
         "#,
+        subscriber_id,
+        plan_key,
     )
-    .bind(subscriber_id)
-    .bind(plan_key)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -265,7 +267,8 @@ async fn lock_initial_attempts(
     subscriber_id: &Uuid,
     plan_key: &str,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
+    checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id
         FROM billing_payment_attempts
@@ -276,10 +279,10 @@ async fn lock_initial_attempts(
         ORDER BY created_at, id
         FOR UPDATE
         "#,
+        billing_scope_id,
+        subscriber_id,
+        plan_key,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
     .fetch_all(&mut **transaction)
     .await?;
     Ok(())
@@ -289,7 +292,7 @@ async fn blocking_initial_attempt_exists(
     transaction: &mut Transaction<'_, Postgres>,
     creation: &SubscriptionGrantCreation,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -316,10 +319,10 @@ async fn blocking_initial_attempt_exists(
                 )
         )
         "#,
+        creation.billing_scope_id().into_uuid(),
+        creation.subscriber_id().into_uuid(),
+        creation.plan_key().as_str(),
     )
-    .bind(creation.billing_scope_id().as_uuid())
-    .bind(creation.subscriber_id().as_uuid())
-    .bind(creation.plan_key().as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -328,7 +331,7 @@ async fn pending_processor_evidence_exists(
     transaction: &mut Transaction<'_, Postgres>,
     creation: &SubscriptionGrantCreation,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -346,10 +349,10 @@ async fn pending_processor_evidence_exists(
                 )
         )
         "#,
+        creation.billing_scope_id().into_uuid(),
+        creation.subscriber_id().into_uuid(),
+        creation.plan_key().as_str(),
     )
-    .bind(creation.billing_scope_id().as_uuid())
-    .bind(creation.subscriber_id().as_uuid())
-    .bind(creation.plan_key().as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -358,7 +361,7 @@ async fn grant_by_id(
     transaction: &mut Transaction<'_, Postgres>,
     grant_id: &Uuid,
 ) -> Result<Option<SubscriptionGrantRecord>, SubscriptionGrantMutationError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id,
             billing_scope_id,
@@ -377,8 +380,8 @@ async fn grant_by_id(
         FROM billing_subscription_grants
         WHERE id = $1
         "#,
+        grant_id,
     )
-    .bind(grant_id)
     .fetch_optional(&mut **transaction)
     .await?;
     row.as_ref().map(grant_from_row).transpose()
@@ -466,10 +469,10 @@ mod tests {
                 return Err(io::Error::other("grant was not created before rollback").into());
             }
             rolled_back.rollback().await?;
-            let count: i64 = sqlx::query_scalar(
+            let count: i64 = checked_query_scalar!(
                 "SELECT count(*) FROM billing_subscription_grants WHERE id = $1",
+                grant_id.as_uuid(),
             )
-            .bind(grant_id.as_uuid())
             .fetch_one(&database.pool)
             .await?;
             if count != 0 {
@@ -611,7 +614,7 @@ mod tests {
         gateway_configuration: Uuid,
     ) -> Result<(), sqlx::Error> {
         let attempt = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -644,16 +647,16 @@ mod tests {
                 'remain_past_due', 'suspend_immediately'
             )
             "#,
+            attempt,
+            scope,
+            subscriber,
+            plan,
+            format!("grant-{}", attempt.simple()),
+            format!("initial:{plan}:100:USD"),
+            gateway_account,
+            gateway_configuration,
+            format!("grant-order-{}", attempt.simple()),
         )
-        .bind(attempt)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(plan)
-        .bind(format!("grant-{}", attempt.simple()))
-        .bind(format!("initial:{plan}:100:USD"))
-        .bind(gateway_account)
-        .bind(gateway_configuration)
-        .bind(format!("grant-order-{}", attempt.simple()))
         .execute(pool)
         .await?;
         Ok(())

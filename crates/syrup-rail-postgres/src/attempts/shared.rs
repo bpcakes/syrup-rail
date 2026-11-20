@@ -255,11 +255,11 @@ impl<'a> ExpectedGatewayIdentity<'a> {
 pub(crate) async fn set_enrollment_timeouts(
     connection: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    checked_query!(
+        "SELECT set_config('lock_timeout', $1, true) AS lock_timeout, set_config('statement_timeout', $2, true)",
+        BILLING_ROW_LOCK_TIMEOUT,
+        BILLING_OPERATION_TIMEOUT,
     )
-    .bind(BILLING_ROW_LOCK_TIMEOUT)
-    .bind(BILLING_OPERATION_TIMEOUT)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -270,11 +270,13 @@ pub(crate) async fn lock_subscription_aggregate(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id.as_uuid())
-        .bind(plan_key.as_str())
-        .execute(&mut *connection)
-        .await?;
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
+    )
+    .execute(&mut *connection)
+    .await?;
     Ok(())
 }
 
@@ -283,11 +285,11 @@ pub(crate) async fn try_lock_subscription_aggregate(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         "SELECT pg_try_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -305,23 +307,26 @@ pub(super) async fn payment_attempt_by_idempotency(
     idempotency_key: &IdempotencyKey,
     lookup: AttemptLookup,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let lock = match lookup {
-        AttemptLookup::Read => "",
-        AttemptLookup::LockForUpdate => "FOR UPDATE",
-    };
-    let query = format!(
-        "{PAYMENT_ATTEMPT_SELECT} \
-         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3 \
-         {lock}"
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(billing_scope_id.as_uuid())
-        .bind(subscriber_id.as_uuid())
-        .bind(idempotency_key.expose())
-        .fetch_optional(&mut **transaction)
-        .await?;
-    row.as_ref().map(payment_attempt_from_row).transpose()
+    match lookup {
+        AttemptLookup::Read => {
+            find_payment_attempt_by_idempotency_in_transaction(
+                transaction,
+                billing_scope_id,
+                subscriber_id,
+                idempotency_key,
+            )
+            .await
+        }
+        AttemptLookup::LockForUpdate => {
+            lock_payment_attempt_by_idempotency_in_transaction(
+                transaction,
+                billing_scope_id,
+                subscriber_id,
+                idempotency_key,
+            )
+            .await
+        }
+    }
 }
 
 pub(crate) async fn lock_initial_attempt_rows(
@@ -330,17 +335,18 @@ pub(crate) async fn lock_initial_attempt_rows(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
+    checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id FROM billing_payment_attempts
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
             AND attempt_kind = 'subscription_initial'
         ORDER BY created_at, id FOR UPDATE
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_all(&mut **transaction)
     .await?;
     Ok(())
@@ -352,7 +358,8 @@ pub(crate) async fn lock_initial_charge_rows(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
+    checked_query_scalar!(
+        Uuid,
         r#"
         SELECT charges.id
         FROM billing_processor_charges charges
@@ -364,10 +371,10 @@ pub(crate) async fn lock_initial_charge_rows(
         ORDER BY charges.observed_at, charges.id
         FOR UPDATE OF charges
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_all(&mut **transaction)
     .await?;
     Ok(())
@@ -380,7 +387,7 @@ pub(crate) async fn expire_stale_initial_attempts(
     plan_key: &PlanKey,
 ) -> Result<u64, sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed',
@@ -398,13 +405,13 @@ pub(crate) async fn expire_stale_initial_attempts(
             AND created_at <= clock_timestamp()
                 - ($6::bigint * interval '1 second')
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
+        INITIAL_PREPARED_EXPIRED_TEXT,
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
-    .bind(INITIAL_PREPARED_EXPIRED_TEXT)
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
     .execute(&mut **transaction)
     .await?;
     Ok(result.rows_affected())
@@ -414,16 +421,17 @@ pub(super) async fn gateway_identity_matches_account(
     transaction: &mut Transaction<'_, Postgres>,
     expected: &ExpectedGatewayIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+    let row = checked_query_as!(
+        (Uuid, Uuid, String),
         r#"
         SELECT id, gateway_configuration_id, provider_key
         FROM billing_gateway_accounts
         WHERE billing_scope_id = $1 AND id = $2
         FOR SHARE
         "#,
+        expected.billing_scope_id().into_uuid(),
+        expected.gateway_account_id().into_uuid(),
     )
-    .bind(expected.billing_scope_id().as_uuid())
-    .bind(expected.gateway_account_id().as_uuid())
     .fetch_optional(&mut **transaction)
     .await?;
     Ok(
@@ -453,7 +461,7 @@ pub(crate) async fn fail_stale_unsubmitted_payment_method_updates(
     subscription_id: SubscriptionId,
 ) -> Result<(), sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed',
@@ -471,10 +479,10 @@ pub(crate) async fn fail_stale_unsubmitted_payment_method_updates(
             AND created_at <= clock_timestamp()
                 - ($3::bigint * interval '1 second')
         "#,
+        subscription_id.as_uuid(),
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
     .execute(connection)
     .await?;
     Ok(())
@@ -485,7 +493,7 @@ pub(crate) async fn fail_stale_unsubmitted_subscription_charges(
     subscription_id: SubscriptionId,
 ) -> Result<u64, sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
-    let result = sqlx::query(
+    let result = checked_query!(
         r#"
         WITH stale_attempts AS (
             SELECT id
@@ -512,12 +520,12 @@ pub(crate) async fn fail_stale_unsubmitted_subscription_charges(
         FROM stale_attempts
         WHERE attempts.id = stale_attempts.id
         "#,
+        subscription_id.as_uuid(),
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
+        STALE_UNSUBMITTED_RENEWAL_TEXT,
+        STALE_UNSUBMITTED_RECOVERY_TEXT,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
-    .bind(STALE_UNSUBMITTED_RENEWAL_TEXT)
-    .bind(STALE_UNSUBMITTED_RECOVERY_TEXT)
     .execute(connection)
     .await?;
     Ok(result.rows_affected())
@@ -540,7 +548,7 @@ pub(super) async fn blocking_subscription_charge_attempt_exists_except(
     subscription_id: SubscriptionId,
     excluded_attempt_id: PaymentAttemptId,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -559,9 +567,9 @@ pub(super) async fn blocking_subscription_charge_attempt_exists_except(
                 )
         )
         "#,
+        subscription_id.as_uuid(),
+        excluded_attempt_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(excluded_attempt_id.as_uuid())
     .fetch_one(&mut **transaction)
     .await
 }
@@ -570,7 +578,7 @@ pub(crate) async fn blocking_payment_method_update_exists(
     connection: &mut PgConnection,
     subscription_id: SubscriptionId,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM billing_payment_attempts
@@ -579,8 +587,8 @@ pub(crate) async fn blocking_payment_method_update_exists(
                 AND status IN ('pending', 'unknown', 'review_required')
         )
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(connection)
     .await
 }

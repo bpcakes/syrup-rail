@@ -1,0 +1,157 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, gateway_account_id, payment_method_id, amount_cents, currency,\n            next_renewal_at, initial_transaction_id, status,\n            recurring_period_kind, recurring_period_count,\n            required_gateway_account_mode,\n            next_renewal_at <= clock_timestamp() AS is_due\n        FROM billing_subscriptions\n        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3\n            AND status = 'past_due'\n        ORDER BY updated_at DESC, id DESC\n        LIMIT 1\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "payment_method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "payment_method_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "next_renewal_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_renewal_at"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "initial_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "initial_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "recurring_period_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "recurring_period_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "recurring_period_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "recurring_period_count"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "required_gateway_account_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "is_due",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "b631b5fa7453a7f3c18a7d86532198d9c3c457f19972c87b13ceb33edd388c0f"
+}

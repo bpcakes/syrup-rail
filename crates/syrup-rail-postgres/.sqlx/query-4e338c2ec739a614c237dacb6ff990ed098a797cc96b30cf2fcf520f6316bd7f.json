@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT billing_name FROM billing_payment_methods WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "billing_name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4e338c2ec739a614c237dacb6ff990ed098a797cc96b30cf2fcf520f6316bd7f"
+}

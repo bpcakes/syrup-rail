@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_methods\n        SET billing_address_line1 = $2, billing_address_line2 = $3,\n            billing_address_city = $4, billing_address_region = $5,\n            billing_address_postal_code = $6, billing_address_country = $7\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c001da1d3777b7417721745dec068cdcd79b7f05761475970b43a2c20f06b22c"
+}

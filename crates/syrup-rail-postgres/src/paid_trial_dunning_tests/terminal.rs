@@ -86,11 +86,11 @@ async fn indeterminate_diagnostics_keep_terminal_renewal_statuses_out_of_dunning
         );
 
         let projection: (String, DateTime<Utc>, DateTime<Utc>, Option<DateTime<Utc>>) =
-            sqlx::query_as(
+            checked_query_as!(
                 "SELECT status, next_renewal_at, next_payment_attempt_at, unpaid_at \
                  FROM billing_subscriptions WHERE id = $1",
+                subscription_id.as_uuid(),
             )
-            .bind(subscription_id.as_uuid())
             .fetch_one(&database.pool)
             .await?;
         assert_eq!(
@@ -98,15 +98,15 @@ async fn indeterminate_diagnostics_keep_terminal_renewal_statuses_out_of_dunning
             ("active".to_owned(), due_at, due_at, None),
             "{suffix}"
         );
-        let qualifying_failure_count: i64 = sqlx::query_scalar(
+        let qualifying_failure_count: i64 = checked_query_scalar!(
             "SELECT count(*) FROM billing_payment_attempts \
              WHERE subscription_id = $1 \
                AND attempt_kind = 'subscription_renewal' \
                AND status IN ('declined', 'failed') \
                AND submitted_at IS NOT NULL \
                AND resolution_code IS NULL",
+            subscription_id.as_uuid(),
         )
-        .bind(subscription_id.as_uuid())
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(qualifying_failure_count, 0, "{suffix}");
@@ -217,21 +217,21 @@ async fn reconciled_renewal_outcomes_preserve_durable_identity_and_do_not_start_
         conflicting_approval.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
     );
-    let durable_transaction_id: Option<String> = sqlx::query_scalar(
+    let durable_transaction_id: Option<String> = checked_query_scalar!(
         "SELECT gateway_transaction_id FROM billing_payment_attempts WHERE id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(
         durable_transaction_id.as_deref(),
         Some("txn_renewal_durable")
     );
-    let conflicting_charge: (String, String) = sqlx::query_as(
+    let conflicting_charge: (String, String) = checked_query_as!(
         "SELECT gateway_transaction_id, progression_state \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(
@@ -241,10 +241,10 @@ async fn reconciled_renewal_outcomes_preserve_durable_identity_and_do_not_start_
             "reconciliation_required".to_owned(),
         )
     );
-    let subscription_state: (String, DateTime<Utc>, Option<DateTime<Utc>>) = sqlx::query_as(
+    let subscription_state: (String, DateTime<Utc>, Option<DateTime<Utc>>) = checked_query_as!(
         "SELECT status, next_renewal_at, unpaid_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(subscription_state, ("active".to_owned(), due_at, None));
@@ -336,21 +336,21 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     ));
 
     let due_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+        checked_query_scalar!("SELECT clock_timestamp() - interval '1 second'")
             .fetch_one(&database.pool)
             .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '7 days',
+        SET current_period_start_at = $2::timestamptz - interval '7 days',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
     .execute(&database.pool)
     .await?;
 
@@ -404,10 +404,10 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     let failure_one_at =
         resolved_at(&database.pool, first.attempt().identity().attempt_id()).await?;
     let (status, economic_anchor, retry_at, unpaid_at): SubscriptionDunningProjection =
-        sqlx::query_as(
-        "SELECT status, next_renewal_at, next_payment_attempt_at, unpaid_at FROM billing_subscriptions WHERE id = $1",
-    )
-    .bind(subscription_id.as_uuid())
+        checked_query_as!(
+            "SELECT status, next_renewal_at, next_payment_attempt_at, unpaid_at FROM billing_subscriptions WHERE id = $1",
+            subscription_id.as_uuid(),
+        )
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(status, "past_due");
@@ -447,10 +447,10 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     ));
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&database.pool)
     .await?;
     let second_reservation =
@@ -467,18 +467,18 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     assert!(second.observation_diagnostics().is_empty());
     let failure_two_at =
         resolved_at(&database.pool, second.attempt().identity().attempt_id()).await?;
-    let retry_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+    let retry_at: Option<DateTime<Utc>> = checked_query_scalar!(
         "SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(retry_at, Some(failure_two_at + ChronoDuration::days(3)));
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&database.pool)
     .await?;
     let final_reservation =
@@ -498,10 +498,10 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     )
     .await?;
     let (status, retry_at, unpaid_at): (String, Option<DateTime<Utc>>, Option<DateTime<Utc>>) =
-        sqlx::query_as(
+        checked_query_as!(
             "SELECT status, next_payment_attempt_at, unpaid_at FROM billing_subscriptions WHERE id = $1",
+            subscription_id.as_uuid(),
         )
-        .bind(subscription_id.as_uuid())
         .fetch_one(&database.pool)
         .await?;
     assert_eq!(status, "unpaid");
@@ -586,15 +586,15 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     transaction.rollback().await?;
 
     let mut transaction = database.pool.begin().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'past_due', unpaid_at = NULL,
             next_payment_attempt_at = clock_timestamp() + interval '1 day'
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&mut *transaction)
     .await?;
     let latest_attempt = find_payment_attempt_by_id_in_transaction(
@@ -655,15 +655,14 @@ async fn paid_trial_dunning_transitions_to_unpaid_once_with_exact_schedule_and_e
     )
     .await?;
     assert!(late.subscription().is_none());
-    let terminal_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id.as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
-    assert_eq!(terminal_status, "unpaid");
-    let late_progression: String = sqlx::query_scalar(
-        "SELECT progression_state FROM billing_processor_charges WHERE gateway_transaction_id = 'late_after_unpaid'",
+    let terminal_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
+    .fetch_one(&database.pool)
+    .await?;
+    assert_eq!(terminal_status, "unpaid");
+    let late_progression: String = checked_query_scalar!("SELECT progression_state FROM billing_processor_charges WHERE gateway_transaction_id = 'late_after_unpaid'")
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(late_progression, "external_reversal_required");

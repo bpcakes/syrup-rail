@@ -348,15 +348,16 @@ pub async fn apply_reconciled_subscription_enrollment_gateway_outcome(
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
         "subscription enrollment attempt was not found",
     ))?;
-    let provider_key = sqlx::query_scalar::<_, String>(
+    let provider_key = checked_query_scalar!(
+        String,
         r#"
         SELECT provider_key
         FROM billing_gateway_accounts
         WHERE billing_scope_id = $1 AND id = $2
         "#,
+        billing_scope_id.as_uuid(),
+        attempt.identity().gateway_account_id().into_uuid(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(attempt.identity().gateway_account_id().as_uuid())
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(

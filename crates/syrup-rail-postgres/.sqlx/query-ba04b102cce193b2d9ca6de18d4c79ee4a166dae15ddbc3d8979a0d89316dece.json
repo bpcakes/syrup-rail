@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT processor_charge_id, final_resolution_code\n        FROM billing_external_reversal_attestations\n        WHERE attempt_id = $1 AND gateway_transaction_id = $2\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "processor_charge_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "processor_charge_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "final_resolution_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "final_resolution_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ba04b102cce193b2d9ca6de18d4c79ee4a166dae15ddbc3d8979a0d89316dece"
+}

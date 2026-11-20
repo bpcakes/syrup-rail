@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1 AND gateway_transaction_id IS NULL AND progression_state = 'reconciliation_required'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8cc55ec72de459449c6c01400b09e26522febffa1a3e3bf206d39678873fc156"
+}

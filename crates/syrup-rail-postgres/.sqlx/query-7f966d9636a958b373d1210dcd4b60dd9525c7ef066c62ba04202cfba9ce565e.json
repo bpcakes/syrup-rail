@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT gateway_lifecycle_status, refunded_amount_cents,\n                gateway_lifecycle_action\n            FROM billing_gateway_lifecycle_pending_updates\n            WHERE gateway_account_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_lifecycle_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_pending_updates",
+            "name": "gateway_lifecycle_status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "refunded_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_pending_updates",
+            "name": "refunded_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gateway_lifecycle_action",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_pending_updates",
+            "name": "gateway_lifecycle_action"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "7f966d9636a958b373d1210dcd4b60dd9525c7ef066c62ba04202cfba9ce565e"
+}

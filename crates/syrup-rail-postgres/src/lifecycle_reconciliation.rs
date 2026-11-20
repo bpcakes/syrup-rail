@@ -177,16 +177,18 @@ pub async fn gateway_lifecycle_reconciliation_start(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        format!(
             "billing_reconciliation_cursor:{}:{}:{}",
             account.gateway_account_id(),
             account.provider_key(),
             cursor_key
-        ))
-        .execute(&mut *transaction)
-        .await?;
-    let row = sqlx::query(
+        ),
+    )
+    .execute(&mut *transaction)
+    .await?;
+    let row = checked_query!(
         r#"
         WITH cursor_value AS (
             SELECT (
@@ -215,11 +217,11 @@ pub async fn gateway_lifecycle_reconciliation_start(
             ) END AS first_approved_at
         FROM cursor_value
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        account.provider_key().as_str(),
+        cursor_key.as_str(),
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(account.provider_key().as_str())
-    .bind(cursor_key.as_str())
     .fetch_one(&mut *transaction)
     .await?;
     let cursor_at: Option<DateTime<Utc>> = row.try_get("cursor_at")?;
@@ -237,7 +239,7 @@ pub async fn save_gateway_lifecycle_reconciliation_cursor(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_reconciliation_cursors (
             billing_scope_id,
@@ -254,12 +256,12 @@ pub async fn save_gateway_lifecycle_reconciliation_cursor(
             ),
             updated_at = now()
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        account.provider_key().as_str(),
+        cursor_key.as_str(),
+        last_successful_end_at,
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(account.provider_key().as_str())
-    .bind(cursor_key.as_str())
-    .bind(last_successful_end_at)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -407,14 +409,14 @@ async fn apply_or_stage_evidence(
         evidence.effective_at,
         candidate.amount_cents,
     )?;
-    let reconciled_at: DateTime<Utc> = sqlx::query_scalar("SELECT now()")
+    let reconciled_at: DateTime<Utc> = checked_query_scalar!("SELECT now()")
         .fetch_one(&mut *transaction)
         .await?;
     let outcome = match transition {
         LifecycleTransition::Apply {
             refunded_amount_cents,
         } => {
-            let result = sqlx::query(
+            let result = sqlx::query!(
                 r#"
                 UPDATE billing_payment_attempts
                 SET gateway_condition = COALESCE($2, gateway_condition),
@@ -428,16 +430,16 @@ async fn apply_or_stage_evidence(
                     AND billing_scope_id = $8
                     AND gateway_account_id = $9
                 "#,
+                candidate.id,
+                evidence.condition.as_deref(),
+                lifecycle_status(&evidence.state),
+                evidence.action.as_deref(),
+                evidence.effective_at,
+                refunded_amount_cents,
+                reconciled_at,
+                account.billing_scope_id().into_uuid(),
+                account.gateway_account_id().into_uuid(),
             )
-            .bind(candidate.id)
-            .bind(evidence.condition.as_deref())
-            .bind(lifecycle_status(&evidence.state))
-            .bind(evidence.action.as_deref())
-            .bind(evidence.effective_at)
-            .bind(refunded_amount_cents)
-            .bind(reconciled_at)
-            .bind(account.billing_scope_id().as_uuid())
-            .bind(account.gateway_account_id().as_uuid())
             .execute(&mut *transaction)
             .await?;
             if result.rows_affected() != 1 {
@@ -557,7 +559,7 @@ async fn attempt_candidates(
     account: &GatewayLifecycleAccount,
     evidence: &StoredEvidence,
 ) -> Result<Vec<AttemptCandidate>, GatewayLifecycleReconciliationError> {
-    let rows = sqlx::query(
+    let rows = checked_query!(
         r#"
         SELECT attempts.id,
             attempts.billing_scope_id,
@@ -609,11 +611,11 @@ async fn attempt_candidates(
         ORDER BY attempts.created_at, attempts.id
         FOR UPDATE OF attempts
         "#,
+        evidence.transaction_id.as_deref(),
+        evidence.order_id.as_deref(),
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
     )
-    .bind(evidence.transaction_id.as_deref())
-    .bind(evidence.order_id.as_deref())
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
     .fetch_all(&mut **transaction)
     .await?;
     rows.into_iter()
@@ -706,7 +708,8 @@ async fn stage_evidence(
     // retains the existing row's identity. This keeps classification exact in
     // one concurrency-safe statement without inspecting MVCC system columns.
     let candidate_id = Uuid::now_v7();
-    let inserted = sqlx::query_scalar::<_, bool>(
+    let inserted = checked_query_scalar!(
+        bool,
         r#"
         INSERT INTO billing_gateway_lifecycle_pending_updates (
             billing_scope_id,
@@ -735,18 +738,18 @@ async fn stage_evidence(
         ) DO UPDATE SET updated_at = now()
         RETURNING id = $11
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        evidence.transaction_id.as_deref(),
+        evidence.order_id.as_deref(),
+        evidence.condition.as_deref(),
+        lifecycle_status(&evidence.state),
+        evidence.action.as_deref(),
+        evidence.effective_at,
+        lifecycle_refunded_amount(&evidence.state),
+        PENDING_RETENTION_SECONDS,
+        candidate_id,
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(evidence.transaction_id.as_deref())
-    .bind(evidence.order_id.as_deref())
-    .bind(evidence.condition.as_deref())
-    .bind(lifecycle_status(&evidence.state))
-    .bind(evidence.action.as_deref())
-    .bind(evidence.effective_at)
-    .bind(lifecycle_refunded_amount(&evidence.state))
-    .bind(PENDING_RETENTION_SECONDS)
-    .bind(candidate_id)
     .fetch_one(&mut **transaction)
     .await?;
     Ok(inserted)
@@ -781,7 +784,7 @@ async fn record_quarantine_parts(
     order_id: Option<&str>,
     reason: GatewayLifecycleQuarantineReason,
 ) -> Result<(), GatewayLifecycleReconciliationError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_gateway_lifecycle_quarantines (
             billing_scope_id,
@@ -806,12 +809,12 @@ async fn record_quarantine_parts(
                 ELSE NULL
             END
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        transaction_id,
+        order_id,
+        reason.as_str(),
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(transaction_id)
-    .bind(order_id)
-    .bind(reason.as_str())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -822,7 +825,7 @@ async fn resolve_matching_quarantines(
     account: &GatewayLifecycleAccount,
     evidence: &StoredEvidence,
 ) -> Result<(), GatewayLifecycleReconciliationError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_gateway_lifecycle_quarantines
         SET resolved_at = now()
@@ -844,11 +847,11 @@ async fn resolve_matching_quarantines(
                 )
             )
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        evidence.transaction_id.as_deref(),
+        evidence.order_id.as_deref(),
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(evidence.transaction_id.as_deref())
-    .bind(evidence.order_id.as_deref())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -859,17 +862,17 @@ async fn delete_pending(
     account: &GatewayLifecycleAccount,
     pending_id: Uuid,
 ) -> Result<(), GatewayLifecycleReconciliationError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         DELETE FROM billing_gateway_lifecycle_pending_updates
         WHERE id = $1
             AND billing_scope_id = $2
             AND gateway_account_id = $3
         "#,
+        pending_id,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
     )
-    .bind(pending_id)
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -882,7 +885,7 @@ async fn cleanup_pending(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    let result = sqlx::query(
+    let result = checked_query!(
         r#"
         WITH stale AS MATERIALIZED (
             SELECT pending.id
@@ -898,10 +901,10 @@ async fn cleanup_pending(
         USING stale
         WHERE pending.id = stale.id
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        PENDING_CLEANUP_BATCH_SIZE,
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(PENDING_CLEANUP_BATCH_SIZE)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -915,7 +918,7 @@ async fn record_unactionable_checks(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    sqlx::query(
+    checked_query!(
         r#"
         WITH unactionable AS MATERIALIZED (
             SELECT pending.id
@@ -968,11 +971,11 @@ async fn record_unactionable_checks(
         FROM unactionable
         WHERE pending.id = unactionable.id
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        PENDING_MAX_CHECKS,
+        PENDING_CLEANUP_BATCH_SIZE,
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(PENDING_MAX_CHECKS)
-    .bind(PENDING_CLEANUP_BATCH_SIZE)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -986,7 +989,7 @@ async fn actionable_pending(
     let mut transaction = pool.begin().await?;
     set_timeouts(&mut transaction).await?;
     ensure_account(&mut transaction, account).await?;
-    let rows = sqlx::query(
+    let rows = checked_query!(
         r#"
         SELECT pending.id,
             pending.gateway_transaction_id,
@@ -1036,10 +1039,10 @@ async fn actionable_pending(
         LIMIT $3
         FOR UPDATE OF pending SKIP LOCKED
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        STAGED_APPLICATION_BATCH_SIZE,
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(STAGED_APPLICATION_BATCH_SIZE)
     .fetch_all(&mut *transaction)
     .await?;
     let pending = rows
@@ -1068,7 +1071,7 @@ pub(crate) async fn ensure_account(
     transaction: &mut Transaction<'_, Postgres>,
     account: &GatewayLifecycleAccount,
 ) -> Result<(), GatewayLifecycleReconciliationError> {
-    let exists: bool = sqlx::query_scalar(
+    let exists: bool = checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -1079,10 +1082,10 @@ pub(crate) async fn ensure_account(
             FOR KEY SHARE
         )
         "#,
+        account.billing_scope_id().into_uuid(),
+        account.gateway_account_id().into_uuid(),
+        account.provider_key().as_str(),
     )
-    .bind(account.billing_scope_id().as_uuid())
-    .bind(account.gateway_account_id().as_uuid())
-    .bind(account.provider_key().as_str())
     .fetch_one(&mut **transaction)
     .await?;
     if exists {
@@ -1095,11 +1098,11 @@ pub(crate) async fn ensure_account(
 pub(crate) async fn set_timeouts(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
+    checked_query!(
+        "SELECT set_config('lock_timeout', $1, true) AS lock_timeout, set_config('statement_timeout', $2, true)",
+        ROW_LOCK_TIMEOUT,
+        OPERATION_TIMEOUT,
     )
-    .bind(ROW_LOCK_TIMEOUT)
-    .bind(OPERATION_TIMEOUT)
     .execute(&mut **transaction)
     .await?;
     Ok(())
@@ -1122,6 +1125,7 @@ mod tests {
 
     use super::*;
     use crate::test_support::{TestDatabase, create_gateway_account};
+    use crate::test_support::{fixture_query, fixture_query_as, fixture_query_scalar};
     use async_trait::async_trait;
     use sqlx::PgConnection;
     use syrup_rail::{
@@ -1184,7 +1188,7 @@ mod tests {
                     });
                 }
             };
-            let result = sqlx::query(
+            let result = fixture_query(
                 r#"
                 UPDATE host_charge_targets
                 SET status = 'reversed',
@@ -1253,7 +1257,7 @@ mod tests {
         resolved_at: DateTime<Utc>,
     ) -> Result<Uuid, sqlx::Error> {
         let attempt_id = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -1278,19 +1282,19 @@ mod tests {
                 $8, $9, $10, $11, $12, $12
             )
             "#,
+            attempt_id,
+            fixture.billing_scope_id,
+            subscriber_id,
+            target_id,
+            format!("idempotency-{attempt_id}"),
+            format!("fingerprint-{attempt_id}"),
+            amount_cents,
+            fixture.gateway_account_id,
+            fixture.gateway_configuration_id,
+            format!("order-{attempt_id}"),
+            transaction_id,
+            resolved_at,
         )
-        .bind(attempt_id)
-        .bind(fixture.billing_scope_id)
-        .bind(subscriber_id)
-        .bind(target_id)
-        .bind(format!("idempotency-{attempt_id}"))
-        .bind(format!("fingerprint-{attempt_id}"))
-        .bind(amount_cents)
-        .bind(fixture.gateway_account_id)
-        .bind(fixture.gateway_configuration_id)
-        .bind(format!("order-{attempt_id}"))
-        .bind(transaction_id)
-        .bind(resolved_at)
         .execute(pool)
         .await?;
         Ok(attempt_id)
@@ -1303,7 +1307,7 @@ mod tests {
         let fixture = create_gateway_account(&database.pool, "nmi").await?;
         let account = lifecycle_account(fixture, "nmi");
         let host_targets = ExactHostTargets::default();
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -1334,15 +1338,15 @@ mod tests {
         )
         .await?;
         assert_eq!(staged.staged(), 1);
-        let pending_state: (String, Option<i32>, String) = sqlx::query_as(
+        let pending_state: (String, Option<i32>, String) = checked_query_as!(
             r#"
             SELECT gateway_lifecycle_status, refunded_amount_cents,
                 gateway_lifecycle_action
             FROM billing_gateway_lifecycle_pending_updates
             WHERE gateway_account_id = $1
             "#,
+            fixture.gateway_account_id,
         )
-        .bind(fixture.gateway_account_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(
@@ -1370,7 +1374,7 @@ mod tests {
             apply_staged_gateway_lifecycle_evidence(&database.pool, &host_targets, &account)
                 .await?;
         assert_eq!(applied.applied(), 1);
-        let stored: (String, i32, String) = sqlx::query_as(
+        let stored: (String, i32, String) = checked_query_as!(
             r#"
             SELECT gateway_lifecycle_status, refunded_amount_cents,
                 gateway_lifecycle_action
@@ -1388,7 +1392,7 @@ mod tests {
 
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'paid')",
         )
         .bind(target_id)
@@ -1431,7 +1435,7 @@ mod tests {
         assert_eq!(first.applied(), 1);
         assert_eq!(replay.applied(), 0);
         assert_eq!(host_targets.calls.load(Ordering::SeqCst), 1);
-        let target: (String, String, DateTime<Utc>) = sqlx::query_as(
+        let target: (String, String, DateTime<Utc>) = fixture_query_as(
             "SELECT status, reversal_kind, reversed_at FROM host_charge_targets WHERE id = $1",
         )
         .bind(target_id)
@@ -1443,7 +1447,7 @@ mod tests {
 
         let refused_subscriber_id = Uuid::now_v7();
         let refused_target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'pending')",
         )
         .bind(refused_target_id)
@@ -1461,14 +1465,12 @@ mod tests {
             staged_at,
         )
         .await?;
-        let refused_attempt_before: (Option<String>, Option<i32>) = sqlx::query_as(
-            "SELECT gateway_lifecycle_status, refunded_amount_cents FROM billing_payment_attempts WHERE gateway_transaction_id = 'txn-refund-refused'",
-        )
+        let refused_attempt_before: (Option<String>, Option<i32>) = checked_query_as!("SELECT gateway_lifecycle_status, refunded_amount_cents FROM billing_payment_attempts WHERE gateway_transaction_id = 'txn-refund-refused'")
         .fetch_one(&database.pool)
         .await?;
         let following_subscriber_id = Uuid::now_v7();
         let following_target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'paid')",
         )
         .bind(following_target_id)
@@ -1522,16 +1524,14 @@ mod tests {
         assert_eq!(redelivery.skipped(), 1);
         assert_eq!(redelivery.staged(), 0);
         assert_eq!(redelivery.applied(), 0);
-        let refused_attempt_state: (Option<String>, Option<i32>) = sqlx::query_as(
-            "SELECT gateway_lifecycle_status, refunded_amount_cents FROM billing_payment_attempts WHERE gateway_transaction_id = 'txn-refund-refused'",
-        )
+        let refused_attempt_state: (Option<String>, Option<i32>) = checked_query_as!("SELECT gateway_lifecycle_status, refunded_amount_cents FROM billing_payment_attempts WHERE gateway_transaction_id = 'txn-refund-refused'")
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(refused_attempt_state, refused_attempt_before);
-        let refused_pending_count: i64 = sqlx::query_scalar(
+        let refused_pending_count: i64 = checked_query_scalar!(
             "SELECT COUNT(*) FROM billing_gateway_lifecycle_pending_updates WHERE gateway_account_id = $1 AND gateway_transaction_id = 'txn-refund-refused'",
+            fixture.gateway_account_id,
         )
-        .bind(fixture.gateway_account_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(refused_pending_count, 1);
@@ -1541,7 +1541,7 @@ mod tests {
         assert_eq!(staged_retry.skipped(), 1);
         assert_eq!(staged_retry.staged(), 0);
         let following_target_state: String =
-            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
+            fixture_query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
                 .bind(following_target_id)
                 .fetch_one(&database.pool)
                 .await?;

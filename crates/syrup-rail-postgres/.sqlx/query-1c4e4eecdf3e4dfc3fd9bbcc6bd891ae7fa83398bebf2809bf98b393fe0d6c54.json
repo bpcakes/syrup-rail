@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscription_discount_claims SET status = 'expired'\n        WHERE billing_scope_id = $1 AND plan_key = $2\n            AND discount_code_id = $3 AND status = 'saved'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1c4e4eecdf3e4dfc3fd9bbcc6bd891ae7fa83398bebf2809bf98b393fe0d6c54"
+}

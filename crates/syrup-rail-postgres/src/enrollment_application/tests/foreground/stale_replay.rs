@@ -15,17 +15,17 @@ async fn foreground_stale_prepared_replay_expires_before_admission_or_live_terms
         SubscriptionEnrollmentReservationOutcome::Reserved(_)
     ));
     transaction.commit().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET created_at = clock_timestamp() - interval '30 minutes'
         WHERE id = $1
         "#,
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .execute(&fixture.database.pool)
     .await?;
-    sqlx::query("DELETE FROM host_subscription_offers")
+    crate::test_support::fixture_query("DELETE FROM host_subscription_offers")
         .execute(&fixture.database.pool)
         .await?;
 

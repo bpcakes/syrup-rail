@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET status = 'unpaid', unpaid_at = now(), next_payment_attempt_at = NULL WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "694e4f0ba061a2695b43b50f8c8c0a2b4a450606475054443016d3af20d96f45"
+}

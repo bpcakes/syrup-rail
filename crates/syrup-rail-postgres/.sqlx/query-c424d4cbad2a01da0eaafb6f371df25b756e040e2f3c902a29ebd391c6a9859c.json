@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE billing_payment_methods IN ACCESS EXCLUSIVE MODE NOWAIT",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c424d4cbad2a01da0eaafb6f371df25b756e040e2f3c902a29ebd391c6a9859c"
+}

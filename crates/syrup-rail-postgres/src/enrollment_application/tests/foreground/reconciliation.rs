@@ -129,11 +129,11 @@ async fn reconciled_unknown_payment_method_replacement_rejects_conflicting_ident
             GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference,
         ]
     );
-    let preserved_identity: (Option<String>, Option<String>) = sqlx::query_as(
+    let preserved_identity: (Option<String>, Option<String>) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference \
          FROM billing_payment_attempts WHERE id = $1",
+        unknown.attempt().identity().attempt_id().into_uuid(),
     )
-    .bind(unknown.attempt().identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -143,7 +143,7 @@ async fn reconciled_unknown_payment_method_replacement_rejects_conflicting_ident
             Some("vault_method_unknown_durable".to_owned()),
         )
     );
-    let current_method_reference: String = sqlx::query_scalar(
+    let current_method_reference: String = checked_query_scalar!(
         r#"
         SELECT method.gateway_payment_method_reference
         FROM billing_subscriptions AS subscription
@@ -151,17 +151,17 @@ async fn reconciled_unknown_payment_method_replacement_rejects_conflicting_ident
             ON method.id = subscription.payment_method_id
         WHERE subscription.id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(current_method_reference, "vault_method_unknown_initial");
     assert_eq!(replacement_gateway.store_calls.load(Ordering::SeqCst), 0);
-    let conflicting_charge: (String, Option<String>, String) = sqlx::query_as(
+    let conflicting_charge: (String, Option<String>, String) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference, progression_state \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        unknown.attempt().identity().attempt_id().into_uuid(),
     )
-    .bind(unknown.attempt().identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -190,15 +190,15 @@ async fn reconciled_unknown_payment_method_replacement_rejects_conflicting_ident
     );
     assert!(matching.subscription().is_none());
     assert!(matching.observation_diagnostics().is_empty());
-    let charge_summary: (i64, i64) = sqlx::query_as(
-        "SELECT count(*), count(*) FILTER (WHERE progression_state = 'reconciliation_required') \
+    let charge_summary: (i64, i64) = checked_query_as!(
+        "SELECT count(*), count(*) FILTER (WHERE progression_state = 'reconciliation_required') AS reconciliation_count \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        unknown.attempt().identity().attempt_id().into_uuid(),
     )
-    .bind(unknown.attempt().identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(charge_summary, (2, 2));
-    let unchanged_method_reference: String = sqlx::query_scalar(
+    let unchanged_method_reference: String = checked_query_scalar!(
         r#"
         SELECT method.gateway_payment_method_reference
         FROM billing_subscriptions AS subscription
@@ -206,8 +206,8 @@ async fn reconciled_unknown_payment_method_replacement_rejects_conflicting_ident
             ON method.id = subscription.payment_method_id
         WHERE subscription.id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(unchanged_method_reference, "vault_method_unknown_initial");
@@ -243,11 +243,11 @@ async fn reconciled_incomplete_replacement_approval_records_charge_before_parkin
         result.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::MissingPaymentMethodReference]
     );
-    let charge: (i64, Option<String>, String) = sqlx::query_as(
-        "SELECT count(*), min(gateway_payment_method_reference), min(progression_state) \
+    let charge: (i64, Option<String>, String) = checked_query_as!(
+        "SELECT count(*), min(gateway_payment_method_reference) AS reference, min(progression_state) AS progression \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -286,11 +286,11 @@ async fn reconciled_replacement_approval_survives_persistent_coordinator_failure
         PaymentAttemptStatus::ReviewRequired
     );
     assert!(result.subscription().is_none());
-    let charge: (i64, Option<String>, String) = sqlx::query_as(
-        "SELECT count(*), min(gateway_payment_method_reference), min(progression_state) \
+    let charge: (i64, Option<String>, String) = checked_query_as!(
+        "SELECT count(*), min(gateway_payment_method_reference) AS reference, min(progression_state) AS progression \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -360,11 +360,11 @@ async fn reconciled_replacement_never_restores_quarantined_durable_identity()
         assert_eq!(result.observation_diagnostics(), &[diagnostic]);
     }
 
-    let durable_identity: (Option<String>, Option<String>) = sqlx::query_as(
+    let durable_identity: (Option<String>, Option<String>) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference \
          FROM billing_payment_attempts WHERE id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -374,16 +374,17 @@ async fn reconciled_replacement_never_restores_quarantined_durable_identity()
             Some("vault_repl_quarantine_durable".to_owned()),
         )
     );
-    let charge_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1")
-            .bind(reservation.identity().attempt_id().as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let charge_count: i64 = checked_query_scalar!(
+        "SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1",
+        reservation.identity().attempt_id().into_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
     assert_eq!(
         charge_count, 0,
         "quarantined identity is not charge authority"
     );
-    let current_method_reference: String = sqlx::query_scalar(
+    let current_method_reference: String = checked_query_scalar!(
         r#"
         SELECT method.gateway_payment_method_reference
         FROM billing_subscriptions AS subscription
@@ -391,8 +392,8 @@ async fn reconciled_replacement_never_restores_quarantined_durable_identity()
             ON method.id = subscription.payment_method_id
         WHERE subscription.id = $1
         "#,
+        reservation.subscription_id().into_uuid(),
     )
-    .bind(reservation.subscription_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(current_method_reference, "vault_repl_quarantine_initial");
@@ -444,7 +445,7 @@ async fn reconciled_approval_cannot_inherit_a_durable_payment_method_reference()
         PaymentAttemptStatus::ReviewRequired
     );
     assert!(result.subscription().is_none());
-    let current_method_reference: String = sqlx::query_scalar(
+    let current_method_reference: String = checked_query_scalar!(
         r#"
         SELECT method.gateway_payment_method_reference
         FROM billing_subscriptions AS subscription
@@ -452,16 +453,16 @@ async fn reconciled_approval_cannot_inherit_a_durable_payment_method_reference()
             ON method.id = subscription.payment_method_id
         WHERE subscription.id = $1
         "#,
+        reservation.subscription_id().into_uuid(),
     )
-    .bind(reservation.subscription_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(current_method_reference, "vault_repl_no_inherit_initial");
-    let durable_identity: (Option<String>, Option<String>) = sqlx::query_as(
+    let durable_identity: (Option<String>, Option<String>) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference \
          FROM billing_payment_attempts WHERE id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -472,11 +473,11 @@ async fn reconciled_approval_cannot_inherit_a_durable_payment_method_reference()
         ),
         "parking the sparse approval must preserve the prior attempt observation"
     );
-    let charge: (Option<String>, Option<String>, String) = sqlx::query_as(
+    let charge: (Option<String>, Option<String>, String) = checked_query_as!(
         "SELECT gateway_transaction_id, gateway_payment_method_reference, progression_state \
          FROM billing_processor_charges WHERE attempt_id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -553,11 +554,12 @@ async fn unanchored_reconciliation_preserves_durable_identity_without_splicing_d
     );
     assert!(evidence.condition().is_none());
     assert!(!evidence.indicates_approved_payment());
-    let charge_count: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1")
-            .bind(reservation.identity().attempt_id().as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let charge_count: i64 = checked_query_scalar!(
+        "SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1",
+        reservation.identity().attempt_id().into_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
     assert_eq!(charge_count, 0);
     fixture.cleanup().await
 }
@@ -598,12 +600,12 @@ async fn sparse_terminal_reconciliation_is_not_promoted_to_an_exact_replay()
         replay.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::MissingTransactionIdentifier]
     );
-    let sparse_reconciliation_count: i64 = sqlx::query_scalar(
+    let sparse_reconciliation_count: i64 = checked_query_scalar!(
         "SELECT count(*) FROM billing_processor_charges \
          WHERE attempt_id = $1 AND gateway_transaction_id IS NULL \
              AND progression_state = 'reconciliation_required'",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(sparse_reconciliation_count, 1);
@@ -645,11 +647,11 @@ async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_at
     ));
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
-    let state: (String, Option<String>, bool, bool) = sqlx::query_as(
+    let state: (String, Option<String>, bool, bool) = checked_query_as!(
         r#"
         SELECT attempt.status, attempt.resolution_code,
-            COALESCE(account.mutation_rate_limited_until > clock_timestamp(), false),
-            provider.rate_limited_until > clock_timestamp()
+            COALESCE(account.mutation_rate_limited_until > clock_timestamp(), false) AS account_limited,
+            provider.rate_limited_until > clock_timestamp() AS provider_limited
         FROM billing_payment_attempts AS attempt
         INNER JOIN billing_gateway_accounts AS account
             ON account.id = attempt.gateway_account_id
@@ -657,8 +659,8 @@ async fn foreground_readiness_throttle_resolves_attempt_and_provider_cooldown_at
             ON provider.provider_key = account.provider_key
         WHERE attempt.id = $1
         "#,
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(state.0, "failed");
@@ -705,14 +707,14 @@ async fn foreground_fresh_cooldown_after_readiness_prevents_the_admitted_sale()
             scope: GatewayMutationCooldownScope::Account
         }
     ));
-    let attempt: (String, Option<String>, bool) = sqlx::query_as(
+    let attempt: (String, Option<String>, bool) = checked_query_as!(
         r#"
-        SELECT status, resolution_code, submitted_at IS NOT NULL
+        SELECT status, resolution_code, submitted_at IS NOT NULL AS submitted
         FROM billing_payment_attempts
         WHERE id = $1
         "#,
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(attempt.0, "failed");

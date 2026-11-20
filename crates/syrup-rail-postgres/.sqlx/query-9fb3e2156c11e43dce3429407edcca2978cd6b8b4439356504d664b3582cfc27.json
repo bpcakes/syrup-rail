@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_payment_methods (\n            id, billing_scope_id, subscriber_id, gateway_account_id,\n            gateway_payment_method_reference, status\n        )\n        SELECT\n            md5('renewal-plan-method-' || value)::uuid,\n            $1,\n            md5('renewal-plan-subscriber-' || value)::uuid,\n            $2,\n            'vault_renewal_plan_' || value,\n            'active'\n        FROM generate_series(1, $3::integer) AS fixture(value)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9fb3e2156c11e43dce3429407edcca2978cd6b8b4439356504d664b3582cfc27"
+}

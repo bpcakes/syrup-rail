@@ -1,0 +1,270 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, billing_scope_id, subscriber_id, plan_key,\n            discount_code_id, code_snapshot, label_snapshot, discount_kind,\n            amount_off_cents, percent_off_bps, currency, duration,\n            duration_months, base_amount_cents, discounted_amount_cents,\n            status, claimed_at, applied_at, applied_subscription_id,\n            applied_payment_attempt_id, superseded_at\n        FROM billing_subscription_discount_claims\n        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3\n            AND status = 'saved'\n        ORDER BY claimed_at DESC, id DESC LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "subscriber_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "subscriber_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "discount_code_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "discount_code_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "code_snapshot",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "code_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "label_snapshot",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "label_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "discount_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "discount_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "amount_off_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "amount_off_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "percent_off_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "percent_off_bps"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "duration",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "duration"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "duration_months",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "duration_months"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "base_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "base_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "discounted_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "discounted_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "claimed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "claimed_at"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "applied_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "applied_at"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "applied_subscription_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "applied_subscription_id"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "applied_payment_attempt_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "applied_payment_attempt_id"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "superseded_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "superseded_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "2913fb24d6c382cc5a289c14e768c6dfb6783a1a6e88c8f0b06a5522ab280a11"
+}

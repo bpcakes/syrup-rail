@@ -72,10 +72,10 @@ async fn foreground_renewal_mode_mismatch_does_not_consume_retry_budget()
         .expect("approved enrollment creates subscription")
         .id();
     let requested_period_start_at = Utc::now() - ChronoDuration::hours(1);
-    let period_start_at: DateTime<Utc> = sqlx::query_scalar(
+    let period_start_at: DateTime<Utc> = checked_query_scalar!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '1 month',
+        SET current_period_start_at = $2::timestamptz - interval '1 month',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2,
@@ -83,9 +83,9 @@ async fn foreground_renewal_mode_mismatch_does_not_consume_retry_budget()
         WHERE id = $1
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
+        requested_period_start_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(requested_period_start_at)
     .fetch_one(&fixture.database.pool)
     .await?;
 
@@ -121,14 +121,14 @@ async fn foreground_renewal_mode_mismatch_does_not_consume_retry_budget()
             GatewayError::Configuration(_)
         ))
     ));
-    let attempt_count: i64 = sqlx::query_scalar(
+    let attempt_count: i64 = checked_query_scalar!(
         r#"
         SELECT COUNT(*)
         FROM billing_payment_attempts
         WHERE subscription_id = $1 AND attempt_kind = 'subscription_renewal'
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(attempt_count, 0);
@@ -175,10 +175,10 @@ async fn foreground_renewal_preserves_final_mode_query_unavailability() -> Resul
         .expect("approved enrollment creates subscription")
         .id();
     let requested_period_start_at = Utc::now() - ChronoDuration::hours(1);
-    let period_start_at: DateTime<Utc> = sqlx::query_scalar(
+    let period_start_at: DateTime<Utc> = checked_query_scalar!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '1 month',
+        SET current_period_start_at = $2::timestamptz - interval '1 month',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2,
@@ -186,9 +186,9 @@ async fn foreground_renewal_preserves_final_mode_query_unavailability() -> Resul
         WHERE id = $1
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
+        requested_period_start_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(requested_period_start_at)
     .fetch_one(&fixture.database.pool)
     .await?;
 
@@ -283,10 +283,10 @@ async fn foreground_unavailable_readiness_keeps_the_prepared_attempt_retryable()
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Unavailable(_))
     ));
     assert!(error.is_retryable());
-    let prepared: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+    let prepared: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
         "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts WHERE id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(prepared, ("pending".to_owned(), None, None));
@@ -343,10 +343,10 @@ async fn final_unavailable_mode_query_restores_enrollment_for_same_key_retry()
             GatewayNotSubmittedError::AccountModeVerification(GatewayError::Unavailable(_))
         )
     ));
-    let prepared: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+    let prepared: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
         "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts WHERE id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(prepared, ("pending".to_owned(), None, None));
@@ -396,10 +396,10 @@ async fn foreground_configuration_readiness_is_typed_and_same_key_recovers_termi
         error,
         SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Configuration(_))
     ));
-    let state: (String, Option<String>) = sqlx::query_as(
+    let state: (String, Option<String>) = checked_query_as!(
         "SELECT status, resolution_code FROM billing_payment_attempts WHERE id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(
@@ -460,10 +460,10 @@ async fn foreground_service_requires_live_mode_by_default() -> Result<(), Box<dy
             .submitted_at()
             .is_none()
     );
-    let persisted_mode: String = sqlx::query_scalar(
+    let persisted_mode: String = checked_query_scalar!(
         "SELECT required_gateway_account_mode FROM billing_payment_attempts WHERE id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(persisted_mode, "live");
@@ -542,10 +542,10 @@ async fn foreground_service_blocks_mode_flip_after_early_readiness() -> Result<(
             }
         )
     ));
-    let persisted: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+    let persisted: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
         "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts WHERE id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(persisted.0, "failed");
@@ -603,10 +603,10 @@ async fn prepared_test_attempt_cannot_resume_under_live_service_mode() -> Result
         live_service.enroll(fixture.command.clone()).await,
         Err(SubscriptionBillingServiceError::GatewayConfigurationChanged)
     ));
-    let persisted: (String, String, Option<DateTime<Utc>>) = sqlx::query_as(
+    let persisted: (String, String, Option<DateTime<Utc>>) = checked_query_as!(
         "SELECT required_gateway_account_mode, status, submitted_at FROM billing_payment_attempts WHERE id = $1",
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(persisted, ("test".to_owned(), "pending".to_owned(), None));
@@ -655,17 +655,17 @@ async fn foreground_service_submits_when_test_mode_is_required_and_observed()
             .submitted_at()
             .is_some()
     );
-    let persisted_modes: (String, String) = sqlx::query_as(
+    let persisted_modes: (String, String) = checked_query_as!(
         r#"
         SELECT attempts.required_gateway_account_mode,
-            subscriptions.required_gateway_account_mode
+            subscriptions.required_gateway_account_mode AS subscription_mode
         FROM billing_payment_attempts AS attempts
         JOIN billing_subscriptions AS subscriptions
             ON subscriptions.id = attempts.subscription_id
         WHERE attempts.id = $1
         "#,
+        fixture.command.attempt_id().into_uuid(),
     )
-    .bind(fixture.command.attempt_id().as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(persisted_modes, ("test".to_owned(), "test".to_owned()));
@@ -673,10 +673,10 @@ async fn foreground_service_submits_when_test_mode_is_required_and_observed()
     assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
 
     let due_at = Utc::now() - ChronoDuration::hours(1);
-    let due_at: DateTime<Utc> = sqlx::query_scalar(
+    let due_at: DateTime<Utc> = checked_query_scalar!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '1 month',
+        SET current_period_start_at = $2::timestamptz - interval '1 month',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2,
@@ -684,9 +684,9 @@ async fn foreground_service_submits_when_test_mode_is_required_and_observed()
         WHERE id = $1
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
     .fetch_one(&fixture.database.pool)
     .await?;
     let dispatch = due_renewals(&fixture.database.pool)
@@ -746,10 +746,10 @@ async fn foreground_service_submits_when_test_mode_is_required_and_observed()
     assert_eq!(live_resolver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(live_gateway.account_mode_calls.load(Ordering::SeqCst), 0);
     assert_eq!(live_gateway.sale_calls.load(Ordering::SeqCst), 0);
-    let renewal_attempts: i64 = sqlx::query_scalar(
+    let renewal_attempts: i64 = checked_query_scalar!(
         "SELECT count(*) FROM billing_payment_attempts WHERE subscription_id = $1 AND attempt_kind = 'subscription_renewal'",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(renewal_attempts, 0);

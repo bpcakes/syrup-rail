@@ -152,10 +152,10 @@ async fn dunning_state(
     pool: &PgPool,
     subscription_id: syrup_rail::SubscriptionId,
 ) -> Result<(String, Option<DateTime<Utc>>, Option<DateTime<Utc>>), sqlx::Error> {
-    sqlx::query_as(
+    checked_query_as!(
         "SELECT status, next_payment_attempt_at, unpaid_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(pool)
     .await
 }

@@ -5,7 +5,7 @@ async fn submission_admission_validates_identity_and_skips_nonprepared_replay()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("rail_host_ident").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -23,7 +23,7 @@ async fn submission_admission_validates_identity_and_skips_nonprepared_replay()
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -94,10 +94,12 @@ async fn submission_admission_validates_identity_and_skips_nonprepared_replay()
         assert_eq!(attempt.status(), PaymentAttemptStatus::Pending);
         assert!(attempt.state().timestamps().submitted_at().is_none());
 
-        sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
-            .bind(attempt_id.as_uuid())
-            .execute(&database.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+            attempt_id.as_uuid(),
+        )
+        .execute(&database.pool)
+        .await?;
         let HostChargeAdmissionOutcome::AlreadyAdmitted(review) =
             admit_host_charge_submission(&database.pool, &AdmissionMustNotRun, &wrong_mode).await?
         else {
@@ -118,7 +120,7 @@ async fn reservation_race_replays_equivalent_contact_and_rejects_changed_contact
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("rail_host_race").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -136,7 +138,7 @@ async fn reservation_race_replays_equivalent_contact_and_rejects_changed_contact
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -232,10 +234,12 @@ async fn reservation_race_replays_equivalent_contact_and_rejects_changed_contact
             HostChargeReservationOutcome::GatewayAccountModeChanged
         );
 
-        sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
-            .bind(winner_id.as_uuid())
-            .execute(&database.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+            winner_id.as_uuid(),
+        )
+        .execute(&database.pool)
+        .await?;
         let mut transaction = database.pool.begin().await?;
         let outcome = reserve_host_charge_in_transaction(
             &mut transaction,

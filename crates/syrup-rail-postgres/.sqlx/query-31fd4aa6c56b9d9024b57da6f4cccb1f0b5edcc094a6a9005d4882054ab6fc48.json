@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET status = 'failed',\n                resolution_code = 'gateway_configuration_before_submission',\n                gateway_response_text = 'concurrently resolved',\n                gateway_condition = 'failed', resolved_at = clock_timestamp(),\n                updated_at = clock_timestamp()\n            WHERE billing_scope_id = $1 AND subscriber_id = $2\n                AND attempt_kind = 'host_charge' AND status = 'pending'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "31fd4aa6c56b9d9024b57da6f4cccb1f0b5edcc094a6a9005d4882054ab6fc48"
+}

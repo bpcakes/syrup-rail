@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM billing_payment_attempts\n            WHERE subscription_id = $1\n                AND attempt_kind IN ('subscription_renewal', 'subscription_recovery')\n                AND (\n                    status IN ('unknown', 'review_required')\n                    OR (status = 'pending' AND submitted_at IS NOT NULL)\n                    OR (status = 'approved' AND billing_period_start_at = $2)\n                )\n        )\n        OR EXISTS (\n            SELECT 1\n            FROM billing_processor_charges AS charges\n            INNER JOIN billing_payment_attempts AS attempts\n                ON attempts.id = charges.attempt_id\n            WHERE attempts.subscription_id = $1\n                AND charges.attempt_kind IN (\n                    'subscription_initial',\n                    'subscription_renewal',\n                    'subscription_recovery'\n                )\n                AND charges.progression_state IN (\n                    'pending',\n                    'reconciliation_required',\n                    'external_reversal_required'\n                )\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "?column?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9828558ae8322dd8b992f0294e1ca6320f07d01ee14c6db8e3927f7a3eed5cbe"
+}

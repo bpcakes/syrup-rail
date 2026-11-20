@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH clock AS MATERIALIZED (\n                SELECT clock_timestamp() AS observed_at\n            )\n            INSERT INTO billing_subscriptions (\n            required_gateway_account_mode,\n                id, billing_scope_id, subscriber_id, plan_key, status,\n                gateway_account_id, payment_method_id, amount_cents,\n                currency, current_period_start_at, current_period_end_at,\n                next_renewal_at, initial_transaction_id, phase,\n                recurring_period_kind, recurring_period_count,\n                dunning_retry_delays_seconds, dunning_exhaustion,\n                past_due_access, next_payment_attempt_at\n            ) SELECT\n                'live', $1, $2, $3, 'plan_a', 'active', $4, $5, 100, 'USD',\n                observed_at - interval '1 day',\n                observed_at + interval '1 day',\n                observed_at + interval '1 day', $6, 'recurring',\n                'calendar_months', 1, ARRAY[]::bigint[],\n                'remain_past_due', 'suspend_immediately',\n                observed_at + interval '1 day'\n            FROM clock\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "efb2d13053ca5d179dadb42329405d13777975bf71bd46b291581336e84b1a2e"
+}

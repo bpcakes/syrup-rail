@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT trigger.tgname\n        FROM pg_catalog.pg_trigger AS trigger\n        INNER JOIN pg_catalog.pg_class AS relation\n            ON relation.oid = trigger.tgrelid\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = relation.relnamespace\n        WHERE namespace.nspname = 'public'\n            AND NOT trigger.tgisinternal\n            AND trigger.tgenabled = 'O'\n            AND trigger.tgname = ANY($1)\n        ORDER BY trigger.tgname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tgname",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_trigger",
+            "name": "tgname"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bda2495ec4cba3b61d59b0ee0aebfbace11a90994cdf9243c08622704e727eea"
+}

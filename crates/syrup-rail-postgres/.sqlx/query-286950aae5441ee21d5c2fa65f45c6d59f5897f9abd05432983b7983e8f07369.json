@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_gateway_lifecycle_pending_updates (\n            billing_scope_id,\n            gateway_account_id,\n            gateway_transaction_id,\n            gateway_order_id,\n            gateway_condition,\n            gateway_lifecycle_status,\n            gateway_lifecycle_action,\n            gateway_lifecycle_at,\n            refunded_amount_cents,\n            expires_at,\n            id\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,\n            now() + ($10::bigint * interval '1 second'), $11)\n        ON CONFLICT (\n            gateway_account_id,\n            COALESCE(gateway_transaction_id, ''),\n            COALESCE(gateway_order_id, ''),\n            COALESCE(gateway_condition, ''),\n            gateway_lifecycle_status,\n            COALESCE(gateway_lifecycle_action, ''),\n            COALESCE(gateway_lifecycle_at, '-infinity'),\n            COALESCE(refunded_amount_cents, -1)\n        ) DO UPDATE SET updated_at = now()\n        RETURNING id = $11\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "?column?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Int4",
+        "Int8",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "286950aae5441ee21d5c2fa65f45c6d59f5897f9abd05432983b7983e8f07369"
+}

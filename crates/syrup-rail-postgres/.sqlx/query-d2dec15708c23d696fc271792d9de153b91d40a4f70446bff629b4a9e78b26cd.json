@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT rate_limited_until::text\n                FROM billing_gateway_provider_rate_limits\n                WHERE provider_key = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rate_limited_until",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d2dec15708c23d696fc271792d9de153b91d40a4f70446bff629b4a9e78b26cd"
+}

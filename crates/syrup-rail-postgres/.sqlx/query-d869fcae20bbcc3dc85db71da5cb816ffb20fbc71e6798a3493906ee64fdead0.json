@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO billing_gateway_provider_rate_limits (provider_key) VALUES ($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d869fcae20bbcc3dc85db71da5cb816ffb20fbc71e6798a3493906ee64fdead0"
+}

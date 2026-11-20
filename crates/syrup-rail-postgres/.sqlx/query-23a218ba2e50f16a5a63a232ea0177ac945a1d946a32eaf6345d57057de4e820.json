@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscriptions\n        SET next_payment_attempt_at = clock_timestamp() - interval '1 second'\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "23a218ba2e50f16a5a63a232ea0177ac945a1d946a32eaf6345d57057de4e820"
+}

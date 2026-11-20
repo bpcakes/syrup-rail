@@ -20,10 +20,10 @@ async fn card_metadata_expiry_components_fill_independently_and_reject_conflicts
             refresh_payment_method_metadata(&db.pool, &resolver, fixture.command()).await?,
             Outcome::Updated
         );
-        let fields: (Option<i16>, Option<i16>) = sqlx::query_as(
+        let fields: (Option<i16>, Option<i16>) = checked_query_as!(
             "SELECT card_exp_month, card_exp_year FROM billing_payment_methods WHERE id = $1",
+            fixture.method_id,
         )
-        .bind(fixture.method_id)
         .fetch_one(&db.pool)
         .await?;
         assert_eq!(fields, (first_month, first_year));
@@ -80,10 +80,15 @@ async fn card_metadata_honors_account_and_provider_cooldowns_before_io()
     )))));
     let resolver = fixture.resolver(provider.clone())?;
     for account in [true, false] {
-        sqlx::query("UPDATE billing_gateway_accounts SET mutation_rate_limited_until = CASE WHEN $2 THEN clock_timestamp() + interval '1 hour' ELSE NULL END WHERE id = $1")
-            .bind(fixture.account.gateway_account_id).bind(account).execute(&db.pool).await?;
-        sqlx::query("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = CASE WHEN $1 THEN '-infinity'::timestamptz ELSE clock_timestamp() + interval '1 hour' END WHERE provider_key = 'nmi'")
-            .bind(account).execute(&db.pool).await?;
+        sqlx::query!(
+            "UPDATE billing_gateway_accounts SET mutation_rate_limited_until = CASE WHEN $2 THEN clock_timestamp() + interval '1 hour' ELSE NULL END WHERE id = $1",
+            fixture.account.gateway_account_id,
+            account,
+        ).execute(&db.pool).await?;
+        sqlx::query!(
+            "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = CASE WHEN $1 THEN '-infinity'::timestamptz ELSE clock_timestamp() + interval '1 hour' END WHERE provider_key = 'nmi'",
+            account,
+        ).execute(&db.pool).await?;
         let expected_scope = if account {
             crate::GatewayMutationCooldownScope::Account
         } else {
@@ -96,7 +101,7 @@ async fn card_metadata_honors_account_and_provider_cooldowns_before_io()
         assert_eq!(provider.queries.load(Ordering::SeqCst), 0);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 0);
     }
-    sqlx::query("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'")
+    sqlx::query!("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'")
         .execute(&db.pool).await?;
     assert_eq!(
         refresh_payment_method_metadata(&db.pool, &resolver, fixture.command()).await?,
@@ -121,7 +126,7 @@ async fn card_metadata_query_throttle_persists_shared_provider_cooldown()
         refresh_payment_method_metadata(&db.pool, &resolver, fixture.command()).await,
         Err(RefreshError::Query(GatewayError::RateLimited(_)))
     ));
-    let active: bool = sqlx::query_scalar("SELECT rate_limited_until > clock_timestamp() FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'")
+    let active: bool = checked_query_scalar!("SELECT rate_limited_until > clock_timestamp() FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'")
         .fetch_one(&db.pool).await?;
     assert!(
         active,
@@ -153,7 +158,7 @@ async fn card_metadata_failed_cooldown_write_preserves_throttle_and_storage_erro
     let method = fixture.method_snapshot(&db.pool).await?;
     let provider = Arc::new(QueryGateway::new(Reply::RateLimited));
     let resolver = fixture.resolver(provider.clone())?;
-    sqlx::raw_sql("CREATE FUNCTION host_reject_cooldown() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private cooldown detail'; END $$; CREATE TRIGGER host_reject_cooldown BEFORE UPDATE ON billing_gateway_provider_rate_limits FOR EACH ROW EXECUTE FUNCTION host_reject_cooldown()")
+    crate::test_support::fixture_raw_sql("CREATE FUNCTION host_reject_cooldown() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private cooldown detail'; END $$; CREATE TRIGGER host_reject_cooldown BEFORE UPDATE ON billing_gateway_provider_rate_limits FOR EACH ROW EXECUTE FUNCTION host_reject_cooldown()")
         .execute(&db.pool).await?;
     let error = refresh_payment_method_metadata(&db.pool, &resolver, fixture.command())
         .await

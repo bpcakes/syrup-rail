@@ -1,0 +1,69 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    SELECT\n        attempts.id AS attempt_id,\n        attempts.attempt_kind,\n        attempts.submitted_at IS NOT NULL AS submitted,\n        attempts.status,\n        public.billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)\n            IS NOT NULL AS has_transaction_id\n    FROM unnest($4::uuid[]) WITH ORDINALITY AS requested(attempt_id, position)\n    INNER JOIN billing_payment_attempts AS attempts\n        ON attempts.id = requested.attempt_id\n    WHERE attempts.billing_scope_id = $1\n        AND attempts.subscriber_id = $2\n        AND (attempts.attempt_kind = 'host_charge' OR attempts.plan_key = $3)\n    ORDER BY requested.position\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "submitted",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "has_transaction_id",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false,
+      null
+    ]
+  },
+  "hash": "172095f8ea6701cfd84d798392f1f473f136af70c90faf9fd22786a64880b003"
+}

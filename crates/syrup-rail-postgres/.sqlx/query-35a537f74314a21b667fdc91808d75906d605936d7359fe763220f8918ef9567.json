@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_methods\n        SET status = 'disabled',\n            gateway_payment_method_reference = 'erased:' || id::text,\n            billing_name = NULL,\n            billing_email = NULL,\n            billing_address_line1 = NULL,\n            billing_address_line2 = NULL,\n            billing_address_city = NULL,\n            billing_address_region = NULL,\n            billing_address_postal_code = NULL,\n            billing_address_country = NULL,\n            payment_type = NULL,\n            card_brand = NULL,\n            card_last4 = NULL,\n            card_exp_month = NULL,\n            card_exp_year = NULL,\n            updated_at = now()\n        WHERE billing_scope_id = $1 AND subscriber_id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "35a537f74314a21b667fdc91808d75906d605936d7359fe763220f8918ef9567"
+}

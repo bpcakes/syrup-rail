@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_processor_charges\n        SET progression_state = $2, state_code = $3,\n            reconciliation_required_at = CASE WHEN $2 = 'reconciliation_required'\n                THEN COALESCE(reconciliation_required_at, clock_timestamp())\n                ELSE NULL END,\n            external_reversal_required_at = CASE WHEN $2 = 'external_reversal_required'\n                THEN COALESCE(external_reversal_required_at, clock_timestamp())\n                ELSE NULL END,\n            applied_at = CASE WHEN $2 = 'applied'\n                THEN COALESCE(applied_at, clock_timestamp()) ELSE NULL END,\n            updated_at = clock_timestamp()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "189fd0eb665d6402e834c3de9629a8c8bcf11c2e2e9dc4650c1ab3d607eaf925"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT concat_ws(\n            '|',\n            relation.relname,\n            catalog_constraint.conname,\n            catalog_constraint.contype::text,\n            pg_catalog.pg_get_constraintdef(catalog_constraint.oid, true)\n        )\n        FROM pg_catalog.pg_constraint AS catalog_constraint\n        INNER JOIN pg_catalog.pg_class AS relation\n            ON relation.oid = catalog_constraint.conrelid\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = relation.relnamespace\n        WHERE namespace.nspname = 'public'\n            AND relation.relname = ANY($1)\n            AND catalog_constraint.contype <> 'n'\n            AND catalog_constraint.conname LIKE 'billing\\_%' ESCAPE '\\'\n        ORDER BY relation.relname, catalog_constraint.conname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "concat_ws",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4f1e5f9b9b541f8182c97f2939e33474eddeb68a3fa4cbbe892146db52322e3f"
+}

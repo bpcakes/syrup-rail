@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            (SELECT count(*) FROM billing_payment_methods\n             WHERE subscriber_id = $1\n                AND num_nonnulls(billing_name, billing_email, billing_address_line1,\n                    billing_address_line2, billing_address_city, billing_address_region,\n                    billing_address_postal_code, billing_address_country) <> 0)\n            + (SELECT count(*) FROM billing_payment_attempts\n             WHERE subscriber_id = $1\n                AND num_nonnulls(billing_first_name, billing_last_name, billing_email,\n                    billing_address_line1, billing_address_line2, billing_address_city,\n                    billing_address_region, billing_address_postal_code,\n                    billing_address_country) <> 0)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "?column?",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b738cb4d7d4fb4eb47bd5d0ddc73d657724ab6895eb686a557f45c9449430ee7"
+}

@@ -46,7 +46,7 @@ async fn prepared_recovery(
 }
 
 async fn provider_cooldown_active(harness: &Harness) -> Result<bool, Box<dyn Error>> {
-    Ok(sqlx::query_scalar(
+    Ok(checked_query_scalar!(
         "SELECT coalesce(bool_or(rate_limited_until > clock_timestamp()), false)
          FROM billing_gateway_provider_rate_limits",
     )
@@ -58,11 +58,11 @@ async fn attempt_state(
     harness: &Harness,
     reservation: &syrup_rail::SubscriptionRecoveryReservation,
 ) -> Result<(String, Option<String>, Option<DateTime<Utc>>), Box<dyn Error>> {
-    Ok(sqlx::query_as(
+    Ok(checked_query_as!(
         "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts
          WHERE id = $1",
+        reservation.identity().attempt_id().into_uuid(),
     )
-    .bind(reservation.identity().attempt_id().as_uuid())
     .fetch_one(harness.pool())
     .await?)
 }

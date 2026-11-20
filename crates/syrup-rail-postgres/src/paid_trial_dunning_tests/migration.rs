@@ -68,7 +68,7 @@ async fn v1_active_recovery_authority_survives_v2_v3_and_v4_cutovers() -> Result
         }
 
         let mut transaction = database.pool.begin().await?;
-        sqlx::raw_sql(V1_TO_V2_UPGRADE_SQL)
+        crate::test_support::fixture_raw_sql(V1_TO_V2_UPGRADE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -233,7 +233,7 @@ async fn insert_v1_active_recovery(
             initial_transaction_id
         ) VALUES (
             $1, $2, $3, 'base_subscription', 'active', $4, $5, 100, 'USD',
-            $6 - interval '30 days', $6, $6, $7
+            $6::timestamptz - interval '30 days', $6, $6, $7
         )
         "#,
     )

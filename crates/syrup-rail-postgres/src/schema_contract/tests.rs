@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_methods)] // Fixtures exercise historical schemas and catalog drift.
+
 use std::{error::Error, io};
 
 use sqlx::{PgPool, Row};

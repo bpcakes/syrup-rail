@@ -26,7 +26,7 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
 
         let discount_code = Uuid::now_v7();
         let discount_claim = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_subscription_discount_codes (
                     id, billing_scope_id, plan_key, code_normalized,
@@ -38,12 +38,12 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                     'indefinite'
                 )
                 "#,
+            discount_code,
+            scope,
         )
-        .bind(discount_code)
-        .bind(scope)
         .execute(&database.pool)
         .await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_subscription_discount_claims (
                     id, billing_scope_id, subscriber_id, plan_key,
@@ -56,11 +56,11 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                     'indefinite', 100, 90, 'saved'
                 )
                 "#,
+            discount_claim,
+            scope,
+            subscriber,
+            discount_code,
         )
-        .bind(discount_claim)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(discount_code)
         .execute(&database.pool)
         .await?;
         match entitlement(&database.pool, &query).await? {
@@ -77,7 +77,7 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
         }
 
         let grant_id = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_subscription_grants (
                     id, billing_scope_id, subscriber_id, plan_key, grant_kind,
@@ -88,11 +88,11 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                     clock_timestamp() + interval '1 day', $4
                 )
                 "#,
+            grant_id,
+            scope,
+            subscriber,
+            Uuid::now_v7(),
         )
-        .bind(grant_id)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(Uuid::now_v7())
         .execute(&database.pool)
         .await?;
         if !matches!(
@@ -101,49 +101,53 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
         ) {
             return Err(io::Error::other("active grant did not own entitlement").into());
         }
-        sqlx::query("DELETE FROM billing_subscription_grants WHERE id = $1")
-            .bind(grant_id)
-            .execute(&database.pool)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM billing_subscription_grants WHERE id = $1",
+            grant_id,
+        )
+        .execute(&database.pool)
+        .await?;
 
         let provider = "test_gateway";
         let account = Uuid::now_v7();
         let configuration = Uuid::now_v7();
-        sqlx::query("INSERT INTO billing_gateway_provider_rate_limits (provider_key) VALUES ($1)")
-            .bind(provider)
-            .execute(&database.pool)
-            .await?;
-        sqlx::query(
+        sqlx::query!(
+            "INSERT INTO billing_gateway_provider_rate_limits (provider_key) VALUES ($1)",
+            provider,
+        )
+        .execute(&database.pool)
+        .await?;
+        sqlx::query!(
             r#"
                 INSERT INTO billing_gateway_accounts (
                     id, billing_scope_id, provider_key, gateway_configuration_id
                 ) VALUES ($1, $2, $3, $4)
                 "#,
+            account,
+            scope,
+            provider,
+            configuration,
         )
-        .bind(account)
-        .bind(scope)
-        .bind(provider)
-        .bind(configuration)
         .execute(&database.pool)
         .await?;
         let method = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_payment_methods (
                     id, billing_scope_id, subscriber_id, gateway_account_id,
                     gateway_payment_method_reference, status
                 ) VALUES ($1, $2, $3, $4, $5, 'active')
                 "#,
+            method,
+            scope,
+            subscriber,
+            account,
+            format!("vault_{}", method.simple()),
         )
-        .bind(method)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(account)
-        .bind(format!("vault_{}", method.simple()))
         .execute(&database.pool)
         .await?;
         let subscription = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_subscriptions (
                     required_gateway_account_mode,
@@ -164,16 +168,16 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                     observed_at + interval '1 day'
                 FROM (SELECT clock_timestamp() AS observed_at) clock
                 "#,
+            subscription,
+            scope,
+            subscriber,
+            account,
+            method,
+            format!("txn_{}", subscription.simple()),
         )
-        .bind(subscription)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(account)
-        .bind(method)
-        .bind(format!("txn_{}", subscription.simple()))
         .execute(&database.pool)
         .await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_subscription_discounts (
                     subscription_id, billing_scope_id, subscriber_id,
@@ -186,10 +190,10 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                     100, 90, 1, 'active'
                 )
                 "#,
+            subscription,
+            scope,
+            subscriber,
         )
-        .bind(subscription)
-        .bind(scope)
-        .bind(subscriber)
         .execute(&database.pool)
         .await?;
         match entitlement(&database.pool, &query).await? {
@@ -235,10 +239,10 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
             )
             .into());
         }
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id = $1",
+            subscription,
         )
-        .bind(subscription)
         .execute(&database.pool)
         .await?;
         assert!(matches!(
@@ -253,15 +257,15 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
             .await?,
             Entitlement::PaidActive { .. }
         ));
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_subscriptions SET required_gateway_account_mode = 'live' WHERE id = $1",
+            subscription,
         )
-        .bind(subscription)
         .execute(&database.pool)
         .await?;
 
         let overlapping_grant = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_subscription_grants (
                     id, billing_scope_id, subscriber_id, plan_key, grant_kind,
@@ -272,11 +276,11 @@ async fn entitlement_is_exact_lossless_and_rejects_overlapping_owners() -> Resul
                     clock_timestamp() + interval '1 day', $4
                 )
                 "#,
+            overlapping_grant,
+            scope,
+            subscriber,
+            Uuid::now_v7(),
         )
-        .bind(overlapping_grant)
-        .bind(scope)
-        .bind(subscriber)
-        .bind(Uuid::now_v7())
         .execute(&database.pool)
         .await?;
         if !matches!(

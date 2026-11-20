@@ -167,8 +167,10 @@ async fn card_metadata_refresh_preserves_existing_fields_and_rejects_conflicts()
 -> Result<(), Box<dyn Error>> {
     let db = TestDatabase::start("metadata_merge").await?;
     let fixture = Fixture::new(&db.pool).await?;
-    sqlx::query("UPDATE billing_payment_methods SET card_brand = 'VISA', card_last4 = '1111', card_exp_month = 10 WHERE id = $1")
-        .bind(fixture.method_id).execute(&db.pool).await?;
+    sqlx::query!(
+        "UPDATE billing_payment_methods SET card_brand = 'VISA', card_last4 = '1111', card_exp_month = 10 WHERE id = $1",
+        fixture.method_id,
+    ).execute(&db.pool).await?;
     let before = fixture.method_snapshot(&db.pool).await?;
     let provider = Arc::new(QueryGateway::new(Reply::observation(None)));
     let resolver = fixture.resolver(provider.clone())?;
@@ -217,7 +219,10 @@ async fn card_metadata_refresh_preserves_existing_fields_and_rejects_conflicts()
         refresh_payment_method_metadata(&db.pool, &resolver, fixture.command()).await?,
         Outcome::Updated
     );
-    let fields: (String, String, i16, i16) = sqlx::query_as("SELECT card_brand, card_last4, card_exp_month, card_exp_year FROM billing_payment_methods WHERE id = $1").bind(fixture.method_id).fetch_one(&db.pool).await?;
+    let fields: (String, String, i16, i16) = checked_query_as!(
+        "SELECT card_brand, card_last4, card_exp_month, card_exp_year FROM billing_payment_methods WHERE id = $1",
+        fixture.method_id,
+    ).fetch_one(&db.pool).await?;
     assert_eq!(fields, ("VISA".into(), "1111".into(), 10, 2029));
     db.cleanup().await?;
     Ok(())

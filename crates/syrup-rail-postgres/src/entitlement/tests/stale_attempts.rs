@@ -9,7 +9,7 @@ async fn mode_filter_preserves_cross_mode_initial_attempt_guidance() -> Result<(
         let account = create_gateway_account(&database.pool, "ent_mode_gateway").await?;
         let subscriber = Uuid::now_v7();
         let attempt = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -32,15 +32,15 @@ async fn mode_filter_preserves_cross_mode_initial_attempt_guidance() -> Result<(
                 'remain_past_due', 'suspend_immediately'
             )
             "#,
+            attempt,
+            account.billing_scope_id,
+            subscriber,
+            format!("ent-mode-{attempt}"),
+            format!("ent-mode-fingerprint-{attempt}"),
+            account.gateway_account_id,
+            account.gateway_configuration_id,
+            format!("ent-mode-order-{attempt}"),
         )
-        .bind(attempt)
-        .bind(account.billing_scope_id)
-        .bind(subscriber)
-        .bind(format!("ent-mode-{attempt}"))
-        .bind(format!("ent-mode-fingerprint-{attempt}"))
-        .bind(account.gateway_account_id)
-        .bind(account.gateway_configuration_id)
-        .bind(format!("ent-mode-order-{attempt}"))
         .execute(&database.pool)
         .await?;
 
@@ -90,7 +90,7 @@ async fn stale_local_recovery_does_not_request_provider_confirmation() -> Result
         let (scope, subscriber, subscription) =
             insert_paid_subscription(&database.pool, "past_due").await?;
         let attempt_id = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_attempts (
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
@@ -120,12 +120,12 @@ async fn stale_local_recovery_does_not_request_provider_confirmation() -> Result
                 AND accounts.billing_scope_id = subscriptions.billing_scope_id
             WHERE subscriptions.id = $5
             "#,
+            attempt_id,
+            format!("recovery_{}", attempt_id.simple()),
+            format!("recovery_fingerprint_{}", attempt_id.simple()),
+            format!("recovery_order_{}", attempt_id.simple()),
+            subscription,
         )
-        .bind(attempt_id)
-        .bind(format!("recovery_{}", attempt_id.simple()))
-        .bind(format!("recovery_fingerprint_{}", attempt_id.simple()))
-        .bind(format!("recovery_order_{}", attempt_id.simple()))
-        .bind(subscription)
         .execute(&database.pool)
         .await?;
         let query = EntitlementQuery::new(
@@ -141,15 +141,15 @@ async fn stale_local_recovery_does_not_request_provider_confirmation() -> Result
                 ..
             }
         ));
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET created_at = clock_timestamp() - interval '31 minutes',
                 updated_at = clock_timestamp() - interval '31 minutes'
             WHERE id = $1
             "#,
+            attempt_id,
         )
-        .bind(attempt_id)
         .execute(&database.pool)
         .await?;
         assert!(matches!(

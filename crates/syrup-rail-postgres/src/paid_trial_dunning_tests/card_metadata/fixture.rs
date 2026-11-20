@@ -48,11 +48,12 @@ impl Fixture {
             .expect("approved trial")
             .id()
             .as_uuid();
-        let method_id =
-            sqlx::query_scalar("SELECT payment_method_id FROM billing_subscriptions WHERE id = $1")
-                .bind(subscription_id)
-                .fetch_one(pool)
-                .await?;
+        let method_id = checked_query_scalar!(
+            "SELECT payment_method_id FROM billing_subscriptions WHERE id = $1",
+            subscription_id,
+        )
+        .fetch_one(pool)
+        .await?;
         Ok(Self {
             account,
             subscriber_id,
@@ -95,19 +96,26 @@ impl Fixture {
 
     pub async fn financial_snapshot(&self, pool: &PgPool) -> Result<String, sqlx::Error> {
         // Include every column of all financial rows, not only payment status.
-        sqlx::query_scalar("SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM billing_payment_attempts a WHERE billing_scope_id = $1), (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM billing_processor_charges c WHERE billing_scope_id = $1), (SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM billing_subscriptions s WHERE billing_scope_id = $1))::text")
-            .bind(self.scope().as_uuid()).fetch_one(pool).await
+        checked_query_scalar!(
+            "SELECT jsonb_build_array((SELECT jsonb_agg(to_jsonb(a) ORDER BY id) FROM billing_payment_attempts a WHERE billing_scope_id = $1), (SELECT jsonb_agg(to_jsonb(c) ORDER BY id) FROM billing_processor_charges c WHERE billing_scope_id = $1), (SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM billing_subscriptions s WHERE billing_scope_id = $1))::text",
+            self.scope().into_uuid(),
+        ).fetch_one(pool).await
     }
 
     pub async fn method_snapshot(&self, pool: &PgPool) -> Result<String, sqlx::Error> {
-        sqlx::query_scalar("SELECT to_jsonb(m)::text FROM billing_payment_methods m WHERE id = $1")
-            .bind(self.method_id)
-            .fetch_one(pool)
-            .await
+        checked_query_scalar!(
+            "SELECT to_jsonb(m)::text FROM billing_payment_methods m WHERE id = $1",
+            self.method_id,
+        )
+        .fetch_one(pool)
+        .await
     }
 
     pub async fn method_identity(&self, pool: &PgPool) -> Result<String, sqlx::Error> {
-        sqlx::query_scalar("SELECT (to_jsonb(m) - ARRAY['card_brand', 'card_last4', 'card_exp_month', 'card_exp_year', 'updated_at']::text[])::text FROM billing_payment_methods m WHERE id = $1").bind(self.method_id).fetch_one(pool).await
+        checked_query_scalar!(
+            "SELECT (to_jsonb(m) - ARRAY['card_brand', 'card_last4', 'card_exp_month', 'card_exp_year', 'updated_at']::text[])::text FROM billing_payment_methods m WHERE id = $1",
+            self.method_id,
+        ).fetch_one(pool).await
     }
 }
 

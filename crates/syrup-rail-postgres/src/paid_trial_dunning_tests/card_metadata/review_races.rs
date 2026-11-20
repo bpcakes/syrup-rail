@@ -38,10 +38,10 @@ async fn card_metadata_configuration_and_timestamp_changes_return_changed_during
             );
             tx.commit().await?;
         } else {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE billing_subscriptions SET updated_at = clock_timestamp() WHERE id = $1",
+                fixture.subscription_id.as_uuid(),
             )
-            .bind(fixture.subscription_id.as_uuid())
             .execute(&db.pool)
             .await?;
         }
@@ -160,7 +160,7 @@ async fn card_metadata_canceled_write_transaction_rolls_back_and_releases_connec
     // Reusing the only connection forces queued SQLx rollback to complete.
     tokio::time::timeout(
         Duration::from_secs(3),
-        sqlx::query("SELECT 1").execute(&single),
+        checked_query!("SELECT 1 AS probe").execute(&single),
     )
     .await??;
     assert_eq!(fixture.method_snapshot(&db.pool).await?, before);
@@ -190,10 +190,12 @@ async fn card_metadata_canceled_inflight_statement_rolls_back_and_releases_conne
         .connect_with(options)
         .await?;
     let mut blocker = db.pool.begin().await?;
-    sqlx::query("SELECT id FROM billing_gateway_accounts WHERE id = $1 FOR UPDATE")
-        .bind(fixture.account.gateway_account_id)
-        .execute(&mut *blocker)
-        .await?;
+    checked_query!(
+        "SELECT id FROM billing_gateway_accounts WHERE id = $1 FOR UPDATE",
+        fixture.account.gateway_account_id,
+    )
+    .execute(&mut *blocker)
+    .await?;
     let provider = Arc::new(QueryGateway::new(Reply::observation(Some(metadata(
         "txn_metadata",
         None,
@@ -214,7 +216,7 @@ async fn card_metadata_canceled_inflight_statement_rolls_back_and_releases_conne
     );
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
-            let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'metadata_query_abort' AND datname = current_database() AND wait_event_type = 'Lock')")
+            let waiting: bool = checked_query_scalar!("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'metadata_query_abort' AND datname = current_database() AND wait_event_type = 'Lock')")
                 .fetch_one(&db.pool).await?;
             if waiting { return Ok::<_, sqlx::Error>(()); }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -227,7 +229,7 @@ async fn card_metadata_canceled_inflight_statement_rolls_back_and_releases_conne
     // Reusing the only connection forces queued SQLx rollback to complete.
     tokio::time::timeout(
         Duration::from_secs(3),
-        sqlx::query("SELECT 1").execute(&single),
+        checked_query!("SELECT 1 AS probe").execute(&single),
     )
     .await??;
     assert_eq!(fixture.method_snapshot(&db.pool).await?, before);

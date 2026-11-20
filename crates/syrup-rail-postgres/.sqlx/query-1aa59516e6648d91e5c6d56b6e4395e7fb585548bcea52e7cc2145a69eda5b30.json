@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT function.proname\n        FROM pg_catalog.pg_proc AS function\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = function.pronamespace\n        WHERE namespace.nspname = 'public'\n            AND function.prokind = 'f'\n            AND function.proname = ANY($1)\n        ORDER BY function.proname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "proname",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_proc",
+            "name": "proname"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "1aa59516e6648d91e5c6d56b6e4395e7fb585548bcea52e7cc2145a69eda5b30"
+}

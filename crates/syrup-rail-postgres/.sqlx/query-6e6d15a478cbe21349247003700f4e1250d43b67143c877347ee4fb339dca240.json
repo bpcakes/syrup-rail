@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT pg_try_advisory_xact_lock(\n            hashtextextended(\n                'syrup-rail:lifecycle-quarantine-alert:'\n                    || $1::uuid::text || ':' || $2::uuid::text,\n                0\n            )\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pg_try_advisory_xact_lock",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "6e6d15a478cbe21349247003700f4e1250d43b67143c877347ee4fb339dca240"
+}

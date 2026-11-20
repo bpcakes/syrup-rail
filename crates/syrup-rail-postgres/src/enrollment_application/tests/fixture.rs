@@ -48,7 +48,7 @@ impl<'a> FixtureSetup<'a> {
             prepare_submission,
         } = self;
         let database = TestDatabase::start(project).await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
         CREATE TABLE host_subscription_offers (
             billing_scope_id uuid NOT NULL,
@@ -62,7 +62,7 @@ impl<'a> FixtureSetup<'a> {
         .execute(&database.pool)
         .await?;
         let account = create_gateway_account(&database.pool, "nmi").await?;
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_subscription_offers VALUES ($1, 'base_subscription', 1000, 'USD')",
         )
         .bind(account.billing_scope_id)
@@ -71,7 +71,7 @@ impl<'a> FixtureSetup<'a> {
         let subscriber_id = Uuid::now_v7();
         let expected_charge = if discounted {
             let code_id = Uuid::now_v7();
-            sqlx::query(
+            sqlx::query!(
                 r#"
             INSERT INTO billing_subscription_discount_codes (
                 id, billing_scope_id, plan_key, code_normalized, display_code,
@@ -82,12 +82,12 @@ impl<'a> FixtureSetup<'a> {
                 'active', 'percent_off', 2000, 'USD', 'limited_months', 3
             )
             "#,
+                code_id,
+                account.billing_scope_id,
             )
-            .bind(code_id)
-            .bind(account.billing_scope_id)
             .execute(&database.pool)
             .await?;
-            sqlx::query(
+            sqlx::query!(
                 r#"
             INSERT INTO billing_subscription_discount_claims (
                 id, billing_scope_id, subscriber_id, plan_key,
@@ -100,11 +100,11 @@ impl<'a> FixtureSetup<'a> {
                 1000, 800, 'saved'
             )
             "#,
+                Uuid::now_v7(),
+                account.billing_scope_id,
+                subscriber_id,
+                code_id,
             )
-            .bind(Uuid::now_v7())
-            .bind(account.billing_scope_id)
-            .bind(subscriber_id)
-            .bind(code_id)
             .execute(&database.pool)
             .await?;
             SubscriptionEnrollmentExpectedTerms::discounted(

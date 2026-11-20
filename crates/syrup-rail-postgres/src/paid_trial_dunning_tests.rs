@@ -399,10 +399,12 @@ async fn resolved_at(
     pool: &PgPool,
     attempt_id: PaymentAttemptId,
 ) -> Result<DateTime<Utc>, sqlx::Error> {
-    sqlx::query_scalar("SELECT resolved_at FROM billing_payment_attempts WHERE id = $1")
-        .bind(attempt_id.as_uuid())
-        .fetch_one(pool)
-        .await
+    checked_query_scalar!(
+        "SELECT resolved_at FROM billing_payment_attempts WHERE id = $1",
+        attempt_id.as_uuid(),
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn make_trial_due(
@@ -410,21 +412,21 @@ async fn make_trial_due(
     subscription_id: syrup_rail::SubscriptionId,
 ) -> Result<DateTime<Utc>, sqlx::Error> {
     let due_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+        checked_query_scalar!("SELECT clock_timestamp() - interval '1 second'")
             .fetch_one(pool)
             .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '7 days',
+        SET current_period_start_at = $2::timestamptz - interval '7 days',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
     .execute(pool)
     .await?;
     Ok(due_at)
@@ -434,10 +436,10 @@ async fn make_retry_due(
     pool: &PgPool,
     subscription_id: syrup_rail::SubscriptionId,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET next_payment_attempt_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(pool)
     .await?;
     Ok(())
@@ -527,6 +529,7 @@ mod consumer_edges;
 mod decline_advice;
 mod enrollment;
 mod infrastructure;
+#[allow(clippy::disallowed_methods)] // The cutover fixture starts on schema v1.
 mod migration;
 mod period_expiry;
 mod reclassification;

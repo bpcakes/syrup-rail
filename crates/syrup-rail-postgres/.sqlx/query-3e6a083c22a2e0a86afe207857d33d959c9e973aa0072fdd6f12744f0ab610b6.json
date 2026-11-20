@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET status = 'failed',\n            gateway_response_text = COALESCE(gateway_response_text, $4),\n            gateway_condition = COALESCE(gateway_condition, 'failed'),\n            resolution_code = COALESCE(\n                resolution_code,\n                'subscription_initial_prepared_attempt_expired'\n            ),\n            resolved_at = clock_timestamp(), updated_at = clock_timestamp()\n        WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3\n            AND attempt_kind = 'subscription_initial'\n            AND status = ANY($5::text[])\n            AND submitted_at IS NULL\n            AND created_at <= clock_timestamp()\n                - ($6::bigint * interval '1 second')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "TextArray",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3e6a083c22a2e0a86afe207857d33d959c9e973aa0072fdd6f12744f0ab610b6"
+}

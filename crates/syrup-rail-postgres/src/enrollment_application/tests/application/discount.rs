@@ -36,12 +36,12 @@ async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()
         &events[0],
         BillingEvent::SubscriptionStarted { charge, .. } if charge.cents() == 800
     ));
-    let rows: (i64, i64, i64, String, i32) = sqlx::query_as(
+    let rows: (i64, i64, i64, String, i32) = checked_query_as!(
         r#"
         SELECT
-            (SELECT count(*) FROM billing_payment_methods),
-            (SELECT count(*) FROM billing_subscriptions),
-            (SELECT count(*) FROM billing_processor_charges),
+            (SELECT count(*) FROM billing_payment_methods) AS payment_methods,
+            (SELECT count(*) FROM billing_subscriptions) AS subscriptions,
+            (SELECT count(*) FROM billing_processor_charges) AS processor_charges,
             (SELECT status FROM billing_subscription_discount_claims LIMIT 1),
             (SELECT periods_applied FROM billing_subscription_discounts LIMIT 1)
         "#,
@@ -50,7 +50,7 @@ async fn discounted_approval_applies_one_atomic_subscription_event_and_replays()
     .await?;
     assert_eq!(rows, (1, 1, 1, "applied".to_owned(), 1));
     let progression: String =
-        sqlx::query_scalar("SELECT progression_state FROM billing_processor_charges")
+        checked_query_scalar!("SELECT progression_state FROM billing_processor_charges")
             .fetch_one(&fixture.database.pool)
             .await?;
     assert_eq!(progression, "applied");

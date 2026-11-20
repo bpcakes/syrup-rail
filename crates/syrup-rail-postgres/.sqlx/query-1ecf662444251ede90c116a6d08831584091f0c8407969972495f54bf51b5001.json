@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscription_discount_claims\n        SET status = 'applied', applied_subscription_id = $5,\n            applied_payment_attempt_id = $6, applied_at = $7\n        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3\n            AND plan_key = $4 AND status IN ('saved', 'expired')\n            AND applied_subscription_id IS NULL\n            AND applied_payment_attempt_id IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1ecf662444251ede90c116a6d08831584091f0c8407969972495f54bf51b5001"
+}

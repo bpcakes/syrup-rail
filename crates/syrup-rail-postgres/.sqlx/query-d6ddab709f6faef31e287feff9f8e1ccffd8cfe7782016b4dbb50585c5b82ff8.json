@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            CREATE TABLE host_targets (\n                id uuid PRIMARY KEY, billing_scope_id uuid NOT NULL,\n                subscriber_id uuid NOT NULL, released boolean NOT NULL DEFAULT false\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d6ddab709f6faef31e287feff9f8e1ccffd8cfe7782016b4dbb50585c5b82ff8"
+}

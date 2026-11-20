@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT progression_state, state_code,\n                    external_reversal_required_at IS NOT NULL AS reversal_required\n                FROM billing_processor_charges WHERE attempt_id = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "progression_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "progression_state"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "state_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "state_code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "reversal_required",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "2cfdf774945f6c6b0c2a658449adc573a818dae6191f1547b1b4e33dc91e735c"
+}

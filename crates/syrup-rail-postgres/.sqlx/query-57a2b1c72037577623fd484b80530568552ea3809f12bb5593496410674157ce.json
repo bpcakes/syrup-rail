@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*)::bigint\n            FROM pg_catalog.pg_stat_activity\n            WHERE datname = current_database()\n                AND pid <> pg_backend_pid()\n                AND wait_event_type = 'Lock'\n                AND query LIKE '%WITH due AS MATERIALIZED%'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "57a2b1c72037577623fd484b80530568552ea3809f12bb5593496410674157ce"
+}

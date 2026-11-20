@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            CREATE TABLE manual_failure_host_targets (\n                id uuid PRIMARY KEY,\n                billing_scope_id uuid NOT NULL,\n                subscriber_id uuid NOT NULL,\n                status text NOT NULL\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "33caa5a0e4fe7874eb500eb058841e09ffe363fde3200dbe03bda2a22038a445"
+}

@@ -14,32 +14,42 @@ use crate::attempts::LocalAttemptPolicy;
 // local expirable-status policy is $12. Filtered queries add an unconditional
 // mode predicate at $13. Continuations then add their keyset predicate, and the
 // final placeholder is always LIMIT.
-const DUE_RENEWALS_ALL_FIRST_PAGE_SQL: &str = concat!(
-    include_str!("renewal/due_renewals_page_head.sql"),
-    include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $13\n"
-);
-const DUE_RENEWALS_ALL_CONTINUATION_SQL: &str = concat!(
-    include_str!("renewal/due_renewals_page_head.sql"),
-    "        AND (subscriptions.next_payment_attempt_at, subscriptions.id)\n",
-    "            > ($13::timestamptz, $14::uuid)\n",
-    include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $15\n"
-);
-const DUE_RENEWALS_MODE_FIRST_PAGE_SQL: &str = concat!(
-    include_str!("renewal/due_renewals_page_head.sql"),
-    "        AND subscriptions.required_gateway_account_mode = $13::text\n",
-    include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $14\n"
-);
-const DUE_RENEWALS_MODE_CONTINUATION_SQL: &str = concat!(
-    include_str!("renewal/due_renewals_page_head.sql"),
-    "        AND subscriptions.required_gateway_account_mode = $13::text\n",
-    "        AND (subscriptions.next_payment_attempt_at, subscriptions.id)\n",
-    "            > ($14::timestamptz, $15::uuid)\n",
-    include_str!("renewal/due_renewals_page_body.sql"),
-    "LIMIT $16\n"
-);
+#[macro_use]
+mod page_sql;
+
+macro_rules! all_first_page {
+    ($query:ident $(, $arg:expr)*) => {
+        due_renewals_statement!($query, "", "LIMIT $13\n" $(, $arg)*)
+    };
+}
+macro_rules! all_continuation {
+    ($query:ident $(, $arg:expr)*) => {
+        due_renewals_statement!(
+            $query,
+            "        AND (subscriptions.next_payment_attempt_at, subscriptions.id) > ($13::timestamptz, $14::uuid)\n",
+            "LIMIT $15\n" $(, $arg)*
+        )
+    };
+}
+macro_rules! mode_first_page {
+    ($query:ident $(, $arg:expr)*) => {
+        due_renewals_statement!(
+            $query,
+            "        AND subscriptions.required_gateway_account_mode = $13::text\n",
+            "LIMIT $14\n" $(, $arg)*
+        )
+    };
+}
+macro_rules! mode_continuation {
+    ($query:ident $(, $arg:expr)*) => {
+        due_renewals_statement!(
+            $query,
+            "        AND subscriptions.required_gateway_account_mode = $13::text
+                     AND (subscriptions.next_payment_attempt_at, subscriptions.id) > ($14::timestamptz, $15::uuid)\n",
+            "LIMIT $16\n" $(, $arg)*
+        )
+    };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DueRenewalPageQuery {
@@ -54,19 +64,20 @@ impl DueRenewalPageQuery {
     ) -> Result<Self, sqlx::Error> {
         match cursor {
             Some(cursor) => Ok(Self::Continuation(*cursor)),
-            None => sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
+            None => checked_query_scalar!(DateTime<Utc>, "SELECT clock_timestamp()")
                 .fetch_one(pool)
                 .await
                 .map(Self::First),
         }
     }
 
+    #[cfg(test)]
     const fn sql(self, required_mode: Option<GatewayAccountMode>) -> &'static str {
         match (self, required_mode) {
-            (Self::First(_), None) => DUE_RENEWALS_ALL_FIRST_PAGE_SQL,
-            (Self::Continuation(_), None) => DUE_RENEWALS_ALL_CONTINUATION_SQL,
-            (Self::First(_), Some(_)) => DUE_RENEWALS_MODE_FIRST_PAGE_SQL,
-            (Self::Continuation(_), Some(_)) => DUE_RENEWALS_MODE_CONTINUATION_SQL,
+            (Self::First(_), None) => all_first_page!(concat_sql),
+            (Self::Continuation(_), None) => all_continuation!(concat_sql),
+            (Self::First(_), Some(_)) => mode_first_page!(concat_sql),
+            (Self::Continuation(_), Some(_)) => mode_continuation!(concat_sql),
         }
     }
 
@@ -79,42 +90,50 @@ impl DueRenewalPageQuery {
 
     fn bind<'args>(
         self,
-        infrastructure_retry_codes: &'args [&'static str],
-        infrastructure_pacing_codes: &'args [&'static str],
-        rate_limit_pacing_codes: &'args [&'static str],
+        infrastructure_retry_codes: &'args [String],
+        infrastructure_pacing_codes: &'args [String],
+        rate_limit_pacing_codes: &'args [String],
         required_gateway_account_mode: Option<GatewayAccountMode>,
     ) -> Query<'args, Postgres, PgArguments> {
         let payment_method_update_policy =
             LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
         let subscription_charge_policy =
             LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
-        let query = sqlx::query(self.sql(required_gateway_account_mode))
-            .bind(infrastructure_retry_codes)
-            .bind(infrastructure_pacing_codes)
-            .bind(rate_limit_pacing_codes)
-            .bind(payment_method_update_policy.stale_after_seconds())
-            .bind(syrup_rail::MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION)
-            .bind(syrup_rail::RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS)
-            .bind(syrup_rail::RENEWAL_RATE_LIMIT_FAST_RETRY_ATTEMPTS)
-            .bind(syrup_rail::RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS)
-            .bind(syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS)
-            .bind(self.observed_at())
-            .bind(subscription_charge_policy.stale_after_seconds())
-            .bind(LocalAttemptPolicy::expirable_status_values());
+        macro_rules! bind_page {
+            ($statement:ident $(, $extra:expr)*) => {
+                $statement!(
+                    checked_query,
+                    infrastructure_retry_codes,
+                    infrastructure_pacing_codes,
+                    rate_limit_pacing_codes,
+                    payment_method_update_policy.stale_after_seconds(),
+                    syrup_rail::MAX_RENEWAL_INFRASTRUCTURE_ATTEMPTS_PER_PERIOD_CONFIGURATION,
+                    syrup_rail::RENEWAL_INFRASTRUCTURE_RETRY_AFTER_SECONDS,
+                    syrup_rail::RENEWAL_RATE_LIMIT_FAST_RETRY_ATTEMPTS,
+                    syrup_rail::RENEWAL_RATE_LIMIT_SLOW_RETRY_AFTER_SECONDS,
+                    syrup_rail::GATEWAY_MUTATION_RATE_LIMIT_RETRY_AFTER_SECONDS,
+                    self.observed_at(),
+                    subscription_charge_policy.stale_after_seconds(),
+                    LocalAttemptPolicy::expirable_status_values()
+                    $(, $extra)*,
+                    syrup_rail::RENEWAL_DISPATCH_LIMIT + 1
+                )
+            };
+        }
         match (required_gateway_account_mode, self) {
-            (None, Self::First(_)) => query.bind(syrup_rail::RENEWAL_DISPATCH_LIMIT + 1),
-            (None, Self::Continuation(cursor)) => query
-                .bind(cursor.next_payment_attempt_at())
-                .bind(cursor.subscription_id().into_uuid())
-                .bind(syrup_rail::RENEWAL_DISPATCH_LIMIT + 1),
-            (Some(mode), Self::First(_)) => query
-                .bind(mode.as_str())
-                .bind(syrup_rail::RENEWAL_DISPATCH_LIMIT + 1),
-            (Some(mode), Self::Continuation(cursor)) => query
-                .bind(mode.as_str())
-                .bind(cursor.next_payment_attempt_at())
-                .bind(cursor.subscription_id().into_uuid())
-                .bind(syrup_rail::RENEWAL_DISPATCH_LIMIT + 1),
+            (None, Self::First(_)) => bind_page!(all_first_page),
+            (None, Self::Continuation(cursor)) => bind_page!(
+                all_continuation,
+                cursor.next_payment_attempt_at(),
+                cursor.subscription_id().into_uuid()
+            ),
+            (Some(mode), Self::First(_)) => bind_page!(mode_first_page, mode.as_str()),
+            (Some(mode), Self::Continuation(cursor)) => bind_page!(
+                mode_continuation,
+                mode.as_str(),
+                cursor.next_payment_attempt_at(),
+                cursor.subscription_id().into_uuid()
+            ),
         }
     }
 }
@@ -199,7 +218,8 @@ async fn load_due_renewals_page(
     }
     let page_query = DueRenewalPageQuery::load(pool, cursor).await?;
     let observed_at = page_query.observed_at();
-    let missing_provider_cooldown = sqlx::query_scalar::<_, bool>(
+    let missing_provider_cooldown = checked_query_scalar!(
+        bool,
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -298,7 +318,7 @@ pub async fn renewal_attempt_state(
         resolution_strings(PaymentResolutionCode::RENEWAL_INFRASTRUCTURE_PACING_CODES);
     let rate_limit_pacing_codes =
         resolution_strings(PaymentResolutionCode::RENEWAL_RATE_LIMIT_PACING_CODES);
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT
             COUNT(*) AS attempt_sequence_count,
@@ -356,15 +376,15 @@ pub async fn renewal_attempt_state(
             AND billing_period_start_at = $2
             AND ($3::uuid IS NULL OR id <> $3)
         "#,
+        subscription_id.as_uuid(),
+        period_start_at,
+        excluded_attempt_id.map(PaymentAttemptId::into_uuid),
+        &infrastructure_retry_codes,
+        &infrastructure_pacing_codes,
+        &rate_limit_pacing_codes,
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(period_start_at)
-    .bind(excluded_attempt_id.map(PaymentAttemptId::into_uuid))
-    .bind(&infrastructure_retry_codes)
-    .bind(&infrastructure_pacing_codes)
-    .bind(&rate_limit_pacing_codes)
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
     .fetch_one(&mut **transaction)
     .await?;
     Ok(RenewalAttemptState {
@@ -379,8 +399,8 @@ pub async fn renewal_attempt_state(
     })
 }
 
-fn resolution_strings(codes: &[PaymentResolutionCode]) -> Vec<&'static str> {
-    codes.iter().map(|code| code.as_str()).collect()
+fn resolution_strings(codes: &[PaymentResolutionCode]) -> Vec<String> {
+    codes.iter().map(|code| code.as_str().to_owned()).collect()
 }
 
 #[cfg(test)]

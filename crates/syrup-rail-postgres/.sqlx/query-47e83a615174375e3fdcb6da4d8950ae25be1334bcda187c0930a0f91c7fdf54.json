@@ -1,0 +1,193 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH page AS (\n            SELECT quarantine.id,\n                quarantine.billing_scope_id,\n                quarantine.gateway_account_id,\n                quarantine.gateway_transaction_id,\n                quarantine.gateway_order_id,\n                quarantine.reason_code,\n                quarantine.first_seen_at,\n                quarantine.last_seen_at,\n                quarantine.occurrence_count\n            FROM billing_gateway_lifecycle_quarantines quarantine\n            WHERE quarantine.resolved_at IS NULL\n                AND (\n                    $1::timestamptz IS NULL\n                    OR (quarantine.first_seen_at, quarantine.id)\n                        > ($1::timestamptz, $2::uuid)\n                )\n            ORDER BY quarantine.first_seen_at, quarantine.id\n            LIMIT $3\n        )\n        SELECT page.*,\n            COALESCE(history.resolution_count, 0)::bigint AS resolution_count,\n            history.actor_id AS latest_resolution_actor_id,\n            history.reason AS latest_resolution_reason,\n            history.observed_occurrence_count AS latest_observed_occurrence_count,\n            history.observed_last_seen_at AS latest_observed_last_seen_at,\n            history.resolved_at AS latest_resolved_at\n        FROM page\n        LEFT JOIN LATERAL (\n            SELECT resolution.actor_id,\n                resolution.reason,\n                resolution.observed_occurrence_count,\n                resolution.observed_last_seen_at,\n                resolution.resolved_at,\n                COUNT(*) OVER () AS resolution_count\n            FROM billing_gateway_lifecycle_quarantine_resolutions resolution\n            WHERE resolution.quarantine_id = page.id\n            ORDER BY resolution.resolved_at DESC, resolution.id DESC\n            LIMIT 1\n        ) history ON TRUE\n        ORDER BY page.first_seen_at, page.id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "gateway_order_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "gateway_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "reason_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "reason_code"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "first_seen_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "first_seen_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "last_seen_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "occurrence_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "occurrence_count"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "resolution_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "latest_resolution_actor_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "actor_id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "latest_resolution_reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "latest_observed_occurrence_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "observed_occurrence_count"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "latest_observed_last_seen_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "observed_last_seen_at"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "latest_resolved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantine_resolutions",
+            "name": "resolved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "47e83a615174375e3fdcb6da4d8950ae25be1334bcda187c0930a0f91c7fdf54"
+}

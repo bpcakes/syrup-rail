@@ -66,11 +66,12 @@ async fn card_metadata_refreshes_approved_replacement_renewal_and_recovery_attem
             }
             _ => unreachable!(),
         };
-        fixture.method_id =
-            sqlx::query_scalar("SELECT payment_method_id FROM billing_subscriptions WHERE id = $1")
-                .bind(fixture.subscription_id.as_uuid())
-                .fetch_one(&db.pool)
-                .await?;
+        fixture.method_id = checked_query_scalar!(
+            "SELECT payment_method_id FROM billing_subscriptions WHERE id = $1",
+            fixture.subscription_id.as_uuid(),
+        )
+        .fetch_one(&db.pool)
+        .await?;
         let financial = fixture.financial_snapshot(&db.pool).await?;
         let identity = fixture.method_identity(&db.pool).await?;
         let event_count = fixture.coordinator.events.lock().await.len();
@@ -145,10 +146,10 @@ pub(super) async fn approve_renewal(
     .await?;
     assert_eq!(payment.status(), syrup_rail::PaymentAttemptStatus::Approved);
     fixture.attempt_id = payment.attempt().identity().attempt_id();
-    let stored: Option<String> = sqlx::query_scalar(
+    let stored: Option<String> = checked_query_scalar!(
         "SELECT gateway_payment_method_reference FROM billing_payment_attempts WHERE id = $1",
+        fixture.attempt_id.as_uuid(),
     )
-    .bind(fixture.attempt_id.as_uuid())
     .fetch_one(pool)
     .await?;
     assert_eq!(stored.as_deref(), reference);

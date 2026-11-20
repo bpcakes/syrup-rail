@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_subscriptions\n            SET recurring_period_kind = 'fixed_days', recurring_period_count = 1,\n                current_period_start_at = $2::timestamptz - interval '7 days',\n                current_period_end_at = $2, next_renewal_at = $2,\n                next_payment_attempt_at = $2\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a28eb164eb7e28af03e7fad6da5f9ddb1ed67cbd48346f07673744e610838a26"
+}

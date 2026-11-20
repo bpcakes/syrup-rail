@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)\n        FROM billing_processor_charges AS charges\n        JOIN billing_payment_attempts AS attempts ON attempts.id = charges.attempt_id\n        WHERE attempts.subscriber_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2c36c286a7df1b2261f946670da61889854aa95f961c953fdf8a06107deab790"
+}

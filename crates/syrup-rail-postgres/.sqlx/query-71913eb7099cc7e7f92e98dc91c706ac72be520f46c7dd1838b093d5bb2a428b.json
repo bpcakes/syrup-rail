@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_gateway_accounts\n        SET mutation_rate_limited_until = GREATEST(\n                COALESCE(mutation_rate_limited_until, '-infinity'::timestamptz),\n                clock_timestamp() + make_interval(secs => $4::bigint)\n            )\n        WHERE id = $1 AND billing_scope_id = $2\n            AND gateway_configuration_id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "71913eb7099cc7e7f92e98dc91c706ac72be520f46c7dd1838b093d5bb2a428b"
+}

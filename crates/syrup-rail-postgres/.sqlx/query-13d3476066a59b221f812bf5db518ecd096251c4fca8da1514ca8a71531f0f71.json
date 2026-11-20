@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET created_at = created_at - interval '40 days',\n                submitted_at = submitted_at - interval '40 days'\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "13d3476066a59b221f812bf5db518ecd096251c4fca8da1514ca8a71531f0f71"
+}

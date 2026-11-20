@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM billing_gateway_lifecycle_pending_updates\n        WHERE id = $1\n            AND billing_scope_id = $2\n            AND gateway_account_id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "05b8e2245e3ea1de10d75cc7888b428a0447ab4816fdad3bfa41efe9c1a17d3d"
+}

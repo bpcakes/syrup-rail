@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT pg_get_constraintdef(oid)\n            FROM pg_constraint\n            WHERE conname = 'billing_external_reversal_attestations_resolution_check'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pg_get_constraintdef",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "be3af3d9b360d15baaaa1eb6094b70b07f8a62e77d75810cca104b510e80a826"
+}

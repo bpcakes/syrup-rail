@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT rate_limited_until = '-infinity'::timestamptz\n                FROM billing_gateway_provider_rate_limits\n                WHERE provider_key = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "?column?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0badab8851801c7f71ef9bb6ee2c83da3ffdf34438c66c2021f7141507810b02"
+}

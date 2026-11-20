@@ -103,7 +103,7 @@ impl ManualAttemptFailureHostStore for ExactManualFailureHost {
         connection: &mut PgConnection,
         charge: ManualFailureHostCharge,
     ) -> Result<(), ManualAttemptFailureHostStoreError> {
-        sqlx::query_scalar::<_, Uuid>(
+        crate::test_support::fixture_query_scalar::<_, Uuid>(
                 "SELECT id FROM manual_failure_host_targets WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 FOR UPDATE",
             )
             .bind(charge.target_id().as_uuid())
@@ -120,7 +120,7 @@ impl ManualAttemptFailureHostStore for ExactManualFailureHost {
         connection: &mut PgConnection,
         charge: ManualFailureHostCharge,
     ) -> Result<ManualAttemptFailureHostTransitionOutcome, ManualAttemptFailureHostStoreError> {
-        let result = sqlx::query(
+        let result = crate::test_support::fixture_query(
                 "UPDATE manual_failure_host_targets SET status = 'payment_failed' WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 AND status = 'pending'",
             )
             .bind(charge.target_id().as_uuid())
@@ -147,22 +147,22 @@ async fn insert_review_renewal(
     let subscription_id = Uuid::now_v7();
     let attempt_id = Uuid::now_v7();
     let initial_transaction_id = format!("txn-initial-{suffix}");
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_methods (
                 id, billing_scope_id, subscriber_id, gateway_account_id,
                 gateway_payment_method_reference, status
             ) VALUES ($1, $2, $3, $4, $5, 'active')
             "#,
+        payment_method_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        format!("method-{suffix}"),
     )
-    .bind(payment_method_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(format!("method-{suffix}"))
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    checked_query!(
         r#"
             WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
             INSERT INTO billing_subscriptions (
@@ -180,16 +180,16 @@ async fn insert_review_renewal(
                 'remain_past_due', 'suspend_immediately', observed_at
             FROM clock
             "#,
+        subscription_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        payment_method_id,
+        &initial_transaction_id,
     )
-    .bind(subscription_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id)
-    .bind(&initial_transaction_id)
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    checked_query!(
         r#"
             WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
             INSERT INTO billing_payment_attempts (
@@ -212,18 +212,18 @@ async fn insert_review_renewal(
             CROSS JOIN billing_subscriptions AS subscriptions
             WHERE subscriptions.id = $4
             "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        subscription_id,
+        payment_method_id,
+        format!("idem-{suffix}"),
+        format!("fingerprint-{suffix}"),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("order-{suffix}"),
+        initial_transaction_id,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(subscription_id)
-    .bind(payment_method_id)
-    .bind(format!("idem-{suffix}"))
-    .bind(format!("fingerprint-{suffix}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("order-{suffix}"))
-    .bind(initial_transaction_id)
     .execute(&database.pool)
     .await?;
     Ok((subscription_id, attempt_id))

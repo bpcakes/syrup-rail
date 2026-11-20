@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT method.gateway_payment_method_reference\n        FROM billing_subscriptions AS subscription\n        INNER JOIN billing_payment_methods AS method\n            ON method.id = subscription.payment_method_id\n        WHERE subscription.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_payment_method_reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "fec70b553db4e60c0c69460d30f63a3337302d0acd204407028e0891a4a5f37e"
+}

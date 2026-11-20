@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DROP TRIGGER host_reject_attempt_status_update ON billing_payment_attempts",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4ea6dd4ce1222ed8245aebe29effb52c7dc381e97fc904b2b10458ec8b5c0b42"
+}

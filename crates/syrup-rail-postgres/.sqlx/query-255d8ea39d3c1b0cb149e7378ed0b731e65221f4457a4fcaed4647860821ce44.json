@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH stale AS MATERIALIZED (\n            SELECT pending.id\n            FROM billing_gateway_lifecycle_pending_updates pending\n            WHERE pending.billing_scope_id = $1\n                AND pending.gateway_account_id = $2\n                AND pending.expires_at <= now()\n            ORDER BY pending.expires_at, pending.first_seen_at, pending.id\n            LIMIT $3\n            FOR UPDATE SKIP LOCKED\n        )\n        DELETE FROM billing_gateway_lifecycle_pending_updates pending\n        USING stale\n        WHERE pending.id = stale.id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "255d8ea39d3c1b0cb149e7378ed0b731e65221f4457a4fcaed4647860821ce44"
+}

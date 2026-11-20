@@ -331,7 +331,8 @@ async fn current_subscription_exists(
     reservation: &SubscriptionEnrollmentReservation,
 ) -> Result<bool, sqlx::Error> {
     let identity = reservation.identity();
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let rows = checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
@@ -342,10 +343,10 @@ async fn current_subscription_exists(
         ORDER BY updated_at DESC, id DESC
         FOR NO KEY UPDATE
         "#,
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        reservation.plan_key().as_str(),
     )
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
     .fetch_all(connection)
     .await?;
     Ok(!rows.is_empty())
@@ -356,7 +357,8 @@ async fn active_grant_exists(
     reservation: &SubscriptionEnrollmentReservation,
 ) -> Result<bool, sqlx::Error> {
     let identity = reservation.identity();
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let rows = checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id FROM billing_subscription_grants
         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3
@@ -365,10 +367,10 @@ async fn active_grant_exists(
         ORDER BY ends_at DESC, id DESC
         FOR UPDATE
         "#,
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        reservation.plan_key().as_str(),
     )
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
     .fetch_all(connection)
     .await?;
     Ok(!rows.is_empty())
@@ -404,7 +406,7 @@ async fn insert_subscription(
         .iter()
         .map(|delay| i64::from(delay.seconds().get()))
         .collect::<Vec<_>>();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscriptions (
             id, billing_scope_id, subscriber_id, plan_key, status,
@@ -420,28 +422,28 @@ async fn insert_subscription(
             $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $10, $21
         )
         "#,
+        subscription_id.as_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        plan_key.as_str(),
+        identity.gateway_account_id().into_uuid(),
+        method_id.as_uuid(),
+        recurring_amount_cents,
+        attempt.request().amount().currency().as_str().to_owned(),
+        period.start_at(),
+        period.end_at(),
+        transaction_id.expose(),
+        phase.as_str(),
+        offer.recurring().period().as_str(),
+        i32::from(offer.recurring().period().count().get()),
+        trial.map(|trial| trial.charge().cents()),
+        trial.map(|trial| trial.period().as_str()),
+        trial.map(|trial| i32::from(trial.period().count().get())),
+        &retry_delays,
+        offer.renewal_failure().exhaustion().as_str(),
+        offer.renewal_failure().past_due_access().as_str(),
+        identity.required_gateway_account_mode().as_str(),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(plan_key.as_str())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(method_id.as_uuid())
-    .bind(recurring_amount_cents)
-    .bind(attempt.request().amount().currency().as_str())
-    .bind(period.start_at())
-    .bind(period.end_at())
-    .bind(transaction_id.expose())
-    .bind(phase.as_str())
-    .bind(offer.recurring().period().as_str())
-    .bind(i32::from(offer.recurring().period().count().get()))
-    .bind(trial.map(|trial| trial.charge().cents()))
-    .bind(trial.map(|trial| trial.period().as_str()))
-    .bind(trial.map(|trial| i32::from(trial.period().count().get())))
-    .bind(retry_delays)
-    .bind(offer.renewal_failure().exhaustion().as_str())
-    .bind(offer.renewal_failure().past_due_access().as_str())
-    .bind(identity.required_gateway_account_mode().as_str())
     .execute(connection)
     .await?;
     Ok(())
@@ -477,7 +479,7 @@ async fn apply_initial_discount(
             }
         }
     };
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discounts (
             subscription_id, billing_scope_id, subscriber_id, plan_key,
@@ -490,39 +492,37 @@ async fn apply_initial_discount(
             $14, $15, $16, $17, $18, $19, $20, $21
         )
         "#,
-    )
-    .bind(subscription_id.as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(
+        subscription_id.as_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
         attempt
             .request()
             .target()
             .plan_key()
             .expect("validated plan")
             .as_str(),
+        discount.claim_id().into_uuid(),
+        discount.code_id().into_uuid(),
+        snapshot.code().as_str(),
+        snapshot.label(),
+        snapshot.kind().as_str(),
+        amount_off_cents,
+        percent_off_bps,
+        snapshot.currency().as_str(),
+        snapshot.duration().as_str(),
+        duration_months,
+        snapshot.base_charge().cents(),
+        snapshot.discounted_charge().cents(),
+        periods_total,
+        periods_applied,
+        status,
+        applied_at,
+        completed_at,
     )
-    .bind(discount.claim_id().as_uuid())
-    .bind(discount.code_id().as_uuid())
-    .bind(snapshot.code().as_str())
-    .bind(snapshot.label())
-    .bind(snapshot.kind().as_str())
-    .bind(amount_off_cents)
-    .bind(percent_off_bps)
-    .bind(snapshot.currency().as_str())
-    .bind(snapshot.duration().as_str())
-    .bind(duration_months)
-    .bind(snapshot.base_charge().cents())
-    .bind(snapshot.discounted_charge().cents())
-    .bind(periods_total)
-    .bind(periods_applied)
-    .bind(status)
-    .bind(applied_at)
-    .bind(completed_at)
     .execute(&mut *connection)
     .await?;
 
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE billing_subscription_discount_claims
         SET status = 'applied', applied_subscription_id = $5,
@@ -532,21 +532,19 @@ async fn apply_initial_discount(
             AND applied_subscription_id IS NULL
             AND applied_payment_attempt_id IS NULL
         "#,
-    )
-    .bind(discount.claim_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(
+        discount.claim_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
         attempt
             .request()
             .target()
             .plan_key()
             .expect("validated plan")
             .as_str(),
+        subscription_id.as_uuid(),
+        identity.attempt_id().into_uuid(),
+        applied_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(identity.attempt_id().as_uuid())
-    .bind(applied_at)
     .execute(connection)
     .await?;
     if updated.rows_affected() != 1 {

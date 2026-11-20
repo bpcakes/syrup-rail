@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXTRACT(EPOCH FROM rate_limited_until - clock_timestamp())::float8 FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "extract",
+        "type_info": "Float8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8563b4171e1b8d39522b5266c73e9da30b23b5dd8b97ec4cb83e80342ffd9c6f"
+}

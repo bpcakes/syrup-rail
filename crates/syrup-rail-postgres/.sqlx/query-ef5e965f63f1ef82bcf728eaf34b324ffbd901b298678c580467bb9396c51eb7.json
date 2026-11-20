@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT table_name, column_name\n        FROM information_schema.columns\n        WHERE table_schema = 'public'\n            AND table_name = ANY($1)\n            AND (\n                column_name IN (\n                    'tenant_id',\n                    'user_id',\n                    'product',\n                    'admin_user_id',\n                    'granted_by_admin_user_id',\n                    'revoked_by_admin_user_id',\n                    'app_resolution_code',\n                    'acquisition_channel'\n                )\n                OR column_name LIKE 'nmi\\_%' ESCAPE '\\'\n                OR column_name LIKE 'base\\_subscription\\_%' ESCAPE '\\'\n                OR column_name LIKE 'google\\_ads\\_%' ESCAPE '\\'\n            )\n        ORDER BY table_name, column_name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table_name",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "information_schema.columns",
+            "name": "table_name"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "column_name",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "information_schema.columns",
+            "name": "column_name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "ef5e965f63f1ef82bcf728eaf34b324ffbd901b298678c580467bb9396c51eb7"
+}

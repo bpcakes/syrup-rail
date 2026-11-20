@@ -1,0 +1,292 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, attempt_id, billing_scope_id, gateway_account_id,\n            gateway_order_id, attempt_kind, amount_cents, currency,\n            charge_role, progression_state, state_code,\n            gateway_transaction_id, gateway_payment_method_reference,\n            gateway_response, gateway_response_code, gateway_response_text,\n            gateway_condition, payment_type, card_brand, card_last4,\n            card_exp_month, card_exp_year, observed_at\n        FROM billing_processor_charges WHERE id = $1 FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "attempt_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "attempt_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "gateway_order_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "charge_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "charge_role"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "progression_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "progression_state"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "state_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "state_code"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "gateway_payment_method_reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "gateway_response",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_response"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "gateway_response_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_response_code"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "gateway_response_text",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_response_text"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "gateway_condition",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_condition"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "payment_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "payment_type"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "card_brand",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "card_brand"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "card_last4",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "card_last4"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "card_exp_month",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "card_exp_month"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "card_exp_year",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "card_exp_year"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "observed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "observed_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "0ad6ea2ee41030c3d6b93a08a83f42cf92170e1ae480e3c7ef300945c0bf8231"
+}

@@ -36,7 +36,7 @@ async fn cooldown_persistence_distinguishes_rotation_from_missing_provider_state
             .await?,
             RateLimitCooldownPersistence::IdentityChanged,
         );
-        let incorrectly_throttled: bool = sqlx::query_scalar(
+        let incorrectly_throttled: bool = checked_query_scalar!(
             "SELECT rate_limited_until > clock_timestamp() \
              FROM billing_gateway_provider_rate_limits WHERE provider_key = 'other_gateway'",
         )
@@ -54,11 +54,11 @@ async fn cooldown_persistence_distinguishes_rotation_from_missing_provider_state
             RateLimitCooldownPersistence::Applied,
         );
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2 WHERE id = $1",
+            account.gateway_account_id,
+            Uuid::now_v7(),
         )
-        .bind(account.gateway_account_id)
-        .bind(Uuid::now_v7())
         .execute(&mut *connection)
         .await?;
 
@@ -82,7 +82,7 @@ async fn cooldown_persistence_distinguishes_rotation_from_missing_provider_state
             .await?,
             RateLimitCooldownPersistence::IdentityChanged,
         );
-        let correctly_throttled: bool = sqlx::query_scalar(
+        let correctly_throttled: bool = checked_query_scalar!(
             "SELECT rate_limited_until > clock_timestamp() \
              FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
         )
@@ -90,12 +90,10 @@ async fn cooldown_persistence_distinguishes_rotation_from_missing_provider_state
         .await?;
         assert!(correctly_throttled);
 
-        sqlx::query(
-            "ALTER TABLE billing_gateway_accounts DROP CONSTRAINT billing_gateway_accounts_provider_fk",
-        )
+        sqlx::query!("ALTER TABLE billing_gateway_accounts DROP CONSTRAINT billing_gateway_accounts_provider_fk")
         .execute(&mut *connection)
         .await?;
-        sqlx::query("DELETE FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'")
+        sqlx::query!("DELETE FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'")
             .execute(&mut *connection)
             .await?;
         assert_eq!(

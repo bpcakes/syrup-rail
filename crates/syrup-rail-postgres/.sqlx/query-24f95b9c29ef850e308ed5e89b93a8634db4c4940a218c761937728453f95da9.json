@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT relation.relname\n        FROM pg_catalog.pg_class AS relation\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = relation.relnamespace\n        WHERE namespace.nspname = 'public'\n            AND relation.relkind = $1::text::\"char\"\n            AND relation.relname = ANY($2)\n        ORDER BY relation.relname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "relname",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relname"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "24f95b9c29ef850e308ed5e89b93a8634db4c4940a218c761937728453f95da9"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET dunning_retry_delays_seconds = ARRAY[60]::bigint[] WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7b2201118d34e314229e143dfe50a5255e5c2d12743bcac979354ced82aa9274"
+}

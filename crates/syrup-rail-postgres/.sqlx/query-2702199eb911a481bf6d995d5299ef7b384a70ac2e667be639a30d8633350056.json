@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'metadata_query_abort' AND datname = current_database() AND wait_event_type = 'Lock')",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2702199eb911a481bf6d995d5299ef7b384a70ac2e667be639a30d8633350056"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "58c264b20ca57c0c9bdfad32d731046c98f80319ac46676659a7884f9431a6da"
+}

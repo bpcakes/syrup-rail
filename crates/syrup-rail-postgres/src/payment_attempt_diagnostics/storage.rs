@@ -14,64 +14,6 @@ use crate::enrollment_application::set_application_timeouts;
 
 // Ownership is scope and subscriber plus the exact plan. Host charges have no
 // plan; they are reported as an unsupported kind rather than hidden.
-const ELIGIBILITY_SQL: &str = r#"
-    SELECT
-        attempts.id AS attempt_id,
-        attempts.attempt_kind,
-        attempts.submitted_at IS NOT NULL AS submitted,
-        attempts.status,
-        public.billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)
-            IS NOT NULL AS has_transaction_id
-    FROM unnest($4::uuid[]) WITH ORDINALITY AS requested(attempt_id, position)
-    INNER JOIN billing_payment_attempts AS attempts
-        ON attempts.id = requested.attempt_id
-    WHERE attempts.billing_scope_id = $1
-        AND attempts.subscriber_id = $2
-        AND (attempts.attempt_kind = 'host_charge' OR attempts.plan_key = $3)
-    ORDER BY requested.position
-"#;
-
-const TARGET_SQL: &str = r#"
-    SELECT
-        attempts.attempt_kind,
-        attempts.status,
-        attempts.submitted_at IS NOT NULL AS submitted,
-        attempts.gateway_transaction_id,
-        public.billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)
-            IS NOT NULL AS has_transaction_id,
-        attempts.amount_cents,
-        attempts.currency,
-        attempts.gateway_order_id,
-        attempts.gateway_account_id,
-        accounts.gateway_configuration_id,
-        accounts.provider_key
-    FROM billing_payment_attempts AS attempts
-    INNER JOIN billing_gateway_accounts AS accounts
-        ON accounts.id = attempts.gateway_account_id
-        AND accounts.billing_scope_id = attempts.billing_scope_id
-    WHERE attempts.billing_scope_id = $1
-        AND attempts.subscriber_id = $2
-        AND attempts.id = $4
-        AND (attempts.attempt_kind = 'host_charge' OR attempts.plan_key = $3)
-"#;
-
-const REVALIDATE_SQL: &str = r#"
-    SELECT
-        attempts.status,
-        attempts.gateway_transaction_id,
-        attempts.gateway_account_id,
-        accounts.gateway_configuration_id,
-        accounts.provider_key,
-        clock_timestamp() AS observed_at
-    FROM billing_payment_attempts AS attempts
-    INNER JOIN billing_gateway_accounts AS accounts
-        ON accounts.id = attempts.gateway_account_id
-        AND accounts.billing_scope_id = attempts.billing_scope_id
-    WHERE attempts.billing_scope_id = $1
-        AND attempts.subscriber_id = $2
-        AND attempts.id = $4
-        AND attempts.plan_key = $3
-"#;
 
 #[derive(FromRow)]
 pub(super) struct EligibilityRow {
@@ -152,11 +94,11 @@ async fn begin_bounded(
         .saturating_duration_since(Instant::now())
         .saturating_sub(SERVER_TIMEOUT_MARGIN);
     let statement_ms = (remaining.as_millis() / u128::from(statements.max(1))).clamp(1, 5_000);
-    sqlx::query(
-        "SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout', $2, true)",
+    checked_query!(
+        "SELECT set_config('statement_timeout', $1, true) AS statement_timeout, set_config('lock_timeout', $2, true)",
+        format!("{statement_ms}ms"),
+        format!("{}ms", statement_ms.min(250)),
     )
-    .bind(format!("{statement_ms}ms"))
-    .bind(format!("{}ms", statement_ms.min(250)))
     .execute(&mut *transaction)
     .await?;
     Ok(transaction)
@@ -187,13 +129,30 @@ pub(super) async fn load_eligibility(
 ) -> Result<Vec<EligibilityRow>, sqlx::Error> {
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
-    let rows = sqlx::query_as(ELIGIBILITY_SQL)
-        .bind(billing_scope_id.as_uuid())
-        .bind(subscriber_id.as_uuid())
-        .bind(plan_key.as_str())
-        .bind(attempt_ids)
-        .fetch_all(&mut *transaction)
-        .await?;
+    let rows = checked_query_as!(
+        r#"
+    SELECT
+        attempts.id AS attempt_id,
+        attempts.attempt_kind,
+        attempts.submitted_at IS NOT NULL AS submitted,
+        attempts.status,
+        public.billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)
+            IS NOT NULL AS has_transaction_id
+    FROM unnest($4::uuid[]) WITH ORDINALITY AS requested(attempt_id, position)
+    INNER JOIN billing_payment_attempts AS attempts
+        ON attempts.id = requested.attempt_id
+    WHERE attempts.billing_scope_id = $1
+        AND attempts.subscriber_id = $2
+        AND (attempts.attempt_kind = 'host_charge' OR attempts.plan_key = $3)
+    ORDER BY requested.position
+"#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
+        attempt_ids,
+    )
+    .fetch_all(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(rows)
 }
@@ -263,13 +222,37 @@ async fn prepare(
 
     let mut transaction = sqlx::Connection::begin(connection).await?;
     set_application_timeouts(&mut transaction).await?;
-    let row: Option<TargetRow> = sqlx::query_as(TARGET_SQL)
-        .bind(target.billing_scope_id.as_uuid())
-        .bind(target.subscriber_id.as_uuid())
-        .bind(target.plan_key.as_str())
-        .bind(target.attempt_id.as_uuid())
-        .fetch_optional(&mut *transaction)
-        .await?;
+    let row: Option<TargetRow> = checked_query_as!(
+        r#"
+    SELECT
+        attempts.attempt_kind,
+        attempts.status,
+        attempts.submitted_at IS NOT NULL AS submitted,
+        attempts.gateway_transaction_id,
+        public.billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)
+            IS NOT NULL AS has_transaction_id,
+        attempts.amount_cents,
+        attempts.currency,
+        attempts.gateway_order_id,
+        attempts.gateway_account_id,
+        accounts.gateway_configuration_id,
+        accounts.provider_key
+    FROM billing_payment_attempts AS attempts
+    INNER JOIN billing_gateway_accounts AS accounts
+        ON accounts.id = attempts.gateway_account_id
+        AND accounts.billing_scope_id = attempts.billing_scope_id
+    WHERE attempts.billing_scope_id = $1
+        AND attempts.subscriber_id = $2
+        AND attempts.id = $4
+        AND (attempts.attempt_kind = 'host_charge' OR attempts.plan_key = $3)
+"#,
+        target.billing_scope_id.as_uuid(),
+        target.subscriber_id.as_uuid(),
+        target.plan_key.as_str(),
+        target.attempt_id.as_uuid(),
+    )
+    .fetch_optional(&mut *transaction)
+    .await?;
     let Some(row) = row else {
         transaction.commit().await?;
         return Ok(Prepared::Done(Outcome::NotFound));
@@ -309,13 +292,31 @@ pub(super) async fn revalidate(
     };
     let row = tokio::time::timeout_at(deadline, async {
         let mut transaction = begin_bounded(&mut connection, deadline, 2).await?;
-        let row: Option<RevalidationRow> = sqlx::query_as(REVALIDATE_SQL)
-            .bind(target.billing_scope_id.as_uuid())
-            .bind(target.subscriber_id.as_uuid())
-            .bind(target.plan_key.as_str())
-            .bind(target.attempt_id.as_uuid())
-            .fetch_optional(&mut *transaction)
-            .await?;
+        let row: Option<RevalidationRow> = checked_query_as!(
+            r#"
+    SELECT
+        attempts.status,
+        attempts.gateway_transaction_id,
+        attempts.gateway_account_id,
+        accounts.gateway_configuration_id,
+        accounts.provider_key,
+        clock_timestamp() AS observed_at
+    FROM billing_payment_attempts AS attempts
+    INNER JOIN billing_gateway_accounts AS accounts
+        ON accounts.id = attempts.gateway_account_id
+        AND accounts.billing_scope_id = attempts.billing_scope_id
+    WHERE attempts.billing_scope_id = $1
+        AND attempts.subscriber_id = $2
+        AND attempts.id = $4
+        AND attempts.plan_key = $3
+"#,
+            target.billing_scope_id.as_uuid(),
+            target.subscriber_id.as_uuid(),
+            target.plan_key.as_str(),
+            target.attempt_id.as_uuid(),
+        )
+        .fetch_optional(&mut *transaction)
+        .await?;
         transaction.commit().await?;
         Ok::<_, sqlx::Error>(row)
     })

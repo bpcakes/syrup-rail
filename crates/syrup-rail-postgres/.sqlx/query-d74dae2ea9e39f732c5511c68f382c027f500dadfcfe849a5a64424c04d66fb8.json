@@ -1,0 +1,304 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT processor_charge_id, attempt_id, actor_id, reversal_kind, reason,\n            prior_resolution_code, final_resolution_code,\n            gateway_account_id, gateway_configuration_id, gateway_order_id,\n            amount_cents, currency, gateway_transaction_id,\n            gateway_payment_method_reference, gateway_response, gateway_response_code,\n            gateway_response_text, gateway_condition, payment_type, card_brand,\n            card_last4, card_exp_month, card_exp_year, attested_at\n        FROM billing_external_reversal_attestations\n        WHERE processor_charge_id = $1 FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "processor_charge_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "processor_charge_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "attempt_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "attempt_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "actor_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "actor_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "reversal_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "reversal_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "prior_resolution_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "prior_resolution_code"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "final_resolution_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "final_resolution_code"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "gateway_configuration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_configuration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "gateway_order_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "gateway_payment_method_reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "gateway_response",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_response"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "gateway_response_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_response_code"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "gateway_response_text",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_response_text"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "gateway_condition",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "gateway_condition"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "payment_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "payment_type"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "card_brand",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "card_brand"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "card_last4",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "card_last4"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "card_exp_month",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "card_exp_month"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "card_exp_year",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "card_exp_year"
+          }
+        }
+      },
+      {
+        "ordinal": 23,
+        "name": "attested_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_external_reversal_attestations",
+            "name": "attested_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "d74dae2ea9e39f732c5511c68f382c027f500dadfcfe849a5a64424c04d66fb8"
+}

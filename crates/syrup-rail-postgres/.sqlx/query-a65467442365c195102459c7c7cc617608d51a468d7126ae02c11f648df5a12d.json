@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        CREATE TABLE host_entitlement_guard_probes (\n            id uuid PRIMARY KEY\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "a65467442365c195102459c7c7cc617608d51a468d7126ae02c11f648df5a12d"
+}

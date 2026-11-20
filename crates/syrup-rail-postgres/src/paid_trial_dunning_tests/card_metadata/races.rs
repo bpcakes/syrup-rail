@@ -32,10 +32,12 @@ async fn card_metadata_refresh_respects_method_and_account_locks() -> Result<(),
             )
             .await?;
         } else {
-            sqlx::query("SELECT id FROM billing_gateway_accounts WHERE id = $1 FOR UPDATE")
-                .bind(fixture.account.gateway_account_id)
-                .execute(&mut *tx)
-                .await?;
+            checked_query!(
+                "SELECT id FROM billing_gateway_accounts WHERE id = $1 FOR UPDATE",
+                fixture.account.gateway_account_id,
+            )
+            .execute(&mut *tx)
+            .await?;
         }
         let error = refresh_payment_method_metadata(&db.pool, &resolver, fixture.command())
             .await
@@ -83,7 +85,7 @@ async fn canceled_card_metadata_query_and_failed_write_leave_no_projection()
         Some(2029),
     )));
     let resolver = fixture.resolver(provider)?;
-    sqlx::raw_sql("CREATE FUNCTION host_reject_metadata() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private fixture detail'; END $$; CREATE TRIGGER host_reject_metadata BEFORE UPDATE ON billing_payment_methods FOR EACH ROW EXECUTE FUNCTION host_reject_metadata()")
+    crate::test_support::fixture_raw_sql("CREATE FUNCTION host_reject_metadata() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private fixture detail'; END $$; CREATE TRIGGER host_reject_metadata BEFORE UPDATE ON billing_payment_methods FOR EACH ROW EXECUTE FUNCTION host_reject_metadata()")
         .execute(&db.pool).await?;
     let error = refresh_payment_method_metadata(&db.pool, &resolver, fixture.command())
         .await
@@ -95,14 +97,14 @@ async fn canceled_card_metadata_query_and_failed_write_leave_no_projection()
     assert!(!format!("{error:?} {error}").contains("private fixture detail"));
     assert_eq!(fixture.method_snapshot(&db.pool).await?, before);
     assert_eq!(fixture.financial_snapshot(&db.pool).await?, financial);
-    sqlx::raw_sql("CREATE OR REPLACE FUNCTION host_reject_metadata() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$")
+    crate::test_support::fixture_raw_sql("CREATE OR REPLACE FUNCTION host_reject_metadata() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$")
         .execute(&db.pool).await?;
     assert!(matches!(
         refresh_payment_method_metadata(&db.pool, &resolver, fixture.command()).await,
         Err(RefreshError::Storage(sqlx::Error::RowNotFound))
     ));
     assert_eq!(fixture.method_snapshot(&db.pool).await?, before);
-    sqlx::query("DROP TRIGGER host_reject_metadata ON billing_payment_methods")
+    sqlx::query!("DROP TRIGGER host_reject_metadata ON billing_payment_methods")
         .execute(&db.pool)
         .await?;
     assert_eq!(

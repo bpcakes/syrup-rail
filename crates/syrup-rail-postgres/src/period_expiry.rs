@@ -24,13 +24,17 @@ const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
 const INVALID_SUBSCRIPTION_STATE: &str = "canonical subscription state is invalid";
 const RETIRED_PERIOD_UNSUBMITTED_TEXT: &str =
     "Subscription payment was canceled before submission because its billing period ended.";
-const SUBSCRIPTION_COLUMNS: &str = r#"
+macro_rules! subscription_columns_query {
+    ($before:literal, $after:literal; $($arg:expr),+ $(,)?) => {
+        checked_query!($before + r#"
     id, plan_key, status, payment_method_id, amount_cents, currency,
     current_period_start_at, current_period_end_at, next_renewal_at,
     phase, recurring_period_kind, recurring_period_count,
     dunning_retry_delays_seconds, dunning_exhaustion, past_due_access,
     next_payment_attempt_at, required_gateway_account_mode
-"#;
+"# + $after, $($arg),+)
+    };
+}
 
 /// Failure of a billing-period expiry or past-due access policy operation.
 #[derive(Debug, Error)]
@@ -71,8 +75,7 @@ pub(crate) async fn period_has_expired_at_database_time(
     connection: &mut PgConnection,
     period_end_at: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT $1::timestamptz <= clock_timestamp()")
-        .bind(period_end_at)
+    checked_query_scalar!("SELECT $1::timestamptz <= clock_timestamp()", period_end_at,)
         .fetch_one(connection)
         .await
 }
@@ -83,8 +86,7 @@ pub(crate) async fn period_has_expired_on_pool(
     pool: &sqlx::PgPool,
     period_end_at: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar("SELECT $1::timestamptz <= clock_timestamp()")
-        .bind(period_end_at)
+    checked_query_scalar!("SELECT $1::timestamptz <= clock_timestamp()", period_end_at,)
         .fetch_one(pool)
         .await
 }
@@ -209,7 +211,7 @@ pub(crate) async fn retire_expired_subscription_period_on_connection(
         period_start_at,
     )
     .await?;
-    let query = format!(
+    let row = subscription_columns_query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'unpaid',
@@ -219,22 +221,20 @@ pub(crate) async fn retire_expired_subscription_period_on_connection(
         WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
             AND plan_key = $4 AND status = $5 AND next_renewal_at = $6
             AND unpaid_at IS NULL AND canceled_at IS NULL
-        RETURNING {SUBSCRIPTION_COLUMNS}, unpaid_at
-        "#
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(command.subscription_id().as_uuid())
-        .bind(command.billing_scope_id().as_uuid())
-        .bind(command.subscriber_id().as_uuid())
-        .bind(command.plan_key().as_str())
-        .bind(prior_status.as_str())
-        .bind(period_start_at)
-        .fetch_optional(&mut *connection)
-        .await?
-        .ok_or(SubscriptionPeriodExpiryError::InvalidState(
-            INVALID_SUBSCRIPTION_STATE,
-        ))?;
+        RETURNING "#, r#", unpaid_at
+        "#;
+        command.subscription_id().into_uuid(),
+        command.billing_scope_id().into_uuid(),
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
+        prior_status.as_str(),
+        period_start_at,
+    )
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(SubscriptionPeriodExpiryError::InvalidState(
+        INVALID_SUBSCRIPTION_STATE,
+    ))?;
     let subscription = decode_subscription_row(&row)?;
     let ended_at: DateTime<Utc> = row.try_get("unpaid_at")?;
     let event = BillingEvent::SubscriptionPeriodExpired {
@@ -297,29 +297,27 @@ pub async fn change_subscription_past_due_access_in_transaction(
             subscription,
         ));
     }
-    let query = format!(
+    let row = subscription_columns_query!(
         r#"
         UPDATE billing_subscriptions
         SET past_due_access = $5, updated_at = clock_timestamp()
         WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
             AND plan_key = $4 AND past_due_access = $6
             AND status IN ('active', 'past_due')
-        RETURNING {SUBSCRIPTION_COLUMNS}
-        "#
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(command.subscription_id().as_uuid())
-        .bind(command.billing_scope_id().as_uuid())
-        .bind(command.subscriber_id().as_uuid())
-        .bind(command.plan_key().as_str())
-        .bind(command.past_due_access().as_str())
-        .bind(previous.as_str())
-        .fetch_optional(&mut *connection)
-        .await?
-        .ok_or(SubscriptionPeriodExpiryError::InvalidState(
-            INVALID_SUBSCRIPTION_STATE,
-        ))?;
+        RETURNING "#, r#"
+        "#;
+        command.subscription_id().into_uuid(),
+        command.billing_scope_id().into_uuid(),
+        command.subscriber_id().into_uuid(),
+        command.plan_key().as_str(),
+        command.past_due_access().as_str(),
+        previous.as_str(),
+    )
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(SubscriptionPeriodExpiryError::InvalidState(
+        INVALID_SUBSCRIPTION_STATE,
+    ))?;
     Ok(SubscriptionPastDueAccessChangeOutcome::Changed {
         previous,
         subscription: decode_subscription_row(&row)?,
@@ -327,10 +325,12 @@ pub async fn change_subscription_past_due_access_in_transaction(
 }
 
 async fn set_lock_timeout(connection: &mut PgConnection) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(BILLING_ROW_LOCK_TIMEOUT)
-        .execute(connection)
-        .await?;
+    checked_query!(
+        "SELECT set_config('lock_timeout', $1, true)",
+        BILLING_ROW_LOCK_TIMEOUT,
+    )
+    .execute(connection)
+    .await?;
     Ok(())
 }
 
@@ -339,11 +339,13 @@ async fn lock_subscription_aggregate(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id.as_uuid())
-        .bind(plan_key.as_str())
-        .execute(connection)
-        .await?;
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
+    )
+    .execute(connection)
+    .await?;
     Ok(())
 }
 
@@ -354,22 +356,20 @@ async fn lock_exact_subscription(
     plan_key: &PlanKey,
     subscription_id: &Uuid,
 ) -> Result<Option<PgRow>, sqlx::Error> {
-    let query = format!(
+    subscription_columns_query!(
         r#"
-        SELECT {SUBSCRIPTION_COLUMNS}
+        SELECT "#, r#"
         FROM billing_subscriptions
         WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 AND plan_key = $4
         FOR NO KEY UPDATE
-        "#
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(subscription_id)
-        .bind(billing_scope_id)
-        .bind(subscriber_id.as_uuid())
-        .bind(plan_key.as_str())
-        .fetch_optional(connection)
-        .await
+        "#;
+        subscription_id,
+        billing_scope_id,
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
+    )
+    .fetch_optional(connection)
+    .await
 }
 
 async fn unresolved_payment_exists(
@@ -377,7 +377,7 @@ async fn unresolved_payment_exists(
     subscription_id: &Uuid,
     period_start_at: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -408,9 +408,9 @@ async fn unresolved_payment_exists(
                 )
         )
         "#,
+        subscription_id,
+        period_start_at,
     )
-    .bind(subscription_id)
-    .bind(period_start_at)
     .fetch_one(connection)
     .await
 }
@@ -420,7 +420,8 @@ async fn reject_unsubmitted_period_attempts(
     subscription_id: &Uuid,
     period_start_at: DateTime<Utc>,
 ) -> Result<Vec<PaymentAttemptId>, sqlx::Error> {
-    let rows = sqlx::query_scalar::<_, Uuid>(
+    let rows = checked_query_scalar!(
+        Uuid,
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed', resolution_code = $3,
@@ -433,11 +434,11 @@ async fn reject_unsubmitted_period_attempts(
             AND status = 'pending' AND submitted_at IS NULL
         RETURNING id
         "#,
+        subscription_id,
+        period_start_at,
+        PaymentResolutionCode::SubscriptionPeriodExpiredBeforeCharge.as_str(),
+        RETIRED_PERIOD_UNSUBMITTED_TEXT,
     )
-    .bind(subscription_id)
-    .bind(period_start_at)
-    .bind(PaymentResolutionCode::SubscriptionPeriodExpiredBeforeCharge.as_str())
-    .bind(RETIRED_PERIOD_UNSUBMITTED_TEXT)
     .fetch_all(connection)
     .await?;
     let mut ids = rows

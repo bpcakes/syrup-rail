@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            (SELECT count(*) FROM billing_payment_methods) AS payment_methods,\n            (SELECT count(*) FROM billing_subscriptions) AS subscriptions,\n            (SELECT count(*) FROM billing_processor_charges) AS processor_charges,\n            (SELECT status FROM billing_subscription_discount_claims LIMIT 1),\n            (SELECT periods_applied FROM billing_subscription_discounts LIMIT 1)\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payment_methods",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "subscriptions",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "processor_charges",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "periods_applied",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "895027e9e0850a76c158b9a36507dfd870027425ac66352daaed4bbd76b3a69c"
+}

@@ -136,7 +136,8 @@ pub(crate) async fn admit_subscription_renewal_submission_with_policy(
     let outcome = match outcome {
         SubscriptionRenewalSubmissionOutcome::Admitted(attempt) => {
             let identity = reservation.identity();
-            let reference = sqlx::query_scalar::<_, String>(
+            let reference = checked_query_scalar!(
+                String,
                 r#"
                 SELECT gateway_payment_method_reference
                 FROM billing_payment_methods
@@ -144,11 +145,11 @@ pub(crate) async fn admit_subscription_renewal_submission_with_policy(
                     AND gateway_account_id = $4 AND status = 'active'
                 FOR SHARE
                 "#,
+                reservation.expected_state().payment_method_id().into_uuid(),
+                identity.billing_scope_id().into_uuid(),
+                identity.subscriber_id().into_uuid(),
+                identity.gateway_account_id().into_uuid(),
             )
-            .bind(reservation.expected_state().payment_method_id().as_uuid())
-            .bind(identity.billing_scope_id().as_uuid())
-            .bind(identity.subscriber_id().as_uuid())
-            .bind(identity.gateway_account_id().as_uuid())
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
@@ -162,16 +163,17 @@ pub(crate) async fn admit_subscription_renewal_submission_with_policy(
             // `recurring`, and either one pays the period that was due, so
             // under the admission lock `paid_trial` means this sale is the
             // first recurring charge after the trial.
-            let phase = sqlx::query_scalar::<_, String>(
+            let phase = checked_query_scalar!(
+                String,
                 r#"
                 SELECT phase
                 FROM billing_subscriptions
                 WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
                 "#,
+                reservation.subscription_id().into_uuid(),
+                identity.billing_scope_id().into_uuid(),
+                identity.subscriber_id().into_uuid(),
             )
-            .bind(reservation.subscription_id().as_uuid())
-            .bind(identity.billing_scope_id().as_uuid())
-            .bind(identity.subscriber_id().as_uuid())
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
@@ -410,11 +412,12 @@ pub async fn apply_reconciled_subscription_renewal_gateway_outcome(
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(
         "subscription renewal attempt was not found",
     ))?;
-    let provider_key = sqlx::query_scalar::<_, String>(
+    let provider_key = checked_query_scalar!(
+        String,
         "SELECT provider_key FROM billing_gateway_accounts WHERE billing_scope_id = $1 AND id = $2",
+        billing_scope_id.as_uuid(),
+        attempt.identity().gateway_account_id().into_uuid(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(attempt.identity().gateway_account_id().as_uuid())
     .fetch_optional(&mut *transaction)
     .await?
     .ok_or(SubscriptionEnrollmentApplicationError::InvalidState(

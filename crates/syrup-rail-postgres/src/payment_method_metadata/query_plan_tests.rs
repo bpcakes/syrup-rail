@@ -13,12 +13,12 @@ async fn card_metadata_candidate_plans_probe_method_linked_subscriptions()
     let database = TestDatabase::start("metadata_plan").await?;
     // One merchant with many unrelated subscribers: the current-reference
     // check must not spend work on that merchant's entire population.
-    sqlx::raw_sql(include_str!("query_plan_fixture.sql"))
+    crate::test_support::fixture_raw_sql(include_str!("query_plan_fixture.sql"))
         .execute(&database.pool)
         .await?;
     for statement in [CANDIDATE_SQL, LOCKED_CANDIDATE_SQL] {
         let explain = format!("EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON) {statement}");
-        let row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain.as_str()))
+        let row = crate::test_support::fixture_raw_sql(sqlx::AssertSqlSafe(explain.as_str()))
             .fetch_one(&database.pool)
             .await?;
         let plan: Value = row.try_get(0)?;
@@ -47,14 +47,14 @@ async fn card_metadata_candidate_plans_probe_method_linked_subscriptions()
         assert_supersession_index(root, &rendered);
         for transaction in ["txn_1", "txn_2", "txn_3", "txn_4"] {
             let (scope, subscriber, attempt, subscription): (Uuid, Uuid, Uuid, Uuid) =
-                sqlx::query_as(
+                checked_query_as!(
                     "SELECT billing_scope_id, subscriber_id, id, subscription_id \
                      FROM billing_payment_attempts WHERE gateway_transaction_id = $1",
+                    transaction,
                 )
-                .bind(transaction)
                 .fetch_one(&database.pool)
                 .await?;
-            let candidate = sqlx::query(statement)
+            let candidate = crate::test_support::fixture_query(statement)
                 .bind(scope)
                 .bind(subscriber)
                 .bind(attempt)
@@ -73,32 +73,31 @@ async fn card_metadata_candidate_plans_probe_method_linked_subscriptions()
 async fn card_metadata_candidate_plans_bound_work_to_one_dense_method_history()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("meta_dense_plan").await?;
-    sqlx::raw_sql(include_str!("query_plan_fixture.sql"))
+    crate::test_support::fixture_raw_sql(include_str!("query_plan_fixture.sql"))
         .execute(&database.pool)
         .await?;
-    sqlx::raw_sql(include_str!("dense_history_fixture.sql"))
+    crate::test_support::fixture_raw_sql(include_str!("dense_history_fixture.sql"))
         .execute(&database.pool)
         .await?;
-    let history: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM billing_payment_attempts WHERE payment_method_id = md5('method1')::uuid",
-    ).fetch_one(&database.pool).await?;
+    let history: i64 = checked_query_scalar!("SELECT count(*) FROM billing_payment_attempts WHERE payment_method_id = md5('method1')::uuid").fetch_one(&database.pool).await?;
     assert_eq!(history, 1025);
     for statement in [CANDIDATE_SQL, LOCKED_CANDIDATE_SQL] {
         let explain = format!("EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON) {statement}");
-        let row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain.as_str()))
+        let row = crate::test_support::fixture_raw_sql(sqlx::AssertSqlSafe(explain.as_str()))
             .fetch_one(&database.pool)
             .await?;
         let plan: Value = row.try_get(0)?;
         let root = explain_plan_root(&plan)?;
         assert_supersession_index(root, &serde_json::to_string_pretty(root)?);
         for (transaction, expected_rows) in [("txn_1", 1), ("history_txn_1024", 0)] {
-            let (scope, subscriber, attempt): (Uuid, Uuid, Uuid) = sqlx::query_as(
+            let (scope, subscriber, attempt): (Uuid, Uuid, Uuid) = checked_query_as!(
                 "SELECT billing_scope_id, subscriber_id, id FROM billing_payment_attempts WHERE gateway_transaction_id = $1",
-            ).bind(transaction).fetch_one(&database.pool).await?;
+                transaction,
+            ).fetch_one(&database.pool).await?;
             let mut tx = database.pool.begin().await?;
             crate::enrollment_application::set_application_timeouts(&mut tx).await?;
             let explain = format!("EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}");
-            let row = sqlx::query(sqlx::AssertSqlSafe(explain.as_str()))
+            let row = crate::test_support::fixture_query(sqlx::AssertSqlSafe(explain.as_str()))
                 .bind(scope)
                 .bind(subscriber)
                 .bind(attempt)

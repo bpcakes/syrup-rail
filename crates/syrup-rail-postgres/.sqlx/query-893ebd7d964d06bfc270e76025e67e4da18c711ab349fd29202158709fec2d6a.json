@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM billing_payment_attempts\n            WHERE id = $1\n                AND billing_scope_id = $2\n                AND subscriber_id = $3\n                AND gateway_account_id = $4\n                AND gateway_configuration_id = $5\n                AND required_gateway_account_mode = $6\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "893ebd7d964d06bfc270e76025e67e4da18c711ab349fd29202158709fec2d6a"
+}

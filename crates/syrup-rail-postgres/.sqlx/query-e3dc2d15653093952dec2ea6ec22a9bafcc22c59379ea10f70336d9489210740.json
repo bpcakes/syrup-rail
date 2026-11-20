@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_processor_charges\n        SET progression_state = $2,\n            state_code = $3,\n            reconciliation_required_at = CASE\n                WHEN $2 = 'reconciliation_required'\n                THEN COALESCE(reconciliation_required_at, clock_timestamp())\n            END,\n            external_reversal_required_at = CASE\n                WHEN $2 = 'external_reversal_required'\n                THEN COALESCE(external_reversal_required_at, clock_timestamp())\n            END,\n            applied_at = CASE WHEN $2 = 'applied'\n                THEN COALESCE(applied_at, clock_timestamp()) END,\n            externally_reversed_at = CASE WHEN $2 = 'externally_reversed'\n                THEN COALESCE(externally_reversed_at, clock_timestamp()) END,\n            updated_at = clock_timestamp()\n        WHERE id = $1 AND progression_state = 'pending'\n            AND (\n                $2 NOT IN ('external_reversal_required', 'externally_reversed')\n                OR (\n                    billing_canonical_gateway_transaction_id(\n                        gateway_transaction_id\n                    ) IS NOT NULL\n                    AND amount_cents > 0\n                    AND attempt_kind <> 'subscription_payment_method_update'\n                )\n            )\n            AND (\n                $2 <> 'applied'\n                OR (\n                    charge_role = 'primary'\n                    AND billing_canonical_gateway_transaction_id(\n                        gateway_transaction_id\n                    ) IS NOT NULL\n                )\n            )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e3dc2d15653093952dec2ea6ec22a9bafcc22c59379ea10f70336d9489210740"
+}

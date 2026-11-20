@@ -1,0 +1,614 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH clock AS MATERIALIZED (\n            SELECT clock_timestamp() AS observed_at\n        ),\n        paid_candidates AS MATERIALIZED (\n            SELECT subscriptions.*\n            FROM billing_subscriptions subscriptions\n            CROSS JOIN clock\n            WHERE subscriptions.billing_scope_id = $1\n                AND subscriptions.subscriber_id = $2\n                AND subscriptions.plan_key = $3\n                AND ($4::text IS NULL OR subscriptions.required_gateway_account_mode = $4)\n                AND (\n                    subscriptions.status IN ('active', 'past_due')\n                    OR (\n                        subscriptions.status = 'canceled'\n                        AND subscriptions.current_period_end_at > clock.observed_at\n                    )\n                )\n        ),\n        active_grants AS MATERIALIZED (\n            SELECT grants.*\n            FROM billing_subscription_grants grants\n            CROSS JOIN clock\n            WHERE grants.billing_scope_id = $1\n                AND grants.subscriber_id = $2\n                AND grants.plan_key = $3\n                AND grants.starts_at <= clock.observed_at\n                AND grants.ends_at > clock.observed_at\n                AND grants.revoked_at IS NULL\n        ),\n        paid AS MATERIALIZED (\n            SELECT *\n            FROM paid_candidates\n            ORDER BY\n                CASE status WHEN 'active' THEN 0 WHEN 'past_due' THEN 1 ELSE 2 END,\n                updated_at DESC,\n                id DESC\n            LIMIT 1\n        ),\n        active_grant AS MATERIALIZED (\n            SELECT *\n            FROM active_grants\n            ORDER BY ends_at DESC, created_at DESC, id DESC\n            LIMIT 1\n        )\n        SELECT\n            (SELECT count(*) FROM paid_candidates) AS paid_count,\n            (SELECT count(*) FROM active_grants) AS grant_count,\n            paid.id AS paid_id,\n            paid.plan_key AS paid_plan_key,\n            paid.status AS paid_status,\n            paid.payment_method_id AS paid_payment_method_id,\n            paid.amount_cents AS paid_amount_cents,\n            paid.currency AS paid_currency,\n            paid.current_period_start_at AS paid_period_start_at,\n            paid.current_period_end_at AS paid_period_end_at,\n            paid.next_renewal_at AS paid_next_renewal_at,\n            paid.phase AS paid_phase,\n            paid.required_gateway_account_mode AS paid_required_gateway_account_mode,\n            paid.recurring_period_kind AS paid_recurring_period_kind,\n            paid.recurring_period_count AS paid_recurring_period_count,\n            paid.dunning_retry_delays_seconds AS paid_dunning_retry_delays_seconds,\n            paid.dunning_exhaustion AS paid_dunning_exhaustion,\n            paid.past_due_access AS paid_past_due_access,\n            paid.next_payment_attempt_at AS paid_next_payment_attempt_at,\n            active_grant.id AS grant_id,\n            active_grant.plan_key AS grant_plan_key,\n            active_grant.grant_kind AS grant_kind,\n            active_grant.starts_at AS grant_starts_at,\n            active_grant.ends_at AS grant_ends_at,\n            active_grant.granted_by_actor_id AS grant_actor_id,\n            EXISTS (\n                SELECT 1\n                FROM billing_payment_attempts attempts\n                WHERE attempts.billing_scope_id = $1\n                    AND attempts.subscriber_id = $2\n                    AND attempts.plan_key = $3\n                    AND attempts.attempt_kind = 'subscription_initial'\n                    AND (\n                        attempts.status IN ('pending', 'unknown')\n                        OR (\n                            attempts.status = 'review_required'\n                            AND attempts.resolution_code IS DISTINCT FROM\n                                'subscription_initial_current_subscription_conflict'\n                        )\n                    )\n                    AND NOT (\n                        attempts.status = ANY($7::text[])\n                        AND attempts.submitted_at IS NULL\n                        AND attempts.created_at <= clock.observed_at\n                            - ($5::bigint * interval '1 second')\n                    )\n                    AND NOT EXISTS (\n                        SELECT 1\n                        FROM billing_subscriptions later_subscription\n                        WHERE later_subscription.billing_scope_id = attempts.billing_scope_id\n                            AND later_subscription.subscriber_id = attempts.subscriber_id\n                            AND later_subscription.plan_key = attempts.plan_key\n                            AND later_subscription.created_at >= attempts.created_at\n                    )\n            ) AS blocking_initial_attempt,\n            EXISTS (\n                SELECT 1\n                FROM billing_payment_attempts attempts\n                WHERE attempts.subscription_id = paid.id\n                    AND attempts.attempt_kind IN (\n                        'subscription_renewal',\n                        'subscription_recovery'\n                    )\n                    AND attempts.status IN ('pending', 'unknown', 'review_required')\n                    AND NOT (\n                        attempts.status = ANY($7::text[])\n                        AND attempts.submitted_at IS NULL\n                        AND attempts.created_at <= clock.observed_at\n                            - ($6::bigint * interval '1 second')\n                    )\n            ) AS pending_recovery_confirmation,\n            saved.id AS saved_claim_id,\n            saved.code_snapshot AS saved_code,\n            saved.label_snapshot AS saved_label,\n            saved.discount_kind AS saved_kind,\n            saved.amount_off_cents AS saved_amount_off_cents,\n            saved.percent_off_bps AS saved_percent_off_bps,\n            saved.currency AS saved_currency,\n            saved.duration AS saved_duration,\n            saved.duration_months AS saved_duration_months,\n            saved.base_amount_cents AS saved_base_amount_cents,\n            saved.discounted_amount_cents AS saved_discounted_amount_cents,\n            applied.discount_claim_id AS applied_claim_id,\n            applied.code_snapshot AS applied_code,\n            applied.label_snapshot AS applied_label,\n            applied.discount_kind AS applied_kind,\n            applied.amount_off_cents AS applied_amount_off_cents,\n            applied.percent_off_bps AS applied_percent_off_bps,\n            applied.currency AS applied_currency,\n            applied.duration AS applied_duration,\n            applied.duration_months AS applied_duration_months,\n            applied.base_amount_cents AS applied_base_amount_cents,\n            applied.discounted_amount_cents AS applied_discounted_amount_cents,\n            applied.periods_total AS applied_periods_total,\n            applied.periods_applied AS applied_periods_applied\n        FROM clock\n        LEFT JOIN paid ON true\n        LEFT JOIN active_grant ON true\n        LEFT JOIN LATERAL (\n            SELECT claims.*\n            FROM billing_subscription_discount_claims claims\n            WHERE claims.billing_scope_id = $1\n                AND claims.subscriber_id = $2\n                AND claims.plan_key = $3\n                AND claims.status = 'saved'\n            ORDER BY claims.claimed_at DESC, claims.id DESC\n            LIMIT 1\n        ) saved ON true\n        LEFT JOIN LATERAL (\n            SELECT discounts.*\n            FROM billing_subscription_discounts discounts\n            WHERE discounts.subscription_id = paid.id\n                AND discounts.billing_scope_id = $1\n                AND discounts.subscriber_id = $2\n                AND discounts.plan_key = $3\n                AND discounts.status = 'active'\n            LIMIT 1\n        ) applied ON true\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "paid_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "grant_count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "paid_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "paid_plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "paid_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "paid_payment_method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "payment_method_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "paid_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "paid_currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "paid_period_start_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "current_period_start_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "paid_period_end_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "current_period_end_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "paid_next_renewal_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_renewal_at"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "paid_phase",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "phase"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "paid_required_gateway_account_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "paid_recurring_period_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "recurring_period_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "paid_recurring_period_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "recurring_period_count"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "paid_dunning_retry_delays_seconds",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "dunning_retry_delays_seconds"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "paid_dunning_exhaustion",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "dunning_exhaustion"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "paid_past_due_access",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "past_due_access"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "paid_next_payment_attempt_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_payment_attempt_at"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "grant_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_grants",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "grant_plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_grants",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "grant_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_grants",
+            "name": "grant_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "grant_starts_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_grants",
+            "name": "starts_at"
+          }
+        }
+      },
+      {
+        "ordinal": 23,
+        "name": "grant_ends_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_grants",
+            "name": "ends_at"
+          }
+        }
+      },
+      {
+        "ordinal": 24,
+        "name": "grant_actor_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_grants",
+            "name": "granted_by_actor_id"
+          }
+        }
+      },
+      {
+        "ordinal": 25,
+        "name": "blocking_initial_attempt",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 26,
+        "name": "pending_recovery_confirmation",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 27,
+        "name": "saved_claim_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 28,
+        "name": "saved_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "code_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 29,
+        "name": "saved_label",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "label_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 30,
+        "name": "saved_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "discount_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 31,
+        "name": "saved_amount_off_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "amount_off_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 32,
+        "name": "saved_percent_off_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "percent_off_bps"
+          }
+        }
+      },
+      {
+        "ordinal": 33,
+        "name": "saved_currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 34,
+        "name": "saved_duration",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "duration"
+          }
+        }
+      },
+      {
+        "ordinal": 35,
+        "name": "saved_duration_months",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "duration_months"
+          }
+        }
+      },
+      {
+        "ordinal": 36,
+        "name": "saved_base_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "base_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 37,
+        "name": "saved_discounted_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discount_claims",
+            "name": "discounted_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 38,
+        "name": "applied_claim_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "discount_claim_id"
+          }
+        }
+      },
+      {
+        "ordinal": 39,
+        "name": "applied_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "code_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 40,
+        "name": "applied_label",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "label_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 41,
+        "name": "applied_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "discount_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 42,
+        "name": "applied_amount_off_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "amount_off_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 43,
+        "name": "applied_percent_off_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "percent_off_bps"
+          }
+        }
+      },
+      {
+        "ordinal": 44,
+        "name": "applied_currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 45,
+        "name": "applied_duration",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "duration"
+          }
+        }
+      },
+      {
+        "ordinal": 46,
+        "name": "applied_duration_months",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "duration_months"
+          }
+        }
+      },
+      {
+        "ordinal": 47,
+        "name": "applied_base_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "base_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 48,
+        "name": "applied_discounted_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "discounted_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 49,
+        "name": "applied_periods_total",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "periods_total"
+          }
+        }
+      },
+      {
+        "ordinal": 50,
+        "name": "applied_periods_applied",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscription_discounts",
+            "name": "periods_applied"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      null,
+      null,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e0d73440ca3933fe48cdda624cec6a8e1ac6ca2eb19839d4fd799c919e56c991"
+}

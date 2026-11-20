@@ -3,9 +3,9 @@ use super::*;
 async fn assert_default_timeouts(pool: &PgPool) -> Result<i32, Box<dyn Error>> {
     let (pid, lock, statement): (i32, String, String) = tokio::time::timeout(
         Duration::from_secs(3),
-        sqlx::query_as(
-            "SELECT pg_backend_pid(), current_setting('lock_timeout'), \
-             current_setting('statement_timeout')",
+        checked_query_as!(
+            "SELECT pg_backend_pid(), current_setting('lock_timeout') AS lock_timeout, \
+             current_setting('statement_timeout') AS statement_timeout",
         )
         .fetch_one(pool),
     )
@@ -25,7 +25,7 @@ async fn card_metadata_initial_reads_time_out_before_io_and_restore_connection()
         .max_connections(1)
         .connect_with((*db.pool.connect_options()).clone())
         .await?;
-    sqlx::query("SELECT set_config('lock_timeout', '0', false), set_config('statement_timeout', '0', false)")
+    checked_query!("SELECT set_config('lock_timeout', '0', false) AS lock_timeout, set_config('statement_timeout', '0', false)")
         .execute(&single).await?;
     let pid = assert_default_timeouts(&single).await?;
     let provider = Arc::new(QueryGateway::new(Reply::observation(None)));
@@ -37,7 +37,9 @@ async fn card_metadata_initial_reads_time_out_before_io_and_restore_connection()
         "LOCK TABLE billing_gateway_provider_rate_limits IN ACCESS EXCLUSIVE MODE",
     ] {
         let mut blocker = db.pool.begin().await?;
-        sqlx::query(lock).execute(&mut *blocker).await?;
+        crate::test_support::fixture_query(lock)
+            .execute(&mut *blocker)
+            .await?;
         let result = tokio::time::timeout(
             Duration::from_secs(3),
             refresh_payment_method_metadata(&single, &resolver, fixture.command()),
@@ -99,7 +101,7 @@ async fn card_metadata_releases_read_transaction_before_resolution_and_provider_
         .max_connections(1)
         .connect_with((*db.pool.connect_options()).clone())
         .await?;
-    sqlx::query("SELECT set_config('lock_timeout', '0', false), set_config('statement_timeout', '0', false)")
+    checked_query!("SELECT set_config('lock_timeout', '0', false) AS lock_timeout, set_config('statement_timeout', '0', false)")
         .execute(&single).await?;
     let pid = assert_default_timeouts(&single).await?;
     let mut provider = QueryGateway::new(Reply::observation(None));
@@ -122,7 +124,7 @@ async fn card_metadata_releases_read_transaction_before_resolution_and_provider_
     assert_eq!(assert_default_timeouts(&single).await?, pid);
     // A DDL-strength lock also proves no read transaction retained table locks.
     let mut lock = db.pool.begin().await?;
-    sqlx::query("LOCK TABLE billing_payment_methods IN ACCESS EXCLUSIVE MODE NOWAIT")
+    sqlx::query!("LOCK TABLE billing_payment_methods IN ACCESS EXCLUSIVE MODE NOWAIT")
         .execute(&mut *lock)
         .await?;
     lock.rollback().await?;

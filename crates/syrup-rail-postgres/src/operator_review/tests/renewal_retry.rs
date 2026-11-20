@@ -1,12 +1,12 @@
 use super::*;
 
 async fn retry_policy(database: &TestDatabase, subscription_id: Uuid) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET dunning_retry_delays_seconds = ARRAY[86400, 259200]::bigint[], \
          dunning_exhaustion = 'mark_unpaid', past_due_access = 'continue_until_dunning_exhausted' \
          WHERE id = $1",
+        subscription_id,
     )
-    .bind(subscription_id)
     .execute(&database.pool)
     .await?;
     Ok(())
@@ -28,7 +28,7 @@ async fn immediate_renewal_retry_is_due_atomic_and_concurrent_replay_safe()
             fail_event: false,
         };
         let before = payment_attempt_by_id_for_test(&database, account.billing_scope_id, attempt_id).await?;
-        let before_clock: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let before_clock: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
             .fetch_one(&database.pool).await?;
         let (first, concurrent) = tokio::join!(
             fail_review_required_renewal_for_retry(&database.pool, &coordinator, PaymentAttemptId::new(attempt_id)),
@@ -37,11 +37,12 @@ async fn immediate_renewal_retry_is_due_atomic_and_concurrent_replay_safe()
         let outcomes = [first?, concurrent?];
         assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, ManualAttemptFailureOutcome::Failed(_))).count(), 1);
         assert_eq!(outcomes.iter().filter(|outcome| matches!(outcome, ManualAttemptFailureOutcome::KeptOpen(_))).count(), 1);
-        let after_clock: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let after_clock: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
             .fetch_one(&database.pool).await?;
-        let (status, anchor, retry_at): (String, DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
+        let (status, anchor, retry_at): (String, DateTime<Utc>, DateTime<Utc>) = checked_query_as!(
             "SELECT status, next_renewal_at, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
-        ).bind(subscription_id).fetch_one(&database.pool).await?;
+            subscription_id,
+        ).fetch_one(&database.pool).await?;
         assert_eq!(status, "past_due");
         assert_eq!(anchor, *before.request().target().period().unwrap().start_at());
         assert!(retry_at >= before_clock && retry_at <= after_clock);
@@ -61,8 +62,10 @@ async fn immediate_renewal_retry_is_due_atomic_and_concurrent_replay_safe()
             access: syrup_rail::SubscriptionPaymentFailureAccess::ContinuesDuringDunning, ..
         }] if event_attempt.into_uuid() == attempt_id && *event_retry == retry_at));
         assert!(matches!(fail_review_required_renewal_for_retry(&database.pool, &coordinator, PaymentAttemptId::new(attempt_id)).await?, ManualAttemptFailureOutcome::KeptOpen(_)));
-        let unchanged: DateTime<Utc> = sqlx::query_scalar("SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id).fetch_one(&database.pool).await?;
+        let unchanged: DateTime<Utc> = checked_query_scalar!(
+            "SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+            subscription_id,
+        ).fetch_one(&database.pool).await?;
         assert_eq!(unchanged, retry_at);
         assert_eq!(events.lock().await.len(), 1);
 
@@ -74,7 +77,8 @@ async fn immediate_renewal_retry_is_due_atomic_and_concurrent_replay_safe()
             target.plan_key().unwrap(), target.subscription_id().unwrap(),
             target.payment_method_id().unwrap(), anchor, before.request().amount(),
         );
-        sqlx::query(r#"
+        sqlx::query!(
+            r#"
             INSERT INTO billing_payment_attempts (
                 id, billing_scope_id, subscriber_id, plan_key, subscription_id,
                 payment_method_id, attempt_kind, status, idempotency_key,
@@ -92,7 +96,11 @@ async fn immediate_renewal_retry_is_due_atomic_and_concurrent_replay_safe()
                 subscription_expected_payment_method_id,
                 subscription_expected_initial_transaction_id, 'past_due', required_gateway_account_mode
             FROM billing_payment_attempts WHERE id = $1
-        "#).bind(attempt_id).bind(next_id).bind(fingerprint.expose()).execute(&database.pool).await?;
+        "#,
+            attempt_id,
+            next_id,
+            fingerprint.expose(),
+        ).execute(&database.pool).await?;
         let decline = syrup_rail::GatewayPaymentOutcome::new(
             syrup_rail::GatewayPaymentStatus::Declined,
             ProcessorEvidence::new(
@@ -107,10 +115,11 @@ async fn immediate_renewal_retry_is_due_atomic_and_concurrent_replay_safe()
             PaymentAttemptId::new(next_id), &decline,
         ).await?;
         assert_eq!(declined.attempt().status(), PaymentAttemptStatus::Declined);
-        let (next_retry, next_resolved): (DateTime<Utc>, DateTime<Utc>) = sqlx::query_as(
+        let (next_retry, next_resolved): (DateTime<Utc>, DateTime<Utc>) = checked_query_as!(
             "SELECT subscriptions.next_payment_attempt_at, attempts.resolved_at FROM billing_subscriptions subscriptions \
              JOIN billing_payment_attempts attempts ON attempts.subscription_id = subscriptions.id WHERE attempts.id = $1",
-        ).bind(next_id).fetch_one(&database.pool).await?;
+            next_id,
+        ).fetch_one(&database.pool).await?;
         assert_eq!(next_retry, next_resolved + chrono::Duration::days(3));
         assert!(crate::due_renewals(&database.pool).await?.is_empty());
         Ok::<_, Box<dyn Error>>(())
@@ -149,8 +158,10 @@ async fn immediate_renewal_retry_rolls_back_when_host_event_fails() -> Result<()
         assert!(fail_review_required_renewal_for_retry(&database.pool, &coordinator, PaymentAttemptId::new(attempt_id)).await.is_err());
         let after = payment_attempt_by_id_for_test(&database, account.billing_scope_id, attempt_id).await?;
         assert_eq!(before, after);
-        let unchanged: (String, bool) = sqlx::query_as("SELECT status, next_payment_attempt_at = next_renewal_at FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id).fetch_one(&database.pool).await?;
+        let unchanged: (String, bool) = checked_query_as!(
+            "SELECT status, next_payment_attempt_at = next_renewal_at AS payment_due FROM billing_subscriptions WHERE id = $1",
+            subscription_id,
+        ).fetch_one(&database.pool).await?;
         assert_eq!(unchanged, ("active".to_owned(), true));
         assert!(crate::due_renewals(&database.pool).await?.is_empty());
         Ok::<_, Box<dyn Error>>(())
@@ -179,7 +190,7 @@ async fn immediate_renewal_retry_keeps_unsafe_or_ineligible_attempts_open()
             ("exhausted", "UPDATE billing_subscriptions SET status = 'past_due', next_payment_attempt_at = NULL WHERE id = (SELECT subscription_id FROM billing_payment_attempts WHERE id = $1)"),
         ] {
             let (_, attempt_id) = insert_review_renewal(&database, &account, Uuid::now_v7(), suffix).await?;
-            sqlx::query(update).bind(attempt_id).execute(&database.pool).await?;
+            crate::test_support::fixture_query(update).bind(attempt_id).execute(&database.pool).await?;
             let before = payment_attempt_by_id_for_test(&database, account.billing_scope_id, attempt_id).await?;
             assert!(matches!(fail_review_required_renewal_for_retry(&database.pool, &coordinator, PaymentAttemptId::new(attempt_id)).await?, ManualAttemptFailureOutcome::KeptOpen(_)), "{suffix}");
             assert_eq!(payment_attempt_by_id_for_test(&database, account.billing_scope_id, attempt_id).await?, before, "{suffix}");
@@ -209,11 +220,13 @@ async fn immediate_renewal_retry_does_not_override_policy_exhaustion() -> Result
         {
             let (subscription_id, attempt_id) =
                 insert_review_renewal(&database, &account, Uuid::now_v7(), policy).await?;
-            sqlx::query("UPDATE billing_subscriptions SET dunning_exhaustion = $2 WHERE id = $1")
-                .bind(subscription_id)
-                .bind(policy)
-                .execute(&database.pool)
-                .await?;
+            sqlx::query!(
+                "UPDATE billing_subscriptions SET dunning_exhaustion = $2 WHERE id = $1",
+                subscription_id,
+                policy,
+            )
+            .execute(&database.pool)
+            .await?;
             assert!(matches!(
                 fail_review_required_renewal_for_retry(
                     &database.pool,
@@ -223,10 +236,10 @@ async fn immediate_renewal_retry_does_not_override_policy_exhaustion() -> Result
                 .await?,
                 ManualAttemptFailureOutcome::Failed(_)
             ));
-            let (status, retry_at): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+            let (status, retry_at): (String, Option<DateTime<Utc>>) = checked_query_as!(
                 "SELECT status, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+                subscription_id,
             )
-            .bind(subscription_id)
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(status, expected_status);
@@ -293,9 +306,11 @@ async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), B
             let (subscription_id, attempt_id) =
                 insert_review_renewal(&database, &account, Uuid::now_v7(), suffix).await?;
             retry_policy(&database, subscription_id).await?;
-            sqlx::query("UPDATE billing_payment_attempts SET gateway_response_code = $2 WHERE id = $1")
-                .bind(attempt_id)
-                .bind(code)
+            sqlx::query!(
+                "UPDATE billing_payment_attempts SET gateway_response_code = $2 WHERE id = $1",
+                attempt_id,
+                code,
+            )
                 .execute(&database.pool)
                 .await?;
             assert!(matches!(
@@ -311,12 +326,12 @@ async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), B
                 String,
                 Option<DateTime<Utc>>,
                 DateTime<Utc>,
-            ) = sqlx::query_as(
+            ) = checked_query_as!(
                 "SELECT subscriptions.status, subscriptions.next_payment_attempt_at, attempts.resolved_at \
                  FROM billing_subscriptions subscriptions JOIN billing_payment_attempts attempts \
                  ON attempts.subscription_id = subscriptions.id WHERE attempts.id = $1",
+                attempt_id,
             )
-            .bind(attempt_id)
             .fetch_one(&database.pool)
             .await?;
             match code {
@@ -340,8 +355,10 @@ async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), B
         let (subscription_id, attempt_id) =
             insert_review_renewal(&database, &account, Uuid::now_v7(), "adv-plain").await?;
         retry_policy(&database, subscription_id).await?;
-        sqlx::query("UPDATE billing_payment_attempts SET gateway_response_code = '261' WHERE id = $1")
-            .bind(attempt_id)
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET gateway_response_code = '261' WHERE id = $1",
+            attempt_id,
+        )
             .execute(&database.pool)
             .await?;
         assert!(matches!(
@@ -354,10 +371,10 @@ async fn operator_retry_never_accelerates_past_provider_advice() -> Result<(), B
             .await?,
             ManualAttemptFailureOutcome::Failed(_)
         ));
-        let (status, next_attempt_at): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+        let (status, next_attempt_at): (String, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+            subscription_id,
         )
-        .bind(subscription_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(status, "unpaid");

@@ -1,1 +1,21 @@
 max-fn-params-bools = 0
+
+disallowed-methods = [
+    { path = "sqlx::query", reason = "use a compile-checked SQLx query macro" },
+    { path = "sqlx::query_as", reason = "use a compile-checked SQLx query macro" },
+    { path = "sqlx::query_scalar", reason = "use a compile-checked SQLx query macro" },
+    { path = "sqlx::query_with", reason = "use a compile-checked SQLx query macro" },
+    { path = "sqlx::query_as_with", reason = "use a compile-checked SQLx query macro" },
+    { path = "sqlx::query_scalar_with", reason = "use a compile-checked SQLx query macro" },
+    { path = "sqlx::raw_sql", reason = "use a compile-checked SQLx query macro" },
+    { path = "sqlx::QueryBuilder::new", reason = "use compile-checked SQL variants" },
+]
+
+disallowed-macros = [
+    { path = "sqlx::query_unchecked", reason = "check the query's Rust bindings" },
+    { path = "sqlx::query_as_unchecked", reason = "check the query's Rust bindings" },
+    { path = "sqlx::query_scalar_unchecked", reason = "check the query's Rust bindings" },
+    { path = "sqlx::query_file_unchecked", reason = "check the query's Rust bindings" },
+    { path = "sqlx::query_file_as_unchecked", reason = "check the query's Rust bindings" },
+    { path = "sqlx::query_file_scalar_unchecked", reason = "check the query's Rust bindings" },
+]

@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT occurrence_count, last_seen_at, resolved_at\n        FROM billing_gateway_lifecycle_quarantines\n        WHERE id = $1\n        FOR UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "occurrence_count",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "occurrence_count"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "last_seen_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "resolved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_lifecycle_quarantines",
+            "name": "resolved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "5c2da8f84186e296d1146fb2a90d415dd91bae6620c30e4b729fc7851d0a7715"
+}

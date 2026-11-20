@@ -53,11 +53,12 @@ async fn card_metadata_unknown_observed_brand_is_bounded_evidence_and_safe_displ
         portal.payment_method_display().unwrap().card_brand(),
         Some(PaymentCardBrand::Other)
     );
-    let stored: String =
-        sqlx::query_scalar("SELECT card_brand FROM billing_payment_methods WHERE id = $1")
-            .bind(fixture.method_id)
-            .fetch_one(&db.pool)
-            .await?;
+    let stored: String = checked_query_scalar!(
+        "SELECT card_brand FROM billing_payment_methods WHERE id = $1",
+        fixture.method_id,
+    )
+    .fetch_one(&db.pool)
+    .await?;
     assert_eq!(stored, raw);
     *provider.reply.lock().await = Reply::observation(Some(metadata(
         "txn_metadata",
@@ -111,11 +112,12 @@ async fn card_metadata_brands_survive_partial_refresh_and_portal_projection()
             portal.payment_method_display().unwrap().card_brand(),
             Some(expected)
         );
-        let stored: String =
-            sqlx::query_scalar("SELECT card_brand FROM billing_payment_methods WHERE id = $1")
-                .bind(fixture.method_id)
-                .fetch_one(&db.pool)
-                .await?;
+        let stored: String = checked_query_scalar!(
+            "SELECT card_brand FROM billing_payment_methods WHERE id = $1",
+            fixture.method_id,
+        )
+        .fetch_one(&db.pool)
+        .await?;
         assert_eq!(stored, raw, "retain the same evidence format as approval");
         *provider.reply.lock().await = Reply::observation(Some(metadata(
             "txn_metadata",
@@ -152,8 +154,10 @@ async fn card_metadata_unknown_stored_brand_does_not_block_missing_fields()
 -> Result<(), Box<dyn Error>> {
     let db = TestDatabase::start("metadata_unknown").await?;
     let fixture = Fixture::new(&db.pool).await?;
-    sqlx::query("UPDATE billing_payment_methods SET card_brand = 'unrecognized provider scheme' WHERE id = $1")
-        .bind(fixture.method_id).execute(&db.pool).await?;
+    sqlx::query!(
+        "UPDATE billing_payment_methods SET card_brand = 'unrecognized provider scheme' WHERE id = $1",
+        fixture.method_id,
+    ).execute(&db.pool).await?;
     let financial = fixture.financial_snapshot(&db.pool).await?;
     let provider = Arc::new(QueryGateway::new(Reply::observation(Some(metadata(
         "txn_metadata",
@@ -174,11 +178,12 @@ async fn card_metadata_unknown_stored_brand_does_not_block_missing_fields()
     assert_eq!(display.card_last_four(), Some("1111"));
     assert_eq!(display.card_expiration_month(), Some(10));
     assert_eq!(display.card_expiration_year(), Some(2029));
-    let stored: String =
-        sqlx::query_scalar("SELECT card_brand FROM billing_payment_methods WHERE id = $1")
-            .bind(fixture.method_id)
-            .fetch_one(&db.pool)
-            .await?;
+    let stored: String = checked_query_scalar!(
+        "SELECT card_brand FROM billing_payment_methods WHERE id = $1",
+        fixture.method_id,
+    )
+    .fetch_one(&db.pool)
+    .await?;
     assert_eq!(stored, "unrecognized provider scheme");
     assert_eq!(fixture.financial_snapshot(&db.pool).await?, financial);
     db.cleanup().await?;

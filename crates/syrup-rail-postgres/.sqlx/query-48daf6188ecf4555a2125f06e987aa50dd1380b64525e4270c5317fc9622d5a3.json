@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT gateway_transaction_id FROM billing_processor_charges",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "gateway_transaction_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "48daf6188ecf4555a2125f06e987aa50dd1380b64525e4270c5317fc9622d5a3"
+}

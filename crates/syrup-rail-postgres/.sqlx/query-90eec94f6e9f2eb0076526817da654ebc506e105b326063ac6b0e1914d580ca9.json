@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM billing_subscriptions\n            WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3\n                AND gateway_account_id = $4 AND plan_key = $5\n                -- New v2 recoveries are reserved only from past_due, but a\n                -- durable v1 attempt may have snapshotted active authority.\n                AND status = $6 AND status IN ('active', 'past_due')\n                AND payment_method_id = $7 AND initial_transaction_id = $8\n                AND next_renewal_at = $9\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "90eec94f6e9f2eb0076526817da654ebc506e105b326063ac6b0e1914d580ca9"
+}

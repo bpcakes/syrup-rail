@@ -1,0 +1,186 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT g.id AS account_id, g.gateway_configuration_id AS configuration_id,\n       g.provider_key, a.gateway_transaction_id AS transaction_id,\n       m.gateway_payment_method_reference AS reference, m.id AS method_id,\n       s.id AS subscription_id, s.plan_key,\n       m.updated_at AS method_updated_at, s.updated_at AS subscription_updated_at,\n       m.card_brand, m.card_last4, m.card_exp_month, m.card_exp_year\nFROM billing_payment_attempts AS a\nJOIN billing_gateway_accounts AS g\n  ON g.id = a.gateway_account_id AND g.billing_scope_id = a.billing_scope_id\nJOIN billing_payment_methods AS m\n  ON m.id = a.payment_method_id AND m.billing_scope_id = a.billing_scope_id\n AND m.subscriber_id = a.subscriber_id AND m.gateway_account_id = a.gateway_account_id\n AND (m.gateway_payment_method_reference = a.gateway_payment_method_reference\n      OR (a.attempt_kind = 'subscription_renewal'\n          AND a.gateway_payment_method_reference IS NULL))\nJOIN billing_subscriptions AS s\n  ON s.id = a.subscription_id AND s.billing_scope_id = a.billing_scope_id\n AND s.subscriber_id = a.subscriber_id AND s.gateway_account_id = a.gateway_account_id\n AND s.plan_key = a.plan_key\nWHERE a.billing_scope_id = $1 AND a.subscriber_id = $2 AND a.id = $3\n  AND a.status = 'approved' AND a.gateway_transaction_id IS NOT NULL\n  AND m.status = 'active'\n  AND m.gateway_payment_method_reference <> 'erased:' || m.id::text\n  AND EXISTS (\n      SELECT 1 FROM billing_payment_attempts AS current_approval\n      JOIN billing_subscriptions AS current_subscription\n        ON current_subscription.id = current_approval.subscription_id\n       AND current_subscription.plan_key = current_approval.plan_key\n      WHERE current_approval.payment_method_id = m.id\n        AND current_approval.status = 'approved'\n        AND current_subscription.billing_scope_id = a.billing_scope_id\n        AND current_subscription.subscriber_id = a.subscriber_id\n        AND current_subscription.gateway_account_id = a.gateway_account_id\n        AND current_subscription.payment_method_id = m.id\n  )\n  AND NOT EXISTS (\n      SELECT 1 FROM billing_payment_attempts AS newer\n      WHERE newer.payment_method_id = m.id AND newer.status = 'approved'\n        AND (newer.resolved_at, newer.id) > (a.resolved_at, a.id)\n  )\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "configuration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "gateway_configuration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "provider_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "provider_key"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "subscription_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "method_updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "subscription_updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "card_brand",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "card_brand"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "card_last4",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "card_last4"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "card_exp_month",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "card_exp_month"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "card_exp_year",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "card_exp_year"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "092e9e09faaa3fab521d42e20a2c8c47446f583d8a8c356f5d9e1769b665d571"
+}
