@@ -9,9 +9,13 @@ and transaction orchestration.
 
 - `src/lib.rs` — the public PostgreSQL operation facade and crate-private
   module ownership map.
-- `schema/v6/install.sql` — current authoritative fresh-install DDL;
-  `schema/v6/upgrade_from_v5.sql` is the one-transaction, stopped-writer
-  forward-only v5 cutover that widens the attempt resolution-code and
+- `schema/v7/install.sql` — current authoritative fresh-install DDL;
+  `schema/v7/upgrade_from_v6.sql` is the one-transaction, online forward-only
+  v6 upgrade that appends the nullable
+  `billing_payment_attempts.gateway_avs_response` column.
+- `schema/v6/**` — immutable shipped version-6 distribution artifacts,
+  including the one-transaction, stopped-writer v5 cutover
+  (`upgrade_from_v5.sql`) that widens the attempt resolution-code and
   external-reversal prior-resolution CHECK lists for billing-period expiry.
 - `schema/v5/**` — immutable shipped version-5 distribution artifacts,
   including the one-transaction v4 cutover (`upgrade_from_v4.sql`) that
@@ -27,8 +31,9 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v6 runtime compatibility
-  assertion, the retained v5 and v4 pre-cutover assertions, and canonical
+- `src/schema_contract.rs` — production read-only v6-or-v7 runtime
+  compatibility assertion, the exact v7 and v6 assertions, the retained v5
+  and v4 pre-cutover assertions, and canonical
   catalog conformance. Version-specific, upgrade, and
   shared fixture tests live under `src/schema_contract/tests/`; checked-in
   install/upgrade SQL constants remain behind tests or the explicit
@@ -131,9 +136,9 @@ and transaction orchestration.
 - Change canonical tables, constraints, functions, triggers, or views in the
   current versioned schema artifact and supply a forward-only upgrade for any
   materialized version. Never edit shipped `schema/v1/**` through
-  `schema/v5/**`.
+  `schema/v6/**`.
 - Change host conformance or schema behavior tests in the matching
-  `src/schema_contract/tests/{v1,v2,v3,v4,v5,v6,upgrade}` module, keep shared setup in the
+  `src/schema_contract/tests/{v1,v2,v3,v4,v5,v6,v7,upgrade}` module, keep shared setup in the
   fixture modules, and update the catalog fingerprint intentionally.
 - Change reusable gateway account/configuration metadata transitions in
   `src/gateway_accounts.rs`; keep host credentials outside this crate.
@@ -175,7 +180,7 @@ and transaction orchestration.
   Pass selected presentation fields to the core conversion before deciding
   presence; normalized absence must remain `None`. Keep the exact-plan
   identity prefix plus descending `(created_at, id)` keyset aligned with
-  `billing_payment_attempts_subscription_history_idx` in the current schema-v6
+  `billing_payment_attempts_subscription_history_idx` in the current schema-v7
   artifacts and the runtime schema contract. Keep first-page and continuation
   SQL as separate physical statements, with the continuation keyset as an
   unconditional index condition; the PostgreSQL generic-plan regression must
@@ -221,7 +226,7 @@ and transaction orchestration.
   fold so it is not unconditionally materialized before the outer page limit,
   and keep that keyset aligned with `billing_subscriptions_due_idx` for all-mode
   scans and `billing_subscriptions_due_mode_idx` for mode-specific scans in
-  the current schema-v6 install artifact and the complete runtime index contract. Folding and
+  the current schema-v7 install artifact and the complete runtime index contract. Folding and
   aligned indexes make early stopping available; PostgreSQL still chooses plans
   by cost, so representative host data belongs in migration rehearsal. Do not
   introduce a canonical lease or queue writer; host outbox/queue transactions
@@ -280,22 +285,25 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
-- `assert_runtime_schema_v6_compatible` must reuse the complete canonical v6
+- `assert_runtime_schema_v6_or_v7_compatible`,
+  `assert_runtime_schema_v7_compatible`, and
+  `assert_runtime_schema_v6_compatible` must reuse the complete canonical
   catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
-  major other than 18, and run no DDL; hosts apply versioned install and
+  major other than 18, and run no DDL; the v6-or-v7 check differs only in
+  accepting either exact fingerprint. Hosts apply versioned install and
   forward-only upgrade artifacts through their own migrations. The retained
   `assert_runtime_schema_v5_compatible` and `assert_runtime_schema_v4_compatible`
   check only their pre-cutover states.
 - Committed SQLx metadata lives in `crates/syrup-rail-postgres/.sqlx`.
 - Use SQLx and SQLx CLI 0.9.0 with Rust 1.94 or later. Regenerate metadata
-  with `scripts/check-sqlx.sh --prepare` against the unchanged schema v6.
+  with `scripts/check-sqlx.sh --prepare` against the current schema v7.
 - Recovery admission relies on the exactly pinned `sqlx-core` transaction-depth
   API to reject nested transactions. Keep this guard and its database tests
   when upgrading SQLx; `Connection::is_in_transaction` alone is insufficient.
 - Provider wire strings belong in `syrup-rail-nmi`, not here.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
-  `assert_v3_conforms`, `assert_v4_conforms`, `assert_v5_conforms`, and
-  `assert_v6_conforms` wrappers are also read-only;
+  `assert_v3_conforms`, `assert_v4_conforms`, `assert_v5_conforms`,
+  `assert_v6_conforms`, and `assert_v7_conforms` wrappers are also read-only;
   mutation and locking
   behavior belongs in package fixtures and host-seeded integration tests.
 - Host objects attached to canonical relations use explicit host prefixes;

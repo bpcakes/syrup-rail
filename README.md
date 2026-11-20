@@ -105,10 +105,14 @@ subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
 at that boundary. Hosts that mirror access outside Syrup Rail must consume the
 event's `access` outcome from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v6 is the
+PostgreSQL 18 is the only supported database major, and schema v7 is the
 current contract. New hosts install
-[`schema/v6/install.sql`](crates/syrup-rail-postgres/schema/v6/install.sql).
-Existing schema-v5 hosts follow the checked-in
+[`schema/v7/install.sql`](crates/syrup-rail-postgres/schema/v7/install.sql).
+Existing schema-v6 hosts follow the
+[`v6` to `v7` guide](crates/syrup-rail-postgres/schema/v7/README.md), an
+online single-transaction upgrade that appends one nullable attempt column;
+deploy a build that accepts v6 or v7 at startup first. Schema-v5 hosts first
+follow the checked-in
 [`v5` to `v6` cutover guide](crates/syrup-rail-postgres/schema/v6/README.md),
 a single stopped-writer transaction that widens two resolution-code
 constraints for typed billing-period expiry dispositions. Schema-v4 hosts first
@@ -139,11 +143,12 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v6 install or committed the
-forward-only v5-to-v6 upgrade artifact, call
-`assert_runtime_schema_v6_compatible(&pool).await` during process startup and
-before accepting billing traffic. The assertion checks the complete canonical
-v6 catalog and fingerprint inside one repeatable-read, read-only transaction.
+After the host has applied its immutable v6 or v7 install or committed a
+forward-only upgrade artifact, call
+`assert_runtime_schema_v6_or_v7_compatible(&pool).await` during process
+startup and before accepting billing traffic. The assertion checks the complete
+canonical catalog inside one repeatable-read, read-only transaction and accepts
+exactly the v6 or the v7 fingerprint.
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even

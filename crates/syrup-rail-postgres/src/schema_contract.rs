@@ -56,11 +56,17 @@ pub const V5_INSTALL_SQL: &str = include_str!("../schema/v5/install.sql");
 /// The one-transaction, stopped-writer version-4-to-version-5 upgrade artifact.
 pub const V4_TO_V5_UPGRADE_SQL: &str = include_str!("../schema/v5/upgrade_from_v4.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
-/// The current version-6 fresh-install artifact.
+/// The version-6 fresh-install artifact.
 pub const V6_INSTALL_SQL: &str = include_str!("../schema/v6/install.sql");
 #[cfg(any(test, feature = "schema-contract-test-support"))]
 /// The one-transaction, stopped-writer version-5-to-version-6 upgrade artifact.
 pub const V5_TO_V6_UPGRADE_SQL: &str = include_str!("../schema/v6/upgrade_from_v5.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The current version-7 fresh-install artifact.
+pub const V7_INSTALL_SQL: &str = include_str!("../schema/v7/install.sql");
+#[cfg(any(test, feature = "schema-contract-test-support"))]
+/// The one-transaction, online version-6-to-version-7 upgrade artifact.
+pub const V6_TO_V7_UPGRADE_SQL: &str = include_str!("../schema/v7/upgrade_from_v6.sql");
 
 // Non-cryptographic drift fingerprint over the canonical PostgreSQL catalog.
 // Host objects use host-prefixed names and are deliberately excluded.
@@ -73,6 +79,7 @@ const V3_CATALOG_FINGERPRINT: u64 = 0x475d_91d1_6525_a966;
 const V4_CATALOG_FINGERPRINT: u64 = 0x0931_8e66_2d53_c5b6;
 const V5_CATALOG_FINGERPRINT: u64 = 0xfe31_5b97_ddbf_a4d0;
 const V6_CATALOG_FINGERPRINT: u64 = 0xaa6f_82cd_d624_57bd;
+const V7_CATALOG_FINGERPRINT: u64 = 0xd3fd_eba9_f196_9fb4;
 const CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN: &str = r"_cc(new|old)[0-9]*$";
 const REINDEX_TRANSITION_DETAIL: &str = "concurrent reindex state changed during schema validation";
 const REINDEX_TRANSITION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(25);
@@ -374,10 +381,14 @@ const V4_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = &[
 const V5_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V4_CURRENT_SUBSCRIPTION_COLUMNS;
 // Version 6 widens only attempt and attestation resolution-code constraints.
 const V6_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V5_CURRENT_SUBSCRIPTION_COLUMNS;
+// Version 7 appends one nullable attempt column.
+const V7_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V6_CURRENT_SUBSCRIPTION_COLUMNS;
 
 /// Why a host database does not satisfy a canonical schema contract.
 ///
-/// [`crate::assert_runtime_schema_v6_compatible`] reports version `6`,
+/// [`crate::assert_runtime_schema_v7_compatible`] reports version `7`,
+/// [`crate::assert_runtime_schema_v6_or_v7_compatible`] and
+/// [`crate::assert_runtime_schema_v6_compatible`] report version `6`,
 /// [`crate::assert_runtime_schema_v5_compatible`] reports version `5`, and
 /// [`crate::assert_runtime_schema_v4_compatible`] reports version `4` in its
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
@@ -444,13 +455,59 @@ pub async fn assert_runtime_schema_v3_compatible(
         pool,
         3,
         V3_CURRENT_SUBSCRIPTION_COLUMNS,
-        V3_CATALOG_FINGERPRINT,
+        &[V3_CATALOG_FINGERPRINT],
     )
     .await
 }
 
-/// Asserts that a host database is compatible with the canonical schema-v6
-/// contract before the host accepts billing work.
+/// Asserts that a host database is exactly the canonical schema-v7 catalog.
+///
+/// Version 7 appends the nullable
+/// `billing_payment_attempts.gateway_avs_response` column through the online
+/// `schema/v7/upgrade_from_v6.sql`. This runtime does not yet write that
+/// column, so hosts on this release call
+/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing
+/// work; this exact check is for confirming that the upgrade committed. It is
+/// read-only and requires PostgreSQL major version 18.
+pub async fn assert_runtime_schema_v7_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        7,
+        V7_CURRENT_SUBSCRIPTION_COLUMNS,
+        &[V7_CATALOG_FINGERPRINT],
+    )
+    .await
+}
+
+/// Asserts that a host database is the canonical schema-v6 or schema-v7
+/// catalog before the host accepts billing work.
+///
+/// This runtime reads and writes only schema-v6 columns, by name, so it is
+/// correct on either catalog. Accepting both lets a host keep this build as
+/// its rollback target while a later build applies
+/// `schema/v7/upgrade_from_v6.sql` with writers running. Every other
+/// conformance check is the same for both versions; only the catalog
+/// fingerprint differs, and it must equal one of the two exactly. Failures
+/// report version `6`. Read-only; requires PostgreSQL major version 18.
+pub async fn assert_runtime_schema_v6_or_v7_compatible(
+    pool: &PgPool,
+) -> Result<(), SchemaConformanceError> {
+    assert_schema_conforms_in_read_only_snapshot(
+        pool,
+        6,
+        V6_CURRENT_SUBSCRIPTION_COLUMNS,
+        &[V6_CATALOG_FINGERPRINT, V7_CATALOG_FINGERPRINT],
+    )
+    .await
+}
+
+/// Asserts that a host database is exactly the canonical schema-v6 contract.
+///
+/// It rejects schema v7. Hosts that may run against a schema-v7 catalog,
+/// including as a rollback target, use
+/// [`assert_runtime_schema_v6_or_v7_compatible`] instead.
 ///
 /// Call this after the host has applied its immutable Syrup Rail install or
 /// forward-only upgrade migration through its normal migration deployment.
@@ -465,7 +522,7 @@ pub async fn assert_runtime_schema_v6_compatible(
         pool,
         6,
         V6_CURRENT_SUBSCRIPTION_COLUMNS,
-        V6_CATALOG_FINGERPRINT,
+        &[V6_CATALOG_FINGERPRINT],
     )
     .await
 }
@@ -485,7 +542,7 @@ pub async fn assert_runtime_schema_v5_compatible(
         pool,
         5,
         V5_CURRENT_SUBSCRIPTION_COLUMNS,
-        V5_CATALOG_FINGERPRINT,
+        &[V5_CATALOG_FINGERPRINT],
     )
     .await
 }
@@ -505,7 +562,7 @@ pub async fn assert_runtime_schema_v4_compatible(
         pool,
         4,
         V4_CURRENT_SUBSCRIPTION_COLUMNS,
-        V4_CATALOG_FINGERPRINT,
+        &[V4_CATALOG_FINGERPRINT],
     )
     .await
 }
@@ -516,7 +573,7 @@ async fn assert_runtime_schema_v2_compatible(pool: &PgPool) -> Result<(), Schema
         pool,
         2,
         V2_CURRENT_SUBSCRIPTION_COLUMNS,
-        V2_CATALOG_FINGERPRINT,
+        &[V2_CATALOG_FINGERPRINT],
     )
     .await
 }
@@ -557,6 +614,13 @@ pub async fn assert_v6_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
 }
 
 #[cfg(any(test, feature = "schema-contract-test-support"))]
+/// Asserts that an already-migrated host database contains the canonical v7
+/// objects without exposing a production runtime migrator.
+pub async fn assert_v7_conforms(pool: &PgPool) -> Result<(), SchemaConformanceError> {
+    assert_runtime_schema_v7_compatible(pool).await
+}
+
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 /// Asserts that an already-migrated host database contains the canonical v1
 /// objects without re-running or exposing a production migrator.
 ///
@@ -568,7 +632,7 @@ pub async fn assert_v1_conforms(pool: &PgPool) -> Result<(), SchemaConformanceEr
         pool,
         1,
         V1_CURRENT_SUBSCRIPTION_COLUMNS,
-        V1_CATALOG_FINGERPRINT,
+        &[V1_CATALOG_FINGERPRINT],
     )
     .await
 }
@@ -577,14 +641,14 @@ async fn assert_schema_conforms_in_read_only_snapshot(
     pool: &PgPool,
     version: u16,
     current_subscription_columns: &[&str],
-    expected_fingerprint: u64,
+    expected_fingerprints: &[u64],
 ) -> Result<(), SchemaConformanceError> {
     retry_reindex_transition_once(|| {
         assert_schema_conforms_in_one_read_only_snapshot(
             pool,
             version,
             current_subscription_columns,
-            expected_fingerprint,
+            expected_fingerprints,
         )
     })
     .await
@@ -616,7 +680,7 @@ async fn assert_schema_conforms_in_one_read_only_snapshot(
     pool: &PgPool,
     version: u16,
     current_subscription_columns: &[&str],
-    expected_fingerprint: u64,
+    expected_fingerprints: &[u64],
 ) -> Result<(), SchemaConformanceAttemptError> {
     let mut transaction = pool
         .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
@@ -631,7 +695,7 @@ async fn assert_schema_conforms_in_one_read_only_snapshot(
             &mut transaction,
             version,
             current_subscription_columns,
-            expected_fingerprint,
+            expected_fingerprints,
         )
         .await
     }
@@ -663,7 +727,7 @@ async fn assert_schema_conforms(
     connection: &mut PgConnection,
     version: u16,
     current_subscription_columns: &[&str],
-    expected_fingerprint: u64,
+    expected_fingerprints: &[u64],
 ) -> Result<(), SchemaConformanceAttemptError> {
     let billing_indexes = load_billing_index_catalog(connection).await?;
     require_relations(connection, version, 'r', REQUIRED_TABLES).await?;
@@ -700,7 +764,7 @@ async fn assert_schema_conforms(
     if version >= 4 {
         require_index_contract(connection, version, MODE_RENEWAL_DISPATCH_INDEX_CONTRACT).await?;
     }
-    require_catalog_fingerprint(connection, version, expected_fingerprint, &billing_indexes)
+    require_catalog_fingerprint(connection, version, expected_fingerprints, &billing_indexes)
         .await?;
     require_unchanged_active_reindex_shadows(connection, version, &billing_indexes).await
 }
@@ -1372,17 +1436,22 @@ async fn catalog_index_shape(
 async fn require_catalog_fingerprint(
     connection: &mut PgConnection,
     version: u16,
-    expected: u64,
+    expected: &[u64],
     billing_indexes: &[BillingIndexCatalogEntry],
 ) -> Result<(), SchemaConformanceError> {
     let actual = canonical_catalog_fingerprint(connection, billing_indexes).await?;
-    if actual == expected {
+    if expected.contains(&actual) {
         Ok(())
     } else {
+        let expected = expected
+            .iter()
+            .map(|fingerprint| format!("{fingerprint:#018x}"))
+            .collect::<Vec<_>>()
+            .join(" or ");
         Err(contract_error(
             version,
             format!(
-                "canonical catalog fingerprint differs: expected {expected:#018x}, found {actual:#018x}"
+                "canonical catalog fingerprint differs: expected {expected}, found {actual:#018x}"
             ),
         ))
     }

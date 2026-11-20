@@ -37,10 +37,10 @@ breaking package release. It preserves schema v6 byte-for-byte; hosts already
 on v6 need no database migration for this upgrade.
 
 Before integrating `dev/0.6.0`, assign its unfinished features a later release
-number. Preserve the shipped schema v5 (billing addresses) and v6 (typed
-billing-period expiry codes) artifacts. Renumber that branch's unreleased
-schemas to v7 or later and provide an upgrade from v6; do not ship a different
-schema under v5 or v6. If 0.5.x needs maintenance, branch from the last 0.5.x
+number. Preserve the shipped schema v5 (billing addresses), v6 (typed
+billing-period expiry codes), and v7 (attempt AVS result column) artifacts.
+Renumber that branch's unreleased schemas to v8 or later and provide an
+upgrade from v7; do not ship a different schema under v5, v6, or v7. If 0.5.x needs maintenance, branch from the last 0.5.x
 revision.
 Publishing from a maintenance branch requires an explicit update to the
 workflow ref check and the `release` environment's allowed branches.

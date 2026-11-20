@@ -138,7 +138,7 @@ async fn runtime_schema_v6_accepts_fresh_install_and_populated_v5_upgrade()
     if V6_INSTALL_SQL.trim().is_empty() || V5_TO_V6_UPGRADE_SQL.trim().is_empty() {
         return Err(io::Error::other("schema-v6 artifacts must not be empty").into());
     }
-    let fresh = TestDatabase::start("sr_fresh_v6").await?;
+    let fresh = TestDatabase::start_v6("sr_fresh_v6").await?;
     let upgraded = TestDatabase::start_v3("sr_upgrade_v6").await?;
     let result = async {
         populated_v4(&upgraded).await?;
@@ -194,9 +194,9 @@ async fn runtime_schema_v6_accepts_fresh_install_and_populated_v5_upgrade()
 async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
 -> Result<(), Box<dyn Error>> {
     let v5 = TestDatabase::start_v5("sr_v6_reject_v5").await?;
-    let v6 = TestDatabase::start("sr_v6_reject_v6").await?;
-    let narrowed = TestDatabase::start("sr_v6_narrowed").await?;
-    let unvalidated = TestDatabase::start("sr_v6_not_valid").await?;
+    let v6 = TestDatabase::start_v6("sr_v6_reject_v6").await?;
+    let narrowed = TestDatabase::start_v6("sr_v6_narrowed").await?;
+    let unvalidated = TestDatabase::start_v6("sr_v6_not_valid").await?;
     let result = async {
         assert!(matches!(
             crate::assert_runtime_schema_v6_compatible(&v5.pool).await,
@@ -280,7 +280,7 @@ async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
 #[tokio::test]
 async fn v6_constraints_accept_expiry_dispositions_that_v5_rejects() -> Result<(), Box<dyn Error>> {
     let v5 = TestDatabase::start_v5("sr_v6_codes_v5").await?;
-    let v6 = TestDatabase::start("sr_v6_codes_v6").await?;
+    let v6 = TestDatabase::start_v6("sr_v6_codes_v6").await?;
     let result = async {
         for (database, accepted) in [(&v5, false), (&v6, true)] {
             let account = create_gateway_account(&database.pool, "nmi").await?;

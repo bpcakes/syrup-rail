@@ -2,6 +2,24 @@
 
 All notable changes to the Syrup Rail crates are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Schema v7 (`schema/v7/install.sql`, online `schema/v7/upgrade_from_v6.sql`)
+  appends the nullable `billing_payment_attempts.gateway_avs_response` column.
+  No row, constraint, index, trigger, or view changes. This release does not
+  write the column yet.
+- `assert_runtime_schema_v6_or_v7_compatible` accepts exactly the v6 or v7
+  catalog, and `assert_runtime_schema_v7_compatible` accepts exactly v7.
+
+### Action required for hosts
+
+- Replace the startup call to `assert_runtime_schema_v6_compatible` with
+  `assert_runtime_schema_v6_or_v7_compatible` and deploy that build before any
+  build applies the v7 upgrade, so it remains a valid rollback target. The
+  exact v6 assertion rejects a v7 catalog.
+
 ## [0.6.0] - Unreleased
 
 Breaking SQLx upgrade from the IdentityPro-consumed 0.5.5 revision

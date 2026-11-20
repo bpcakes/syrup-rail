@@ -252,6 +252,10 @@ mod tests {
         "subscription_initial_dunning_exhaustion",
         "subscription_initial_past_due_access",
         "required_gateway_account_mode",
+        // Schema v7. Like `gateway_response_code`, the address-verification
+        // result is a closed provider code, not the address it was checked
+        // against, so it is retained with the attempt's other decision codes.
+        "gateway_avs_response",
     ];
 
     /// Method columns the scrub clears.

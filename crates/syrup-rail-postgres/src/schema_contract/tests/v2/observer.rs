@@ -29,7 +29,7 @@ pub(super) async fn require_hidden_reindex_to_fail_closed(
         &mut transaction,
         2,
         V2_CURRENT_SUBSCRIPTION_COLUMNS,
-        V2_CATALOG_FINGERPRINT,
+        &[V2_CATALOG_FINGERPRINT],
     )
     .await;
     transaction.rollback().await?;

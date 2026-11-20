@@ -14,6 +14,7 @@ use crate::schema_contract::{
     V1_INSTALL_SQL, V1_TO_V2_UPGRADE_SQL, V2_INSTALL_SQL, V2_TO_V3_UPGRADE_SQL, V3_INSTALL_SQL,
     V3_TO_V4_INDEX_SQL, V3_TO_V4_PREPARE_SQL, V3_TO_V4_UPGRADE_SQL, V3_TO_V4_VALIDATE_SQL,
     V4_INSTALL_SQL, V4_TO_V5_UPGRADE_SQL, V5_INSTALL_SQL, V5_TO_V6_UPGRADE_SQL, V6_INSTALL_SQL,
+    V6_TO_V7_UPGRADE_SQL, V7_INSTALL_SQL,
 };
 
 pub(crate) struct TestDatabase {
@@ -104,6 +105,10 @@ pub(crate) fn immediate_offer(plan_key: PlanKey, charge: ChargeAmount) -> Subscr
 
 impl TestDatabase {
     pub(crate) async fn start(project: &str) -> Result<Self, Box<dyn Error>> {
+        Self::start_with_install(project, V7_INSTALL_SQL).await
+    }
+
+    pub(crate) async fn start_v6(project: &str) -> Result<Self, Box<dyn Error>> {
         Self::start_with_install(project, V6_INSTALL_SQL).await
     }
 
@@ -154,6 +159,15 @@ impl TestDatabase {
     pub(crate) async fn upgrade_v2_to_v3(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
         sqlx::raw_sql(V2_TO_V3_UPGRADE_SQL)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn upgrade_v6_to_v7(&self) -> Result<(), Box<dyn Error>> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::raw_sql(V6_TO_V7_UPGRADE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
