@@ -9,16 +9,20 @@
 --
 -- Adding a nullable column without a default changes only the catalog: it
 -- neither rewrites nor scans the table. ALTER TABLE still takes an ACCESS
--- EXCLUSIVE lock for that catalog change, so the 5-second lock_timeout below
--- bounds how long other statements queue behind it; on a timeout the
--- transaction rolls back with no change and can be retried. Writers do not
--- need to stop: schema-v6 writers name their attempt columns explicitly and
--- read rows by column name, so they keep working while and after this
--- commits. A runtime that starts afterwards must accept schema v7 at
--- startup: assert_runtime_schema_v6_or_v7_compatible or
+-- EXCLUSIVE lock for that catalog change, and every later statement on the
+-- table queues behind the waiting request. The 100-millisecond lock_timeout
+-- below stays under the runtime's 250-millisecond billing lock timeout, so a
+-- blocked upgrade gives up before queued billing statements fail; on a timeout
+-- the transaction rolls back with no change and can be retried. Writers do not
+-- need to stop once every serving build accepts schema v6 or v7 at startup:
+-- those builds name their attempt columns explicitly and read rows by column
+-- name, so they keep working while and after this commits. Earlier schema-v6
+-- builds returned attempts with a wildcard in the reconciliation claim and
+-- must not be serving. A runtime that starts afterwards must accept schema v7
+-- at startup: assert_runtime_schema_v6_or_v7_compatible or
 -- assert_runtime_schema_v7_compatible, not assert_runtime_schema_v6_compatible.
 
-SET LOCAL lock_timeout = '5s';
+SET LOCAL lock_timeout = '100ms';
 
 DO $$
 BEGIN
@@ -31,8 +35,10 @@ BEGIN
             AND tables.relname = 'billing_payment_attempts'
             AND constraints.conname = 'billing_payment_attempts_resolution_code_check'
             AND constraints.convalidated
-            AND pg_catalog.pg_get_constraintdef(constraints.oid)
-                LIKE '%subscription_approved_period_expired%'
+            AND pg_catalog.strpos(
+                pg_catalog.pg_get_constraintdef(constraints.oid),
+                'subscription_approved_period_expired'
+            ) > 0
     )
     THEN
         RAISE EXCEPTION

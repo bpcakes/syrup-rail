@@ -11,11 +11,13 @@ Version 7 appends one nullable column and changes nothing else:
   address-verification result code from the attempt's original response.
 
 No row, constraint, index, trigger, view, or other column changes, and the
-upgrade infers nothing about historical rows: they keep `NULL`. Like the
-attempt's other gateway response columns, the value carries no CHECK
-constraint; the runtime bounds it before writing. Subscriber scrubbing retains
-it with `gateway_response_code`, because it is a closed provider code and not
-the address it was checked against.
+upgrade infers nothing about historical rows: they keep `NULL`. Unlike the
+attempt's other gateway response columns, which
+`billing_payment_attempts_gateway_text_check` bounds to 512 octets, the value
+carries no CHECK constraint, so the upgrade stays catalog-only. This release
+never writes it; a runtime that does must bound the value itself before
+writing. Subscriber scrubbing retains it with `gateway_response_code`, because
+it is a closed provider code and not the address it was checked against.
 
 ## Runtime compatibility
 
@@ -41,11 +43,14 @@ the catalog: it neither rewrites nor scans the table. Writers do not stop.
    make it the oldest permitted rollback target. A build that calls
    `assert_runtime_schema_v6_compatible` refuses to start once v7 commits.
 2. Apply `upgrade_from_v6.sql` in one host-owned transaction and commit it.
-   `ALTER TABLE` briefly takes an `ACCESS EXCLUSIVE` lock for the catalog
-   change; the artifact's 5-second `lock_timeout` bounds how long other
-   statements queue behind it. On a timeout the transaction rolls back with no
-   change and can be retried. The artifact refuses a database that is not
-   schema v6 and a rerun.
+   `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock for the catalog change and
+   holds it until that transaction commits, so commit promptly. While the
+   request waits, every later statement on the attempt table queues behind it.
+   The artifact's 100-millisecond `lock_timeout` stays under the runtime's
+   250-millisecond billing lock timeout, so a blocked upgrade gives up before
+   queued billing statements fail. On a timeout the transaction rolls back
+   with no change and can be retried. The artifact refuses a database that is
+   not schema v6 and a rerun.
 3. Optionally confirm the result with `assert_runtime_schema_v7_compatible`.
 
 ## Recovery

@@ -40,8 +40,8 @@ Before integrating `dev/0.6.0`, assign its unfinished features a later release
 number. Preserve the shipped schema v5 (billing addresses), v6 (typed
 billing-period expiry codes), and v7 (attempt AVS result column) artifacts.
 Renumber that branch's unreleased schemas to v8 or later and provide an
-upgrade from v7; do not ship a different schema under v5, v6, or v7. If 0.5.x needs maintenance, branch from the last 0.5.x
-revision.
+upgrade from v7; do not ship a different schema under v5, v6, or v7. If 0.5.x
+needs maintenance, branch from the last 0.5.x revision.
 Publishing from a maintenance branch requires an explicit update to the
 workflow ref check and the `release` environment's allowed branches.
 
@@ -76,7 +76,7 @@ Replace `VERSION` with the exact stable semantic version recorded in the
 workspace, such as `0.6.0`. The advisory check follows
 [`security/dependency-advisories.md`](security/dependency-advisories.md).
 Use SQLx CLI 0.9.0 for both metadata preparation and checks. To regenerate
-metadata against the disposable PostgreSQL 18 schema-v6 database, run
+metadata against the disposable PostgreSQL 18 schema-v7 database, run
 `scripts/check-sqlx.sh --prepare` and review the `.sqlx` diff.
 The test and SQLx gates use `scripts/with-test-postgres.py` to provision a
 disposable PostgreSQL 18 server through Docker. Python 3 and Docker are required

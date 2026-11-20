@@ -40,7 +40,7 @@ use syrup_rail_postgres::{
     SubscriptionBillingServiceError, SubscriptionBillingServiceErrorDisposition,
     SubscriptionEnrollmentApplicationError, SubscriptionOfferStore, SubscriptionPeriodExpiryError,
     SubscriptionRecoveryAdmissionOutcome, admit_subscription_recovery_submission_with_transaction,
-    assert_runtime_schema_v6_compatible, change_subscription_past_due_access_in_transaction,
+    assert_runtime_schema_v6_or_v7_compatible, change_subscription_past_due_access_in_transaction,
     due_renewals_page_for_mode, require_entitlement_for_update, subscription_billing_portal,
     subscription_payment_history_page,
 };
@@ -126,12 +126,14 @@ pub fn build_subscription_billing_service(
 /// one repeatable-read, read-only catalog snapshot; it never installs,
 /// upgrades, preflights, audits, or otherwise changes the schema. It requires
 /// PostgreSQL 18 and rejects host-specific columns on canonical relations.
-/// Schema v6 is required; a schema-v5 host must first commit
-/// `schema/v6/upgrade_from_v5.sql` with every billing writer stopped.
+/// Schema v6 or v7 is required; a schema-v5 host must first commit
+/// `schema/v6/upgrade_from_v5.sql` with every billing writer stopped. Accepting
+/// both keeps this build a valid rollback target after a later build commits
+/// the online `schema/v7/upgrade_from_v6.sql`.
 pub async fn assert_host_runtime_schema_compatibility(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
-    assert_runtime_schema_v6_compatible(pool).await
+    assert_runtime_schema_v6_or_v7_compatible(pool).await
 }
 
 /// Admits a host-authorized protected write and returns its only valid transaction.

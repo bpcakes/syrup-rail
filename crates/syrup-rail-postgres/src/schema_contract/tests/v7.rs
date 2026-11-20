@@ -288,15 +288,18 @@ async fn runtime_attempt_reads_cached_on_v6_survive_the_v7_upgrade() -> Result<(
             .max_connections(1)
             .connect_with((*database.pool.connect_options()).clone())
             .await?;
-        read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id).await?;
-
-        database.upgrade_v6_to_v7().await?;
-        assert_v7_conforms(&database.pool).await?;
-        read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id).await?;
+        let rounds = async {
+            read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id).await?;
+            database.upgrade_v6_to_v7().await?;
+            assert_v7_conforms(&database.pool).await?;
+            read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id).await
+        }
+        .await;
         serving.close().await;
-        Ok::<(), Box<dyn Error>>(())
+        rounds
     }
     .await;
-    database.cleanup().await?;
-    result
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
 }
