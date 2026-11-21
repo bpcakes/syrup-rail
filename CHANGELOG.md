@@ -43,6 +43,11 @@ historically named `dev/0.6.0` branch.
 
 ### Changed
 
+- `GatewayTransactionDiagnosticsObservation::with_avs_response` retains only a
+  single ASCII letter or digit, matching schema v7's `varchar(1)` AVS column.
+  Any other value, which the generic 64-byte diagnostic code bound used to
+  admit, is omitted and marks the observation partial.
+
 - Replace boolean function parameters with named policies, existing evidence,
   and fixture builders throughout the workspace. Enforce zero boolean function
   parameters through workspace Clippy settings; defer function-length and
@@ -108,9 +113,10 @@ historically named `dev/0.6.0` branch.
 ### Added
 
 - Add schema v7 (`schema/v7/install.sql`, online `schema/v7/upgrade_from_v6.sql`),
-  appending the nullable `billing_payment_attempts.gateway_avs_response` column
-  and replacing `billing_host_charge_ledger_admission` so `submit` admission
-  also requires a pending host-charge attempt to have no AVS result. No row,
+  appending the nullable `varchar(1)`
+  `billing_payment_attempts.gateway_avs_response` column and replacing
+  `billing_host_charge_ledger_admission` so `submit` admission also requires a
+  pending host-charge attempt to have no AVS result. No row,
   constraint, index, trigger, or view changes; this release does not write the
   column yet.
 - Add `assert_runtime_schema_v6_or_v7_compatible`, accepting exactly the v6 or

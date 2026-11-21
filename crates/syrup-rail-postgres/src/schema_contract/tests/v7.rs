@@ -32,10 +32,13 @@ async fn canonical_rows_without_v7_column(pool: &PgPool) -> Result<Vec<String>, 
     Ok(snapshots)
 }
 
-async fn v7_column_shape(pool: &PgPool) -> Result<Option<(String, String, i16)>, sqlx::Error> {
+async fn v7_column_shape(
+    pool: &PgPool,
+) -> Result<Option<(String, String, i16, Option<i32>)>, sqlx::Error> {
     sqlx::query_as(
         r#"
-        SELECT columns.data_type, columns.is_nullable, attributes.attnum
+        SELECT columns.data_type, columns.is_nullable, attributes.attnum,
+            columns.character_maximum_length::integer
         FROM information_schema.columns AS columns
         JOIN pg_catalog.pg_attribute AS attributes
             ON attributes.attrelid = 'public.billing_payment_attempts'::regclass
@@ -48,6 +51,54 @@ async fn v7_column_shape(pool: &PgPool) -> Result<Option<(String, String, i16)>,
     .bind(V7_COLUMN)
     .fetch_optional(pool)
     .await
+}
+
+/// The attempt table's storage file, which a table rewrite replaces, and its
+/// constraint count. PostgreSQL 18 records CHECK and NOT NULL constraints in
+/// `pg_constraint`, and adding either scans the table under the lock.
+async fn attempt_table_storage(pool: &PgPool) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT relation.relfilenode::bigint, \
+             (SELECT count(*) FROM pg_catalog.pg_constraint \
+              WHERE conrelid = relation.oid) \
+         FROM pg_catalog.pg_class AS relation \
+         WHERE relation.oid = 'public.billing_payment_attempts'::regclass",
+    )
+    .fetch_one(pool)
+    .await
+}
+
+/// Writes a one-character AVS code to an existing attempt and rejects a
+/// two-character value, then rolls both writes back. An explicit cast would
+/// truncate silently; only a real write shows the column enforces its bound.
+async fn assert_avs_length_bound(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let attempt_id: Uuid =
+        sqlx::query_scalar("SELECT id FROM billing_payment_attempts ORDER BY id LIMIT 1")
+            .fetch_one(&mut *transaction)
+            .await?;
+    let write = "UPDATE billing_payment_attempts SET gateway_avs_response = $1 WHERE id = $2";
+    sqlx::query(write)
+        .bind("Y")
+        .bind(attempt_id)
+        .execute(&mut *transaction)
+        .await?;
+    let error = sqlx::query(write)
+        .bind("YY")
+        .bind(attempt_id)
+        .execute(&mut *transaction)
+        .await
+        .expect_err("a two-character AVS value must be rejected");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("22001"),
+        "{error}"
+    );
+    transaction.rollback().await?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -68,8 +119,12 @@ async fn runtime_schema_v7_accepts_fresh_install_and_populated_v6_upgrade()
             .fetch_one(&upgraded.pool)
             .await?;
         assert!(attempt_rows >= 2, "fixture must be populated");
+        let storage_before = attempt_table_storage(&upgraded.pool).await?;
 
         upgraded.upgrade_v6_to_v7().await?;
+        // The bounded column is added without rewriting the populated table or
+        // adding a constraint that would scan it under the lock.
+        assert_eq!(attempt_table_storage(&upgraded.pool).await?, storage_before);
         assert_v7_conforms(&fresh.pool).await?;
         assert_v7_conforms(&upgraded.pool).await?;
         let fresh_fingerprint = canonical_catalog_fingerprint(&fresh.pool).await?;
@@ -78,12 +133,19 @@ async fn runtime_schema_v7_accepts_fresh_install_and_populated_v6_upgrade()
         assert_eq!(fresh_fingerprint, V7_CATALOG_FINGERPRINT);
         assert_ne!(V7_CATALOG_FINGERPRINT, V6_CATALOG_FINGERPRINT);
 
-        // The column is the attempt table's last, nullable text column in
-        // both paths, so ADD COLUMN and the fresh install agree.
+        // The column is the attempt table's last, nullable varchar(1) column
+        // in both paths, so ADD COLUMN and the fresh install agree.
         let fresh_shape = v7_column_shape(&fresh.pool).await?;
         assert_eq!(fresh_shape, v7_column_shape(&upgraded.pool).await?);
-        let (data_type, nullable, _) = fresh_shape.expect("v7 adds the AVS column");
-        assert_eq!((data_type.as_str(), nullable.as_str()), ("text", "YES"));
+        let (data_type, nullable, _, max_length) = fresh_shape.expect("v7 adds the AVS column");
+        assert_eq!(
+            (data_type.as_str(), nullable.as_str(), max_length),
+            ("character varying", "YES", Some(1))
+        );
+
+        // The type bounds writes. Only the upgraded database has attempt rows;
+        // the shape check above shows the fresh install has the same type.
+        assert_avs_length_bound(&upgraded.pool).await?;
 
         // Historical rows are unchanged and infer no AVS result.
         assert_eq!(
@@ -112,6 +174,8 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
     let v6 = TestDatabase::start_v6("sr_v7_br_v6").await?;
     let v7 = TestDatabase::start("sr_v7_br_v7").await?;
     let retyped = TestDatabase::start("sr_v7_br_type").await?;
+    let widened = TestDatabase::start("sr_v7_br_len").await?;
+    let unbounded = TestDatabase::start("sr_v7_br_unb").await?;
     let constrained = TestDatabase::start("sr_v7_br_check").await?;
     let result = async {
         crate::assert_runtime_schema_v6_or_v7_compatible(&v6.pool).await?;
@@ -137,9 +201,22 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         // A v7-like catalog that is not exactly v7 is drift, not acceptance.
         sqlx::raw_sql(
             "ALTER TABLE billing_payment_attempts \
-             ALTER COLUMN gateway_avs_response TYPE varchar(8)",
+             ALTER COLUMN gateway_avs_response TYPE text",
         )
         .execute(&retyped.pool)
+        .await?;
+        // A change to the length bound alone is drift too.
+        sqlx::raw_sql(
+            "ALTER TABLE billing_payment_attempts \
+             ALTER COLUMN gateway_avs_response TYPE varchar(8)",
+        )
+        .execute(&widened.pool)
+        .await?;
+        sqlx::raw_sql(
+            "ALTER TABLE billing_payment_attempts \
+             ALTER COLUMN gateway_avs_response TYPE varchar",
+        )
+        .execute(&unbounded.pool)
         .await?;
         sqlx::raw_sql(
             "ALTER TABLE billing_payment_attempts \
@@ -148,7 +225,7 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         )
         .execute(&constrained.pool)
         .await?;
-        for drifted in [&retyped, &constrained] {
+        for drifted in [&retyped, &widened, &unbounded, &constrained] {
             let error = crate::assert_runtime_schema_v6_or_v7_compatible(&drifted.pool)
                 .await
                 .expect_err("a drifted v7 catalog must be rejected");
@@ -176,6 +253,8 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         v6.cleanup().await,
         v7.cleanup().await,
         retyped.cleanup().await,
+        widened.cleanup().await,
+        unbounded.cleanup().await,
         constrained.cleanup().await,
     ];
     result?;

@@ -428,7 +428,7 @@ CREATE TABLE public.billing_payment_attempts (
     billing_address_region text,
     billing_address_postal_code text,
     billing_address_country text,
-    gateway_avs_response text,
+    gateway_avs_response varchar(1),
     CONSTRAINT billing_payment_attempts_billing_address_valid
         CHECK (
             (
