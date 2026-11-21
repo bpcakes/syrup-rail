@@ -58,6 +58,9 @@ and transaction orchestration.
   approval mutations live in their nested `approval.rs` modules.
 - `src/enrollment_application/recovery/evidence.rs` owns bounded recovery
   approval-evidence retries and the fallback that does not lock the attempt.
+- `src/enrollment_application/evidence_identity.rs` — which processor
+  identifiers non-approved evidence keeps, replaces, or reports as conflicting
+  across separate observations of one attempt.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
 - `src/period_expiry.rs` — the database-clock billing-period expiry check,
