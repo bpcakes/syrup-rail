@@ -1,15 +1,15 @@
 use async_trait::async_trait;
 use chrono::Duration;
 use syrup_rail::{
-    BillingAddress, BillingContact, BillingContactParts, GatewayAccountMode, GatewayDiagnostic,
-    GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy, GatewayMutationError,
-    GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentDiagnostic,
-    GatewayPaymentMethodMetadata, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewaySaleRequestParts,
-    GatewayStorePaymentMethodRequest, GatewayTransactionDiagnostics,
-    GatewayTransactionDiagnosticsRequest, GatewayTransactionId, GatewayTransactionReport,
-    GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway, ProcessorEvidence,
-    StatementDescriptor,
+    BillingAddress, BillingContact, BillingContactParts, GatewayAccountMode, GatewayAvsResponse,
+    GatewayDiagnostic, GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDescriptor,
+    GatewayPaymentDiagnostic, GatewayPaymentMethodMetadata, GatewayPaymentOutcome,
+    GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest, GatewaySaleIntent,
+    GatewaySaleRequest, GatewaySaleRequestParts, GatewayStorePaymentMethodRequest,
+    GatewayTransactionDiagnostics, GatewayTransactionDiagnosticsRequest, GatewayTransactionId,
+    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway,
+    ProcessorEvidence, StatementDescriptor,
 };
 use syrup_rail_nmi_client::{
     AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeDiagnostic,
@@ -186,6 +186,7 @@ fn map_payment_method_metadata(
             response_code: None,
             response_text: None,
             condition: None,
+            avs_response: None,
         },
     ))
 }
@@ -353,6 +354,14 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
         sanitized_text(parts.response_text),
         sanitized_text(parts.condition),
         map_payment_descriptor_parts(parts.descriptor.into_parts()),
+    )
+    // Anything but a single letter or digit is not an AVS result code and is
+    // dropped rather than shortened; the payment decision is unaffected.
+    .with_avs_response(
+        parts
+            .avs_response
+            .as_ref()
+            .and_then(|value| GatewayAvsResponse::parse(value.expose())),
     );
     GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics)
 }

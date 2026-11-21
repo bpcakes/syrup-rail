@@ -386,6 +386,8 @@ async fn update_attempt_for_manual_failure(
     evidence: &ProcessorEvidence,
 ) -> Result<u64, sqlx::Error> {
     let descriptor = evidence.descriptor();
+    let avs_response = evidence.avs_response();
+    let avs_response = avs_response.as_ref().map(GatewayAvsResponse::as_str);
     let result = sqlx::query(
         r#"
         UPDATE billing_payment_attempts
@@ -401,6 +403,7 @@ async fn update_attempt_for_manual_failure(
             card_last4 = $10,
             card_exp_month = $11,
             card_exp_year = $12,
+            gateway_avs_response = $13,
             resolved_at = clock_timestamp(),
             updated_at = clock_timestamp()
         WHERE id = $1 AND status = 'review_required'
@@ -426,6 +429,7 @@ async fn update_attempt_for_manual_failure(
     )
     .bind(descriptor.card_exp_month())
     .bind(descriptor.card_exp_year())
+    .bind(avs_response)
     .execute(&mut *connection)
     .await?;
     Ok(result.rows_affected())

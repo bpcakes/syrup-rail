@@ -6,8 +6,8 @@ use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use crate::{
-    BillingContact, GatewayDiagnostic, GatewayLifecycleCursorKey, GatewayOrderId,
-    GatewayPaymentMethodReference, GatewayTransactionId, PaymentToken,
+    BillingContact, GatewayAvsResponse, GatewayDiagnostic, GatewayLifecycleCursorKey,
+    GatewayOrderId, GatewayPaymentMethodReference, GatewayTransactionId, PaymentToken,
 };
 
 /// Cooldown applied after a determinate account- or provider-scoped mutation
@@ -553,6 +553,7 @@ pub struct ProcessorEvidence {
     response_text: Option<GatewayDiagnostic>,
     condition: Option<GatewayDiagnostic>,
     descriptor: GatewayPaymentDescriptor,
+    avs_response: Option<GatewayAvsResponse>,
 }
 
 impl ProcessorEvidence {
@@ -574,7 +575,21 @@ impl ProcessorEvidence {
             response_text,
             condition,
             descriptor,
+            avs_response: None,
         }
+    }
+
+    /// Attaches the provider's address-verification result from the same
+    /// response.
+    ///
+    /// The code is a diagnostic, not payment identity. The stored exact-replay
+    /// and processor-charge checks compare named evidence columns that exclude
+    /// it, and processor charges do not store it, so a response replayed after
+    /// a release that did not record AVS still matches.
+    #[must_use]
+    pub const fn with_avs_response(mut self, avs_response: Option<GatewayAvsResponse>) -> Self {
+        self.avs_response = avs_response;
+        self
     }
 
     pub const fn transaction_id(&self) -> Option<&GatewayTransactionId> {
@@ -603,6 +618,13 @@ impl ProcessorEvidence {
 
     pub const fn descriptor(&self) -> &GatewayPaymentDescriptor {
         &self.descriptor
+    }
+
+    /// The provider's address-verification result code, when the response
+    /// carried one.
+    #[must_use]
+    pub const fn avs_response(&self) -> Option<GatewayAvsResponse> {
+        self.avs_response
     }
 
     pub const fn has_gateway_reference(&self) -> bool {
@@ -661,6 +683,7 @@ impl fmt::Debug for ProcessorEvidence {
             .field("has_response_text", &self.response_text.is_some())
             .field("has_condition", &self.condition.is_some())
             .field("descriptor", &self.descriptor)
+            .field("has_avs_response", &self.avs_response.is_some())
             .finish()
     }
 }
@@ -806,6 +829,13 @@ impl GatewayPaymentOutcome {
 
     pub const fn descriptor(&self) -> &GatewayPaymentDescriptor {
         self.evidence.descriptor()
+    }
+
+    /// The provider's address-verification result code, when the response
+    /// carried one.
+    #[must_use]
+    pub const fn avs_response(&self) -> Option<GatewayAvsResponse> {
+        self.evidence.avs_response()
     }
 }
 

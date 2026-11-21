@@ -1,25 +1,28 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.6.0
-supports PostgreSQL 18 only and runs on schema v6 or v7.
+SQLx operations, and high-level subscription billing service. Version 0.7.0
+supports PostgreSQL 18 only and requires schema v7.
 
 ```toml
 [dependencies]
-syrup-rail = "0.6.0"
-syrup-rail-postgres = "0.6.0"
+syrup-rail = "0.7.0"
+syrup-rail-postgres = "0.7.0"
 ```
 
 Requires Rust 1.94 and SQLx 0.9.0. Host SQLx types must come from 0.9.0;
 0.8 pools, connections, transactions, and errors are not interchangeable.
 Upgrade the host's SQLx CLI to 0.9.0 and regenerate its query metadata.
-Schema v6 artifacts are unchanged from 0.5.5, so an existing v6 host needs no
-database migration for this package upgrade.
+Version 0.7.0 records the provider's AVS result in the v7
+`billing_payment_attempts.gateway_avs_response` column, so an existing v6 host
+commits the online v7 upgrade before deploying it. Schema v6 artifacts are
+unchanged from 0.5.5.
 
 New hosts install `schema/v7/install.sql` through their normal migration
-system. Existing schema-v6 hosts may commit the online
+system. Existing schema-v6 hosts commit the online
 `schema/v7/upgrade_from_v6.sql` following `schema/v7/README.md`, but only after
-every serving and rollback-target build accepts v6 or v7 at startup. Existing
+every serving and rollback-target build accepts v6 or v7 at startup (the 0.6.0
+bridge release); deploy 0.7.0 only after `upgrade_from_v6.sql` commits. Existing
 schema-v5 hosts stop every billing writer and commit
 `schema/v6/upgrade_from_v5.sql` in one transaction, following
 `schema/v6/README.md`; old 0.5.4 binaries must not restart after that commit.
@@ -37,7 +40,7 @@ verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v6_or_v7_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v7_compatible(pool).await?;
 # Ok(())
 # }
 ```

@@ -658,3 +658,28 @@ fn last4_requires_masked_or_four_digit_card_text() {
     assert_eq!(last4("1111".to_owned()).as_deref(), Some("1111"));
     assert_eq!(last4("4111111111111111".to_owned()), None);
 }
+
+#[test]
+fn classic_payment_outcome_carries_the_avs_result_unvalidated() {
+    for (field, expected) in [
+        ("avsresponse=Z", Some("Z")),
+        ("avs_response=N", Some("N")),
+        ("avsresponse=YY", Some("YY")),
+        ("avsresponse=Y&avs_response=Y", Some("Y")),
+        ("avsresponse=Y&avs_response=", Some("Y")),
+        ("avsresponse=Y&avs_response=N", None),
+        ("avsresponse=", None),
+        ("", None),
+    ] {
+        let outcome = classic_payment_outcome_from_form(&format!(
+            "response=3&responsetext=AVS+REJECTED&response_code=300&transactionid=txn_avs&{field}"
+        ))
+        .expect("an AVS rejection should parse");
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{field}");
+        assert_eq!(
+            outcome.avs_response.as_ref().map(SensitiveText::expose),
+            expected,
+            "{field}"
+        );
+    }
+}

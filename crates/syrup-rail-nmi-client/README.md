@@ -17,7 +17,7 @@ manage NMI plans or subscription schedules.
 
 ```toml
 [dependencies]
-syrup-rail-nmi-client = "0.6.0"
+syrup-rail-nmi-client = "0.7.0"
 ```
 
 The client never retries mutations. `MutationError::Indeterminate` and
@@ -302,6 +302,14 @@ not on the form `Debug` allowlist and `SaleRequest` prints only
 `has_cardholder_ip`. The client does not decide whether a sale may carry an
 address; the adapter and the host do. The field breaks existing `SaleRequest`
 struct literals; add `cardholder_ip: None` to keep sending none.
+
+`PaymentOutcomeParts.avs_response` carries the response's raw AVS result as
+`Option<SensitiveText>` from Classic transaction API responses (`avsresponse` /
+`avs_response`), v5 JSON sale responses (`avs_response` / `avsresponse`), and
+exact query API responses (`avs_response`), unvalidated and redacted in
+`PaymentOutcome` `Debug` output. It is a diagnostic and never decides the
+payment status. Adding the field breaks existing `PaymentOutcomeParts` struct
+literals; add `avs_response: None` when constructing test or synthetic values.
 
 `Client::query_transaction_diagnostics` performs the same bounded one-shot query
 as `query_transaction`, selected only by transaction ID, and returns

@@ -9,7 +9,7 @@ use std::fmt;
 use thiserror::Error;
 
 use super::GatewayError;
-use crate::{GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, Money};
+use crate::{GatewayAvsResponse, GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, Money};
 
 /// Largest provider code, in bytes, that a diagnostic observation retains.
 ///
@@ -312,13 +312,11 @@ impl GatewayTransactionDiagnosticsObservation {
 
     fn avs_code(&mut self, value: Option<&str>) -> Option<GatewayDiagnostic> {
         let value = value.map(str::trim).filter(|value| !value.is_empty())?;
-        let mut characters = value.chars();
-        let single = characters.next().filter(char::is_ascii_alphanumeric);
-        if single.is_none() || characters.next().is_some() {
+        let Some(code) = GatewayAvsResponse::parse(value) else {
             self.marked_partial = true;
             return None;
-        }
-        self.bounded_code(Some(value))
+        };
+        Some(GatewayDiagnostic::new(code.as_str()))
     }
 
     /// Bounds both the provider's code and the retained sanitized code, since

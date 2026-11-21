@@ -1,6 +1,21 @@
-# Syrup Rail 0.6.0 public API
+# Syrup Rail 0.7.0 public API
 
-Version 0.6.0 requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
+Version 0.7.0 requires Rust 1.94, SQLx 0.9.0, and schema v7: it records the
+provider's AVS result on payment attempts (`GatewayAvsResponse`,
+`ProcessorEvidence::with_avs_response` / `avs_response`,
+`GatewayPaymentOutcome::avs_response`, and the NMI client's
+`PaymentOutcomeParts::avs_response`). `GatewayAvsResponse::parse` accepts only
+a single ASCII letter or digit (omitting any other value rather than shortening
+it) and keeps ordinary `Debug` and `Display` output value-free; read the code
+through `as_char()` or `as_str()`. In-memory `ProcessorEvidence` equality
+includes `avs_response`, whereas stored SQL replay and processor-charge checks
+compare named columns that exclude it so 0.6.0-recorded evidence still replays
+cleanly. `PaymentOutcomeParts::avs_response` breaks existing struct literals,
+and `assert_runtime_schema_v6_or_v7_compatible` moves behind
+`schema-contract-test-support` so upgrading hosts switch to
+`assert_runtime_schema_v7_compatible` at compile time.
+
+Version 0.6.0, the SQLx upgrade, requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
 pool, transaction, and error types are incompatible with SQLx 0.8; hosts must
 upgrade their SQLx dependencies and CLI together and regenerate host metadata.
 Schema v6 and existing billing behavior are unchanged from 0.5.5 at
@@ -212,7 +227,7 @@ the descriptor on), the recurring intent variant gains a field, and the raw
 `descriptor: None` to existing literals. Without a policy nothing changes on
 the wire.
 
-0.6.0 also adds an opt-in cardholder network address for customer-initiated
+0.7.0 also adds an opt-in cardholder network address for customer-initiated
 token sales. `CardholderIpAddress` wraps an `IpAddr`, stores an IPv4-mapped
 IPv6 address as IPv4, and never prints its value. A host that has established
 the cardholder's own address attaches it with
@@ -373,13 +388,14 @@ than being expired automatically.
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v6_or_v7_compatible` after host migrations and
-before serving billing traffic. This release supports PostgreSQL 18 and schema
-v6 or v7, and writes only schema-v6 columns; the assertion is read-only and does
-not install or upgrade a schema. `assert_runtime_schema_v7_compatible` and
-`assert_runtime_schema_v6_compatible` each accept exactly one version; the exact
-v6 check rejects a v7 catalog, so a host that may run against v7, including as a
-rollback target, must not use it.
+Use `assert_runtime_schema_v7_compatible` after host migrations and before
+serving billing traffic. This release supports PostgreSQL 18 and requires
+schema v7, because attempt reads and writes include `gateway_avs_response`; the
+assertion is read-only and does not install or upgrade a schema.
+`assert_runtime_schema_v6_or_v7_compatible` is moved behind the
+`schema-contract-test-support` feature (the 0.6.0 bridge release exports it in
+its default facade), and `assert_runtime_schema_v6_compatible` confirms a
+pre-upgrade v6 catalog.
 `assert_runtime_schema_v5_compatible` remains for confirming the pre-cutover
 state before a host commits `schema/v6/upgrade_from_v5.sql` with every billing
 writer stopped, and `assert_runtime_schema_v4_compatible` likewise before

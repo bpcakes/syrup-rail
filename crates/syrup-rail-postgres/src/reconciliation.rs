@@ -165,7 +165,7 @@ pub async fn claim_exact_reconciliation_attempts(
         .execute(&mut *transaction)
         .await?;
     // The claim names its returned columns: a `RETURNING attempts.*` statement
-    // cached on a pooled connection fails after schema v7 appends a column.
+    // cached on a pooled connection fails after a later schema appends a column.
     let rows = sqlx::query(concat!(
         r#"
         WITH candidate_attempts AS MATERIALIZED (
