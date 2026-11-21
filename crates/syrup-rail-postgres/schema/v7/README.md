@@ -7,19 +7,24 @@ v6 and do not edit any shipped artifact under `schema/v1` through `schema/v6`.
 
 Version 7 appends one nullable column and replaces one function to cover it:
 
-- `billing_payment_attempts.gateway_avs_response text` holds the provider's
+- `billing_payment_attempts.gateway_avs_response varchar(16)` holds the provider's
   address-verification result code from the attempt's original response.
 - `billing_host_charge_ledger_admission` additionally requires a pending
   host-charge attempt to have no AVS result before `submit` admission, as it
   already requires for the other gateway response columns.
 
 No row, constraint, index, trigger, view, or other column changes, and the
-upgrade infers nothing about historical rows: they keep `NULL`. Unlike the
-attempt's other gateway response columns, which
-`billing_payment_attempts_gateway_text_check` bounds to 512 octets, the value
-carries no CHECK constraint, so the upgrade stays catalog-only. This release
-never writes it; a runtime that does must bound the value and recognize it from
-the provider adapter's closed AVS result-code vocabulary (never persisting raw
+upgrade infers nothing about historical rows: they keep `NULL`.
+
+The `varchar(16)` type bounds the value to 16 characters on every write.
+Provider AVS result codes are one or two characters. The attempt's other
+gateway response columns are bounded by the
+`billing_payment_attempts_gateway_text_check` constraint instead. The new
+column uses a type bound because adding a column whose type has a length limit
+verifies no existing rows, while adding a CHECK scans the table under the
+`ALTER TABLE` lock. The bound limits length, not vocabulary. This release never
+writes the column; a runtime that does must recognize the value from the
+provider adapter's closed AVS result-code vocabulary (never persisting raw
 provider text or address fragments), because subscriber scrubbing retains it
 with `gateway_response_code` as a closed decision code rather than the address
 it was checked against.
