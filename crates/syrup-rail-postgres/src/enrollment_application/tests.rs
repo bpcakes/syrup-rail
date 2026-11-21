@@ -710,6 +710,7 @@ fn approved_outcome_with_optional_reference(
 }
 
 mod application;
+mod avs;
 mod billing_address;
 mod diagnostics;
 mod fixture;

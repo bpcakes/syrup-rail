@@ -20,7 +20,8 @@ with an older or newer core package.
 
 ## Branches
 
-- `master` is the default branch and prepares the 0.6.0 SQLx upgrade.
+- `master` is the default branch and prepares 0.7.0, which follows the 0.6.0
+  SQLx upgrade.
 - `dev/0.6.0` contains separate unfinished development; its historical branch
   name no longer reserves the 0.6.0 release number.
 - `main` and `integration/0.6.0` are historical references; target new work at
@@ -35,7 +36,9 @@ IdentityPro-consumed `3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a` behavior.
 The public SQLx pool, connection, transaction, and error types make this a
 breaking package release. It preserves schema v6 byte-for-byte and adds schema
 v7 with `assert_runtime_schema_v6_or_v7_compatible`, so hosts already on v6
-need no database migration before deploying 0.6.0.
+need no database migration before deploying 0.6.0. Version 0.7.0 writes the v7
+attempt AVS column and requires v7, so a host deploys 0.6.0 as its bridge and
+commits the online v7 upgrade first.
 
 Before integrating `dev/0.6.0`, assign its unfinished features a later release
 number. Preserve the shipped schema v5 (billing addresses), v6 (typed
@@ -74,7 +77,7 @@ scripts/jig check sqlx
 ```
 
 Replace `VERSION` with the exact stable semantic version recorded in the
-workspace, such as `0.6.0`. The advisory check follows
+workspace, such as `0.7.0`. The advisory check follows
 [`security/dependency-advisories.md`](security/dependency-advisories.md).
 Use SQLx CLI 0.9.0 for both metadata preparation and checks. To regenerate
 metadata against the disposable PostgreSQL 18 schema-v7 database, run

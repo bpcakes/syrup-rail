@@ -297,6 +297,9 @@ fn exact_query_response_from_xml(
         decision.response_code,
         response_text,
     );
+    let (avs_response, _) = resolve_optional_scalar(
+        collect_xml_scalar(transaction, &["avs_response"], Protocol).finish(),
+    );
     Ok(Some(ExactQueryResponse {
         outcome: PaymentOutcome {
             status,
@@ -313,6 +316,7 @@ fn exact_query_response_from_xml(
                 card_exp_month,
                 card_exp_year,
             },
+            avs_response: avs_response.map(SensitiveText::new),
             diagnostics,
         }
         .normalize_diagnostics(),

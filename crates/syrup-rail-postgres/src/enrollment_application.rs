@@ -1057,7 +1057,8 @@ pub(crate) fn reconcile_non_approved_evidence(
             observed.response_text().cloned(),
             observed.condition().cloned(),
             observed.descriptor().clone(),
-        ),
+        )
+        .with_avs_response(observed.avs_response().or(persisted.avs_response())),
         transaction_id_conflict: false,
         payment_method_reference_conflict: false,
         discarded_transaction_id,

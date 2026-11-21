@@ -1,6 +1,6 @@
--- Every schema-v6 column of billing_payment_attempts, named explicitly.
--- A cached `*` projection fails once schema v7 appends a column, so runtime
--- reads use this list and keep working across that upgrade.
+-- Every schema-v7 column of billing_payment_attempts, named explicitly.
+-- A cached `*` projection fails once a later schema appends a column, so
+-- runtime reads use this list and keep working across that upgrade.
 -- Comments here are part of the SQL text: keep them line comments.
 id, billing_scope_id, subscriber_id, plan_key,
         host_charge_target_id, subscription_id, payment_method_id,
@@ -47,4 +47,4 @@ id, billing_scope_id, subscriber_id, plan_key,
         subscription_initial_past_due_access, billing_last_name,
         billing_address_line1, billing_address_line2, billing_address_city,
         billing_address_region, billing_address_postal_code,
-        billing_address_country
+        billing_address_country, gateway_avs_response

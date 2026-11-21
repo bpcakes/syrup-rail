@@ -488,3 +488,21 @@ fn an_unsettled_transaction_keeps_its_own_evidence_beside_a_failed_sale() {
         assert_eq!(beside_sale.diagnostics, alone.diagnostics, "{name}");
     }
 }
+
+#[test]
+fn exact_query_outcome_carries_the_transaction_avs_result() {
+    let xml = failed_transaction(&format!(
+        "<avs_response>Z</avs_response>{}",
+        sale_action(
+            "<response_text>AVS REJECTED</response_text><response_code>300</response_code>"
+        )
+    ));
+    let outcome = queried(&xml);
+    assert_eq!(outcome.status, PaymentStatus::Failed);
+    assert_eq!(exposed(&outcome.avs_response), Some("Z"));
+
+    let without = queried(&failed_transaction(&sale_action(
+        "<response_text>AVS REJECTED</response_text><response_code>300</response_code>",
+    )));
+    assert_eq!(without.avs_response, None);
+}

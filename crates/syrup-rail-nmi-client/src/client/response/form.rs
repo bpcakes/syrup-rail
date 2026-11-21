@@ -92,6 +92,7 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
     let (card_number, _) = resolve_optional_scalar(
         collect_classic_scalar(&fields, &["cc_number", "ccnumber"], GatewayField).finish(),
     );
+    let (avs_response, _) = resolve_optional_scalar(avs_response);
     Ok(PaymentOutcome {
         status,
         transaction_id,
@@ -109,6 +110,7 @@ pub(in crate::client) fn classic_payment_outcome_from_form(
             card_exp_month: None,
             card_exp_year: None,
         },
+        avs_response: avs_response.map(SensitiveText::new),
         diagnostics,
     }
     .normalize_diagnostics())

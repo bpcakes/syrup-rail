@@ -192,6 +192,9 @@ pub struct PaymentOutcome {
     pub(crate) response_text: Option<SensitiveText>,
     pub(crate) condition: Option<SensitiveText>,
     pub(crate) descriptor: PaymentDescriptor,
+    /// The address-verification result exactly as the response carried it.
+    /// Hosts validate it before use; see `PaymentOutcomeParts::avs_response`.
+    pub(crate) avs_response: Option<SensitiveText>,
     pub(crate) diagnostics: Vec<PaymentOutcomeDiagnostic>,
 }
 
@@ -225,6 +228,7 @@ impl PaymentOutcome {
             response_text: self.response_text,
             condition: self.condition,
             descriptor: self.descriptor,
+            avs_response: self.avs_response,
             diagnostics: self.diagnostics,
         }
     }
@@ -242,6 +246,7 @@ impl fmt::Debug for PaymentOutcome {
             .field("has_response_text", &self.response_text.is_some())
             .field("has_condition", &self.condition.is_some())
             .field("descriptor", &self.descriptor)
+            .field("has_avs_response", &self.avs_response.is_some())
             .field("diagnostics", &self.diagnostics)
             .finish()
     }
@@ -257,6 +262,10 @@ pub struct PaymentOutcomeParts {
     pub response_text: Option<SensitiveText>,
     pub condition: Option<SensitiveText>,
     pub descriptor: PaymentDescriptor,
+    /// The response's address-verification result (`avsresponse` from the
+    /// transaction API, `avs_response` from the query API), unvalidated. It
+    /// is a diagnostic and never decides the payment status.
+    pub avs_response: Option<SensitiveText>,
     pub diagnostics: Vec<PaymentOutcomeDiagnostic>,
 }
 
@@ -387,6 +396,7 @@ mod tests {
             response_text: None,
             condition: None,
             descriptor: PaymentDescriptor::default(),
+            avs_response: None,
             diagnostics: vec![
                 PaymentOutcomeDiagnostic::DuplicateTransactionAtProcessor,
                 PaymentOutcomeDiagnostic::InvalidOrConflictingDecisionField,

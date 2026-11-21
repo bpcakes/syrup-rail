@@ -447,6 +447,7 @@ pub fn review_required_manual_failure_evidence(attempt: &PaymentAttempt) -> Proc
         condition,
         current.descriptor().clone(),
     )
+    .with_avs_response(current.avs_response())
 }
 
 fn payment_method_update_has_processor_evidence(evidence: &ProcessorEvidence) -> bool {

@@ -389,6 +389,37 @@ impl GatewayDiagnostic {
 
 impl_redacted_format!(GatewayDiagnostic);
 
+/// A provider's address-verification (AVS) result code.
+///
+/// AVS result codes, as NMI and the card networks' AVS scheme define them, are
+/// a single ASCII letter or digit. Parsing keeps exactly that and rejects any
+/// other value instead of shortening it into a misleading code, so a stored
+/// value always fits the schema-v7 `varchar(1)` `gateway_avs_response` column.
+/// The code is a closed decision value, never the address it was checked
+/// against, so it is safe to log.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GatewayAvsResponse(u8);
+
+impl GatewayAvsResponse {
+    /// Parses a provider value, ignoring surrounding whitespace. Returns
+    /// `None` for an empty value and for anything other than one ASCII letter
+    /// or digit. Case is preserved: providers define the codes' case.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().as_bytes() {
+            [code] if code.is_ascii_alphanumeric() => Some(Self(*code)),
+            _ => None,
+        }
+    }
+
+    pub const fn as_char(self) -> char {
+        self.0 as char
+    }
+
+    pub fn as_str(&self) -> &str {
+        std::str::from_utf8(std::slice::from_ref(&self.0)).expect("an ASCII code is UTF-8")
+    }
+}
+
 pub use contact::{
     BillingAddress, BillingAddressError, BillingContact, BillingContactError, BillingContactParts,
 };

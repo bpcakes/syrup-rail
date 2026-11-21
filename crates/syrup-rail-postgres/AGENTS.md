@@ -32,8 +32,8 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v6-or-v7 runtime
-  compatibility assertion, the exact v7 and v6 assertions, the retained v5
+- `src/schema_contract.rs` — production read-only v7 runtime compatibility
+  assertion, the v6-or-v7 bridge and exact v6 assertions, the retained v5
   and v4 pre-cutover assertions, and canonical catalog conformance;
   `src/schema_contract/fingerprint.rs` owns snapshot-consistent catalog
   fingerprinting. Version-specific, upgrade, and shared fixture tests live

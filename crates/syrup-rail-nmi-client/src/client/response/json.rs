@@ -151,6 +151,9 @@ pub(in crate::client) fn payment_outcome_from_json(
         response_text: sensitive_gateway_field(response_text),
         condition: sensitive_gateway_field(decision.condition),
         descriptor: descriptor_from_json(value),
+        // AVS is read from classic transaction and query API responses only;
+        // a v5 JSON sale on a saved card records none.
+        avs_response: None,
         diagnostics,
     }
     .normalize_diagnostics())

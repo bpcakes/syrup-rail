@@ -1752,7 +1752,7 @@ dependencies = [
 
 [[package]]
 name = "syrup-rail"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1765,7 +1765,7 @@ dependencies = [
 
 [[package]]
 name = "syrup-rail-nmi"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1782,7 +1782,7 @@ dependencies = [
 
 [[package]]
 name = "syrup-rail-nmi-client"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "futures-util",
  "h2",
@@ -1798,7 +1798,7 @@ dependencies = [
 
 [[package]]
 name = "syrup-rail-postgres"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "syrup-rail-sqlx-gate"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "postgres-test-harness",
  "sqlx",

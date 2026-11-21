@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.6.0"
-syrup-rail-postgres = "0.6.0"
-syrup-rail-nmi = "0.6.0" # only for NMI-backed hosts
+syrup-rail = "0.7.0"
+syrup-rail-postgres = "0.7.0"
+syrup-rail-nmi = "0.7.0" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.6.0"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.7.0"`
 directly.
 
 ## Subscription terms
@@ -112,7 +112,8 @@ Existing schema-v6 hosts follow the
 [`v6` to `v7` guide](crates/syrup-rail-postgres/schema/v7/README.md), an
 online single-transaction upgrade that appends one nullable attempt column and
 updates host-charge submit admission;
-deploy a build that accepts v6 or v7 at startup first. Schema-v5 hosts first
+deploy a build that accepts v6 or v7 at startup, such as 0.6.0, first and
+commit the upgrade before deploying 0.7.0, which requires v7. Schema-v5 hosts first
 follow the checked-in
 [`v5` to `v6` cutover guide](crates/syrup-rail-postgres/schema/v6/README.md),
 a single stopped-writer transaction that widens two resolution-code
@@ -144,12 +145,15 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v6 or v7 install or committed a
-forward-only upgrade artifact, call
-`assert_runtime_schema_v6_or_v7_compatible(&pool).await` during process
-startup and before accepting billing traffic. The assertion checks the complete
-canonical catalog inside one repeatable-read, read-only transaction and accepts
-exactly the v6 or the v7 fingerprint.
+After the host has applied its immutable v7 install or committed the
+forward-only v7 upgrade, call
+`assert_runtime_schema_v7_compatible(&pool).await` during process startup and
+before accepting billing traffic. The 0.7.0 runtime records each payment
+response's AVS result in the v7 `gateway_avs_response` column, so it requires
+v7. The assertion checks the complete canonical catalog inside one
+repeatable-read, read-only transaction and accepts exactly the v7 fingerprint.
+`assert_runtime_schema_v6_or_v7_compatible` remains for a 0.6.0 bridge build
+that must start on either catalog.
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even

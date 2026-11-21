@@ -486,37 +486,34 @@ async fn read_attempts_on(
     Ok(())
 }
 
+/// The 0.6.0 bridge runtime read only schema-v6 columns, so its cached
+/// statements survived the online v7 upgrade (verified at revision `9b8aacf`).
+/// This runtime reads and writes `gateway_avs_response` and requires v7, so it
+/// runs on a populated catalog upgraded through every version, twice on one
+/// connection to reuse the statements and PL/pgSQL plans it cached.
 #[tokio::test]
-async fn runtime_attempt_reads_cached_on_v6_survive_the_v7_upgrade() -> Result<(), Box<dyn Error>> {
+async fn runtime_reads_and_functions_run_on_a_populated_upgraded_v7_catalog()
+-> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start_v3("sr_cached_v7").await?;
     let result = async {
         populated_v4(&database).await?;
         database.upgrade_v4_to_v5().await?;
         database.upgrade_v5_to_v6().await?;
+        database.upgrade_v6_to_v7().await?;
+        assert_v7_conforms(&database.pool).await?;
         let (scope_id, attempt_id, gateway_account_id): (Uuid, Uuid, Uuid) = sqlx::query_as(
             "SELECT billing_scope_id, id, gateway_account_id FROM billing_payment_attempts \
              ORDER BY created_at, id LIMIT 1",
         )
         .fetch_one(&database.pool)
         .await?;
-        // One connection, so the second round reuses the statements and
-        // PL/pgSQL plans the first round cached against the v6 catalog.
         let serving = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
             .connect_with((*database.pool.connect_options()).clone())
             .await?;
-        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&serving)
-            .await?;
         let rounds = async {
-            read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "v6").await?;
-            database.upgrade_v6_to_v7().await?;
-            assert_v7_conforms(&database.pool).await?;
-            read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "v7").await?;
-            let pid_after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                .fetch_one(&serving)
-                .await?;
-            assert_eq!(pid_after, pid);
+            read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "first").await?;
+            read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "again").await?;
             Ok::<(), Box<dyn Error>>(())
         }
         .await;

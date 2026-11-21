@@ -28,7 +28,38 @@ fn empty_outcome(status: PaymentStatus) -> PaymentOutcomeParts {
         response_text: None,
         condition: None,
         descriptor: PaymentDescriptor::default(),
+        avs_response: None,
         diagnostics: Vec::new(),
+    }
+}
+
+#[test]
+fn avs_result_reaches_evidence_only_as_a_single_letter_or_digit() {
+    for (raw, expected) in [
+        (Some("Z"), Some('Z')),
+        (Some(" n "), Some('n')),
+        (Some("0"), Some('0')),
+        (None, None),
+        (Some(""), None),
+        (Some("YY"), None),
+        (Some("N/A"), None),
+        (Some("-"), None),
+        (Some("123 Main St"), None),
+    ] {
+        let mut parts = empty_outcome(PaymentStatus::Failed);
+        parts.response_code = Some(text("300"));
+        parts.response_text = Some(text("AVS REJECTED"));
+        parts.avs_response = raw.map(text);
+        let outcome = map_payment_outcome_parts(parts);
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Failed, "{raw:?}");
+        assert_eq!(
+            outcome
+                .evidence()
+                .avs_response()
+                .map(GatewayAvsResponse::as_char),
+            expected,
+            "{raw:?}"
+        );
     }
 }
 

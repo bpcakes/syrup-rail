@@ -1,6 +1,9 @@
-# Syrup Rail 0.6.0 public API
+# Syrup Rail 0.7.0 public API
 
-Version 0.6.0 requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
+Version 0.7.0 requires Rust 1.94, SQLx 0.9.0, and schema v7: it records the
+provider's AVS result on payment attempts (`ProcessorEvidence::avs_response`,
+`GatewayAvsResponse`, and the NMI client's `PaymentOutcomeParts::avs_response`).
+Version 0.6.0, the SQLx upgrade, requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
 pool, transaction, and error types are incompatible with SQLx 0.8; hosts must
 upgrade their SQLx dependencies and CLI together and regenerate host metadata.
 Schema v6 and existing billing behavior are unchanged from 0.5.5 at
