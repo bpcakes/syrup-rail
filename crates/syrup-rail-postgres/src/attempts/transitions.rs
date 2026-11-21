@@ -74,8 +74,18 @@ pub(crate) async fn persist_attempt_transition(
 ) -> Result<(), PaymentAttemptStoreError> {
     let descriptor = evidence.descriptor();
     // Written with the rest of the response's evidence. Schema v7's
-    // `varchar(1)` column holds any parsed code.
-    let avs_response = evidence.avs_response();
+    // `varchar(1)` column holds any parsed code. An approval reconciled from
+    // an observation without AVS keeps a previously stored code from the same
+    // submitted attempt, while foreign non-code bytes parsed as `None` are
+    // still cleared.
+    let avs_response = match transition {
+        AttemptTransition::Approved(_) => evidence
+            .avs_response()
+            .or(attempt.state().processor_evidence().avs_response()),
+        AttemptTransition::Resolved { .. } | AttemptTransition::LateApprovalReview { .. } => {
+            evidence.avs_response()
+        }
+    };
     let avs_response = avs_response.as_ref().map(GatewayAvsResponse::as_str);
     if let AttemptTransition::LateApprovalReview {
         resolution_code,

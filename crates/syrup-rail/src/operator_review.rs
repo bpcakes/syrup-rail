@@ -455,6 +455,7 @@ fn payment_method_update_has_processor_evidence(evidence: &ProcessorEvidence) ->
         || evidence.response().is_some()
         || evidence.response_code().is_some()
         || evidence.condition().is_some()
+        || evidence.avs_response().is_some()
         || evidence.descriptor().payment_type().is_some()
         || evidence.descriptor().card_brand().is_some()
         || evidence.descriptor().card_last_four().is_some()

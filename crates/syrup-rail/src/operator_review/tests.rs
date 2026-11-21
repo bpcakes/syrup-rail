@@ -135,7 +135,8 @@ fn manual_failure_policy_refuses_charge_risk_and_preserves_update_evidence() {
         Some(GatewayDiagnostic::new("Processor response: Approved")),
         Some(GatewayDiagnostic::new("complete")),
         crate::GatewayPaymentDescriptor::default(),
-    );
+    )
+    .with_avs_response(crate::GatewayAvsResponse::parse("Y"));
     let update = review_attempt(
         crate::PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
             plan_key: crate::PlanKey::new("test_plan").unwrap(),
@@ -160,10 +161,53 @@ fn manual_failure_policy_refuses_charge_risk_and_preserves_update_evidence() {
         preserved.condition().map(GatewayDiagnostic::expose),
         Some("complete")
     );
+    assert_eq!(
+        preserved.avs_response(),
+        crate::GatewayAvsResponse::parse("Y")
+    );
     let response_text = preserved
         .response_text()
         .expect("manual closure note")
         .expose();
     assert!(response_text.contains("Processor response: Approved"));
     assert!(response_text.contains(PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE));
+
+    // Even when AVS is the only structured processor evidence on a payment
+    // method update, manual closure treats it as processor evidence rather than
+    // asserting that no processor transaction occurred.
+    let avs_only_update = review_attempt(
+        crate::PaymentAttemptTarget::SubscriptionPaymentMethodUpdate {
+            plan_key: crate::PlanKey::new("test_plan").unwrap(),
+            payment_method_id: crate::PaymentMethodId::new(Uuid::from_u128(7)),
+            expected_state: crate::PaymentMethodUpdateSnapshot::new(
+                crate::SubscriptionId::new(Uuid::from_u128(8)),
+                crate::PaymentMethodId::new(Uuid::from_u128(7)),
+                GatewayTransactionId::new("txn-initial").unwrap(),
+            ),
+        },
+        0,
+        submitted_at,
+        ProcessorEvidence::new(
+            None,
+            None,
+            None,
+            None,
+            Some(GatewayDiagnostic::new("AVS check returned Z")),
+            None,
+            crate::GatewayPaymentDescriptor::default(),
+        )
+        .with_avs_response(crate::GatewayAvsResponse::parse("Z")),
+    );
+    let avs_only_preserved = review_required_manual_failure_evidence(&avs_only_update);
+    assert_eq!(
+        avs_only_preserved.avs_response(),
+        crate::GatewayAvsResponse::parse("Z")
+    );
+    assert_eq!(avs_only_preserved.condition(), None);
+    let avs_only_text = avs_only_preserved
+        .response_text()
+        .expect("manual closure note")
+        .expose();
+    assert!(avs_only_text.contains("AVS check returned Z"));
+    assert!(avs_only_text.contains(PAYMENT_METHOD_UPDATE_MANUAL_CLOSURE_NOTE));
 }

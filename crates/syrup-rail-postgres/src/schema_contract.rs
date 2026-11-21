@@ -391,8 +391,7 @@ const V7_CURRENT_SUBSCRIPTION_COLUMNS: &[&str] = V6_CURRENT_SUBSCRIPTION_COLUMNS
 /// Why a host database does not satisfy a canonical schema contract.
 ///
 /// [`crate::assert_runtime_schema_v7_compatible`] reports version `7`,
-/// [`crate::assert_runtime_schema_v6_or_v7_compatible`] and
-/// [`crate::assert_runtime_schema_v6_compatible`] report version `6`,
+/// [`crate::assert_runtime_schema_v6_compatible`] reports version `6`,
 /// [`crate::assert_runtime_schema_v5_compatible`] reports version `5`, and
 /// [`crate::assert_runtime_schema_v4_compatible`] reports version `4` in its
 /// [`Self::Contract`] diagnostic. Database failures include inability to begin
@@ -436,7 +435,7 @@ impl From<sqlx::Error> for SchemaConformanceAttemptError {
 /// `schema-contract-test-support` feature.
 ///
 /// This function is not part of the ordinary production facade because the
-/// current runtime requires schema v6 or v7. It does not install, upgrade, preflight,
+/// current runtime requires schema v7. It does not install, upgrade, preflight,
 /// audit, or otherwise mutate the schema. It runs the full canonical v3 catalog conformance
 /// and fingerprint check used by the schema-contract tests in one
 /// `REPEATABLE READ READ ONLY` PostgreSQL transaction. PostgreSQL major version
@@ -464,16 +463,15 @@ pub async fn assert_runtime_schema_v3_compatible(
     .await
 }
 
-/// Asserts that a host database is exactly the canonical schema-v7 catalog.
+/// Asserts that a host database is exactly the canonical schema-v7 catalog
+/// before the host accepts billing work.
 ///
 /// Version 7 appends the nullable
 /// `billing_payment_attempts.gateway_avs_response` column and replaces
 /// `billing_host_charge_ledger_admission` through the online
-/// `schema/v7/upgrade_from_v6.sql`. This runtime does not yet write that
-/// column, so hosts on this release call
-/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing
-/// work; this exact check is for confirming that the upgrade committed. It is
-/// read-only and requires PostgreSQL major version 18.
+/// `schema/v7/upgrade_from_v6.sql`. This runtime reads and writes that column,
+/// so hosts on 0.7.0 call this assertion at startup. It is read-only and
+/// requires PostgreSQL major version 18.
 pub async fn assert_runtime_schema_v7_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -487,15 +485,12 @@ pub async fn assert_runtime_schema_v7_compatible(
 }
 
 /// Asserts that a host database is the canonical schema-v6 or schema-v7
-/// catalog before the host accepts billing work.
+/// catalog in tests or migration tooling built with `schema-contract-test-support`.
 ///
-/// This runtime reads and writes only schema-v6 columns, by name, so it is
-/// correct on either catalog. Accepting both lets a host keep this build as
-/// its rollback target while a later build applies
-/// `schema/v7/upgrade_from_v6.sql` with writers running. Every other
-/// conformance check is the same for both versions; only the catalog
-/// fingerprint differs, and it must equal one of the two exactly. Failures
-/// report version `6`. Read-only; requires PostgreSQL major version 18.
+/// Not part of the default 0.7.0 production facade because 0.7.0 requires
+/// schema v7; call [`assert_runtime_schema_v7_compatible`] before accepting
+/// billing work. Failures report version `6`. Read-only; requires PostgreSQL 18.
+#[cfg(any(test, feature = "schema-contract-test-support"))]
 pub async fn assert_runtime_schema_v6_or_v7_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -510,12 +505,11 @@ pub async fn assert_runtime_schema_v6_or_v7_compatible(
 
 /// Asserts that a host database is exactly the canonical schema-v6 contract.
 ///
-/// It rejects schema v7. Hosts on this release call
-/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing work
-/// so the build remains compatible across the online v7 upgrade and as a
-/// rollback target; this exact check confirms the pre-upgrade v6 catalog in a
-/// host's migration workflow. It is read-only, requires PostgreSQL major
-/// version 18, and rejects schema v5.
+/// It rejects schema v7. The current runtime requires schema v7; call
+/// [`assert_runtime_schema_v7_compatible`] before accepting billing work. This
+/// exact check confirms the pre-upgrade v6 catalog in a host's migration
+/// workflow. It is read-only, requires PostgreSQL major version 18, and
+/// rejects schema v5.
 pub async fn assert_runtime_schema_v6_compatible(
     pool: &PgPool,
 ) -> Result<(), SchemaConformanceError> {
@@ -531,8 +525,8 @@ pub async fn assert_runtime_schema_v6_compatible(
 /// Asserts that a host database still matches the canonical schema-v5
 /// contract.
 ///
-/// The current runtime requires schema v6 or v7; use
-/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing work.
+/// The current runtime requires schema v7; use
+/// [`assert_runtime_schema_v7_compatible`] before accepting billing work.
 /// This read-only check remains available so hosts can confirm the pre-cutover
 /// state before applying `schema/v6/upgrade_from_v5.sql`. It requires
 /// PostgreSQL major version 18.
@@ -551,8 +545,8 @@ pub async fn assert_runtime_schema_v5_compatible(
 /// Asserts that a host database still matches the canonical schema-v4
 /// contract.
 ///
-/// The current runtime requires schema v6 or v7; use
-/// [`assert_runtime_schema_v6_or_v7_compatible`] before accepting billing work.
+/// The current runtime requires schema v7; use
+/// [`assert_runtime_schema_v7_compatible`] before accepting billing work.
 /// This read-only check remains available for hosts that still need to confirm
 /// a schema-v4 state before applying `schema/v5/upgrade_from_v4.sql`. It
 /// requires PostgreSQL major version 18.

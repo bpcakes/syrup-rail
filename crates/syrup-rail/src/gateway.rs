@@ -622,6 +622,7 @@ impl ProcessorEvidence {
 
     /// The provider's address-verification result code, when the response
     /// carried one.
+    #[must_use]
     pub const fn avs_response(&self) -> Option<GatewayAvsResponse> {
         self.avs_response
     }
@@ -682,7 +683,7 @@ impl fmt::Debug for ProcessorEvidence {
             .field("has_response_text", &self.response_text.is_some())
             .field("has_condition", &self.condition.is_some())
             .field("descriptor", &self.descriptor)
-            .field("avs_response", &self.avs_response)
+            .field("has_avs_response", &self.avs_response.is_some())
             .finish()
     }
 }
@@ -828,6 +829,13 @@ impl GatewayPaymentOutcome {
 
     pub const fn descriptor(&self) -> &GatewayPaymentDescriptor {
         self.evidence.descriptor()
+    }
+
+    /// The provider's address-verification result code, when the response
+    /// carried one.
+    #[must_use]
+    pub const fn avs_response(&self) -> Option<GatewayAvsResponse> {
+        self.evidence.avs_response()
     }
 }
 

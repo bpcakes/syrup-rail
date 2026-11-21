@@ -491,18 +491,38 @@ fn an_unsettled_transaction_keeps_its_own_evidence_beside_a_failed_sale() {
 
 #[test]
 fn exact_query_outcome_carries_the_transaction_avs_result() {
-    let xml = failed_transaction(&format!(
-        "<avs_response>Z</avs_response>{}",
-        sale_action(
-            "<response_text>AVS REJECTED</response_text><response_code>300</response_code>"
-        )
-    ));
-    let outcome = queried(&xml);
-    assert_eq!(outcome.status, PaymentStatus::Failed);
-    assert_eq!(exposed(&outcome.avs_response), Some("Z"));
-
-    let without = queried(&failed_transaction(&sale_action(
+    let action = sale_action(
         "<response_text>AVS REJECTED</response_text><response_code>300</response_code>",
-    )));
-    assert_eq!(without.avs_response, None);
+    );
+    for (avs_xml, expected) in [
+        ("<avs_response>Z</avs_response>", Some("Z")),
+        ("<avs_response>YY</avs_response>", Some("YY")),
+        (
+            "<avs_response>Z</avs_response><avs_response>Z</avs_response>",
+            Some("Z"),
+        ),
+        (
+            "<avs_response>Z</avs_response><avs_response>N</avs_response>",
+            None,
+        ),
+        (
+            "<avs_response>Z</avs_response><avs_response></avs_response>",
+            None,
+        ),
+        ("<avs_response></avs_response>", None),
+        ("<avs_response><b>Z</b></avs_response>", None),
+        ("", None),
+    ] {
+        let outcome = queried(&failed_transaction(&format!("{avs_xml}{action}")));
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{avs_xml}");
+        assert_eq!(exposed(&outcome.avs_response), expected, "{avs_xml}");
+    }
+
+    let approved = queried(
+        "<nm_response><transaction><transaction_id>txn_approved_avs</transaction_id>\
+         <response>1</response><response_code>100</response_code><condition>complete</condition>\
+         <avs_response>Y</avs_response></transaction></nm_response>",
+    );
+    assert_eq!(approved.status, PaymentStatus::Approved);
+    assert_eq!(exposed(&approved.avs_response), Some("Y"));
 }

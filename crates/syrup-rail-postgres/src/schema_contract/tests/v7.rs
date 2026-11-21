@@ -427,7 +427,7 @@ async fn read_attempts_on(
 
     // Also exercise PL/pgSQL functions (`billing_host_charge_ledger_admission`
     // and the `%ROWTYPE` trigger `billing_set_processor_charge_attempt_dimensions`)
-    // on the same pooled connection before and after the online upgrade.
+    // on the same pooled connection across repeated rounds.
     let target_id = Uuid::now_v7();
     let charge_attempt_id = Uuid::now_v7();
     let order_id = format!("cached-order-{label}");
@@ -511,9 +511,16 @@ async fn runtime_reads_and_functions_run_on_a_populated_upgraded_v7_catalog()
             .max_connections(1)
             .connect_with((*database.pool.connect_options()).clone())
             .await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&serving)
+            .await?;
         let rounds = async {
             read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "first").await?;
             read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "again").await?;
+            let pid_after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&serving)
+                .await?;
+            assert_eq!(pid_after, pid);
             Ok::<(), Box<dyn Error>>(())
         }
         .await;

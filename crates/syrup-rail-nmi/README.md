@@ -131,6 +131,11 @@ recency. The observation keeps NMI's gateway `response_code` separate from the
 processor's `processor_response_code`, with source `nmi_query_api`. Name,
 address, email, card, and signature fields in the response are never extracted.
 
+Payment outcomes from Classic sales and validations, v5 JSON sales, and exact
+queries also pass NMI's AVS result through `GatewayAvsResponse::parse` onto
+`ProcessorEvidence::avs_response`. Any value other than one ASCII letter or
+digit records no AVS result and never changes the payment status.
+
 `nmi_renewal_decline_retry_advice` interprets a determinate automatic-renewal
 failure's durable `response_code` for the PostgreSQL integration's
 `BillingTransactionCoordinator::renewal_decline_retry_advice`. Codes 220-224,

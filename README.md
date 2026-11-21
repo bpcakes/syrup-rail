@@ -152,16 +152,18 @@ before accepting billing traffic. The 0.7.0 runtime records each payment
 response's AVS result in the v7 `gateway_avs_response` column, so it requires
 v7. The assertion checks the complete canonical catalog inside one
 repeatable-read, read-only transaction and accepts exactly the v7 fingerprint.
-`assert_runtime_schema_v6_or_v7_compatible` remains for a 0.6.0 bridge build
-that must start on either catalog.
+`assert_runtime_schema_v6_or_v7_compatible` is moved behind the
+`schema-contract-test-support` feature in 0.7.0 (the 0.6.0 bridge release
+exports it for hosts spanning the v6-to-v7 upgrade).
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even
 a host-prefixed column to a canonical relation is unsupported and fails the
-fingerprint check. The assertion also fails closed for v1, v2, v3, v4, or other
-canonical drift. `assert_runtime_schema_v4_compatible` remains available to
-confirm the pre-cutover v4 state. Neither assertion executes install, upgrade,
-preflight, or audit SQL.
+fingerprint check. The assertion also fails closed for v1 through v6 or other
+canonical drift. `assert_runtime_schema_v6_compatible`,
+`assert_runtime_schema_v5_compatible`, and `assert_runtime_schema_v4_compatible`
+remain available to confirm pre-cutover states. None of these assertions execute
+install, upgrade, preflight, or audit SQL.
 Hosts remain responsible for applying and coordinating their own migrations.
 The compiled host integration example includes a default-feature helper for
 this startup check.
@@ -294,7 +296,7 @@ checks treat warnings as errors. Function-length and cognitive-complexity
 limits are deferred until the existing payment workflows and tests have been
 refactored to meet them.
 
-See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
+See [the public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.
 
 ## Releasing

@@ -665,6 +665,9 @@ fn classic_payment_outcome_carries_the_avs_result_unvalidated() {
         ("avsresponse=Z", Some("Z")),
         ("avs_response=N", Some("N")),
         ("avsresponse=YY", Some("YY")),
+        ("avsresponse=Y&avs_response=Y", Some("Y")),
+        ("avsresponse=Y&avs_response=", Some("Y")),
+        ("avsresponse=Y&avs_response=N", None),
         ("avsresponse=", None),
         ("", None),
     ] {

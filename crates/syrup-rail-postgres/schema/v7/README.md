@@ -43,10 +43,12 @@ code rather than the address it was checked against.
 
 The 0.6.0 runtime reads and writes only schema-v6 columns, by name, so it is
 correct on either catalog and calls
-`assert_runtime_schema_v6_or_v7_compatible`. No runtime query projects
+`assert_runtime_schema_v6_or_v7_compatible` (which 0.7.0 moves behind the
+`schema-contract-test-support` feature). No runtime query projects
 attempts with `*`, so statements a pooled connection prepared against v6 keep
 working after the upgrade commits. The 0.7.0 runtime reads and writes
-`gateway_avs_response` and calls `assert_runtime_schema_v7_compatible`. Serving roles require table-level `SELECT`
+`gateway_avs_response` and calls `assert_runtime_schema_v7_compatible`. Serving
+roles require table-level `SELECT`
 on `billing_payment_attempts` (not v6-only column grants), because catalog
 validation and the canonical trigger and admission functions inspect the
 table's full column set.
@@ -57,9 +59,10 @@ The upgrade is online. Adding a nullable column without a default and
 replacing the admission function change only the catalog: neither rewrites nor
 scans the table. Writers do not stop.
 
-1. Deploy a build that calls `assert_runtime_schema_v6_or_v7_compatible` and
-   make it the oldest permitted rollback target. A build that calls
-   `assert_runtime_schema_v6_compatible` refuses to start once v7 commits.
+1. Deploy a Syrup Rail 0.6.0 bridge build that calls
+   `assert_runtime_schema_v6_or_v7_compatible` and make it the oldest permitted
+   rollback target. A build that calls `assert_runtime_schema_v6_compatible`
+   refuses to start once v7 commits.
 2. Apply `upgrade_from_v6.sql` in one host-owned transaction and commit it.
    `ALTER TABLE` takes an `ACCESS EXCLUSIVE` lock for the catalog change and
    holds it until that transaction commits, so commit promptly. Run nothing

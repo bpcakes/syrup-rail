@@ -262,9 +262,10 @@ pub struct PaymentOutcomeParts {
     pub response_text: Option<SensitiveText>,
     pub condition: Option<SensitiveText>,
     pub descriptor: PaymentDescriptor,
-    /// The response's address-verification result (`avsresponse` from the
-    /// transaction API, `avs_response` from the query API), unvalidated. It
-    /// is a diagnostic and never decides the payment status.
+    /// The response's address-verification result (`avsresponse` / `avs_response`
+    /// from the classic transaction API and v5 sale API, `avs_response` from the
+    /// query API), unvalidated. It is a diagnostic and never decides the payment
+    /// status.
     pub avs_response: Option<SensitiveText>,
     pub diagnostics: Vec<PaymentOutcomeDiagnostic>,
 }

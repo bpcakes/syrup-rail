@@ -54,9 +54,10 @@ pub(crate) fn processor_identity_conflict_diagnostics(
 ///
 /// A concrete identity conflict preserves the established forensic bundle and
 /// forces callers to leave the attempt unresolved. Otherwise the current
-/// observation owns the complete decision and descriptor bundles. Missing
-/// identity fields may retain established values, but an unanchored partial
-/// identity cannot delete or replace an existing durable bundle.
+/// observation owns the complete decision and descriptor bundles, while an
+/// absent AVS result keeps any previously stored AVS code. Missing identity
+/// fields may retain established values, but an unanchored partial identity
+/// cannot delete or replace an existing durable bundle.
 pub(crate) fn reconcile_non_approved_evidence(
     attempt: &PaymentAttempt,
     observed: &ProcessorEvidence,

@@ -611,3 +611,31 @@ fn gateway_errors_preserve_value_free_debug_and_stable_messages() {
     assert!(debug.contains("has_detail: true"));
     assert!(!debug.contains(SENTINEL));
 }
+
+#[test]
+fn gateway_avs_response_parses_single_ascii_codes_and_redacts_formatting() {
+    for (raw, expected_char, expected_str) in [("Z", 'Z', "Z"), (" n ", 'n', "n"), ("0", '0', "0")]
+    {
+        let parsed = GatewayAvsResponse::parse(raw).expect("single ASCII code should parse");
+        assert_eq!(parsed.as_char(), expected_char);
+        assert_eq!(parsed.as_str(), expected_str);
+        assert_eq!(parsed.to_string(), "[redacted]");
+        assert_eq!(format!("{parsed:?}"), "GatewayAvsResponse([redacted])");
+    }
+    for invalid in ["", "   ", "YY", "N/A", "-", "é", "Y N", "123 Main St"] {
+        assert_eq!(
+            GatewayAvsResponse::parse(invalid),
+            None,
+            "{invalid:?} must not parse as an AVS code"
+        );
+    }
+
+    let avs = GatewayAvsResponse::parse("Z");
+    let evidence = ProcessorEvidence::default().with_avs_response(avs);
+    assert_eq!(evidence.avs_response(), avs);
+    let debug = format!("{evidence:?}");
+    assert!(debug.contains("has_avs_response: true"), "{debug}");
+    assert!(!debug.contains("\"Z\""), "{debug}");
+    let outcome = GatewayPaymentOutcome::new(GatewayPaymentStatus::Failed, evidence);
+    assert_eq!(outcome.avs_response(), avs);
+}

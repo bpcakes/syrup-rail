@@ -15,11 +15,14 @@ unchanged.
   every serving and rollback-target host, then commit the online
   `schema/v7/upgrade_from_v6.sql` following `schema/v7/README.md` before
   0.7.0 serves billing traffic. A 0.6.0 build may run on the v7 catalog and
-  remains a valid rollback target: it reads only v6 columns and ignores the
-  stored AVS result.
+  remains a valid rollback target: it reads only v6 columns and neither reads
+  nor updates `gateway_avs_response`.
 - Replace the startup call to `assert_runtime_schema_v6_or_v7_compatible`
-  with `assert_runtime_schema_v7_compatible`. A 0.7.0 process on a v6 catalog
-  fails on its first attempt read or write.
+  with `assert_runtime_schema_v7_compatible`. In 0.7.0,
+  `assert_runtime_schema_v6_or_v7_compatible` is moved behind the
+  `schema-contract-test-support` feature (matching
+  `assert_runtime_schema_v3_compatible`) so upgrading hosts fail at compile
+  time rather than starting a 0.7.0 process against a v6 catalog.
 - `syrup_rail_nmi_client::PaymentOutcomeParts` gains a public `avs_response`
   field; code that constructs the struct must set it.
 
@@ -27,28 +30,31 @@ unchanged.
 
 - `GatewayAvsResponse`, a provider AVS result code: exactly one ASCII letter or
   digit, case preserved. Any other value parses to `None` and is never
-  shortened into a code.
-- `ProcessorEvidence::with_avs_response` and `ProcessorEvidence::avs_response`.
+  shortened into a code. Ordinary `Debug` and `Display` formatting are
+  value-free; read the validated code explicitly via `as_char()` or `as_str()`.
+- `ProcessorEvidence::with_avs_response`, `ProcessorEvidence::avs_response`,
+  and `GatewayPaymentOutcome::avs_response`.
   The value is a diagnostic: the stored exact-replay and processor-charge
   checks compare named columns that exclude it, and processor charges do not
   store it, so evidence recorded by 0.6.0 without an AVS result still matches
   the same response replayed by 0.7.0.
 - The NMI client carries the AVS result of classic transaction API responses
-  (`avsresponse`, including sales and payment-method validation) and of exact
-  query API responses (`avs_response`) as `PaymentOutcomeParts::avs_response`,
-  unvalidated. v5 JSON sales on a saved card report none. The NMI adapter
-  attaches it to the outcome's evidence through `GatewayAvsResponse::parse`, so
-  an unrecognized value records no result and never changes the payment
-  status.
+  (`avsresponse` / `avs_response`, including sales and payment-method
+  validation), v5 JSON sale responses (`avs_response` / `avsresponse`), and
+  exact query API responses (`avs_response`) as
+  `PaymentOutcomeParts::avs_response`, unvalidated. The NMI adapter attaches it
+  to the outcome's evidence through `GatewayAvsResponse::parse`, so an
+  unrecognized value records no result and never changes the payment status.
 
 ### Changed
 
 - Every attempt transition that records provider evidence writes
   `gateway_avs_response` with the rest of that response's evidence, and attempt
-  reads return it. Reconciled non-approved evidence keeps the stored result
-  when the reconciling observation has none, and a manual failure keeps the
-  attempt's result. A stored value that is not an AVS code reads as no result
-  rather than failing the attempt. Attempt reads name every schema-v7 column.
+  reads return it. Reconciled approved and non-approved transitions keep the
+  stored AVS result when the reconciling observation has none, and a manual
+  failure keeps the attempt's result. A stored value that is not an AVS code
+  reads as no result rather than failing the attempt. Attempt reads name every
+  schema-v7 column.
 - Administrator transaction diagnostics share `GatewayAvsResponse`'s rule.
 
 ## [0.6.0] - Unreleased

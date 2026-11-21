@@ -21,8 +21,8 @@ unchanged from 0.5.5.
 New hosts install `schema/v7/install.sql` through their normal migration
 system. Existing schema-v6 hosts commit the online
 `schema/v7/upgrade_from_v6.sql` following `schema/v7/README.md`, but only after
-every serving and rollback-target build accepts v6 or v7 at startup (0.6.0 or
-later). Existing
+every serving and rollback-target build accepts v6 or v7 at startup (the 0.6.0
+bridge release); deploy 0.7.0 only after `upgrade_from_v6.sql` commits. Existing
 schema-v5 hosts stop every billing writer and commit
 `schema/v6/upgrade_from_v5.sql` in one transaction, following
 `schema/v6/README.md`; old 0.5.4 binaries must not restart after that commit.
