@@ -1,8 +1,9 @@
 use std::fmt;
 
 use crate::{
-    BillingContact, BillingScopeId, CardholderIpAddress, GatewayConfigurationId, IdempotencyKey,
-    PaymentAttemptId, PaymentToken, SubscriberId,
+    BillingContact, BillingScopeId, CardholderIpAddress, ChargeAmount, GatewayConfigurationId,
+    GatewayOrderId, GatewaySaleIntent, GatewaySaleRequest, IdempotencyKey, PaymentAttemptId,
+    PaymentToken, SubscriberId,
 };
 
 /// Request-scoped input shared by subscription payment commands.
@@ -89,6 +90,26 @@ impl SubscriptionPaymentContext {
     pub const fn cardholder_ip(&self) -> Option<CardholderIpAddress> {
         self.cardholder_ip
     }
+
+    /// The token sale the customer submits with this context, as enrollment
+    /// and recovery send it: the one-shot token stored as an initial
+    /// credential, the billing contact, and the cardholder address if the
+    /// host supplied one. The charge and order come from the durable attempt.
+    pub fn token_sale_request(
+        &self,
+        charge: ChargeAmount,
+        order_id: GatewayOrderId,
+    ) -> GatewaySaleRequest {
+        GatewaySaleRequest::new(
+            charge,
+            order_id,
+            GatewaySaleIntent::InitialStoredCredential {
+                payment_token: self.payment_token.clone(),
+            },
+            Some(self.billing_contact.clone()),
+        )
+        .with_cardholder_ip(self.cardholder_ip)
+    }
 }
 
 impl fmt::Debug for SubscriptionPaymentContext {
@@ -152,6 +173,30 @@ mod tests {
         )));
         let context = context.with_cardholder_ip(Some(address));
         assert_eq!(context.cardholder_ip(), Some(address));
+
+        // The sale built from the context is the customer's own token sale
+        // and carries exactly what the context holds.
+        let charge = ChargeAmount::new(100, crate::CurrencyCode::new("USD").unwrap()).unwrap();
+        let order = GatewayOrderId::from_correlation("ck_context_sale").unwrap();
+        let sale = context.token_sale_request(charge, order.clone());
+        assert_eq!(sale.charge(), charge);
+        assert_eq!(sale.order_id(), &order);
+        assert_eq!(sale.billing_contact(), Some(&billing_contact));
+        assert_eq!(sale.cardholder_ip(), Some(address));
+        assert_eq!(sale.descriptor(), None);
+        assert!(matches!(
+            sale.intent(),
+            GatewaySaleIntent::InitialStoredCredential { payment_token: token }
+                if token == &payment_token
+        ));
+        assert_eq!(
+            context
+                .clone()
+                .with_cardholder_ip(None)
+                .token_sale_request(charge, order)
+                .cardholder_ip(),
+            None
+        );
 
         let debug = format!("{context:?}");
         for secret in [

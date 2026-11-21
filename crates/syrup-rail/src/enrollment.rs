@@ -5,12 +5,11 @@ use std::fmt;
 use crate::gateway::normalize_gateway_payment_diagnostics;
 use crate::{
     ApprovedProcessorEvidence, BillingContact, BillingContactSnapshot, BillingScopeId,
-    CardholderIpAddress, ChargeAmount, DiscountClaimId, DiscountCodeId, GatewayAccountMode,
-    GatewayConfigurationId, GatewayOrderId, GatewayPaymentDiagnostic, GatewayProviderKey,
-    IdempotencyKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind,
-    PaymentAttemptStatus, PaymentAttemptTarget, PaymentToken, PlanKey, ProcessorEvidence,
-    ResolvedGateway, SubscriberId, Subscription, SubscriptionDiscountSnapshot, SubscriptionOffer,
-    SubscriptionPaymentContext,
+    ChargeAmount, DiscountClaimId, DiscountCodeId, GatewayAccountMode, GatewayConfigurationId,
+    GatewayOrderId, GatewayPaymentDiagnostic, GatewayProviderKey, IdempotencyKey, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptStatus,
+    PaymentAttemptTarget, PaymentToken, PlanKey, ProcessorEvidence, ResolvedGateway, SubscriberId,
+    Subscription, SubscriptionDiscountSnapshot, SubscriptionOffer, SubscriptionPaymentContext,
 };
 use thiserror::Error;
 
@@ -351,10 +350,6 @@ impl EnrollSubscription {
 
     pub const fn billing_contact(&self) -> &BillingContact {
         self.context.billing_contact()
-    }
-
-    pub const fn cardholder_ip(&self) -> Option<CardholderIpAddress> {
-        self.context.cardholder_ip()
     }
 
     pub const fn expected_terms(&self) -> &SubscriptionEnrollmentExpectedTerms {

@@ -175,9 +175,11 @@ historically named `dev/0.6.0` branch.
   `GatewaySaleRequestParts` (also convertible back with `From`).
 - Add the opt-in cardholder network address. `CardholderIpAddress` wraps an
   `IpAddr` (an IPv4-mapped IPv6 address is stored as IPv4) and never prints
-  it. A host sets it with `SubscriptionPaymentContext::with_cardholder_ip`;
-  the PostgreSQL enrollment and recovery workflows forward it on the token
-  sale the customer submits through `GatewaySaleRequest::with_cardholder_ip`.
+  it. A host sets it with `SubscriptionPaymentContext::with_cardholder_ip`.
+  `SubscriptionPaymentContext::token_sale_request` builds the token sale the
+  customer submits, and the PostgreSQL enrollment and recovery workflows now
+  use it, so both forward the address through
+  `GatewaySaleRequest::with_cardholder_ip`.
   It is request-scoped like the payment token: never persisted, absent from
   the reservation and from replay equality (a retry may carry another address
   or none), and never an input to a payment decision. Renewals, payment-method

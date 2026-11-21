@@ -216,9 +216,9 @@ the wire.
 token sales. `CardholderIpAddress` wraps an `IpAddr`, stores an IPv4-mapped
 IPv6 address as IPv4, and never prints its value. A host that has established
 the cardholder's own address attaches it with
-`SubscriptionPaymentContext::with_cardholder_ip`; `EnrollSubscription` and
-`RecoverSubscriptionPayment` expose it as `cardholder_ip()`, and the PostgreSQL
-enrollment and recovery workflows put it on the sale they submit with
+`SubscriptionPaymentContext::with_cardholder_ip`. The PostgreSQL enrollment
+and recovery workflows build the sale they submit with the new
+`SubscriptionPaymentContext::token_sale_request`, which sets it through
 `GatewaySaleRequest::with_cardholder_ip`. The address is request-scoped like
 the payment token: it is never persisted, is not part of the reservation or of
 replay equality (a retry may carry a different address or none without an
