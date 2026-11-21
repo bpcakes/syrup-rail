@@ -11,7 +11,7 @@ and transaction orchestration.
   module ownership map.
 - `schema/v7/install.sql` — current authoritative fresh-install DDL;
   `schema/v7/upgrade_from_v6.sql` is the one-transaction, online forward-only
-  v6 upgrade that appends the nullable `varchar(16)`
+  v6 upgrade that appends the nullable `varchar(64)`
   `billing_payment_attempts.gateway_avs_response` column and replaces
   `billing_host_charge_ledger_admission` to require it empty before `submit`.
 - `schema/v6/**` — immutable shipped version-6 distribution artifacts,
@@ -303,7 +303,7 @@ and transaction orchestration.
   API to reject nested transactions. Keep this guard and its database tests
   when upgrading SQLx; `Connection::is_in_transaction` alone is insufficient.
 - Provider wire strings belong in `syrup-rail-nmi`, not here. Schema v7
-  bounds `gateway_avs_response` to `varchar(16)` but does not restrict its
+  bounds `gateway_avs_response` to `varchar(64)` but does not restrict its
   vocabulary, and `scrub_subscriber_billing_data` retains it. Any future writer
   must validate it against a closed provider AVS code vocabulary (never raw
   provider text or address fragments) before persisting.

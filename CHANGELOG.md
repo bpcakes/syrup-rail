@@ -109,7 +109,7 @@ historically named `dev/0.6.0` branch.
 
 - Add schema v7 (`schema/v7/install.sql`, online `schema/v7/upgrade_from_v6.sql`),
   appending the nullable `billing_payment_attempts.gateway_avs_response
-  varchar(16)` column and replacing `billing_host_charge_ledger_admission` so `submit` admission
+  varchar(64)` column and replacing `billing_host_charge_ledger_admission` so `submit` admission
   also requires a pending host-charge attempt to have no AVS result. No row,
   constraint, index, trigger, or view changes; this release does not write the
   column yet.

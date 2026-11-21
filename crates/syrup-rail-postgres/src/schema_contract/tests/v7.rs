@@ -63,8 +63,8 @@ async fn attempt_table_storage(pool: &PgPool) -> Result<i64, sqlx::Error> {
     .await
 }
 
-/// Writes a 16-character AVS value to an existing attempt and rejects a
-/// 17-character one, then rolls both writes back. An explicit cast would
+/// Writes a 64-character AVS value to an existing attempt and rejects a
+/// 65-character one, then rolls both writes back. An explicit cast would
 /// truncate silently; only a real write shows the column enforces its bound.
 async fn assert_avs_length_bound(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     let mut transaction = pool.begin().await?;
@@ -74,16 +74,16 @@ async fn assert_avs_length_bound(pool: &PgPool) -> Result<(), Box<dyn Error>> {
             .await?;
     let write = "UPDATE billing_payment_attempts SET gateway_avs_response = $1 WHERE id = $2";
     sqlx::query(write)
-        .bind("A".repeat(16))
+        .bind("A".repeat(64))
         .bind(attempt_id)
         .execute(&mut *transaction)
         .await?;
     let error = sqlx::query(write)
-        .bind("A".repeat(17))
+        .bind("A".repeat(65))
         .bind(attempt_id)
         .execute(&mut *transaction)
         .await
-        .expect_err("a 17-character AVS value must be rejected");
+        .expect_err("a 65-character AVS value must be rejected");
     assert_eq!(
         error
             .as_database_error()
@@ -127,14 +127,21 @@ async fn runtime_schema_v7_accepts_fresh_install_and_populated_v6_upgrade()
         assert_eq!(fresh_fingerprint, V7_CATALOG_FINGERPRINT);
         assert_ne!(V7_CATALOG_FINGERPRINT, V6_CATALOG_FINGERPRINT);
 
-        // The column is the attempt table's last, nullable varchar(16) column
+        // The column is the attempt table's last, nullable varchar(64) column
         // in both paths, so ADD COLUMN and the fresh install agree.
         let fresh_shape = v7_column_shape(&fresh.pool).await?;
         assert_eq!(fresh_shape, v7_column_shape(&upgraded.pool).await?);
         let (data_type, nullable, _, max_length) = fresh_shape.expect("v7 adds the AVS column");
+        // Every code the domain observation retains fits the column.
+        assert_eq!(
+            max_length,
+            Some(i32::try_from(
+                syrup_rail::MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES
+            )?)
+        );
         assert_eq!(
             (data_type.as_str(), nullable.as_str(), max_length),
-            ("character varying", "YES", Some(16))
+            ("character varying", "YES", Some(64))
         );
 
         // The type bounds writes. Only the upgraded database has attempt rows;
@@ -168,6 +175,8 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
     let v6 = TestDatabase::start_v6("sr_v7_br_v6").await?;
     let v7 = TestDatabase::start("sr_v7_br_v7").await?;
     let retyped = TestDatabase::start("sr_v7_br_type").await?;
+    let narrowed = TestDatabase::start("sr_v7_br_len").await?;
+    let unbounded = TestDatabase::start("sr_v7_br_unb").await?;
     let constrained = TestDatabase::start("sr_v7_br_check").await?;
     let result = async {
         crate::assert_runtime_schema_v6_or_v7_compatible(&v6.pool).await?;
@@ -197,6 +206,19 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         )
         .execute(&retyped.pool)
         .await?;
+        // A change to the length bound alone is drift too.
+        sqlx::raw_sql(
+            "ALTER TABLE billing_payment_attempts \
+             ALTER COLUMN gateway_avs_response TYPE varchar(8)",
+        )
+        .execute(&narrowed.pool)
+        .await?;
+        sqlx::raw_sql(
+            "ALTER TABLE billing_payment_attempts \
+             ALTER COLUMN gateway_avs_response TYPE varchar",
+        )
+        .execute(&unbounded.pool)
+        .await?;
         sqlx::raw_sql(
             "ALTER TABLE billing_payment_attempts \
              ADD CONSTRAINT billing_payment_attempts_gateway_avs_response_check \
@@ -204,7 +226,7 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         )
         .execute(&constrained.pool)
         .await?;
-        for drifted in [&retyped, &constrained] {
+        for drifted in [&retyped, &narrowed, &unbounded, &constrained] {
             let error = crate::assert_runtime_schema_v6_or_v7_compatible(&drifted.pool)
                 .await
                 .expect_err("a drifted v7 catalog must be rejected");
@@ -232,6 +254,8 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         v6.cleanup().await,
         v7.cleanup().await,
         retyped.cleanup().await,
+        narrowed.cleanup().await,
+        unbounded.cleanup().await,
         constrained.cleanup().await,
     ];
     result?;

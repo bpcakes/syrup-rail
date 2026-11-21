@@ -62,7 +62,10 @@ async fn canonical_catalog_fingerprint(
             data_type,
             udt_name,
             is_nullable,
-            COALESCE(column_default, '')
+            COALESCE(column_default, ''),
+            -- A length bound is part of the column's type. concat_ws skips
+            -- the NULL of an unbounded column, so that row hashes as before.
+            'max_length=' || character_maximum_length::text
         )
         FROM information_schema.columns
         WHERE table_schema = 'public'
