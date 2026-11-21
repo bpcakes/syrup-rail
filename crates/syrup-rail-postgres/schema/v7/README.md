@@ -28,9 +28,9 @@ verifies no existing rows, while adding a CHECK scans the table under the
 writes the column; a runtime that does must recognize the value from the
 provider adapter's closed AVS result-code vocabulary (never persisting raw
 provider text or address fragments) and treat any other value as unreadable,
-marking the observation partial rather than truncating it, because subscriber scrubbing retains it
-with `gateway_response_code` as a closed decision code rather than the address
-it was checked against.
+marking the observation partial rather than truncating it, because subscriber
+scrubbing retains it with `gateway_response_code` as a closed decision code
+rather than the address it was checked against.
 
 ## Runtime compatibility
 

@@ -53,11 +53,16 @@ async fn v7_column_shape(
     .await
 }
 
-/// The attempt table's storage file, which a table rewrite replaces.
-async fn attempt_table_storage(pool: &PgPool) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT relfilenode::bigint FROM pg_catalog.pg_class \
-         WHERE oid = 'public.billing_payment_attempts'::regclass",
+/// The attempt table's storage file, which a table rewrite replaces, and its
+/// constraint count. PostgreSQL 18 records CHECK and NOT NULL constraints in
+/// `pg_constraint`, and adding either scans the table under the lock.
+async fn attempt_table_storage(pool: &PgPool) -> Result<(i64, i64), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT relation.relfilenode::bigint, \
+             (SELECT count(*) FROM pg_catalog.pg_constraint \
+              WHERE conrelid = relation.oid) \
+         FROM pg_catalog.pg_class AS relation \
+         WHERE relation.oid = 'public.billing_payment_attempts'::regclass",
     )
     .fetch_one(pool)
     .await
@@ -117,7 +122,8 @@ async fn runtime_schema_v7_accepts_fresh_install_and_populated_v6_upgrade()
         let storage_before = attempt_table_storage(&upgraded.pool).await?;
 
         upgraded.upgrade_v6_to_v7().await?;
-        // The bounded column is added without rewriting the populated table.
+        // The bounded column is added without rewriting the populated table or
+        // adding a constraint that would scan it under the lock.
         assert_eq!(attempt_table_storage(&upgraded.pool).await?, storage_before);
         assert_v7_conforms(&fresh.pool).await?;
         assert_v7_conforms(&upgraded.pool).await?;
@@ -168,7 +174,7 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
     let v6 = TestDatabase::start_v6("sr_v7_br_v6").await?;
     let v7 = TestDatabase::start("sr_v7_br_v7").await?;
     let retyped = TestDatabase::start("sr_v7_br_type").await?;
-    let narrowed = TestDatabase::start("sr_v7_br_len").await?;
+    let widened = TestDatabase::start("sr_v7_br_len").await?;
     let unbounded = TestDatabase::start("sr_v7_br_unb").await?;
     let constrained = TestDatabase::start("sr_v7_br_check").await?;
     let result = async {
@@ -204,7 +210,7 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
             "ALTER TABLE billing_payment_attempts \
              ALTER COLUMN gateway_avs_response TYPE varchar(8)",
         )
-        .execute(&narrowed.pool)
+        .execute(&widened.pool)
         .await?;
         sqlx::raw_sql(
             "ALTER TABLE billing_payment_attempts \
@@ -219,7 +225,7 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         )
         .execute(&constrained.pool)
         .await?;
-        for drifted in [&retyped, &narrowed, &unbounded, &constrained] {
+        for drifted in [&retyped, &widened, &unbounded, &constrained] {
             let error = crate::assert_runtime_schema_v6_or_v7_compatible(&drifted.pool)
                 .await
                 .expect_err("a drifted v7 catalog must be rejected");
@@ -247,7 +253,7 @@ async fn bridge_assertion_accepts_exactly_v6_or_v7() -> Result<(), Box<dyn Error
         v6.cleanup().await,
         v7.cleanup().await,
         retyped.cleanup().await,
-        narrowed.cleanup().await,
+        widened.cleanup().await,
         unbounded.cleanup().await,
         constrained.cleanup().await,
     ];
