@@ -92,13 +92,13 @@ pub use gateway::{
 };
 pub use gateway_value::{
     BillingAddress, BillingAddressError, BillingContact, BillingContactError, BillingContactParts,
-    GatewayDiagnostic, GatewayOrderId, GatewayPaymentMethodReference, GatewayReferenceValueError,
-    GatewayTransactionId, MAX_BILLING_CONTACT_FIELD_BYTES, MAX_GATEWAY_TEXT_BYTES,
-    MAX_STATEMENT_DESCRIPTOR_NAME_BYTES, MAX_STATEMENT_DESCRIPTOR_PHONE_BYTES,
-    MAX_STATEMENT_DESCRIPTOR_URL_BYTES, PaymentToken, PaymentTokenError, StatementDescriptor,
-    StatementDescriptorError, StatementDescriptorPolicy, canonical_gateway_transaction_id,
-    canonical_gateway_transaction_ids_equal, sanitize_gateway_detail,
-    truncate_gateway_detail_to_length,
+    CardholderIpAddress, GatewayDiagnostic, GatewayOrderId, GatewayPaymentMethodReference,
+    GatewayReferenceValueError, GatewayTransactionId, MAX_BILLING_CONTACT_FIELD_BYTES,
+    MAX_GATEWAY_TEXT_BYTES, MAX_STATEMENT_DESCRIPTOR_NAME_BYTES,
+    MAX_STATEMENT_DESCRIPTOR_PHONE_BYTES, MAX_STATEMENT_DESCRIPTOR_URL_BYTES, PaymentToken,
+    PaymentTokenError, StatementDescriptor, StatementDescriptorError, StatementDescriptorPolicy,
+    canonical_gateway_transaction_id, canonical_gateway_transaction_ids_equal,
+    sanitize_gateway_detail, truncate_gateway_detail_to_length,
 };
 pub use host_charge::{
     ChargeHostTarget, HostChargePaymentResult, HostChargePaymentResultBuildError,

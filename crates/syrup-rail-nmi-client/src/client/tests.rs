@@ -322,6 +322,7 @@ fn test_sale_request(source: PaymentSource) -> SaleRequest {
         stored_credential: None,
         billing_contact: None,
         descriptor: None,
+        cardholder_ip: None,
     }
 }
 

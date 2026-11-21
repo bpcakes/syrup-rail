@@ -212,6 +212,27 @@ the descriptor on), the recurring intent variant gains a field, and the raw
 `descriptor: None` to existing literals. Without a policy nothing changes on
 the wire.
 
+0.6.0 also adds an opt-in cardholder network address for customer-initiated
+token sales. `CardholderIpAddress` wraps an `IpAddr`, stores an IPv4-mapped
+IPv6 address as IPv4, and never prints its value. A host that has established
+the cardholder's own address attaches it with
+`SubscriptionPaymentContext::with_cardholder_ip`; `EnrollSubscription` and
+`RecoverSubscriptionPayment` expose it as `cardholder_ip()`, and the PostgreSQL
+enrollment and recovery workflows put it on the sale they submit with
+`GatewaySaleRequest::with_cardholder_ip`. The address is request-scoped like
+the payment token: it is never persisted, is not part of the reservation or of
+replay equality (a retry may carry a different address or none without an
+idempotency conflict), and decides nothing. Payment-method replacement,
+renewals and host charges send none. The NMI adapter forwards it only for
+`InitialStoredCredential` and `OneTime` intents, and the raw client sends an
+IPv4 address as the Classic `ipaddress` field; an IPv6 address is omitted
+because NMI documents only the dotted format for that field, and the v5 sale
+sends no address. Source breaks: `GatewaySaleRequestParts` and the raw
+`syrup_rail_nmi_client::SaleRequest` each gain `cardholder_ip`; add
+`cardholder_ip: None` to existing `SaleRequest` literals, and a decorator that
+rebuilds a sale with `GatewaySaleRequest::new` must forward the address with
+`with_cardholder_ip`. Without an address nothing changes on the wire.
+
 0.6.0 also adds opt-in provider retry advice for automatic-renewal declines.
 The core `RenewalDeclineRetryAdvice` is `FollowSchedule`,
 `StopAutomaticRetries`, or `RetryNoEarlierThan(DunningRetryDelay)`, and

@@ -30,6 +30,9 @@ the billing scope and subscriber before calling a shared command.
 - Subscription periods, amounts, discounts, grants, and durable attempt state.
 - Billing contact and card-display metadata retained only where required for a
   command or stored-method display.
+- The cardholder network address a host may attach to a customer-initiated
+  token sale. It exists in memory for that submission only, is never
+  persisted or logged, and is redacted from `Debug` and `Display` output.
 
 PAN and CVV are not accepted or stored by these crates. Hosts must tokenize card
 data in the browser through the approved provider boundary.

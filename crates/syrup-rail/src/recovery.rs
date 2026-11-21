@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::{
-    BillingContact, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
-    GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayProviderKey,
+    BillingContact, BillingContactSnapshot, BillingPeriod, BillingScopeId, CardholderIpAddress,
+    ChargeAmount, GatewayAccountId, GatewayAccountMode, GatewayConfigurationId, GatewayProviderKey,
     GatewayTransactionId, IdempotencyKey, PaymentAttempt, PaymentAttemptFingerprint,
     PaymentAttemptId, PaymentAttemptIdentity, PaymentAttemptKind, PaymentAttemptRequest,
     PaymentAttemptTarget, PaymentMethodId, PaymentToken, PlanKey, ResolvedGateway, SubscriberId,
@@ -61,6 +61,10 @@ impl RecoverSubscriptionPayment {
 
     pub const fn billing_contact(&self) -> &BillingContact {
         self.context.billing_contact()
+    }
+
+    pub const fn cardholder_ip(&self) -> Option<CardholderIpAddress> {
+        self.context.cardholder_ip()
     }
 }
 

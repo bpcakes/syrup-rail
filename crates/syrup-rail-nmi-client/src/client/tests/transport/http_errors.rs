@@ -125,6 +125,7 @@ async fn http_429_sale_remains_indeterminate() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("HTTP 429 must preserve mutation uncertainty");
@@ -160,6 +161,7 @@ async fn non_success_sale_with_payment_decision_evidence_is_indeterminate() {
                 stored_credential: None,
                 billing_contact: None,
                 descriptor: None,
+                cardholder_ip: None,
             })
             .await
             .expect_err("non-success response with payment evidence must be indeterminate");
@@ -194,6 +196,7 @@ async fn documented_v5_validation_error_is_known_not_submitted() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("documented validation failure must be surfaced");
@@ -265,6 +268,7 @@ async fn only_the_documented_v5_validation_envelope_proves_http_400_non_submissi
                 stored_credential: None,
                 billing_contact: None,
                 descriptor: None,
+                cardholder_ip: None,
             })
             .await
             .expect_err("an unproven HTTP 400 envelope must remain reconcilable");
@@ -300,6 +304,7 @@ async fn unreadable_http_400_payment_bodies_never_prove_non_submission() {
                 stored_credential: None,
                 billing_contact: None,
                 descriptor: None,
+                cardholder_ip: None,
             })
             .await
             .expect_err("an unreadable HTTP 400 body must remain reconcilable");
@@ -667,6 +672,7 @@ async fn undocumented_http_422_sale_without_payment_evidence_is_indeterminate() 
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("undocumented HTTP 422 must preserve mutation uncertainty");

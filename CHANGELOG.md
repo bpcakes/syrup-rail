@@ -34,6 +34,13 @@ historically named `dev/0.6.0` branch.
 - The raw `syrup_rail_nmi_client::SaleRequest` struct gains
   `descriptor: Option<StatementDescriptor>`; add `descriptor: None` to
   existing literals.
+- `GatewaySaleRequestParts` gains `cardholder_ip: Option<CardholderIpAddress>`
+  and the raw `syrup_rail_nmi_client::SaleRequest` struct gains
+  `cardholder_ip: Option<IpAddr>`. Add `cardholder_ip: None` to existing
+  `SaleRequest` literals. A gateway decorator that rebuilds a sale with
+  `GatewaySaleRequest::new` must carry the address across with
+  `with_cardholder_ip`, or the provider receives the sale without it;
+  `GatewaySaleRequest::from(parts)` keeps it.
 - `classify_past_due_access` now takes `Option<DateTime<Utc>>` for the next
   payment attempt instead of a boolean. Pass the scheduled timestamp directly
   (use `.copied()` for `Subscription::next_payment_attempt_at()`).
@@ -166,6 +173,23 @@ historically named `dev/0.6.0` branch.
   `syrup-rail-postgres` is covered without changing their commands.
 - Add `GatewaySaleRequest::with_descriptor`, `descriptor`, and
   `GatewaySaleRequestParts` (also convertible back with `From`).
+- Add the opt-in cardholder network address. `CardholderIpAddress` wraps an
+  `IpAddr` (an IPv4-mapped IPv6 address is stored as IPv4) and never prints
+  it. A host sets it with `SubscriptionPaymentContext::with_cardholder_ip`;
+  the PostgreSQL enrollment and recovery workflows forward it on the token
+  sale the customer submits through `GatewaySaleRequest::with_cardholder_ip`.
+  It is request-scoped like the payment token: never persisted, absent from
+  the reservation and from replay equality (a retry may carry another address
+  or none), and never an input to a payment decision. Renewals, payment-method
+  replacement and host charges do not send one. No schema changes.
+- The NMI adapter forwards the address only for customer-initiated intents,
+  dropping it from a `RecurringStoredCredential` sale whatever the request
+  holds. The raw client sends an IPv4 address as the Classic `ipaddress`
+  field ("IP address of cardholder", documented format `xxx.xxx.xxx.xxx`),
+  keeps it off the `Debug` allowlist, and omits an IPv6 address because NMI's
+  Classic reference documents no IPv6 form; the v5 sale sends none. The host
+  remains responsible for whose address it is and for disclosing that it is
+  shared with the processor.
 - The PostgreSQL renewal workflow reads the subscription's phase under the
   final-admission lock and sets `first_charge_after_paid_trial` when it is
   still `paid_trial`, which covers the first post-trial charge and every

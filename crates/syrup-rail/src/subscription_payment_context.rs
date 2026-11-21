@@ -1,14 +1,20 @@
 use std::fmt;
 
 use crate::{
-    BillingContact, BillingScopeId, GatewayConfigurationId, IdempotencyKey, PaymentAttemptId,
-    PaymentToken, SubscriberId,
+    BillingContact, BillingScopeId, CardholderIpAddress, GatewayConfigurationId, IdempotencyKey,
+    PaymentAttemptId, PaymentToken, SubscriberId,
 };
 
 /// Request-scoped input shared by subscription payment commands.
 ///
 /// The payment token remains in memory only. Durable reservations retain only
 /// the permitted billing-contact snapshot and never the token.
+///
+/// The optional cardholder network address is memory-only too. It is sent
+/// with the token sale an enrollment or recovery submits and is otherwise
+/// ignored: it is never persisted, and a replay may carry a different address
+/// or none without conflicting with the original request. A payment-method
+/// replacement does not send it.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionPaymentContext {
     attempt_id: PaymentAttemptId,
@@ -18,6 +24,7 @@ pub struct SubscriptionPaymentContext {
     idempotency_key: IdempotencyKey,
     payment_token: PaymentToken,
     billing_contact: BillingContact,
+    cardholder_ip: Option<CardholderIpAddress>,
 }
 
 impl SubscriptionPaymentContext {
@@ -39,7 +46,16 @@ impl SubscriptionPaymentContext {
             idempotency_key,
             payment_token,
             billing_contact,
+            cardholder_ip: None,
         }
+    }
+
+    /// Sets the network address the cardholder used when they authorized this
+    /// payment, replacing any address already set. See
+    /// [`CardholderIpAddress`] for what the host vouches for.
+    pub const fn with_cardholder_ip(mut self, cardholder_ip: Option<CardholderIpAddress>) -> Self {
+        self.cardholder_ip = cardholder_ip;
+        self
     }
 
     pub const fn attempt_id(&self) -> PaymentAttemptId {
@@ -69,6 +85,10 @@ impl SubscriptionPaymentContext {
     pub const fn billing_contact(&self) -> &BillingContact {
         &self.billing_contact
     }
+
+    pub const fn cardholder_ip(&self) -> Option<CardholderIpAddress> {
+        self.cardholder_ip
+    }
 }
 
 impl fmt::Debug for SubscriptionPaymentContext {
@@ -82,6 +102,7 @@ impl fmt::Debug for SubscriptionPaymentContext {
             .field("has_idempotency_key", &true)
             .field("has_payment_token", &true)
             .field("has_billing_contact", &true)
+            .field("has_cardholder_ip", &self.cardholder_ip.is_some())
             .finish()
     }
 }
@@ -123,6 +144,14 @@ mod tests {
         assert_eq!(context.idempotency_key(), &idempotency_key);
         assert_eq!(context.payment_token(), &payment_token);
         assert_eq!(context.billing_contact(), &billing_contact);
+        assert_eq!(context.cardholder_ip(), None);
+        assert!(format!("{context:?}").contains("has_cardholder_ip: false"));
+
+        let address = CardholderIpAddress::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+            203, 0, 113, 7,
+        )));
+        let context = context.with_cardholder_ip(Some(address));
+        assert_eq!(context.cardholder_ip(), Some(address));
 
         let debug = format!("{context:?}");
         for secret in [
@@ -130,11 +159,13 @@ mod tests {
             "secret-token",
             "Secret Name",
             "secret@example.test",
+            "203.0.113.7",
         ] {
             assert!(!debug.contains(secret));
         }
         assert!(debug.contains("has_idempotency_key"));
         assert!(debug.contains("has_payment_token"));
         assert!(debug.contains("has_billing_contact"));
+        assert!(debug.contains("has_cardholder_ip: true"));
     }
 }

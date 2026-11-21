@@ -105,6 +105,17 @@ bounds: the networks print the name in a 25- or 22-character field that the
 acquirer's prefix shares and the phone or URL in 13 characters, and only a
 real statement proves what printed.
 
+A `CardholderIpAddress` is the network address the cardholder used when they
+personally authorized a payment, as the host established it. A host attaches
+it with `SubscriptionPaymentContext::with_cardholder_ip`, and enrollment and
+recovery forward it on their token sale as `GatewaySaleRequest::cardholder_ip`.
+It is memory-only: Syrup Rail never stores it, never compares it on replay,
+and never decides anything from it, and its `Debug` and `Display` output is
+value-free. The host vouches that the address is the cardholder's own, not its
+server's or a representative's, and owns the disclosure that it is shared with
+the provider. A decorator that rebuilds a sale with `GatewaySaleRequest::new`
+must forward `parts.cardholder_ip` with `with_cardholder_ip`.
+
 `PaymentGateway::query_transaction_diagnostics` reads processor and verification
 results for one historical transaction. A `GatewayTransactionDiagnosticsRequest`
 names the transaction ID, the original operation (`Sale` or `Validate`), its

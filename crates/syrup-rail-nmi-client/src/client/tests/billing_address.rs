@@ -51,6 +51,7 @@ fn initial_sale(contact: Option<BillingContact>) -> SaleRequest {
         stored_credential: Some(StoredCredential::InitialCustomer),
         billing_contact: contact,
         descriptor: None,
+        cardholder_ip: None,
     }
 }
 
@@ -66,6 +67,7 @@ fn merchant_renewal(contact: Option<BillingContact>) -> SaleRequest {
         }),
         billing_contact: contact,
         descriptor: None,
+        cardholder_ip: None,
     }
 }
 
@@ -79,6 +81,7 @@ fn one_time_sale(contact: Option<BillingContact>) -> SaleRequest {
         stored_credential: None,
         billing_contact: contact,
         descriptor: None,
+        cardholder_ip: None,
     }
 }
 
@@ -634,6 +637,7 @@ async fn merchant_renewal_size_is_measured_as_the_classic_form_it_is_sent_as() {
         stored_credential,
         billing_contact: with_address(|address| address.address1 = "%".repeat(100)),
         descriptor: None,
+        cardholder_ip: None,
     };
     let renewal = vault_heavy(Some(StoredCredential::RecurringMerchant {
         initial_transaction_id: "%".repeat(MAX_NMI_IDENTIFIER_BYTES),

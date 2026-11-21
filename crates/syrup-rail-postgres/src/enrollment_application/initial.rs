@@ -188,7 +188,11 @@ pub async fn submit_admitted_subscription_enrollment(
             payment_token: command.payment_token().clone(),
         },
         Some(command.billing_contact().clone()),
-    );
+    )
+    // The cardholder submits this token sale themselves, so the address the
+    // host established for them may accompany it. It comes from the command
+    // alone and is never read from or written to the attempt.
+    .with_cardholder_ip(command.cardholder_ip());
     match gateway.sale(request).await {
         Ok(outcome) => apply_subscription_enrollment_gateway_outcome(
             pool,

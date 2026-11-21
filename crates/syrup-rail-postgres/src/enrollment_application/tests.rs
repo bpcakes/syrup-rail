@@ -711,6 +711,7 @@ fn approved_outcome_with_optional_reference(
 
 mod application;
 mod billing_address;
+mod cardholder_ip;
 mod diagnostics;
 mod fixture;
 mod foreground;

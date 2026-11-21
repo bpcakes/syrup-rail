@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, net::IpAddr};
 
 pub struct BillingContact {
     pub first_name: Option<String>,
@@ -125,6 +125,17 @@ pub struct SaleRequest {
     pub stored_credential: Option<StoredCredential>,
     pub billing_contact: Option<BillingContact>,
     pub descriptor: Option<StatementDescriptor>,
+    /// The cardholder's own network address, for a sale the cardholder
+    /// initiates. Never the address of the merchant's server or staff.
+    ///
+    /// A Classic sale sends an IPv4 address (including an IPv4-mapped IPv6
+    /// one) as `ipaddress`, the field NMI documents as "IP address of
+    /// cardholder" in the format `xxx.xxx.xxx.xxx`. NMI's Classic reference
+    /// documents no IPv6 form, so an IPv6 address is omitted rather than
+    /// risked on a payment. The v5 sale used for one-time payments and
+    /// non-recurring saved-card sales sends no address. A network address is
+    /// customer data: `Debug` shows only whether one is present.
+    pub cardholder_ip: Option<IpAddr>,
 }
 
 impl fmt::Debug for SaleRequest {
@@ -139,6 +150,7 @@ impl fmt::Debug for SaleRequest {
             .field("stored_credential", &self.stored_credential)
             .field("has_billing_contact", &self.billing_contact.is_some())
             .field("descriptor", &self.descriptor)
+            .field("has_cardholder_ip", &self.cardholder_ip.is_some())
             .finish()
     }
 }

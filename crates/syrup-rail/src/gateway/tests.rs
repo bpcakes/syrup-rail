@@ -611,3 +611,37 @@ fn gateway_errors_preserve_value_free_debug_and_stable_messages() {
     assert!(debug.contains("has_detail: true"));
     assert!(!debug.contains(SENTINEL));
 }
+
+#[test]
+fn sale_request_parts_round_trip_preserves_the_cardholder_ip_and_debug_redacts_it() {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let charge = ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap();
+    let attempt_id = "00000000-0000-0000-0000-000000000000".parse().unwrap();
+    let order = GatewayOrderId::from_generated_attempt(
+        "ck_order_00000000000000000000000000000000",
+        attempt_id,
+    )
+    .unwrap();
+    let address = crate::CardholderIpAddress::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+    let request = GatewaySaleRequest::new(
+        charge,
+        order,
+        GatewaySaleIntent::InitialStoredCredential {
+            payment_token: PaymentToken::new("tok_safe").unwrap(),
+        },
+        None,
+    );
+    assert_eq!(request.cardholder_ip(), None);
+
+    let request = request.with_cardholder_ip(Some(address));
+    assert_eq!(request.cardholder_ip(), Some(address));
+    assert!(!format!("{request:?}").contains("203.0.113.7"));
+
+    let parts = request.into_parts();
+    assert_eq!(parts.cardholder_ip, Some(address));
+    assert!(!format!("{parts:?}").contains("203.0.113.7"));
+    let restored = GatewaySaleRequest::from(parts);
+    assert_eq!(restored.cardholder_ip(), Some(address));
+    assert_eq!(restored.with_cardholder_ip(None).cardholder_ip(), None);
+}

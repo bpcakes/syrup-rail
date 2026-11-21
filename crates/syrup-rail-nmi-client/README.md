@@ -291,6 +291,18 @@ customer statements, so they stay visible in `Debug` output. The field breaks
 existing `SaleRequest` struct literals; add `descriptor: None` to keep sending
 none.
 
+`SaleRequest.cardholder_ip` optionally carries the cardholder's own network
+address for a sale the cardholder initiates; never pass the address of the
+merchant's server or staff. A Classic sale sends an IPv4 address, or an
+IPv4-mapped IPv6 one, as `ipaddress`, which NMI documents as "IP address of
+cardholder" in the format `xxx.xxx.xxx.xxx`. NMI's Classic reference documents
+no IPv6 form, so any other IPv6 address is omitted rather than risked on a
+payment, and the v5 sale sends no address. The value is customer data: it is
+not on the form `Debug` allowlist and `SaleRequest` prints only
+`has_cardholder_ip`. The client does not decide whether a sale may carry an
+address; the adapter and the host do. The field breaks existing `SaleRequest`
+struct literals; add `cardholder_ip: None` to keep sending none.
+
 `Client::query_transaction_diagnostics` performs the same bounded one-shot query
 as `query_transaction`, selected only by transaction ID, and returns
 `TransactionDiagnosticsLookup`: not found, more than one transaction, or one

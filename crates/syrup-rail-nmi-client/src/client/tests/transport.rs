@@ -52,6 +52,7 @@ fn order_ids_are_normalized_consistently_across_mutation_and_query_transports() 
         stored_credential: None,
         billing_contact: None,
         descriptor: None,
+        cardholder_ip: None,
     };
     assert!(validate_sale_request(&sale, "private_key").is_ok());
     let sale_params = classic_sale_params(
@@ -162,6 +163,7 @@ async fn json_sale_sends_raw_private_key_authorization_header() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect("sale should parse test response");
@@ -203,6 +205,7 @@ async fn classic_recurring_merchant_sale_sends_scheduled_billing_metadata() {
             }),
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect("recurring Classic sale should parse");
@@ -266,6 +269,7 @@ async fn http_200_invalid_v5_json_is_an_indeterminate_mutation() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("accepted mutation with invalid JSON must be indeterminate");
@@ -313,6 +317,7 @@ async fn connection_failure_is_known_not_submitted() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("a refused connection must fail before submission");
@@ -399,6 +404,7 @@ async fn established_http1_reset_is_indeterminate_and_never_retried() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("a reset after submission must preserve mutation uncertainty");
@@ -435,6 +441,7 @@ async fn successful_oversized_response_is_an_indeterminate_mutation() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("oversized successful response must be indeterminate");
@@ -486,6 +493,7 @@ fn sale_body_json_applies_the_configured_duplicate_check_policy() {
         stored_credential: None,
         billing_contact: None,
         descriptor: None,
+        cardholder_ip: None,
     };
     let body = sale_body_json(
         &request,

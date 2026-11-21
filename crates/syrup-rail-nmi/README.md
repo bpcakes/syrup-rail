@@ -120,6 +120,15 @@ whitespace) as `GatewayNotSubmittedError::Malformed` after the attempt is
 reserved, so hosts validate the strings at configuration time; the core type
 enforces the same rules.
 
+A `CardholderIpAddress` on a sale maps to NMI's Classic `ipaddress` field for
+the customer-initiated `InitialStoredCredential` intent, which enrollment and
+recovery submit. The adapter drops it from a merchant-initiated
+`RecurringStoredCredential` sale whatever the request holds, because no
+cardholder takes part in a renewal. Only IPv4 (including IPv4-mapped IPv6) is
+sent: NMI's Classic reference documents the dotted format alone, so an IPv6
+address is omitted and the sale proceeds without it. The v5 one-time sale and
+Classic `validate` send no address.
+
 `query_transaction_diagnostics` makes one exact Query API lookup by transaction
 ID and never searches by order ID. It requires exactly one returned transaction
 whose ID matches, rejects a returned order ID or currency that differs from the
