@@ -1,7 +1,8 @@
 use sqlx::{PgConnection, Postgres, Transaction};
 use syrup_rail::{
-    GatewayDiagnostic, GatewayTransactionId, PaymentAttempt, PaymentAttemptStatus, PaymentMethodId,
-    PaymentResolutionCode, ProcessorEvidence, SubscriptionId,
+    GatewayAvsResponse, GatewayDiagnostic, GatewayTransactionId, PaymentAttempt,
+    PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode, ProcessorEvidence,
+    SubscriptionId,
 };
 
 use super::{PaymentAttemptStoreError, invalid_state};
@@ -72,6 +73,20 @@ pub(crate) async fn persist_attempt_transition(
     transition: AttemptTransition,
 ) -> Result<(), PaymentAttemptStoreError> {
     let descriptor = evidence.descriptor();
+    // Written with the rest of the response's evidence. Schema v7's
+    // `varchar(1)` column holds any parsed code. An approval reconciled from
+    // an observation without AVS keeps a previously stored code from the same
+    // submitted attempt, while foreign non-code bytes parsed as `None` are
+    // still cleared.
+    let avs_response = match transition {
+        AttemptTransition::Approved(_) => evidence
+            .avs_response()
+            .or(attempt.state().processor_evidence().avs_response()),
+        AttemptTransition::Resolved { .. } | AttemptTransition::LateApprovalReview { .. } => {
+            evidence.avs_response()
+        }
+    };
+    let avs_response = avs_response.as_ref().map(GatewayAvsResponse::as_str);
     if let AttemptTransition::LateApprovalReview {
         resolution_code,
         message,
@@ -92,6 +107,7 @@ pub(crate) async fn persist_attempt_transition(
                 payment_type = $8, card_brand = $9, card_last4 = $10,
                 card_exp_month = $11, card_exp_year = $12,
                 resolution_code = $13,
+                gateway_avs_response = $15,
                 review_required_at = COALESCE(review_required_at, clock_timestamp()),
                 updated_at = clock_timestamp()
             WHERE id = $1
@@ -116,6 +132,7 @@ pub(crate) async fn persist_attempt_transition(
         .bind(descriptor.card_exp_year())
         .bind(resolution_code.map(PaymentResolutionCode::as_str))
         .bind(message)
+        .bind(avs_response)
         .execute(&mut *connection)
         .await?;
         if result.rows_affected() != 1 {
@@ -159,6 +176,7 @@ pub(crate) async fn persist_attempt_transition(
             payment_type = $11, card_brand = $12, card_last4 = $13,
             card_exp_month = $14, card_exp_year = $15,
             resolution_code = $16,
+            gateway_avs_response = $17,
             resolved_at = CASE WHEN $2 IN ('approved', 'declined', 'failed')
                 THEN clock_timestamp() ELSE resolved_at END,
             review_required_at = CASE WHEN $2 = 'review_required'
@@ -187,6 +205,7 @@ pub(crate) async fn persist_attempt_transition(
     .bind(descriptor.card_exp_month())
     .bind(descriptor.card_exp_year())
     .bind(resolution_code.map(PaymentResolutionCode::as_str))
+    .bind(avs_response)
     .execute(connection)
     .await?;
     if result.rows_affected() != 1 {

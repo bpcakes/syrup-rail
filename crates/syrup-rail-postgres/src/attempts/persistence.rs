@@ -1,7 +1,7 @@
 use super::*;
 
-/// Reads every schema-v6 attempt column by name, so prepared statements keep
-/// working after schema v7 appends `gateway_avs_response`.
+/// Reads every schema-v7 attempt column by name, so prepared statements keep
+/// working after a later schema appends a column.
 pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = concat!(
     "SELECT ",
     include_str!("payment_attempt_columns.sql"),
@@ -233,7 +233,7 @@ pub(crate) fn payment_attempt_from_row(
             .map(PaymentResolutionCode::try_from)
             .transpose()
             .map_err(|_| invalid_state())?,
-        processor_evidence_from_row(row)?,
+        processor_evidence_from_row(row)?.with_avs_response(attempt_avs_response(row)?),
         lifecycle_from_row(row)?,
         PaymentAttemptTimestamps::new(
             row.try_get("submitted_at")?,
@@ -633,6 +633,18 @@ pub(crate) fn processor_evidence_from_row(
         diagnostic(row, "gateway_condition")?,
         descriptor,
     ))
+}
+
+/// An attempt row's AVS result. Processor charges share the evidence columns
+/// above but have no AVS column, so only attempt reads call this.
+///
+/// A stored value that is not an AVS code was not written by this runtime;
+/// it is a diagnostic, so it reads as absent rather than failing the attempt.
+fn attempt_avs_response(row: &PgRow) -> Result<Option<GatewayAvsResponse>, sqlx::Error> {
+    Ok(row
+        .try_get::<Option<String>, _>("gateway_avs_response")?
+        .as_deref()
+        .and_then(GatewayAvsResponse::parse))
 }
 
 fn diagnostic(row: &PgRow, column: &'static str) -> Result<Option<GatewayDiagnostic>, sqlx::Error> {

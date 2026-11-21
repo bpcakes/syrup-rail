@@ -65,6 +65,10 @@ fn documented_v5_sale_accepts_blank_optional_customer_vault_id() {
         outcome.response_code.as_ref().map(SensitiveText::expose),
         Some("100")
     );
+    assert_eq!(
+        outcome.avs_response.as_ref().map(SensitiveText::expose),
+        Some("Y")
+    );
     assert!(outcome.diagnostics.is_empty());
 }
 
@@ -401,7 +405,8 @@ fn payment_outcome_wraps_raw_processor_fields_without_formatting_disclosure() {
         "response": "1",
         "response_code": "cvv=123",
         "response_text": "Approved card_number=4111111111111111",
-        "condition": "complete payment_token=tok_secret"
+        "condition": "complete payment_token=tok_secret",
+        "avs_response": "avs_street=123_Secret_Ln"
     }))
     .expect("payment outcome should parse");
 
@@ -433,10 +438,16 @@ fn payment_outcome_wraps_raw_processor_fields_without_formatting_disclosure() {
         outcome.condition.as_ref().map(SensitiveText::expose),
         Some("complete payment_token=tok_secret")
     );
+    assert_eq!(
+        outcome.avs_response.as_ref().map(SensitiveText::expose),
+        Some("avs_street=123_Secret_Ln")
+    );
     let debug = format!("{outcome:?}");
+    assert!(debug.contains("has_avs_response: true"), "{debug}");
     assert!(!debug.contains("4111111111111111"));
     assert!(!debug.contains("tok_secret"));
     assert!(!debug.contains("cvv=123"));
+    assert!(!debug.contains("123_Secret_Ln"));
 }
 
 #[test]
@@ -552,4 +563,37 @@ fn payment_outcome_drops_malformed_json_card_descriptor_fields() {
     assert_eq!(outcome.descriptor.card_last4, None);
     assert_eq!(outcome.descriptor.card_exp_month, None);
     assert_eq!(outcome.descriptor.card_exp_year, None);
+}
+
+#[test]
+fn v5_json_payment_outcome_carries_the_avs_result_unvalidated() {
+    for (members, expected) in [
+        (r#""avs_response":"Z""#, Some("Z")),
+        (r#""avsresponse":"N""#, Some("N")),
+        (r#""avs_response":0"#, Some("0")),
+        (r#""avs_response":"YY""#, Some("YY")),
+        (r#""avs_response":"Y","avs_response":"Y""#, Some("Y")),
+        (r#""avs_response":"Y","avsresponse":"""#, Some("Y")),
+        (r#""avs_response":"Y","avs_response":"N""#, None),
+        (r#""avs_response":"Y","avsresponse":"N""#, None),
+        (r#""avs_response":"""#, None),
+        (r#""avs_response":"   ""#, None),
+        (r#""avs_response":null"#, None),
+        (r#""avs_response":{}"#, None),
+        (r#""avs_response":true"#, None),
+        ("", None),
+    ] {
+        let separator = if members.is_empty() { "" } else { "," };
+        let body = format!(
+            r#"{{"response":"3","response_code":"300","response_text":"AVS REJECTED","id":"txn_v5_avs"{separator}{members}}}"#
+        );
+        let outcome =
+            payment_outcome_from_json_text(&body).expect("v5 JSON AVS rejection should parse");
+        assert_eq!(outcome.status, PaymentStatus::Failed, "{members}");
+        assert_eq!(
+            outcome.avs_response.as_ref().map(SensitiveText::expose),
+            expected,
+            "{members}"
+        );
+    }
 }

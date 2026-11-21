@@ -27,6 +27,8 @@ const JSON_CUSTOMER_VAULT_ID_PATHS: &[&[&str]] = &[
     &["customer", "customer_vault_id"],
 ];
 
+const JSON_AVS_RESPONSE_PATHS: &[&[&str]] = &[&["avs_response"], &["avsresponse"]];
+
 fn json_scalar_occurrence(value: &LosslessJsonValue) -> ScalarOccurrence<'_> {
     match value {
         LosslessJsonValue::String(value) => {
@@ -130,6 +132,11 @@ pub(in crate::client) fn payment_outcome_from_json(
     let (response_text, _) = resolve_optional_scalar(
         collect_json_direct_scalar(value, "response_text", GatewayField).finish(),
     );
+    let (avs_response, _) = resolve_optional_scalar(collect_json_identifier(
+        value,
+        JSON_AVS_RESPONSE_PATHS,
+        IdentifierPresence::Optional,
+    ));
     let mut status = decision.status;
     let mut diagnostics = decision.diagnostics;
     let (transaction_id, customer_vault_id) = finalize_payment_identifiers(
@@ -151,6 +158,7 @@ pub(in crate::client) fn payment_outcome_from_json(
         response_text: sensitive_gateway_field(response_text),
         condition: sensitive_gateway_field(decision.condition),
         descriptor: descriptor_from_json(value),
+        avs_response: avs_response.map(SensitiveText::new),
         diagnostics,
     }
     .normalize_diagnostics())

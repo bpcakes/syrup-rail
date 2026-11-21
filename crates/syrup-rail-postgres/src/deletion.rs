@@ -15,8 +15,9 @@ pub use blockers::billing_deletion_blockers;
 /// ascending account order, before updating any row, so a concurrent approval
 /// or renewal reservation cannot restore contact or address data mid-scrub.
 /// Names, email, billing addresses, provider references, response text, and
-/// card display are cleared; immutable processor-charge observations are never
-/// selected or mutated by this operation.
+/// card display are cleared; closed decision codes such as
+/// `gateway_response_code` and `gateway_avs_response` are retained, and
+/// immutable processor-charge observations are never selected or mutated.
 pub async fn scrub_subscriber_billing_data(
     connection: &mut PgConnection,
     command: ScrubSubscriberBillingData,

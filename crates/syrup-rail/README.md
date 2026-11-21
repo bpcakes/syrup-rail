@@ -8,7 +8,7 @@ ports used by the adapter crates.
 
 ```toml
 [dependencies]
-syrup-rail = "0.6.0"
+syrup-rail = "0.7.0"
 ```
 
 Construct subscription offers from explicit start, recurring, and failure
@@ -111,9 +111,17 @@ names the transaction ID, the original operation (`Sale` or `Validate`), its
 amount, and the expected order ID; providers must look up only that transaction
 and select exactly one matching original action. Results are observations, not
 payment evidence: `GatewayTransactionDiagnosticsObservation` omits provider codes
-longer than 64 bytes as received or after sanitization, sanitizes free text, and
+longer than 64 bytes as received or after sanitization (and limits AVS codes to
+one ASCII letter or digit via `GatewayAvsResponse`), sanitizes free text, and
 reports partial completeness when a field is missing. The default returns `Unsupported` without I/O, and gateway
 decorators must forward the method.
+
+`GatewayAvsResponse` represents a provider's single-character ASCII AVS result
+code (`parse`, `as_char`, `as_str`) with value-free `Debug` and `Display`
+formatting; any other value parses to `None` rather than being shortened.
+`ProcessorEvidence::with_avs_response` / `avs_response` and
+`GatewayPaymentOutcome::avs_response` carry it alongside a payment response as
+a diagnostic without changing payment decisions.
 
 Syrup Rail does not authenticate subscribers, persist gateway credentials, or
 define a transport wire format for billing events. Those remain host

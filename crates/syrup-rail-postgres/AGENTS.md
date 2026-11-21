@@ -32,9 +32,9 @@ and transaction orchestration.
   informational retry-reclassification audit, and forward-only v1 cutover
   artifact. All `schema/v2/**` files are immutable shipped artifacts.
 - `schema/v1/**` — immutable shipped version-1 distribution artifacts.
-- `src/schema_contract.rs` — production read-only v6-or-v7 runtime
-  compatibility assertion, the exact v7 and v6 assertions, the retained v5
-  and v4 pre-cutover assertions, and canonical catalog conformance;
+- `src/schema_contract.rs` — production read-only v7 runtime compatibility
+  assertion, the exact v6, v5, and v4 pre-cutover assertions, feature-gated v3
+  and v6-or-v7 assertions, and canonical catalog conformance;
   `src/schema_contract/fingerprint.rs` owns snapshot-consistent catalog
   fingerprinting. Version-specific, upgrade, and shared fixture tests live
   under `src/schema_contract/tests/`; checked-in install/upgrade SQL constants
@@ -58,6 +58,9 @@ and transaction orchestration.
   approval mutations live in their nested `approval.rs` modules.
 - `src/enrollment_application/recovery/evidence.rs` owns bounded recovery
   approval-evidence retries and the fallback that does not lock the attempt.
+- `src/enrollment_application/evidence_identity.rs` — which processor
+  identifiers non-approved evidence keeps, replaces, or reports as conflicting
+  across separate observations of one attempt.
 - `src/renewal_failure.rs` — the single qualifying automatic-failure history
   predicate and atomic retry, exhausted, or terminal-unpaid projection.
 - `src/period_expiry.rs` — the database-clock billing-period expiry check,
@@ -287,12 +290,14 @@ and transaction orchestration.
 ## Invariants
 
 - No runtime migrator in production service construction.
-- `assert_runtime_schema_v6_or_v7_compatible`,
-  `assert_runtime_schema_v7_compatible`, and
+- `assert_runtime_schema_v7_compatible`, the feature-gated
+  `assert_runtime_schema_v6_or_v7_compatible`, and
   `assert_runtime_schema_v6_compatible` must reuse the complete canonical
   catalog/fingerprint check in one read-only snapshot, reject any PostgreSQL
   major other than 18, and run no DDL; the v6-or-v7 check differs only in
-  accepting either exact fingerprint. Hosts apply versioned install and
+  accepting either exact fingerprint and stays behind
+  `schema-contract-test-support` in 0.7.0 so upgrading hosts switch to the v7
+  check at compile time. Hosts apply versioned install and
   forward-only upgrade artifacts through their own migrations. The retained
   `assert_runtime_schema_v5_compatible` and `assert_runtime_schema_v4_compatible`
   check only their pre-cutover states.
@@ -304,10 +309,9 @@ and transaction orchestration.
   when upgrading SQLx; `Connection::is_in_transaction` alone is insufficient.
 - Provider wire strings belong in `syrup-rail-nmi`, not here. Schema v7
   bounds `gateway_avs_response` to `varchar(1)` but does not restrict its
-  vocabulary, and `scrub_subscriber_billing_data` retains it. A writer stores
-  only the domain observation's `avs_response`, which `with_avs_response`
-  limits to one ASCII letter or digit; never persist raw provider text or
-  address fragments there.
+  vocabulary, and `scrub_subscriber_billing_data` retains it. Attempt writers
+  store only `ProcessorEvidence::avs_response` (`GatewayAvsResponse`, one ASCII
+  letter or digit); never persist raw provider text or address fragments there.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
   `assert_v3_conforms`, `assert_v4_conforms`, `assert_v5_conforms`,
   `assert_v6_conforms`, and `assert_v7_conforms` wrappers are also read-only;
