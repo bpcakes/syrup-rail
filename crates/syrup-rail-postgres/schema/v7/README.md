@@ -25,12 +25,13 @@ attempt's other gateway response columns are bounded by the
 column uses a type bound because adding a column whose type has a length limit
 verifies no existing rows, while adding a CHECK scans the table under the
 `ALTER TABLE` lock. The bound limits length, not vocabulary. This release never
-writes the column; a runtime that does must recognize the value from the
-provider adapter's closed AVS result-code vocabulary (never persisting raw
-provider text or address fragments) and treat any other value as unreadable,
-marking the observation partial rather than truncating it, because subscriber
-scrubbing retains it with `gateway_response_code` as a closed decision code
-rather than the address it was checked against.
+writes the column. The value a writer should store is
+`GatewayTransactionDiagnosticsObservation::avs_response`: `with_avs_response`
+retains only a single ASCII letter or digit and treats any other value as
+unreadable, marking the observation partial rather than shortening it. Never
+persist raw provider text or address fragments here, because subscriber
+scrubbing retains the value with `gateway_response_code` as a closed decision
+code rather than the address it was checked against.
 
 ## Runtime compatibility
 

@@ -304,11 +304,10 @@ and transaction orchestration.
   when upgrading SQLx; `Connection::is_in_transaction` alone is insufficient.
 - Provider wire strings belong in `syrup-rail-nmi`, not here. Schema v7
   bounds `gateway_avs_response` to `varchar(1)` but does not restrict its
-  vocabulary, and `scrub_subscriber_billing_data` retains it. Any future writer
-  must validate it against a closed provider AVS code vocabulary (never raw
-  provider text or address fragments) before persisting, and treat any other
-  value, including a longer one that the 64-byte diagnostic code bound
-  admits, as unreadable rather than truncating it.
+  vocabulary, and `scrub_subscriber_billing_data` retains it. A writer stores
+  only the domain observation's `avs_response`, which `with_avs_response`
+  limits to one ASCII letter or digit; never persist raw provider text or
+  address fragments there.
 - The feature-gated `assert_v1_conforms`, `assert_v2_conforms`,
   `assert_v3_conforms`, `assert_v4_conforms`, `assert_v5_conforms`,
   `assert_v6_conforms`, and `assert_v7_conforms` wrappers are also read-only;
