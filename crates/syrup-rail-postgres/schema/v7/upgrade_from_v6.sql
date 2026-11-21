@@ -9,7 +9,7 @@
 -- a pending host-charge attempt must have no AVS result before submission, as
 -- it already must have no other gateway response. No row, constraint, index,
 -- trigger, view, or other column changes, and the upgrade infers nothing about
--- historical rows: they keep NULL. The column's varchar(64) type bounds every
+-- historical rows: they keep NULL. The column's varchar(1) type bounds every
 -- write; it is a type modifier, not a CHECK, so adding it verifies no rows.
 --
 -- Adding a nullable column without a default and replacing a function change
@@ -65,7 +65,7 @@ END
 $$;
 
 ALTER TABLE public.billing_payment_attempts
-    ADD COLUMN gateway_avs_response varchar(64);
+    ADD COLUMN gateway_avs_response varchar(1);
 
 CREATE OR REPLACE FUNCTION public.billing_host_charge_ledger_admission(
     p_billing_scope_id uuid,

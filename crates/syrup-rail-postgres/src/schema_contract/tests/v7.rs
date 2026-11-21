@@ -63,8 +63,8 @@ async fn attempt_table_storage(pool: &PgPool) -> Result<i64, sqlx::Error> {
     .await
 }
 
-/// Writes a 64-character AVS value to an existing attempt and rejects a
-/// 65-character one, then rolls both writes back. An explicit cast would
+/// Writes a one-character AVS code to an existing attempt and rejects a
+/// two-character value, then rolls both writes back. An explicit cast would
 /// truncate silently; only a real write shows the column enforces its bound.
 async fn assert_avs_length_bound(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     let mut transaction = pool.begin().await?;
@@ -74,16 +74,16 @@ async fn assert_avs_length_bound(pool: &PgPool) -> Result<(), Box<dyn Error>> {
             .await?;
     let write = "UPDATE billing_payment_attempts SET gateway_avs_response = $1 WHERE id = $2";
     sqlx::query(write)
-        .bind("A".repeat(64))
+        .bind("Y")
         .bind(attempt_id)
         .execute(&mut *transaction)
         .await?;
     let error = sqlx::query(write)
-        .bind("A".repeat(65))
+        .bind("YY")
         .bind(attempt_id)
         .execute(&mut *transaction)
         .await
-        .expect_err("a 65-character AVS value must be rejected");
+        .expect_err("a two-character AVS value must be rejected");
     assert_eq!(
         error
             .as_database_error()
@@ -127,21 +127,14 @@ async fn runtime_schema_v7_accepts_fresh_install_and_populated_v6_upgrade()
         assert_eq!(fresh_fingerprint, V7_CATALOG_FINGERPRINT);
         assert_ne!(V7_CATALOG_FINGERPRINT, V6_CATALOG_FINGERPRINT);
 
-        // The column is the attempt table's last, nullable varchar(64) column
+        // The column is the attempt table's last, nullable varchar(1) column
         // in both paths, so ADD COLUMN and the fresh install agree.
         let fresh_shape = v7_column_shape(&fresh.pool).await?;
         assert_eq!(fresh_shape, v7_column_shape(&upgraded.pool).await?);
         let (data_type, nullable, _, max_length) = fresh_shape.expect("v7 adds the AVS column");
-        // Every code the domain observation retains fits the column.
-        assert_eq!(
-            max_length,
-            Some(i32::try_from(
-                syrup_rail::MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES
-            )?)
-        );
         assert_eq!(
             (data_type.as_str(), nullable.as_str(), max_length),
-            ("character varying", "YES", Some(64))
+            ("character varying", "YES", Some(1))
         );
 
         // The type bounds writes. Only the upgraded database has attempt rows;

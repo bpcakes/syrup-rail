@@ -7,7 +7,7 @@ v6 and do not edit any shipped artifact under `schema/v1` through `schema/v6`.
 
 Version 7 appends one nullable column and replaces one function to cover it:
 
-- `billing_payment_attempts.gateway_avs_response varchar(64)` holds the provider's
+- `billing_payment_attempts.gateway_avs_response varchar(1)` holds the provider's
   address-verification result code from the attempt's original response.
 - `billing_host_charge_ledger_admission` additionally requires a pending
   host-charge attempt to have no AVS result before `submit` admission, as it
@@ -16,18 +16,19 @@ Version 7 appends one nullable column and replaces one function to cover it:
 No row, constraint, index, trigger, view, or other column changes, and the
 upgrade infers nothing about historical rows: they keep `NULL`.
 
-The `varchar(64)` type bounds the value to 64 characters on every write. That
-matches `MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES`, the 64-byte bound the domain
-diagnostic observation already applies to AVS codes, so no value the domain
-accepts can fail the write. NMI AVS result codes are one or two characters. The attempt's other
-gateway response columns are bounded by the
+The `varchar(1)` type bounds the value to one character on every write: NMI's
+AVS result codes, like the card networks' AVS scheme they follow, are single
+characters. Raising a `varchar` limit later is a catalog-only change, so a
+provider with longer codes can widen it online in a later schema version. The
+attempt's other gateway response columns are bounded by the
 `billing_payment_attempts_gateway_text_check` constraint instead. The new
 column uses a type bound because adding a column whose type has a length limit
 verifies no existing rows, while adding a CHECK scans the table under the
 `ALTER TABLE` lock. The bound limits length, not vocabulary. This release never
 writes the column; a runtime that does must recognize the value from the
 provider adapter's closed AVS result-code vocabulary (never persisting raw
-provider text or address fragments), because subscriber scrubbing retains it
+provider text or address fragments) and treat any other value as unreadable,
+marking the observation partial rather than truncating it, because subscriber scrubbing retains it
 with `gateway_response_code` as a closed decision code rather than the address
 it was checked against.
 
