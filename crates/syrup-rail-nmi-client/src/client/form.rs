@@ -178,21 +178,20 @@ pub(super) fn classic_sale_params<'a>(
     if let Some(descriptor) = &request.descriptor {
         push_classic_statement_descriptor(&mut params, descriptor);
     }
-    if let Some(address) = classic_cardholder_ip(request.cardholder_ip) {
-        params.push_customer_owned("ipaddress", address);
+    if let Some(address) = request.cardholder_ip {
+        params.push_customer_owned("ipaddress", classic_cardholder_ip(address));
     }
     params
 }
 
-/// The Classic `ipaddress` value for a cardholder address, or `None` when it
-/// has no documented Classic form. NMI's Classic reference gives only the
-/// dotted IPv4 format, so an IPv6 address that is not IPv4-mapped is left out:
-/// an omitted optional field cannot fail a payment, an unsupported one might.
-fn classic_cardholder_ip(address: Option<IpAddr>) -> Option<String> {
-    match address?.to_canonical() {
-        IpAddr::V4(address) => Some(address.to_string()),
-        IpAddr::V6(_) => None,
-    }
+/// The Classic `ipaddress` value for a cardholder address: dotted IPv4, also
+/// for an IPv4-mapped IPv6 address, or else compressed IPv6. NMI's Classic
+/// reference gives only the dotted format, but its sandbox accepted an IPv6
+/// address and recorded it exactly as sent. Leaving one out is not neutral:
+/// for a sale without the field the sandbox recorded the submitting server's
+/// address instead.
+fn classic_cardholder_ip(address: IpAddr) -> String {
+    address.to_canonical().to_string()
 }
 
 /// Dynamic descriptor fields NMI forwards on supported processors. They are

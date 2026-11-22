@@ -65,12 +65,13 @@ unchanged.
   replacement and host charges do not send one. No schema changes.
 - The NMI adapter forwards the address only for customer-initiated intents,
   dropping it from a `RecurringStoredCredential` sale whatever the request
-  holds. The raw client sends an IPv4 address as the Classic `ipaddress`
-  field ("IP address of cardholder", documented format `xxx.xxx.xxx.xxx`),
-  keeps it off the `Debug` allowlist, and omits an IPv6 address because NMI's
-  Classic reference documents no IPv6 form; the v5 sale sends none. The host
-  remains responsible for whose address it is and for disclosing that it is
-  shared with the processor.
+  holds. The raw client sends it as the Classic `ipaddress` field ("IP address
+  of cardholder", documented format `xxx.xxx.xxx.xxx`), in dotted IPv4 or
+  compressed IPv6 form, and keeps it off the `Debug` allowlist. NMI's Classic
+  reference documents no IPv6 form, but its sandbox accepted IPv6 and recorded
+  it as sent, and recorded the submitting server's address for a sale without
+  the field. The v5 sale sends none. The host remains responsible for whose
+  address it is and for disclosing that it is shared with the processor.
 
 ### Changed
 

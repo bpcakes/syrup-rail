@@ -239,10 +239,10 @@ the payment token: it is never persisted, is not part of the reservation or of
 replay equality (a retry may carry a different address or none without an
 idempotency conflict), and decides nothing. Payment-method replacement,
 renewals and host charges send none. The NMI adapter forwards it only for
-`InitialStoredCredential` and `OneTime` intents, and the raw client sends an
-IPv4 address as the Classic `ipaddress` field; an IPv6 address is omitted
-because NMI documents only the dotted format for that field, and the v5 sale
-sends no address. Source breaks: `GatewaySaleRequestParts` and the raw
+`InitialStoredCredential` and `OneTime` intents, and the raw client sends it
+as the Classic `ipaddress` field, in dotted IPv4 or compressed IPv6 form. NMI
+documents only the dotted format for that field, but its sandbox accepted IPv6
+and recorded it as sent. The v5 sale sends no address. Source breaks: `GatewaySaleRequestParts` and the raw
 `syrup_rail_nmi_client::SaleRequest` each gain `cardholder_ip`; add
 `cardholder_ip: None` to existing `SaleRequest` literals, and a decorator that
 rebuilds a sale with `GatewaySaleRequest::new` must forward the address with

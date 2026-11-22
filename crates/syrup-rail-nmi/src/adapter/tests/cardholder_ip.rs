@@ -98,7 +98,7 @@ async fn cardholder_ip_reaches_the_classic_wire_only_for_the_initial_sale() {
 }
 
 #[tokio::test]
-async fn ipv6_cardholder_address_is_omitted_from_the_classic_sale() {
+async fn ipv6_cardholder_address_reaches_the_classic_wire() {
     let address = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x17));
     let (gateway, captured, server) = capturing_gateway(CLASSIC_APPROVAL).await;
     let outcome = gateway
@@ -107,11 +107,12 @@ async fn ipv6_cardholder_address_is_omitted_from_the_classic_sale() {
                 .with_cardholder_ip(Some(CardholderIpAddress::new(address))),
         )
         .await
-        .expect("the sale is submitted without the address");
+        .expect("initial sale should be approved");
     assert_eq!(outcome.status(), GatewayPaymentStatus::Approved);
-    let request = captured.await.unwrap();
-    assert!(!form_fields(&request).contains_key("ipaddress"));
-    assert!(!request.contains("2001"), "no form of the address is sent");
+    // The colons survive form encoding.
+    let fields = form_fields(&captured.await.unwrap());
+    assert_eq!(fields["ipaddress"], "2001:db8::17");
+    assert_eq!(fields["initiated_by"], "customer");
     finish(server).await;
 }
 

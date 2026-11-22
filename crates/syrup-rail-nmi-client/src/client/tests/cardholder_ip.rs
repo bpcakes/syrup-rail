@@ -1,5 +1,5 @@
-//! The cardholder network address on the wire: IPv4 on a Classic sale,
-//! nothing for IPv6 or on the v5 sale, and never in `Debug` output.
+//! The cardholder network address on the wire: IPv4 or IPv6 on a Classic sale,
+//! nothing on the v5 sale, and never in `Debug` output.
 
 use super::*;
 
@@ -63,16 +63,42 @@ fn classic_sale_sends_an_ipv4_cardholder_address_and_redacts_it_from_debug() {
 }
 
 #[test]
-fn classic_sale_omits_an_ipv6_cardholder_address() {
-    use std::net::{IpAddr, Ipv6Addr};
+fn classic_sale_sends_an_ipv6_cardholder_address_and_redacts_it_from_debug() {
+    // NMI records the text exactly as sent, so every spelling of one address
+    // must reach it in the same compressed form.
+    for spelling in [
+        "2001:db8:1234::97",
+        "2001:0DB8:1234:0000:0000:0000:0000:0097",
+    ] {
+        let request = initial_sale_with_cardholder_ip(Some(spelling.parse().unwrap()));
+        assert_eq!(
+            classic_ipaddress(&request).as_deref(),
+            Some("2001:db8:1234::97")
+        );
+        crate::client::validation::validate_sale_request(&request, "private_key")
+            .expect("an IPv6 address never invalidates the sale");
 
-    // NMI's Classic reference documents only the dotted IPv4 format.
-    let request = initial_sale_with_cardholder_ip(Some(IpAddr::V6(Ipv6Addr::new(
-        0x2001, 0xdb8, 0, 0, 0, 0, 0, 0x17,
-    ))));
-    assert_eq!(classic_ipaddress(&request), None);
-    crate::client::validation::validate_sale_request(&request, "private_key")
-        .expect("an omitted address never invalidates the sale");
+        let params = classic_sale_params(
+            "private_key",
+            &request,
+            "1.00".to_owned(),
+            DuplicateCheck::ProcessorConfigured,
+        );
+        assert!(matches!(
+            params.field("ipaddress"),
+            Some(NmiFormValue::CustomerOwned(_))
+        ));
+        let debug = format!("{params:?} {request:?}");
+        assert!(!debug.contains("2001"), "{debug}");
+        assert!(debug.contains("has_cardholder_ip: true"), "{debug}");
+    }
+}
+
+#[test]
+fn classic_sale_sends_an_uncompressible_ipv6_cardholder_address_whole() {
+    let address = "2001:db8:1111:2222:3333:4444:5555:6666";
+    let request = initial_sale_with_cardholder_ip(Some(address.parse().unwrap()));
+    assert_eq!(classic_ipaddress(&request).as_deref(), Some(address));
 }
 
 #[test]

@@ -124,9 +124,10 @@ A `CardholderIpAddress` on a sale maps to NMI's Classic `ipaddress` field for
 the customer-initiated `InitialStoredCredential` intent, which enrollment and
 recovery submit. The adapter drops it from a merchant-initiated
 `RecurringStoredCredential` sale whatever the request holds, because no
-cardholder takes part in a renewal. Only IPv4 (including IPv4-mapped IPv6) is
-sent: NMI's Classic reference documents the dotted format alone, so an IPv6
-address is omitted and the sale proceeds without it. The v5 one-time sale and
+cardholder takes part in a renewal. IPv4 (including IPv4-mapped IPv6) is sent in
+dotted form and IPv6 in compressed form. NMI's Classic reference documents the
+dotted format alone; its sandbox accepted IPv6 and recorded it as sent, while
+processor handling of either form is unverified. The v5 one-time sale and
 Classic `validate` send no address.
 
 `query_transaction_diagnostics` makes one exact Query API lookup by transaction
