@@ -31,8 +31,12 @@ the billing scope and subscriber before calling a shared command.
 - Billing contact and card-display metadata retained only where required for a
   command or stored-method display.
 - The cardholder network address a host may attach to a customer-initiated
-  token sale. It exists in memory for that submission only, is never
-  persisted or logged, and is redacted from `Debug` and `Display` output.
+  token sale. These crates hold it only in the host's command and the request
+  built from it, never persist or log it, and redact it from `Debug` and
+  `Display` output. The
+  provider receives and records it, and may repeat it in text these crates
+  persist; see
+  [Cardholder network address transfer](#cardholder-network-address-transfer).
 
 PAN and CVV are not accepted or stored by these crates. Hosts must tokenize card
 data in the browser through the approved provider boundary.
@@ -90,6 +94,37 @@ retention schedules, or incident response.
 Zeroization cannot erase copies made by HTTP, JSON, TLS, allocators, the
 operating system, or callers after explicit exposure. PostgreSQL integrity does
 not protect a host that runs unreviewed DDL with superuser privileges.
+
+## Cardholder network address transfer
+
+Sending a cardholder's network address to NMI is an external data transfer, so
+it answers the review test below.
+
+1. **Protected data and attacker.** The address is personal data. The controls
+   address a reader of logs, errors, or the database, and an ordinary coding
+   mistake that would send it with a charge no cardholder took part in.
+2. **Trust boundary and prevented attack.** The address crosses the host command
+   API into NMI transport. It is opt-in per request, the raw client keeps it off
+   the form `Debug` allowlist, and the NMI adapter drops it from every
+   merchant-initiated sale whatever the request holds.
+3. **Simpler controls considered.** Sending nothing is the default. It is not
+   neutral at the provider: for a sale without the field NMI's sandbox recorded
+   the submitting server's address. Redaction and bounding reuse the existing
+   form controls; no new cryptography or storage is added.
+4. **Lifecycle and operational cost.** There is no key. The value lives as long as
+   the host's command and its clones, is not zeroized, and is copied into the
+   encoded request body.
+   NMI keeps it with the transaction under its own retention.
+5. **Explicit non-protections.** Syrup Rail does not check that the address is
+   routable or belongs to the cardholder; a host must take it from trusted
+   ingress, and a VPN, proxy, or assisted signup can still hide the cardholder.
+   Scrubbing subscriber billing data cannot recall it from the provider. If the
+   provider repeats the address in response or error text, the sanitizer does
+   not recognize it, so it is persisted as provider text; copies in immutable
+   charge evidence, external-reversal attestations, and attempt fields the scrub
+   does not clear outlive it. What a processor does with it
+   is unverified, and a merchant account's IP rules may approve or decline on
+   it. The host owns its disclosure.
 
 ## Review test for a new security mechanism
 

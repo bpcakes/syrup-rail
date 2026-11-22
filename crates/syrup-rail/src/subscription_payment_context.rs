@@ -16,6 +16,9 @@ use crate::{
 /// ignored: it is never persisted, and a replay may carry a different address
 /// or none without conflicting with the original request. A payment-method
 /// replacement does not send it.
+///
+/// `PartialEq` compares every field, including the token and the address. It
+/// is not replay equality, which the durable reservation decides.
 #[derive(Clone, Eq, PartialEq)]
 pub struct SubscriptionPaymentContext {
     attempt_id: PaymentAttemptId,

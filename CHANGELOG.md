@@ -31,7 +31,9 @@ unchanged.
   `SaleRequest` literals. A gateway decorator that rebuilds a sale with
   `GatewaySaleRequest::new` must carry the address across with
   `with_cardholder_ip`, or the provider receives the sale without it;
-  `GatewaySaleRequest::from(parts)` keeps it.
+  `GatewaySaleRequest::from(parts)` keeps it. One that builds a
+  `GatewaySaleRequestParts` literal must copy the incoming `cardholder_ip`, not
+  `None`.
 
 ### Added
 
@@ -61,20 +63,27 @@ unchanged.
   `GatewaySaleRequest::with_cardholder_ip`.
   It is request-scoped like the payment token: never persisted, absent from
   the reservation and from replay equality (a retry may carry another address
-  or none), and never an input to a payment decision. Renewals, payment-method
-  replacement and host charges do not send one. No schema changes.
+  or none; provider text that repeats it is stored as provider text), and never
+  an input to a payment or entitlement decision by Syrup Rail, though a merchant
+  account's own IP rules may act on it. Renewals, payment-method replacement
+  and host charges do not send one. No schema changes.
 - The NMI adapter forwards the address only for customer-initiated intents,
   dropping it from a `RecurringStoredCredential` sale whatever the request
   holds. The raw client sends it as the Classic `ipaddress` field ("IP address
   of cardholder", documented format `xxx.xxx.xxx.xxx`), in dotted IPv4 or
   compressed IPv6 form, and keeps it off the `Debug` allowlist. NMI's Classic
-  reference documents no IPv6 form, but its sandbox accepted IPv6 and recorded
-  it as sent, and recorded the submitting server's address for a sale without
+  reference documents no IPv6 form. Its sandbox accepted IPv6 and recorded it
+  as sent, but also recorded text that is not an address, so processor handling
+  is unverified; it recorded the submitting server's address for a sale without
   the field. The v5 sale sends none. The host remains responsible for whose
   address it is and for disclosing that it is shared with the processor.
 
 ### Changed
 
+- `EnrollSubscription`, `RecoverSubscriptionPayment`, and
+  `ReplaceSubscriptionPaymentMethod` print their shared context as a nested
+  `context` in `Debug` output, which shows whether a cardholder address is
+  attached and never the address.
 - Every attempt transition that records provider evidence writes
   `gateway_avs_response` with the rest of that response's evidence, and attempt
   reads return it. Reconciled approved and non-approved transitions keep the

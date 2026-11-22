@@ -77,6 +77,8 @@ const MAX_NMI_ZIP_BYTES: usize = 20;
 const MAX_NMI_DESCRIPTOR_BYTES: usize = 25;
 const MAX_NMI_DESCRIPTOR_PHONE_BYTES: usize = 20;
 const MAX_NMI_DESCRIPTOR_URL_BYTES: usize = 40;
+/// The longest text form of an IPv6 address: eight four-digit groups.
+const MAX_NMI_IP_ADDRESS_BYTES: usize = 39;
 const MAX_NMI_REPORT_DATE_BYTES: usize = 64;
 const MAX_NMI_OUTBOUND_REQUEST_BYTES: usize = 16 * 1024;
 const MAX_NMI_FIXED_REQUEST_BYTES: usize = 1_024;

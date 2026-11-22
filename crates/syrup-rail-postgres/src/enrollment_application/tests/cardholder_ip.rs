@@ -16,6 +16,35 @@ fn address(last: u8) -> CardholderIpAddress {
     CardholderIpAddress::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, last)))
 }
 
+/// Every table's rows as text, so a copy in any column is found.
+async fn assert_never_stored(pool: &PgPool, addresses: &[&str]) -> Result<(), Box<dyn Error>> {
+    let tables = sqlx::query_scalar::<_, String>(
+        "SELECT quote_ident(table_schema) || '.' || quote_ident(table_name) \
+         FROM information_schema.tables \
+         WHERE table_type = 'BASE TABLE' \
+           AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut rows_scanned = 0;
+    for table in tables {
+        let rows = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
+            "SELECT row_to_json(stored)::text FROM {table} AS stored"
+        )))
+        .fetch_all(pool)
+        .await?;
+        rows_scanned += rows.len();
+        for address in addresses {
+            assert!(
+                !rows.iter().any(|row| row.contains(address)),
+                "{table} stores a cardholder address"
+            );
+        }
+    }
+    assert!(rows_scanned > 0, "the workflow stored nothing to scan");
+    Ok(())
+}
+
 fn enroll_from(
     fixture: &ApplicationFixture,
     key: &str,
@@ -61,6 +90,7 @@ async fn enrollment_sends_the_cardholder_ip_and_replays_ignore_it() -> Result<()
             assert_eq!(replay.attempt(), applied.attempt());
         }
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_never_stored(&fixture.database.pool, &["203.0.113.7", "203.0.113.8"]).await?;
 
         // The merchant-initiated renewal of that subscription carries none.
         let subscription_id = applied
@@ -110,7 +140,7 @@ async fn enrollment_without_a_cardholder_ip_sends_none() -> Result<(), Box<dyn E
 }
 
 #[tokio::test]
-async fn recovery_sends_the_cardholder_ip_with_its_token_sale() -> Result<(), Box<dyn Error>> {
+async fn recovery_sends_the_cardholder_ip_and_replays_ignore_it() -> Result<(), Box<dyn Error>> {
     let fixture = enrollment_fixture("card_ip_recover").build().await?;
     let result = async {
         let (subscription_id, _) = enroll_with(
@@ -131,16 +161,26 @@ async fn recovery_sends_the_cardholder_ip_with_its_token_sale() -> Result<(), Bo
             Some("txn_cardholder_ip_recovery"),
             "vault_cardholder_ip_recovery",
         ))));
-        let command = RecoverSubscriptionPayment::new(
-            context(&fixture, "cardholder-ip-recovery", named_contact(None))
-                .with_cardholder_ip(Some(address(9))),
-            fixture.command.plan_key().clone(),
-        );
-        let applied = service(&fixture, &gateway).recover(command).await?;
+        let service = service(&fixture, &gateway);
+        let recovery_context = context(&fixture, "cardholder-ip-recovery", named_contact(None));
+        let recover_from = |cardholder_ip| {
+            RecoverSubscriptionPayment::new(
+                recovery_context.clone().with_cardholder_ip(cardholder_ip),
+                fixture.command.plan_key().clone(),
+            )
+        };
+        let applied = service.recover(recover_from(Some(address(9)))).await?;
         assert_eq!(applied.attempt().status(), PaymentAttemptStatus::Approved);
         let requests = gateway.sale_requests.lock().await.clone();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].cardholder_ip(), Some(address(9)));
+
+        for retried in [Some(address(10)), None] {
+            let replay = service.recover(recover_from(retried)).await?;
+            assert_eq!(replay.attempt(), applied.attempt());
+        }
+        assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
+        assert_never_stored(&fixture.database.pool, &["203.0.113.9", "203.0.113.10"]).await?;
         Ok::<_, Box<dyn Error>>(())
     }
     .await;

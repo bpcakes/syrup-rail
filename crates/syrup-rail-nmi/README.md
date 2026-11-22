@@ -127,7 +127,10 @@ recovery submit. The adapter drops it from a merchant-initiated
 cardholder takes part in a renewal. IPv4 (including IPv4-mapped IPv6) is sent in
 dotted form and IPv6 in compressed form. NMI's Classic reference documents the
 dotted format alone; its sandbox accepted IPv6 and recorded it as sent, while
-processor handling of either form is unverified. The v5 one-time sale and
+processor handling of either form is unverified. A host that must hold back one
+form, such as IPv6 on a processor that rejects it, attaches no address for that
+sale; that is not neutral, since for a sale without the field NMI's sandbox
+recorded the submitting server's address. The v5 one-time sale and
 Classic `validate` send no address.
 
 `query_transaction_diagnostics` makes one exact Query API lookup by transaction

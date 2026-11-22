@@ -215,7 +215,9 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
         ));
     }
     // No cardholder takes part in a merchant-initiated charge, so one never
-    // carries a cardholder address, whatever the request holds.
+    // carries a cardholder address, whatever the request holds. A one-time
+    // sale keeps its address here, but the raw client's v5 sale does not send
+    // one.
     let cardholder_ip = match &intent {
         GatewaySaleIntent::RecurringStoredCredential { .. } => None,
         GatewaySaleIntent::OneTime { .. } | GatewaySaleIntent::InitialStoredCredential { .. } => {

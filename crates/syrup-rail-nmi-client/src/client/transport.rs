@@ -139,6 +139,7 @@ impl Client {
         ensure_form_request_is_bounded(params)?;
         // The parameter set borrows credentials, tokens, processor identifiers,
         // and contact data, so it creates no application-owned secret copies.
+        // The formatted cardholder address is the one customer value it owns.
         // Reqwest necessarily creates one URL-encoded transport body here; its
         // allocator is outside this crate and is not guaranteed to zeroize it.
         Ok(self.http.post(self.endpoint(path)?).form(params))

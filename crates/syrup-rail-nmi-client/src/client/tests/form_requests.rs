@@ -177,7 +177,7 @@ fn store_payment_method_uses_validate_without_amount() {
 }
 
 #[test]
-fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
+fn form_params_borrow_caller_text_and_own_the_formatted_amount() {
     let private_key = Zeroizing::new("private_key_sentinel".to_owned());
     let request = SaleRequest {
         amount_cents: 4_900,

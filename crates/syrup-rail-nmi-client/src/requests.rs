@@ -132,8 +132,9 @@ pub struct SaleRequest {
     /// address of cardholder" in the format `xxx.xxx.xxx.xxx`: dotted IPv4
     /// (also for an IPv4-mapped IPv6 address) or compressed IPv6. NMI's
     /// Classic reference documents no IPv6 form; its sandbox accepted IPv6 and
-    /// recorded it as sent, and recorded the submitting server's address for
-    /// a sale without the field. The v5 sale used for one-time payments and
+    /// recorded it as sent, but also recorded text that is not an address, so
+    /// processor handling is unverified. It recorded the submitting server's
+    /// address for a sale without the field. The v5 sale used for one-time payments and
     /// non-recurring saved-card sales sends no address. A network address is
     /// customer data: `Debug` shows only whether one is present.
     pub cardholder_ip: Option<IpAddr>,

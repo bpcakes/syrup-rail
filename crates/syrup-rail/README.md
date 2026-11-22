@@ -108,13 +108,15 @@ real statement proves what printed.
 A `CardholderIpAddress` is the network address the cardholder used when they
 personally authorized a payment, as the host established it. A host attaches
 it with `SubscriptionPaymentContext::with_cardholder_ip`, and enrollment and
-recovery forward it on their token sale as `GatewaySaleRequest::cardholder_ip`.
-It is memory-only: Syrup Rail never stores it, never compares it on replay,
-and never decides anything from it, and its `Debug` and `Display` output is
-value-free. The host vouches that the address is the cardholder's own, not its
-server's or a representative's, and owns the disclosure that it is shared with
-the provider. A decorator that rebuilds a sale with `GatewaySaleRequest::new`
-must forward `parts.cardholder_ip` with `with_cardholder_ip`.
+recovery forward it on their token sale as
+`GatewaySaleRequest::cardholder_ip`. It is memory-only: Syrup Rail never
+stores it, never compares it on replay, and makes no payment or entitlement
+decision from it, and its `Debug` and `Display` output is value-free. Provider
+text that repeats it is stored as provider text. The host vouches that the
+address is the cardholder's own, not its server's or a representative's, and
+owns the disclosure that it is shared with the provider. A decorator that
+rebuilds a sale with `GatewaySaleRequest::new` must forward
+`parts.cardholder_ip` with `with_cardholder_ip`.
 
 `PaymentGateway::query_transaction_diagnostics` reads processor and verification
 results for one historical transaction. A `GatewayTransactionDiagnosticsRequest`

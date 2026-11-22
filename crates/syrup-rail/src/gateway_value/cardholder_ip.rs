@@ -3,12 +3,20 @@ use std::{fmt, net::IpAddr};
 /// The network address a cardholder used when they personally took part in a
 /// payment, as the host established it.
 ///
-/// Syrup Rail carries the address to the provider on customer-initiated token
-/// sales and nowhere else: it is request-scoped like the payment token, is
+/// The subscription workflows attach the address to customer-initiated token
+/// sales and nowhere else, and a gateway adapter must not send one with a
+/// merchant-initiated charge. It is request-scoped like the payment token, is
 /// never persisted, and takes no part in idempotency, replay equality, or any
-/// payment decision. The host decides whose address this is and whether it may
-/// be disclosed to the provider; it must never substitute the address of its
-/// own server or of a merchant representative.
+/// payment or entitlement decision Syrup Rail makes. It counts toward a
+/// request's size limit, and a merchant account's own IP rules may act on it.
+/// Provider text that repeats the address is not searched for it and is stored
+/// as provider text.
+///
+/// The host decides whose address this is and whether it may be disclosed to
+/// the provider; it must never substitute the address of its own server or of a
+/// merchant representative. Nothing here checks that the address is routable or
+/// the cardholder's, so a host behind a proxy must take it from trusted ingress
+/// rather than from the socket peer.
 ///
 /// An IPv4-mapped IPv6 address is stored as its IPv4 form. A network address
 /// is customer data, so `Debug` and `Display` never print it; read it with

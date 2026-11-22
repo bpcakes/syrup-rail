@@ -35,7 +35,11 @@ command/outcome types for application-independent subscription billing.
   `src/gateway_value/descriptor.rs` owns the opt-in `StatementDescriptor` value
   and `StatementDescriptorPolicy`; `ResolvedGateway::sale` in `src/resolver.rs`
   fills a sale's missing descriptor from the attached policy by intent and
-  never replaces an explicit one.
+  never replaces an explicit one. `src/gateway_value/cardholder_ip.rs` owns the
+  redacted, memory-only `CardholderIpAddress`.
+- `src/subscription_payment_context.rs` owns the shared foreground-payment
+  context; its `token_sale_request` is the one constructor for the token sale
+  enrollment and recovery submit, so neither can drop the address.
 - `src/{card_data,policy}.rs` own the provider-neutral PAN scanner and pure
   payment/calendar policy.
 - `src/billing_portal.rs` owns the provider-neutral customer billing portal,

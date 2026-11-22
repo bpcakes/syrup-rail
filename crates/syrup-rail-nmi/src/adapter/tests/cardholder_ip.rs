@@ -28,6 +28,20 @@ fn cardholder_ip_maps_only_onto_customer_initiated_sales() {
     .expect("USD enrollment maps");
     assert_eq!(initial.cardholder_ip, Some(IpAddr::V4(V4)));
 
+    let one_time = map_sale_request(
+        GatewaySaleRequest::new(
+            charge(),
+            order(),
+            GatewaySaleIntent::OneTime {
+                payment_token: PaymentToken::new("tok_one_time").unwrap(),
+            },
+            None,
+        )
+        .with_cardholder_ip(v4()),
+    )
+    .expect("USD host charge maps");
+    assert_eq!(one_time.cardholder_ip, Some(IpAddr::V4(V4)));
+
     let renewal = map_sale_request(
         GatewaySaleRequest::new(charge(), order(), recurring_intent(), None)
             .with_cardholder_ip(v4()),

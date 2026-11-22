@@ -190,7 +190,7 @@ pub(super) fn classic_sale_params<'a>(
 /// address and recorded it exactly as sent. Leaving one out is not neutral:
 /// for a sale without the field the sandbox recorded the submitting server's
 /// address instead.
-fn classic_cardholder_ip(address: IpAddr) -> String {
+pub(super) fn classic_cardholder_ip(address: IpAddr) -> String {
     address.to_canonical().to_string()
 }
 

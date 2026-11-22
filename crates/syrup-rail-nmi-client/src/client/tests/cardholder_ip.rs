@@ -75,9 +75,6 @@ fn classic_sale_sends_an_ipv6_cardholder_address_and_redacts_it_from_debug() {
             classic_ipaddress(&request).as_deref(),
             Some("2001:db8:1234::97")
         );
-        crate::client::validation::validate_sale_request(&request, "private_key")
-            .expect("an IPv6 address never invalidates the sale");
-
         let params = classic_sale_params(
             "private_key",
             &request,
@@ -99,6 +96,56 @@ fn classic_sale_sends_an_uncompressible_ipv6_cardholder_address_whole() {
     let address = "2001:db8:1111:2222:3333:4444:5555:6666";
     let request = initial_sale_with_cardholder_ip(Some(address.parse().unwrap()));
     assert_eq!(classic_ipaddress(&request).as_deref(), Some(address));
+    crate::client::validation::validate_sale_request(&request, "private_key")
+        .expect("the longest address is within its bound");
+}
+
+#[test]
+fn classic_sale_owns_only_the_formatted_amount_and_cardholder_address() {
+    let mut request = initial_sale_with_cardholder_ip(Some("2001:db8::17".parse().unwrap()));
+    request.billing_contact = Some(BillingContact {
+        first_name: Some("Ada".to_owned()),
+        last_name: Some("Lovelace".to_owned()),
+        email: Some("ada@example.test".to_owned()),
+        address: None,
+    });
+    let params = classic_sale_params(
+        "private_key",
+        &request,
+        "1.00".to_owned(),
+        DuplicateCheck::ProcessorConfigured,
+    );
+    for (key, _) in params.iter() {
+        let value = params.field(key).expect("an iterated field exists");
+        match key {
+            "amount" => assert!(matches!(value, NmiFormValue::PublicOwned(_))),
+            "ipaddress" => assert!(matches!(value, NmiFormValue::CustomerOwned(_))),
+            _ => assert!(matches!(value, NmiFormValue::Borrowed(_)), "{key}"),
+        }
+    }
+}
+
+#[test]
+fn classic_sale_size_validation_counts_the_cardholder_address() {
+    let validate = |padding: usize, cardholder_ip: Option<std::net::IpAddr>| {
+        let mut request = initial_sale_with_cardholder_ip(cardholder_ip);
+        // Each '%' takes three encoded bytes.
+        request.source = PaymentSource::PaymentToken("%".repeat(4_096));
+        request.order_id = "%".repeat(512);
+        request.billing_contact = Some(BillingContact {
+            first_name: Some("%".repeat(256)),
+            last_name: Some("%".repeat(padding)),
+            email: None,
+            address: None,
+        });
+        crate::client::validation::validate_sale_request(&request, "private_key")
+    };
+    let largest = (1..=256)
+        .rev()
+        .find(|padding| validate(*padding, None).is_ok())
+        .expect("a sale just under the limit is valid without an address");
+    assert!(largest < 256, "the padding must reach the request limit");
+    assert!(validate(largest, Some("2001:db8::17".parse().unwrap())).is_err());
 }
 
 #[test]

@@ -361,14 +361,8 @@ impl fmt::Debug for EnrollSubscription {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("EnrollSubscription")
-            .field("attempt_id", &self.attempt_id())
-            .field("billing_scope_id", &self.billing_scope_id())
-            .field("subscriber_id", &self.subscriber_id())
+            .field("context", &self.context)
             .field("plan_key", &self.plan_key())
-            .field("gateway_configuration_id", &self.gateway_configuration_id())
-            .field("has_idempotency_key", &true)
-            .field("has_payment_token", &true)
-            .field("has_billing_contact", &true)
             .field("expected_terms", &self.expected_terms)
             .finish()
     }

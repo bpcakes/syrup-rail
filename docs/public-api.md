@@ -228,25 +228,32 @@ the descriptor on), the recurring intent variant gains a field, and the raw
 the wire.
 
 0.7.0 also adds an opt-in cardholder network address for customer-initiated
-token sales. `CardholderIpAddress` wraps an `IpAddr`, stores an IPv4-mapped
-IPv6 address as IPv4, and never prints its value. A host that has established
-the cardholder's own address attaches it with
-`SubscriptionPaymentContext::with_cardholder_ip`. The PostgreSQL enrollment
-and recovery workflows build the sale they submit with the new
+token sales. `CardholderIpAddress` wraps an `IpAddr`, stores an IPv4-mapped IPv6
+address as IPv4, and never prints its value. A host that has established the
+cardholder's own address attaches it with
+`SubscriptionPaymentContext::with_cardholder_ip`. The PostgreSQL enrollment and
+recovery workflows build the sale they submit with the new
 `SubscriptionPaymentContext::token_sale_request`, which sets it through
-`GatewaySaleRequest::with_cardholder_ip`. The address is request-scoped like
-the payment token: it is never persisted, is not part of the reservation or of
+`GatewaySaleRequest::with_cardholder_ip`. The address is request-scoped like the
+payment token: it is never persisted, is not part of the reservation or of
 replay equality (a retry may carry a different address or none without an
-idempotency conflict), and decides nothing. Payment-method replacement,
-renewals and host charges send none. The NMI adapter forwards it only for
-`InitialStoredCredential` and `OneTime` intents, and the raw client sends it
-as the Classic `ipaddress` field, in dotted IPv4 or compressed IPv6 form. NMI
-documents only the dotted format for that field, but its sandbox accepted IPv6
-and recorded it as sent. The v5 sale sends no address. Source breaks: `GatewaySaleRequestParts` and the raw
-`syrup_rail_nmi_client::SaleRequest` each gain `cardholder_ip`; add
-`cardholder_ip: None` to existing `SaleRequest` literals, and a decorator that
+idempotency conflict), and Syrup Rail makes no payment or entitlement decision
+from it, though a merchant account's own IP rules may. Provider text that
+repeats the address is persisted as provider text. Payment-method replacement,
+renewals and host charges send none. The NMI adapter drops it from a
+`RecurringStoredCredential` sale. Only an `InitialStoredCredential` sale puts it
+on the wire, as the Classic `ipaddress` field in dotted IPv4 or compressed IPv6
+form; a `OneTime` sale uses v5, which sends no address. NMI documents only the
+dotted format for `ipaddress`. Its sandbox accepted IPv6 and recorded it as
+sent, but also recorded text that is not an address, and processor handling is
+unverified. `Debug` output of the enrollment, recovery, and replacement commands
+now nests their shared context. Source breaks: `GatewaySaleRequestParts` and the
+raw `syrup_rail_nmi_client::SaleRequest` each gain `cardholder_ip`; add
+`cardholder_ip: None` to existing `SaleRequest` literals. A decorator that
 rebuilds a sale with `GatewaySaleRequest::new` must forward the address with
-`with_cardholder_ip`. Without an address nothing changes on the wire.
+`with_cardholder_ip`, and one that builds a `GatewaySaleRequestParts` literal
+must copy the incoming `cardholder_ip`, not `None`. Without an address nothing
+changes on the wire.
 
 0.6.0 also adds opt-in provider retry advice for automatic-renewal declines.
 The core `RenewalDeclineRetryAdvice` is `FollowSchedule`,
