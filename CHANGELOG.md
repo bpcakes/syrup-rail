@@ -83,6 +83,10 @@ unchanged.
   reads as no result rather than failing the attempt. Attempt reads name every
   schema-v7 column.
 - Administrator transaction diagnostics share `GatewayAvsResponse`'s rule.
+- Update the locked `url` to 2.5.9 (and `form_urlencoded` to 1.2.3) for
+  RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs.
+  Endpoint validation admits only HTTP(S) URLs, so this crate set never reached
+  it.
 
 ## [0.6.0] - Unreleased
 
