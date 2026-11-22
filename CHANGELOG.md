@@ -61,22 +61,26 @@ unchanged.
   customer submits, and the PostgreSQL enrollment and recovery workflows now
   use it, so both forward the address through
   `GatewaySaleRequest::with_cardholder_ip`.
-  It is request-scoped like the payment token: never persisted, absent from
-  the reservation and from replay equality (a retry may carry another address
-  or none; provider text that repeats it is stored as provider text), and never
-  an input to a payment or entitlement decision by Syrup Rail, though a merchant
-  account's own IP rules may act on it. Renewals, payment-method replacement
-  and host charges do not send one. No schema changes.
+  It is request-scoped like the payment token: never persisted, absent from the
+  reservation and from replay equality (a retry may carry another address or
+  none; one that resumes a prepared attempt sends its own address, and one of a
+  submitted sale returns the recorded result and sends nothing; provider text
+  that repeats it is stored as provider text, though card-number redaction may
+  remove some or all of it), and never an input to a payment or entitlement
+  decision by Syrup Rail, though a merchant account's own IP rules may act on
+  it. Renewals, payment-method replacement and host charges do not send one. No
+  schema changes.
 - The NMI adapter forwards the address only for customer-initiated intents,
   dropping it from a `RecurringStoredCredential` sale whatever the request
   holds. The raw client sends it as the Classic `ipaddress` field ("IP address
   of cardholder", documented format `xxx.xxx.xxx.xxx`), in dotted IPv4 or
   compressed IPv6 form, and keeps it off the `Debug` allowlist. NMI's Classic
-  reference documents no IPv6 form. Its sandbox accepted IPv6 and recorded it
-  as sent, but also recorded text that is not an address, so processor handling
-  is unverified; it recorded the submitting server's address for a sale without
-  the field. The v5 sale sends none. The host remains responsible for whose
-  address it is and for disclosing that it is shared with the processor.
+  reference documents no IPv6 form, but its sandbox approved sales with IPv6
+  and recorded it as sent. The gateway does not validate the field, what a
+  processor does with it is unverified, and for a sale without the field the
+  sandbox recorded the submitting server's address. The v5 sale sends none. The
+  host remains responsible for whose address it is and for disclosing that it
+  is shared with the processor.
 
 ### Changed
 

@@ -10,7 +10,8 @@ use std::{fmt, net::IpAddr};
 /// payment or entitlement decision Syrup Rail makes. It counts toward a
 /// request's size limit, and a merchant account's own IP rules may act on it.
 /// Provider text that repeats the address is not searched for it and is stored
-/// as provider text.
+/// as provider text, though card-number redaction may remove some or all of
+/// it.
 ///
 /// The host decides whose address this is and whether it may be disclosed to
 /// the provider; it must never substitute the address of its own server or of a

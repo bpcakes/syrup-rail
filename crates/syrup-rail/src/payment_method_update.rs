@@ -238,9 +238,10 @@ impl SubscriptionPaymentMethodReplacement {
     /// Returns whether a retry command and resolved gateway reproduce this
     /// exact durable submission authority.
     ///
-    /// Retry-only candidate attempt IDs and payment tokens are intentionally
-    /// excluded. Reconstructing the reservation through its canonical builder
-    /// keeps every durable command field and gateway identity equality-bound.
+    /// Retry-only candidate attempt IDs, payment tokens, and cardholder network
+    /// addresses are intentionally excluded. Reconstructing the reservation
+    /// through its canonical builder keeps every durable command field and
+    /// gateway identity equality-bound.
     pub fn matches_submission(
         &self,
         command: &ReplaceSubscriptionPaymentMethod,

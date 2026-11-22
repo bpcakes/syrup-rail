@@ -429,19 +429,26 @@ lifecycles keep their historical terms, and a repeated change is `Unchanged`.
 
 Schema v5 stores an optional customer-confirmed billing address on payment
 methods and all five attempt kinds. Approved enrollment, recovery, and
-payment-method replacement write the command's address to the stored method;
-a same-reference approval without an address keeps the whole stored address,
+payment-method replacement write the command's billing address to the stored
+method; a same-reference approval without one keeps the whole stored address,
 and a new card never inherits another card's address. Renewal reservation
 enters the payment-method approval domain before the subscription aggregate
 and copies the selected active method's address into the attempt, so a later
 method change cannot alter a reserved renewal. Submission sends only that
 snapshot, as an address-only contact, and an addressless renewal sends no
-contact. A same-key retry whose address differs from the durable attempt,
-including an address added to a historical addressless attempt, is an
+contact. A same-key retry whose billing address differs from the durable
+attempt, including one added to a historical addressless attempt, is an
 idempotency conflict before provider I/O. `scrub_subscriber_billing_data`
 clears the addresses under the scrub and approval domains, so a concurrent
 approval or renewal reservation cannot restore them; the host still takes its
 subject lock first.
+
+The optional cardholder network address on an enrollment or recovery command is
+separate and needs no schema: it is sent with that command's token sale and
+never stored. It is not part of replay identity, so a same-key retry with
+another network address, or none, is not a conflict. A retry that resumes a
+prepared attempt sends its own; a retry of a submitted sale returns the recorded
+result and sends nothing. Do not store the address to repeat it on retries.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.

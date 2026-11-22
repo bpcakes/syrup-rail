@@ -32,9 +32,10 @@ the billing scope and subscriber before calling a shared command.
   command or stored-method display.
 - The cardholder network address a host may attach to a customer-initiated
   token sale. These crates hold it only in the host's command and the request
-  built from it, never persist or log it, and redact it from `Debug` and
-  `Display` output. The
-  provider receives and records it, and may repeat it in text these crates
+  built from it, and for as long as it takes to parse a later provider query
+  response that contains it. They never extract it from such a response, never
+  persist or log it as a field, and redact it from `Debug` and `Display` output.
+  The provider receives and records it, and may repeat it in text these crates
   persist; see
   [Cardholder network address transfer](#cardholder-network-address-transfer).
 
@@ -113,18 +114,23 @@ it answers the review test below.
    form controls; no new cryptography or storage is added.
 4. **Lifecycle and operational cost.** There is no key. The value lives as long as
    the host's command and its clones, is not zeroized, and is copied into the
-   encoded request body.
-   NMI keeps it with the transaction under its own retention.
+   encoded request body. NMI keeps it with the transaction under its own
+   retention and documents an IP address field in its query responses, so a
+   later query can bring it back into memory as response text. The cost falls on
+   the host: taking the address from trusted ingress, disclosing the transfer,
+   and forwarding the address in any gateway decorator that rebuilds a sale.
 5. **Explicit non-protections.** Syrup Rail does not check that the address is
    routable or belongs to the cardholder; a host must take it from trusted
    ingress, and a VPN, proxy, or assisted signup can still hide the cardholder.
    Scrubbing subscriber billing data cannot recall it from the provider. If the
    provider repeats the address in response or error text, the sanitizer does
-   not recognize it, so it is persisted as provider text; copies in immutable
-   charge evidence, external-reversal attestations, and attempt fields the scrub
-   does not clear outlive it. What a processor does with it
-   is unverified, and a merchant account's IP rules may approve or decline on
-   it. The host owns its disclosure.
+   not recognize it, so it is persisted as provider text, though card-number
+   redaction may remove some or all of it, and digits beside it; copies in
+   immutable charge evidence, external-reversal attestations, and attempt
+   fields the scrub does not clear outlive it. NMI's gateway accepted and
+   recorded IPv4 and IPv6 in its sandbox; what a processor does with either is
+   unverified, and a merchant account's IP rules may approve or decline on it.
+   The host owns its disclosure.
 
 ## Review test for a new security mechanism
 

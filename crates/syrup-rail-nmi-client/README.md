@@ -297,9 +297,10 @@ merchant's server or staff. A Classic sale sends it as `ipaddress`, which NMI
 documents as "IP address of cardholder" in the format `xxx.xxx.xxx.xxx`. An
 IPv4 address, or an IPv4-mapped IPv6 one, is sent in dotted form and any other
 IPv6 address in compressed form. NMI's Classic reference documents no IPv6
-form: NMI's sandbox accepted IPv6 and recorded it exactly as sent, but it also
-recorded text that is not an address, so this shows storage rather than
-validation, and processor handling is unverified. For a sale without the field
+form, but NMI's sandbox approved Classic sales with IPv6, in short and full
+form, and recorded each address exactly as sent. It also recorded text that is
+not an address, so the gateway does not validate the field, and what a
+processor does with either form is unverified. For a sale without the field
 the sandbox recorded the submitting server's address. The v5 sale sends no
 address. The value is customer data: it is not on the form `Debug` allowlist
 and `SaleRequest` prints only `has_cardholder_ip`. The client does not decide

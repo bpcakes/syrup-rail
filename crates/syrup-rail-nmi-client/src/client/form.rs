@@ -186,8 +186,8 @@ pub(super) fn classic_sale_params<'a>(
 
 /// The Classic `ipaddress` value for a cardholder address: dotted IPv4, also
 /// for an IPv4-mapped IPv6 address, or else compressed IPv6. NMI's Classic
-/// reference gives only the dotted format, but its sandbox accepted an IPv6
-/// address and recorded it exactly as sent. Leaving one out is not neutral:
+/// reference gives only the dotted format, but its sandbox approved sales with
+/// an IPv6 address and recorded it exactly as sent. Leaving one out is not neutral:
 /// for a sale without the field the sandbox recorded the submitting server's
 /// address instead.
 pub(super) fn classic_cardholder_ip(address: IpAddr) -> String {

@@ -123,8 +123,10 @@ async fn ipv6_cardholder_address_reaches_the_classic_wire() {
         .await
         .expect("initial sale should be approved");
     assert_eq!(outcome.status(), GatewayPaymentStatus::Approved);
-    // The colons survive form encoding.
-    let fields = form_fields(&captured.await.unwrap());
+    // The colons survive form encoding, and the field is sent once.
+    let request = captured.await.unwrap();
+    assert_eq!(request.matches("ipaddress=").count(), 1);
+    let fields = form_fields(&request);
     assert_eq!(fields["ipaddress"], "2001:db8::17");
     assert_eq!(fields["initiated_by"], "customer");
     finish(server).await;
