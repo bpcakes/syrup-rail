@@ -6,6 +6,7 @@ use zeroize::Zeroizing;
 
 use crate::{raw_card_data_ranges, string_contains_raw_card_data};
 
+mod cardholder_ip;
 mod contact;
 mod descriptor;
 
@@ -430,6 +431,7 @@ impl GatewayAvsResponse {
 
 impl_redacted_format!(GatewayAvsResponse);
 
+pub use cardholder_ip::CardholderIpAddress;
 pub use contact::{
     BillingAddress, BillingAddressError, BillingContact, BillingContactError, BillingContactParts,
 };

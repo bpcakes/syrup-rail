@@ -577,19 +577,30 @@ fn enrollment_debug_omits_token_key_and_contact_values() {
                 Some("secret@example.test".to_owned()),
             )
             .unwrap(),
-        ),
+        )
+        .with_cardholder_ip(Some(std::net::IpAddr::from([203, 0, 113, 7]).into())),
         SubscriptionEnrollmentExpectedTerms::full_price(offer(plan("basic"), 1000)),
     );
-    let debug = format!("{command:?}");
+    let recovery = crate::RecoverSubscriptionPayment::new(
+        command.context().clone(),
+        command.plan_key().clone(),
+    );
+    let replacement = crate::ReplaceSubscriptionPaymentMethod::new(
+        command.context().clone(),
+        command.plan_key().clone(),
+    );
+    let debug = format!("{command:?} {recovery:?} {replacement:?}");
     for secret in [
         "secret-key",
         "secret-token",
         "Secret Name",
         "secret@example.test",
+        "203.0.113.7",
     ] {
         assert!(!debug.contains(secret));
     }
     assert!(debug.contains("has_payment_token"));
+    assert_eq!(debug.matches("has_cardholder_ip: true").count(), 3);
 }
 
 #[test]

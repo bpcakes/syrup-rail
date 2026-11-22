@@ -16,8 +16,8 @@ pub enum TransactionDiagnosticsLookup {
 ///
 /// Every value is untrusted provider text with value-free formatting. Only
 /// correlation, currency, verification, and per-action response fields are
-/// parsed; names, addresses, email, card, and signature fields are never
-/// extracted. This is not payment evidence and carries no decision.
+/// parsed; names, postal and network addresses, email, card, and signature
+/// fields are never extracted. This is not payment evidence and carries no decision.
 #[derive(Debug)]
 pub struct TransactionDiagnostics {
     parts: TransactionDiagnosticsParts,

@@ -11,6 +11,7 @@ use super::*;
 
 mod billing_address;
 mod card_metadata;
+mod cardholder_ip;
 mod diagnostics;
 mod statement_descriptor;
 

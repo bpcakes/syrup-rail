@@ -5,9 +5,9 @@ use sqlx::{PgConnection, PgPool};
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingPeriod, BillingScopeId,
     EnrollSubscription, GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome,
-    GatewayPaymentStatus, GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest,
-    GatewayTransactionId, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus, PaymentMethodId,
-    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
+    GatewayPaymentStatus, GatewayProviderKey, GatewayTransactionId, PaymentAttempt,
+    PaymentAttemptId, PaymentAttemptStatus, PaymentMethodId, PaymentResolutionCode,
+    ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
     SubscriptionDiscountDuration, SubscriptionDiscountKind, SubscriptionEnrollmentPaymentResult,
     SubscriptionEnrollmentReservation, SubscriptionEnrollmentSubmissionOutcome,
     SubscriptionEnrollmentSubmissionRejection, SubscriptionId, SubscriptionPhase,
@@ -181,13 +181,9 @@ pub async fn submit_admitted_subscription_enrollment(
         admission.attempt.request().amount().currency(),
     )
     .map_err(|_| SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE))?;
-    let request = GatewaySaleRequest::new(
+    let request = command.context().token_sale_request(
         charge,
         admission.attempt.request().gateway_order_id().clone(),
-        GatewaySaleIntent::InitialStoredCredential {
-            payment_token: command.payment_token().clone(),
-        },
-        Some(command.billing_contact().clone()),
     );
     match gateway.sale(request).await {
         Ok(outcome) => apply_subscription_enrollment_gateway_outcome(

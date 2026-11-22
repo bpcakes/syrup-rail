@@ -205,6 +205,7 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
         intent,
         billing_contact,
         descriptor,
+        cardholder_ip,
     } = request.into_parts();
     if charge.currency().as_str() != "USD" {
         return Err(GatewayMutationError::NotSubmitted(
@@ -213,6 +214,16 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
             )),
         ));
     }
+    // No cardholder takes part in a merchant-initiated charge, so one never
+    // carries a cardholder address, whatever the request holds. A one-time
+    // sale keeps its address here, but the raw client's v5 sale does not send
+    // one.
+    let cardholder_ip = match &intent {
+        GatewaySaleIntent::RecurringStoredCredential { .. } => None,
+        GatewaySaleIntent::OneTime { .. } | GatewaySaleIntent::InitialStoredCredential { .. } => {
+            cardholder_ip
+        }
+    };
     let (source, vault_action, stored_credential) = match intent {
         GatewaySaleIntent::OneTime { payment_token } => (
             PaymentSource::PaymentToken(payment_token.into_inner()),
@@ -247,6 +258,7 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
         stored_credential,
         billing_contact: billing_contact.map(map_billing_contact),
         descriptor: descriptor.map(map_statement_descriptor),
+        cardholder_ip: cardholder_ip.map(syrup_rail::CardholderIpAddress::get),
     })
 }
 

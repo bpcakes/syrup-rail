@@ -25,6 +25,15 @@ unchanged.
   time rather than starting a 0.7.0 process against a v6 catalog.
 - `syrup_rail_nmi_client::PaymentOutcomeParts` gains a public `avs_response`
   field; code that constructs the struct must set it.
+- `GatewaySaleRequestParts` gains `cardholder_ip: Option<CardholderIpAddress>`
+  and the raw `syrup_rail_nmi_client::SaleRequest` struct gains
+  `cardholder_ip: Option<IpAddr>`. Add `cardholder_ip: None` to existing
+  `SaleRequest` literals. A gateway decorator that rebuilds a sale with
+  `GatewaySaleRequest::new` must carry the address across with
+  `with_cardholder_ip`, or the provider receives the sale without it;
+  `GatewaySaleRequest::from(parts)` keeps it. One that builds a
+  `GatewaySaleRequestParts` literal must copy the incoming `cardholder_ip`, not
+  `None`.
 
 ### Added
 
@@ -45,9 +54,40 @@ unchanged.
   `PaymentOutcomeParts::avs_response`, unvalidated. The NMI adapter attaches it
   to the outcome's evidence through `GatewayAvsResponse::parse`, so an
   unrecognized value records no result and never changes the payment status.
+- Add the opt-in cardholder network address. `CardholderIpAddress` wraps an
+  `IpAddr` (an IPv4-mapped IPv6 address is stored as IPv4) and never prints
+  it. A host sets it with `SubscriptionPaymentContext::with_cardholder_ip`.
+  `SubscriptionPaymentContext::token_sale_request` builds the token sale the
+  customer submits, and the PostgreSQL enrollment and recovery workflows now
+  use it, so both forward the address through
+  `GatewaySaleRequest::with_cardholder_ip`.
+  It is request-scoped like the payment token: never persisted, absent from the
+  reservation and from replay equality (a retry may carry another address or
+  none; one that resumes a prepared attempt sends its own address, and one of a
+  submitted sale returns the recorded result and sends nothing; provider text
+  that repeats it is stored as provider text, though card-number redaction may
+  remove some or all of it), and never an input to a payment or entitlement
+  decision by Syrup Rail, though a merchant account's own IP rules may act on
+  it. Renewals, payment-method replacement and host charges do not send one. No
+  schema changes.
+- The NMI adapter forwards the address only for customer-initiated intents,
+  dropping it from a `RecurringStoredCredential` sale whatever the request
+  holds. The raw client sends it as the Classic `ipaddress` field ("IP address
+  of cardholder", documented format `xxx.xxx.xxx.xxx`), in dotted IPv4 or
+  compressed IPv6 form, and keeps it off the `Debug` allowlist. NMI's Classic
+  reference documents no IPv6 form, but its sandbox approved sales with IPv6
+  and recorded it as sent. The gateway does not validate the field, what a
+  processor does with it is unverified, and for a sale without the field the
+  sandbox recorded the submitting server's address. The v5 sale sends none. The
+  host remains responsible for whose address it is and for disclosing that it
+  is shared with the processor.
 
 ### Changed
 
+- `EnrollSubscription`, `RecoverSubscriptionPayment`, and
+  `ReplaceSubscriptionPaymentMethod` print their shared context as a nested
+  `context` in `Debug` output, which shows whether a cardholder address is
+  attached and never the address.
 - Every attempt transition that records provider evidence writes
   `gateway_avs_response` with the rest of that response's evidence, and attempt
   reads return it. Reconciled approved and non-approved transitions keep the
@@ -56,6 +96,10 @@ unchanged.
   reads as no result rather than failing the attempt. Attempt reads name every
   schema-v7 column.
 - Administrator transaction diagnostics share `GatewayAvsResponse`'s rule.
+- Update the locked `url` to 2.5.9 (and `form_urlencoded` to 1.2.3) for
+  RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs.
+  Endpoint validation admits only HTTP(S) URLs, so this crate set never reached
+  it.
 
 ## [0.6.0] - Unreleased
 

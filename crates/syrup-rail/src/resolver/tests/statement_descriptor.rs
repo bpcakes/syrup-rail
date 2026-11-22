@@ -42,6 +42,11 @@ impl PaymentGateway for CapturingGateway {
     }
 }
 
+fn cardholder_ip() -> Option<crate::CardholderIpAddress> {
+    let address = std::net::Ipv4Addr::new(203, 0, 113, 7);
+    Some(crate::CardholderIpAddress::new(address.into()))
+}
+
 fn sale(intent: GatewaySaleIntent) -> GatewaySaleRequest {
     GatewaySaleRequest::new(
         ChargeAmount::new(2_699, CurrencyCode::new("USD").unwrap()).unwrap(),
@@ -49,6 +54,7 @@ fn sale(intent: GatewaySaleIntent) -> GatewaySaleRequest {
         intent,
         None,
     )
+    .with_cardholder_ip(cardholder_ip())
 }
 
 fn recurring(previous_phase: crate::SubscriptionPhase) -> GatewaySaleIntent {
@@ -142,7 +148,11 @@ fn resolved_gateway_applies_the_descriptor_policy_by_sale_intent() {
             Some(explicit),
         ]
     );
-    // Intent, order and charge pass through unchanged.
+    // Applying the policy rewrites the request; everything else it holds,
+    // the cardholder address included, passes through unchanged.
+    for request in requests.iter() {
+        assert_eq!(request.cardholder_ip(), cardholder_ip());
+    }
     assert!(matches!(
         requests[4].intent(),
         GatewaySaleIntent::RecurringStoredCredential {

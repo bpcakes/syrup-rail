@@ -1,8 +1,8 @@
 use std::fmt;
 
 use crate::{
-    BillingContact, ChargeAmount, GatewayOrderId, GatewayPaymentMethodReference,
-    GatewayTransactionId, PaymentToken, StatementDescriptor,
+    BillingContact, CardholderIpAddress, ChargeAmount, GatewayOrderId,
+    GatewayPaymentMethodReference, GatewayTransactionId, PaymentToken, StatementDescriptor,
 };
 
 #[derive(Clone)]
@@ -60,6 +60,7 @@ pub struct GatewaySaleRequest {
     intent: GatewaySaleIntent,
     billing_contact: Option<BillingContact>,
     descriptor: Option<StatementDescriptor>,
+    cardholder_ip: Option<CardholderIpAddress>,
 }
 
 /// The owned fields of a [`GatewaySaleRequest`], for decorators that rebuild
@@ -74,6 +75,10 @@ pub struct GatewaySaleRequestParts {
     /// rebuilds the request must pass it on with `with_descriptor`, or the
     /// provider prints the account's static descriptor.
     pub descriptor: Option<StatementDescriptor>,
+    /// The cardholder's network address, if the request carries one. A
+    /// decorator that rebuilds the request must pass it on with
+    /// `with_cardholder_ip`, or the provider receives the sale without it.
+    pub cardholder_ip: Option<CardholderIpAddress>,
 }
 
 impl GatewaySaleRequest {
@@ -89,6 +94,7 @@ impl GatewaySaleRequest {
             intent,
             billing_contact,
             descriptor: None,
+            cardholder_ip: None,
         }
     }
 
@@ -97,6 +103,16 @@ impl GatewaySaleRequest {
     /// dynamic descriptors ignore it.
     pub fn with_descriptor(mut self, descriptor: Option<StatementDescriptor>) -> Self {
         self.descriptor = descriptor;
+        self
+    }
+
+    /// Tells the provider which network address the cardholder used for this
+    /// sale, replacing any address already set. Only a sale the cardholder
+    /// personally initiates may carry one; the subscription workflows set it
+    /// on token sales and never on merchant-initiated stored-credential
+    /// charges.
+    pub const fn with_cardholder_ip(mut self, cardholder_ip: Option<CardholderIpAddress>) -> Self {
+        self.cardholder_ip = cardholder_ip;
         self
     }
 
@@ -120,6 +136,10 @@ impl GatewaySaleRequest {
         self.descriptor.as_ref()
     }
 
+    pub const fn cardholder_ip(&self) -> Option<CardholderIpAddress> {
+        self.cardholder_ip
+    }
+
     pub fn into_parts(self) -> GatewaySaleRequestParts {
         GatewaySaleRequestParts {
             charge: self.charge,
@@ -127,6 +147,7 @@ impl GatewaySaleRequest {
             intent: self.intent,
             billing_contact: self.billing_contact,
             descriptor: self.descriptor,
+            cardholder_ip: self.cardholder_ip,
         }
     }
 }
@@ -139,6 +160,7 @@ impl From<GatewaySaleRequestParts> for GatewaySaleRequest {
             intent: parts.intent,
             billing_contact: parts.billing_contact,
             descriptor: parts.descriptor,
+            cardholder_ip: parts.cardholder_ip,
         }
     }
 }

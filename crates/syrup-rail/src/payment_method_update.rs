@@ -59,14 +59,8 @@ impl fmt::Debug for ReplaceSubscriptionPaymentMethod {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ReplaceSubscriptionPaymentMethod")
-            .field("attempt_id", &self.attempt_id())
-            .field("billing_scope_id", &self.billing_scope_id())
-            .field("subscriber_id", &self.subscriber_id())
+            .field("context", &self.context)
             .field("plan_key", &self.plan_key)
-            .field("gateway_configuration_id", &self.gateway_configuration_id())
-            .field("has_idempotency_key", &true)
-            .field("has_payment_token", &true)
-            .field("has_billing_contact", &true)
             .finish()
     }
 }
@@ -244,9 +238,10 @@ impl SubscriptionPaymentMethodReplacement {
     /// Returns whether a retry command and resolved gateway reproduce this
     /// exact durable submission authority.
     ///
-    /// Retry-only candidate attempt IDs and payment tokens are intentionally
-    /// excluded. Reconstructing the reservation through its canonical builder
-    /// keeps every durable command field and gateway identity equality-bound.
+    /// Retry-only candidate attempt IDs, payment tokens, and cardholder network
+    /// addresses are intentionally excluded. Reconstructing the reservation
+    /// through its canonical builder keeps every durable command field and
+    /// gateway identity equality-bound.
     pub fn matches_submission(
         &self,
         command: &ReplaceSubscriptionPaymentMethod,

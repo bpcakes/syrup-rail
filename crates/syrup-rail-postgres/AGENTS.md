@@ -163,7 +163,9 @@ and transaction orchestration.
   another provider mutation. Keep the complete application write set on the
   host-prepared transaction.
 - Change one foreground workflow in its matching
-  `src/subscription_billing_service/*.rs` owner. Put shared subscriber
+  `src/subscription_billing_service/*.rs` owner. Enrollment and recovery build
+  their sale with `SubscriptionPaymentContext::token_sale_request`, so both
+  forward the request-scoped cardholder network address. Put shared subscriber
   admission, resolver identity, cooldown, and readiness behavior in
   `subscriber.rs`, and exhaustive operational error classification in
   `error_disposition.rs`; keep the root as the stable service/fact facade and

@@ -20,6 +20,7 @@ const DECLINED_RENEWAL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
       <amount>10.00</amount>
       <action_type>sale</action_type>
       <success>0</success>
+      <ip_address>203.0.113.7</ip_address>
       <response_code>253</response_code>
       <response_text>Fraud Suspected</response_text>
       <processor_response_code>59</processor_response_code>
@@ -71,11 +72,52 @@ fn exact_diagnostics_keep_gateway_processor_and_verification_fields_separate() {
     assert_eq!(exposed(&settle.action_type), Some("settle"));
     assert_eq!(exposed(&settle.processor_response_code), None);
 
-    // Names, addresses, email, and card fields in the response never surface,
-    // even through formatting.
+    // Names, postal and network addresses, email, and card fields in the
+    // response never surface, even through formatting.
     let debug = format!("{parts:?}");
-    for value in ["Jordan", "Secret", "secret@example.test", "1111", "Fraud"] {
+    for value in [
+        "Jordan",
+        "Secret",
+        "secret@example.test",
+        "1111",
+        "Fraud",
+        "203.0.113.7",
+    ] {
         assert!(!debug.contains(value), "{value} leaked into {debug}");
+    }
+    // `Debug` hides every parsed value, so it cannot show that a field was not
+    // extracted. These patterns name every field: a new one stops compiling
+    // here, to be checked against the list above.
+    let TransactionDiagnosticsParts {
+        transaction_id: _,
+        order_id: _,
+        currency: _,
+        avs_response: _,
+        csc_response: _,
+        actions,
+        malformed: _,
+        incomplete: _,
+    } = parts;
+    for action in actions {
+        let crate::TransactionDiagnosticsActionParts {
+            action_type,
+            amount,
+            response_code,
+            response_text,
+            processor_response_code,
+            processor_response_text,
+            incomplete: _,
+        } = action;
+        for value in [
+            action_type,
+            amount,
+            response_code,
+            response_text,
+            processor_response_code,
+            processor_response_text,
+        ] {
+            assert_ne!(exposed(&value), Some("203.0.113.7"));
+        }
     }
 }
 
