@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, net::IpAddr};
 
 pub struct BillingContact {
     pub first_name: Option<String>,
@@ -125,6 +125,20 @@ pub struct SaleRequest {
     pub stored_credential: Option<StoredCredential>,
     pub billing_contact: Option<BillingContact>,
     pub descriptor: Option<StatementDescriptor>,
+    /// The cardholder's own network address, for a sale the cardholder
+    /// initiates. Never the address of the merchant's server or staff.
+    ///
+    /// A Classic sale sends it as `ipaddress`, the field NMI documents as "IP
+    /// address of cardholder" in the format `xxx.xxx.xxx.xxx`: dotted IPv4
+    /// (also for an IPv4-mapped IPv6 address) or compressed IPv6. NMI's
+    /// Classic reference documents no IPv6 form, but its sandbox approved sales
+    /// with one and recorded it as sent. The gateway does not validate the
+    /// field, and what a processor does with it is unverified. For a sale
+    /// without the field the sandbox recorded the submitting server's address.
+    /// The v5 sale used for one-time payments and
+    /// non-recurring saved-card sales sends no address. A network address is
+    /// customer data: `Debug` shows only whether one is present.
+    pub cardholder_ip: Option<IpAddr>,
 }
 
 impl fmt::Debug for SaleRequest {
@@ -139,6 +153,7 @@ impl fmt::Debug for SaleRequest {
             .field("stored_credential", &self.stored_credential)
             .field("has_billing_contact", &self.billing_contact.is_some())
             .field("descriptor", &self.descriptor)
+            .field("has_cardholder_ip", &self.cardholder_ip.is_some())
             .finish()
     }
 }

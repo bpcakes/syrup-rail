@@ -1,12 +1,14 @@
 use super::*;
 
-macro_rules! payment_attempt_query {
-    ($after:literal; $($arg:expr),+ $(,)?) => {
-        payment_attempt_query!("", $after; $($arg),+)
-    };
-    ($before:literal, $after:literal; $($arg:expr),+ $(,)?) => {
-        checked_query!($before + r#"
-    SELECT id, billing_scope_id, subscriber_id, plan_key,
+// Keep the v7 projection explicit for cached reads and reconciliation claims
+// so a later schema can append a column without changing either result shape.
+macro_rules! payment_attempt_columns_query {
+    ($before:literal $(+ $prefix:literal)*, $after:literal $(+ $suffix:literal)*; $($arg:expr),+ $(,)?) => {
+        checked_query!($before $(+ $prefix)* + r#"-- Every schema-v7 column of billing_payment_attempts, named explicitly.
+-- A cached `*` projection fails once a later schema appends a column, so
+-- runtime reads use this list and keep working across that upgrade.
+-- Comments here are part of the SQL text: keep them line comments.
+id, billing_scope_id, subscriber_id, plan_key,
         host_charge_target_id, subscription_id, payment_method_id,
         attempt_kind, status, idempotency_key, request_fingerprint,
         amount_cents, currency, billing_period_start_at,
@@ -51,9 +53,20 @@ macro_rules! payment_attempt_query {
         subscription_initial_past_due_access, billing_last_name,
         billing_address_line1, billing_address_line2, billing_address_city,
         billing_address_region, billing_address_postal_code,
-        billing_address_country
-    FROM billing_payment_attempts
-"# + $after, $($arg),+)
+        billing_address_country, gateway_avs_response
+"# + $after $(+ $suffix)*, $($arg),+)
+    };
+}
+pub(crate) use payment_attempt_columns_query;
+
+macro_rules! payment_attempt_query {
+    ($after:literal; $($arg:expr),+ $(,)?) => {
+        payment_attempt_query!("", $after; $($arg),+)
+    };
+    ($before:literal, $after:literal; $($arg:expr),+ $(,)?) => {
+        $crate::attempts::payment_attempt_columns_query!(
+            $before + "SELECT ", " FROM billing_payment_attempts " + $after; $($arg),+
+        )
     };
 }
 pub(crate) use payment_attempt_query;
@@ -266,7 +279,7 @@ pub(crate) fn payment_attempt_from_row(
             .map(PaymentResolutionCode::try_from)
             .transpose()
             .map_err(|_| invalid_state())?,
-        processor_evidence_from_row(row)?,
+        processor_evidence_from_row(row)?.with_avs_response(attempt_avs_response(row)?),
         lifecycle_from_row(row)?,
         PaymentAttemptTimestamps::new(
             row.try_get("submitted_at")?,
@@ -666,6 +679,18 @@ pub(crate) fn processor_evidence_from_row(
         diagnostic(row, "gateway_condition")?,
         descriptor,
     ))
+}
+
+/// An attempt row's AVS result. Processor charges share the evidence columns
+/// above but have no AVS column, so only attempt reads call this.
+///
+/// A stored value that is not an AVS code was not written by this runtime;
+/// it is a diagnostic, so it reads as absent rather than failing the attempt.
+fn attempt_avs_response(row: &PgRow) -> Result<Option<GatewayAvsResponse>, sqlx::Error> {
+    Ok(row
+        .try_get::<Option<String>, _>("gateway_avs_response")?
+        .as_deref()
+        .and_then(GatewayAvsResponse::parse))
 }
 
 fn diagnostic(row: &PgRow, column: &'static str) -> Result<Option<GatewayDiagnostic>, sqlx::Error> {

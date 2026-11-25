@@ -25,7 +25,7 @@ transaction queries, and report parsing.
   Incomplete bound observations retain only individually valid fields for host
   comparison; they cannot authorize receipt completion.
 - Private wire and lossless-JSON modules own protocol encoding and parsing.
-  `client/response/xml.rs` also parses exact diagnostic lookups into
+  `client/response/xml/diagnostics.rs` parses exact diagnostic lookups into
   `responses/diagnostics.rs` types without changing financial query parsing.
 
 ## Edit here for X

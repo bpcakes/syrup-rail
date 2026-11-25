@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET status = 'failed',\n            gateway_transaction_id = $2,\n            gateway_payment_method_reference = $3,\n            gateway_response = $4,\n            gateway_response_code = $5,\n            gateway_response_text = $6,\n            gateway_condition = $7,\n            payment_type = $8,\n            card_brand = $9,\n            card_last4 = $10,\n            card_exp_month = $11,\n            card_exp_year = $12,\n            gateway_avs_response = $13,\n            resolved_at = clock_timestamp(),\n            updated_at = clock_timestamp()\n        WHERE id = $1 AND status = 'review_required'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int2",
+        "Int2",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "46e6cb00848573ef49fd987615dff44f931bd04fd15cc293d0bbe485aa1d5ea9"
+}

@@ -350,3 +350,52 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn manual_failure_preserves_the_attempts_avs_result() -> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("rail_man_avs").await?;
+    let result = async {
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let coordinator = TestCoordinator {
+            pool: database.pool.clone(),
+            events: Arc::new(Mutex::new(Vec::new())),
+            fail_event: false,
+        };
+        let subscriber_id = Uuid::now_v7();
+        let (_, attempt_id) =
+            insert_review_renewal(&database, &account, subscriber_id, "avs-manual").await?;
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET gateway_avs_response = 'Z' WHERE id = $1",
+            attempt_id,
+        )
+        .execute(&database.pool)
+        .await?;
+
+        let outcome = fail_review_required_attempt(
+            &database.pool,
+            &coordinator,
+            &ExactManualFailureHost,
+            PaymentAttemptId::new(attempt_id),
+        )
+        .await?;
+        let ManualAttemptFailureOutcome::Failed(attempt) = outcome else {
+            panic!("expected manual failure to succeed, got {outcome:?}");
+        };
+        assert_eq!(
+            attempt.state().processor_evidence().avs_response(),
+            syrup_rail::GatewayAvsResponse::parse("Z")
+        );
+        let stored_avs: Option<String> = checked_query_scalar!(
+            "SELECT gateway_avs_response FROM billing_payment_attempts WHERE id = $1",
+            attempt_id,
+        )
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(stored_avs.as_deref(), Some("Z"));
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup
+}

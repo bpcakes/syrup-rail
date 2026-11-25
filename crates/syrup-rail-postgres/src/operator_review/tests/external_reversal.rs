@@ -348,6 +348,12 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
     let actor = ActorId::new(Uuid::now_v7());
     let reason = ExternalReversalReason::new("processor refund verified")?;
     let transaction_id = GatewayTransactionId::new("txn-grant-conflict")?;
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET gateway_avs_response = 'Y' WHERE id = $1",
+        attempt_id
+    )
+    .execute(&database.pool)
+    .await?;
     let attested = attest_external_reversal(
         &database.pool,
         &host,
@@ -358,10 +364,13 @@ async fn grant_conflict_replay_uses_the_persisted_prior_charge_classification()
         &reason,
     )
     .await?;
-    assert!(matches!(
-        attested,
-        ExternalReversalAttestationOutcome::Attested { .. }
-    ));
+    let ExternalReversalAttestationOutcome::Attested { attempt, .. } = attested else {
+        panic!("expected attested outcome, got {attested:?}");
+    };
+    assert_eq!(
+        attempt.state().processor_evidence().avs_response(),
+        syrup_rail::GatewayAvsResponse::parse("Y")
+    );
     let state_code: String = checked_query_scalar!(
         "SELECT state_code FROM billing_processor_charges WHERE id = $1",
         charge_id,

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT relation.relfilenode::bigint, (SELECT count(*) FROM pg_catalog.pg_constraint WHERE conrelid = relation.oid) FROM pg_catalog.pg_class AS relation WHERE relation.oid = 'public.billing_payment_attempts'::regclass",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "relfilenode",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "count",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "b23f9113c2cad47d31fec38577f9f8a9d9755b14fa0b4e6d322ee76316cdf83a"
+}

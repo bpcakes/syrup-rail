@@ -144,7 +144,10 @@ async fn runtime_schema_v5_accepts_fresh_install_and_populated_v4_upgrade()
             assert_eq!(addressed, 0, "{table} must not infer historical addresses");
         }
 
-        // Historical addressless attempts remain readable by the v5 runtime.
+        // Historical addressless attempts remain readable by the runtime,
+        // which requires schema v7, once the catalog is upgraded to it.
+        upgraded.upgrade_v5_to_v6().await?;
+        upgraded.upgrade_v6_to_v7().await?;
         let mut transaction = upgraded.pool.begin().await?;
         let attempt = crate::find_payment_attempt_by_id_in_transaction(
             &mut transaction,

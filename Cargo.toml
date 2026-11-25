@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 edition = "2024"
 rust-version = "1.94"
-version = "0.6.0"
+version = "0.7.0"
 license-file = "LICENSE"
 repository = "https://github.com/bpcakes/syrup-rail"
 
@@ -43,7 +43,7 @@ zeroize = { version = "1", features = ["derive", "serde"] }
 
 postgres-test-harness = { git = "https://github.com/bpcakes/postgres-test-harness.git", rev = "1466a803db65829bde5d3d883f0699d284813503", default-features = false }
 
-syrup-rail = { version = "=0.6.0", path = "crates/syrup-rail" }
-syrup-rail-postgres = { version = "=0.6.0", path = "crates/syrup-rail-postgres" }
-syrup-rail-nmi = { version = "=0.6.0", path = "crates/syrup-rail-nmi" }
-syrup-rail-nmi-client = { version = "=0.6.0", path = "crates/syrup-rail-nmi-client" }
+syrup-rail = { version = "=0.7.0", path = "crates/syrup-rail" }
+syrup-rail-postgres = { version = "=0.7.0", path = "crates/syrup-rail-postgres" }
+syrup-rail-nmi = { version = "=0.7.0", path = "crates/syrup-rail-nmi" }
+syrup-rail-nmi-client = { version = "=0.7.0", path = "crates/syrup-rail-nmi-client" }

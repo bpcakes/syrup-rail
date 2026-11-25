@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{fmt, net::IpAddr};
 
 use serde::{Serialize, Serializer, ser::SerializeMap};
 
@@ -14,13 +14,16 @@ use super::validation::trimmed_optional;
 pub(super) enum NmiFormValue<'a> {
     Borrowed(&'a str),
     PublicOwned(String),
+    /// Customer data formatted for the wire. Redaction is decided by the
+    /// field key, never by this variant.
+    CustomerOwned(String),
 }
 
 impl NmiFormValue<'_> {
     pub(super) fn as_str(&self) -> &str {
         match self {
             Self::Borrowed(value) => value,
-            Self::PublicOwned(value) => value,
+            Self::PublicOwned(value) | Self::CustomerOwned(value) => value,
         }
     }
 }
@@ -47,6 +50,13 @@ impl<'a> NmiFormParams<'a> {
         self.fields.push(NmiFormParam {
             key,
             value: NmiFormValue::PublicOwned(value),
+        });
+    }
+
+    fn push_customer_owned(&mut self, key: &'static str, value: String) {
+        self.fields.push(NmiFormParam {
+            key,
+            value: NmiFormValue::CustomerOwned(value),
         });
     }
 
@@ -168,7 +178,20 @@ pub(super) fn classic_sale_params<'a>(
     if let Some(descriptor) = &request.descriptor {
         push_classic_statement_descriptor(&mut params, descriptor);
     }
+    if let Some(address) = request.cardholder_ip {
+        params.push_customer_owned("ipaddress", classic_cardholder_ip(address));
+    }
     params
+}
+
+/// The Classic `ipaddress` value for a cardholder address: dotted IPv4, also
+/// for an IPv4-mapped IPv6 address, or else compressed IPv6. NMI's Classic
+/// reference gives only the dotted format, but its sandbox approved sales with
+/// an IPv6 address and recorded it exactly as sent. Leaving one out is not neutral:
+/// for a sale without the field the sandbox recorded the submitting server's
+/// address instead.
+pub(super) fn classic_cardholder_ip(address: IpAddr) -> String {
+    address.to_canonical().to_string()
 }
 
 /// Dynamic descriptor fields NMI forwards on supported processors. They are

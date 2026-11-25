@@ -166,6 +166,7 @@ fn request_and_error_formatting_redacts_values() {
             address: None,
         }),
         descriptor: None,
+        cardholder_ip: None,
     };
     let debug = format!("{request:?}");
     for value in [
@@ -241,6 +242,7 @@ async fn http2_refused_stream_sale_is_indeterminate_and_never_retried() {
             stored_credential: None,
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("protocol NACK should make the sale indeterminate");

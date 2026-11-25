@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n    SELECT id, billing_scope_id, subscriber_id, plan_key,\n        host_charge_target_id, subscription_id, payment_method_id,\n        attempt_kind, status, idempotency_key, request_fingerprint,\n        amount_cents, currency, billing_period_start_at,\n        billing_period_end_at, gateway_account_id,\n        gateway_configuration_id, required_gateway_account_mode,\n        gateway_order_id,\n        gateway_transaction_id, gateway_payment_method_reference,\n        gateway_response, gateway_response_code, gateway_response_text,\n        gateway_condition, payment_type, card_brand, card_last4,\n        card_exp_month, card_exp_year, submitted_at, resolved_at,\n        created_at, updated_at, gateway_lifecycle_status,\n        gateway_lifecycle_action, gateway_lifecycle_at,\n        gateway_lifecycle_reconciled_at, refunded_amount_cents,\n        billing_first_name, billing_email, resolution_code, review_required_at,\n        payment_method_update_expected_payment_method_id,\n        payment_method_update_expected_initial_transaction_id,\n        subscription_expected_payment_method_id,\n        subscription_expected_initial_transaction_id,\n        subscription_expected_status,\n        subscription_initial_discount_claim_id,\n        subscription_initial_discount_code_id,\n        subscription_initial_discount_code_snapshot,\n        subscription_initial_discount_label_snapshot,\n        subscription_initial_discount_kind,\n        subscription_initial_discount_amount_off_cents,\n        subscription_initial_discount_percent_off_bps,\n        subscription_initial_discount_currency,\n        subscription_initial_discount_duration,\n        subscription_initial_discount_duration_months,\n        subscription_initial_discount_base_amount_cents,\n        subscription_initial_discount_discounted_amount_cents,\n        subscription_initial_terms_version,\n        subscription_initial_start_kind,\n        subscription_initial_trial_amount_cents,\n        subscription_initial_trial_period_kind,\n        subscription_initial_trial_period_count,\n        subscription_initial_recurring_base_amount_cents,\n        subscription_initial_recurring_period_kind,\n        subscription_initial_recurring_period_count,\n        subscription_initial_dunning_retry_delays_seconds,\n        subscription_initial_dunning_exhaustion,\n        subscription_initial_past_due_access, billing_last_name,\n        billing_address_line1, billing_address_line2, billing_address_city,\n        billing_address_region, billing_address_postal_code,\n        billing_address_country\n    FROM billing_payment_attempts\n WHERE billing_scope_id = $1 AND id = $2 FOR UPDATE",
+  "query": "\n        SELECT -- Every schema-v7 column of billing_payment_attempts, named explicitly.\n-- A cached `*` projection fails once a later schema appends a column, so\n-- runtime reads use this list and keep working across that upgrade.\n-- Comments here are part of the SQL text: keep them line comments.\nid, billing_scope_id, subscriber_id, plan_key,\n        host_charge_target_id, subscription_id, payment_method_id,\n        attempt_kind, status, idempotency_key, request_fingerprint,\n        amount_cents, currency, billing_period_start_at,\n        billing_period_end_at, gateway_account_id,\n        gateway_configuration_id, required_gateway_account_mode,\n        gateway_order_id,\n        gateway_transaction_id, gateway_payment_method_reference,\n        gateway_response, gateway_response_code, gateway_response_text,\n        gateway_condition, payment_type, card_brand, card_last4,\n        card_exp_month, card_exp_year, submitted_at, resolved_at,\n        created_at, updated_at, gateway_lifecycle_status,\n        gateway_lifecycle_action, gateway_lifecycle_at,\n        gateway_lifecycle_reconciled_at, refunded_amount_cents,\n        billing_first_name, billing_email, resolution_code, review_required_at,\n        payment_method_update_expected_payment_method_id,\n        payment_method_update_expected_initial_transaction_id,\n        subscription_expected_payment_method_id,\n        subscription_expected_initial_transaction_id,\n        subscription_expected_status,\n        subscription_initial_discount_claim_id,\n        subscription_initial_discount_code_id,\n        subscription_initial_discount_code_snapshot,\n        subscription_initial_discount_label_snapshot,\n        subscription_initial_discount_kind,\n        subscription_initial_discount_amount_off_cents,\n        subscription_initial_discount_percent_off_bps,\n        subscription_initial_discount_currency,\n        subscription_initial_discount_duration,\n        subscription_initial_discount_duration_months,\n        subscription_initial_discount_base_amount_cents,\n        subscription_initial_discount_discounted_amount_cents,\n        subscription_initial_terms_version,\n        subscription_initial_start_kind,\n        subscription_initial_trial_amount_cents,\n        subscription_initial_trial_period_kind,\n        subscription_initial_trial_period_count,\n        subscription_initial_recurring_base_amount_cents,\n        subscription_initial_recurring_period_kind,\n        subscription_initial_recurring_period_count,\n        subscription_initial_dunning_retry_delays_seconds,\n        subscription_initial_dunning_exhaustion,\n        subscription_initial_past_due_access, billing_last_name,\n        billing_address_line1, billing_address_line2, billing_address_city,\n        billing_address_region, billing_address_postal_code,\n        billing_address_country, gateway_avs_response\n FROM billing_payment_attempts \n        WHERE status = 'review_required'\n            AND review_required_at IS NOT NULL\n            AND NOT EXISTS (\n                SELECT 1 FROM billing_processor_charges charges\n                WHERE charges.attempt_id = billing_payment_attempts.id\n                    AND charges.progression_state = 'external_reversal_required'\n            )\n            AND (\n                $1::timestamptz IS NULL\n                OR (review_required_at, id) > ($1::timestamptz, $2::uuid)\n            )\n        ORDER BY review_required_at, id\n        LIMIT $3\n        ",
   "describe": {
     "columns": [
       {
@@ -860,12 +860,24 @@
             "name": "billing_address_country"
           }
         }
+      },
+      {
+        "ordinal": 78,
+        "name": "gateway_avs_response",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_avs_response"
+          }
+        }
       }
     ],
     "parameters": {
       "Left": [
+        "Timestamptz",
         "Uuid",
-        "Uuid"
+        "Int8"
       ]
     },
     "nullable": [
@@ -946,8 +958,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "3158aa7fe0d0c660c4f2f4e7b5020d5b679abaf5e2a9e564358c106756eb3a9a"
+  "hash": "fc29a5f10ea0858237d7762bc73e27799a3ce2436b298262258e796b75b5ae8b"
 }

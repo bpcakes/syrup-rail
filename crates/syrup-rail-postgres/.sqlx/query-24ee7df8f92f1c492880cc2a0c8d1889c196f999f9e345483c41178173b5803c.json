@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_payment_attempts SET gateway_avs_response = '-' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "24ee7df8f92f1c492880cc2a0c8d1889c196f999f9e345483c41178173b5803c"
+}

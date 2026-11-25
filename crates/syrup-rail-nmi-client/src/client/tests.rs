@@ -52,6 +52,7 @@ fn query_outcome_from_xml(text: &str) -> Result<Option<PaymentOutcome>, WireErro
 
 mod billing_address;
 mod card_metadata;
+mod cardholder_ip;
 mod classic_response;
 mod concurrency;
 mod customer_receipts;
@@ -322,6 +323,7 @@ fn test_sale_request(source: PaymentSource) -> SaleRequest {
         stored_credential: None,
         billing_contact: None,
         descriptor: None,
+        cardholder_ip: None,
     }
 }
 

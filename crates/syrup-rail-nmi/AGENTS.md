@@ -39,6 +39,8 @@ Adapt the raw NMI client to Syrup Rail gateway and lifecycle-evidence contracts.
 - Renewal retry advice interprets only NMI-published response codes whose
   meaning forbids or delays a same-card retry; unknown, missing, generic, and
   gateway-side codes follow the dunning schedule.
+- Never send a cardholder network address with a merchant-initiated
+  `RecurringStoredCredential` sale, whatever the request holds.
 - Preserve exact NMI card-brand evidence while conformance-testing every
   documented NMI scheme label against the core presentation vocabulary.
 

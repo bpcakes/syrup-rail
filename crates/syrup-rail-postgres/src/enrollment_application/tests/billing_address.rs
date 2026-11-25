@@ -51,7 +51,7 @@ pub(super) fn named_contact(address: Option<BillingAddress>) -> BillingContact {
     }
 }
 
-fn context(
+pub(super) fn context(
     fixture: &ApplicationFixture,
     key: &str,
     contact: BillingContact,
@@ -144,7 +144,7 @@ pub(super) async fn make_renewal_due(
     .await
 }
 
-async fn enroll_with(
+pub(super) async fn enroll_with(
     fixture: &ApplicationFixture,
     key: &str,
     contact: BillingContact,

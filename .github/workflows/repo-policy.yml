@@ -116,7 +116,7 @@ jobs:
 
 
   sqlx-metadata:
-    name: Verify SQLx metadata against schema v6
+    name: Verify SQLx metadata against schema v7
     runs-on: "ubuntu-latest"
     defaults:
       run:

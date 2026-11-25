@@ -5,8 +5,8 @@ gateway and lifecycle-evidence contracts.
 
 ```toml
 [dependencies]
-syrup-rail = "0.6.0"
-syrup-rail-nmi = "0.6.0"
+syrup-rail = "0.7.0"
+syrup-rail-nmi = "0.7.0"
 ```
 
 The adapter re-exports the matching raw client as
@@ -120,6 +120,24 @@ whitespace) as `GatewayNotSubmittedError::Malformed` after the attempt is
 reserved, so hosts validate the strings at configuration time; the core type
 enforces the same rules.
 
+A `CardholderIpAddress` on a sale maps to NMI's Classic `ipaddress` field for
+the customer-initiated `InitialStoredCredential` intent, which enrollment and
+recovery submit. The adapter drops it from a merchant-initiated
+`RecurringStoredCredential` sale whatever the request holds, because no
+cardholder takes part in a renewal. IPv4 (including IPv4-mapped IPv6) is sent in
+dotted form and IPv6 in compressed form. NMI's Classic reference documents the
+dotted format alone, but its sandbox approved sales with IPv6 and recorded each
+address as sent, so the gateway accepts it; what a processor does with either
+form is unverified. A host that must hold back one form, such as IPv6 on a
+processor that rejects it, attaches no address for that sale; that is not
+neutral, since for a sale without the field NMI's sandbox recorded the
+submitting server's address. A refusal is handled like any other: one NMI
+reports as failed ends the attempt, and a new idempotency key may try without
+the address, while a processor error NMI does not settle (such as code 400 or
+421) leaves the attempt `unknown` until it is reconciled, and leaving the
+address out of a retry does not release it. The v5 one-time sale and Classic
+`validate` send no address.
+
 `query_transaction_diagnostics` makes one exact Query API lookup by transaction
 ID and never searches by order ID. It requires exactly one returned transaction
 whose ID matches, rejects a returned order ID or currency that differs from the
@@ -129,7 +147,13 @@ amount matches; settlement, refund, and void actions are never selected, and
 ambiguous or missing matches are reported as unavailable rather than chosen by
 recency. The observation keeps NMI's gateway `response_code` separate from the
 processor's `processor_response_code`, with source `nmi_query_api`. Name,
-address, email, card, and signature fields in the response are never extracted.
+postal and network address, email, card, and signature fields in the response
+are never extracted.
+
+Payment outcomes from Classic sales and validations, v5 JSON sales, and exact
+queries also pass NMI's AVS result through `GatewayAvsResponse::parse` onto
+`ProcessorEvidence::avs_response`. Any value other than one ASCII letter or
+digit records no AVS result and never changes the payment status.
 
 `nmi_renewal_decline_retry_advice` interprets a determinate automatic-renewal
 failure's durable `response_code` for the PostgreSQL integration's

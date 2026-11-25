@@ -9,7 +9,7 @@ use std::fmt;
 use thiserror::Error;
 
 use super::GatewayError;
-use crate::{GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, Money};
+use crate::{GatewayAvsResponse, GatewayDiagnostic, GatewayOrderId, GatewayTransactionId, Money};
 
 /// Largest provider code, in bytes, that a diagnostic observation retains.
 ///
@@ -287,8 +287,13 @@ impl GatewayTransactionDiagnosticsObservation {
     }
 
     /// Records the address verification result code.
+    ///
+    /// AVS result codes are a single ASCII letter or digit. Any other value is
+    /// omitted and the observation marked partial, never shortened to a code,
+    /// so a retained value always fits the schema-v7 `varchar(1)`
+    /// `gateway_avs_response` column.
     pub fn with_avs_response(mut self, value: Option<&str>) -> Self {
-        self.avs_response = self.bounded_code(value);
+        self.avs_response = self.avs_code(value);
         self
     }
 
@@ -303,6 +308,15 @@ impl GatewayTransactionDiagnosticsObservation {
     pub const fn mark_partial(mut self) -> Self {
         self.marked_partial = true;
         self
+    }
+
+    fn avs_code(&mut self, value: Option<&str>) -> Option<GatewayDiagnostic> {
+        let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+        let Some(code) = GatewayAvsResponse::parse(value) else {
+            self.marked_partial = true;
+            return None;
+        };
+        Some(GatewayDiagnostic::new(code.as_str()))
     }
 
     /// Bounds both the provider's code and the retained sanitized code, since
@@ -564,22 +578,35 @@ mod tests {
         assert!(
             GatewayDiagnostic::new(&expanding).expose().len() > MAX_GATEWAY_DIAGNOSTIC_CODE_BYTES
         );
-        let expanded = complete.clone().with_avs_response(Some(&expanding));
-        assert_eq!(expanded.avs_response(), None);
+        let expanded = complete.clone().with_csc_response(Some(&expanding));
+        assert_eq!(expanded.csc_response(), None);
         assert_eq!(
             expanded.completeness(),
             GatewayDiagnosticsCompleteness::Partial
         );
-        let redacted = complete.clone().with_avs_response(Some("cvv=1"));
-        assert!(
-            redacted
-                .avs_response()
-                .is_some_and(|code| !code.expose().contains('1'))
-        );
-        assert_eq!(
-            redacted.completeness(),
-            GatewayDiagnosticsCompleteness::Complete
-        );
+
+        // An AVS code is exactly one ASCII letter or digit. Anything else is
+        // omitted, never shortened, and makes the observation partial.
+        for code in ["Y", "0", " z "] {
+            let kept = complete.clone().with_avs_response(Some(code));
+            assert_eq!(
+                kept.avs_response().map(GatewayDiagnostic::expose),
+                Some(code.trim())
+            );
+            assert_eq!(
+                kept.completeness(),
+                GatewayDiagnosticsCompleteness::Complete
+            );
+        }
+        for value in ["YY", "N/A", "-", "é", "Y N", "cvv=1"] {
+            let rejected = complete.clone().with_avs_response(Some(value));
+            assert_eq!(rejected.avs_response(), None, "{value} was retained");
+            assert_eq!(
+                rejected.completeness(),
+                GatewayDiagnosticsCompleteness::Partial,
+                "{value}"
+            );
+        }
 
         let debug = format!("{complete:?}");
         assert!(debug.contains("has_avs_response: true"));

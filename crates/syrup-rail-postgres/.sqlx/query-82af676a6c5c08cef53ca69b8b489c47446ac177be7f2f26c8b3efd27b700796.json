@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT pg_advisory_xact_lock(\n            hashtextextended(\n                'syrup-rail:payment-method:'\n                || $1::uuid::text || ':'\n                || $2::uuid::text || ':'\n                || $3::uuid::text,\n                0\n            )\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pg_advisory_xact_lock",
+        "type_info": "Void",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "82af676a6c5c08cef53ca69b8b489c47446ac177be7f2f26c8b3efd27b700796"
+}

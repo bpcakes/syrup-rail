@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT current_setting('server_version_num')::integer AS server_version_num",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "server_version_num",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "1a5db3a631344ec04698aed6d333c8f0fa97b9e47dcfa69b8887e60d46f2089c"
+}

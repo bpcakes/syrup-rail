@@ -1,6 +1,21 @@
-# Syrup Rail 0.6.0 public API
+# Syrup Rail 0.7.0 public API
 
-Version 0.6.0 requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
+Version 0.7.0 requires Rust 1.94, SQLx 0.9.0, and schema v7: it records the
+provider's AVS result on payment attempts (`GatewayAvsResponse`,
+`ProcessorEvidence::with_avs_response` / `avs_response`,
+`GatewayPaymentOutcome::avs_response`, and the NMI client's
+`PaymentOutcomeParts::avs_response`). `GatewayAvsResponse::parse` accepts only
+a single ASCII letter or digit (omitting any other value rather than shortening
+it) and keeps ordinary `Debug` and `Display` output value-free; read the code
+through `as_char()` or `as_str()`. In-memory `ProcessorEvidence` equality
+includes `avs_response`, whereas stored SQL replay and processor-charge checks
+compare named columns that exclude it so 0.6.0-recorded evidence still replays
+cleanly. `PaymentOutcomeParts::avs_response` breaks existing struct literals,
+and `assert_runtime_schema_v6_or_v7_compatible` moves behind
+`schema-contract-test-support` so upgrading hosts switch to
+`assert_runtime_schema_v7_compatible` at compile time.
+
+Version 0.6.0, the SQLx upgrade, requires Rust 1.94 and SQLx 0.9.0. The exposed SQLx connection,
 pool, transaction, and error types are incompatible with SQLx 0.8; hosts must
 upgrade their SQLx dependencies and CLI together and regenerate host metadata.
 Schema v6 and existing billing behavior are unchanged from 0.5.5 at
@@ -212,6 +227,39 @@ the descriptor on), the recurring intent variant gains a field, and the raw
 `descriptor: None` to existing literals. Without a policy nothing changes on
 the wire.
 
+0.7.0 also adds an opt-in cardholder network address for customer-initiated
+token sales. `CardholderIpAddress` wraps an `IpAddr`, stores an IPv4-mapped
+IPv6 address as IPv4, and never prints its value. A host that has established
+the cardholder's own address attaches it with
+`SubscriptionPaymentContext::with_cardholder_ip`. The PostgreSQL enrollment and
+recovery workflows build the sale they submit with the new
+`SubscriptionPaymentContext::token_sale_request`, which sets it through
+`GatewaySaleRequest::with_cardholder_ip`. The address is request-scoped like
+the payment token: it is never persisted, is not part of the reservation or of
+replay equality (a retry may carry a different address or none without an
+idempotency conflict), and Syrup Rail makes no payment or entitlement decision
+from it, though a merchant account's own IP rules may. A same-key retry of a
+submitted sale returns the recorded result and sends nothing, so changing or
+dropping the address there has no effect and another sale needs a new key; a
+retry that resumes a prepared attempt sends the retry's own address. Provider
+text that repeats the address is persisted as provider text, though card-number
+redaction may remove some or all of it. Payment-method replacement, renewals
+and host charges send none. The NMI adapter drops it from a
+`RecurringStoredCredential` sale. Only an `InitialStoredCredential` sale puts
+it on the wire, as the Classic `ipaddress` field in dotted IPv4 or compressed
+IPv6 form; a `OneTime` sale uses v5, which sends no address. NMI documents only
+the dotted format for `ipaddress`, but its sandbox approved sales with IPv6 and
+recorded it as sent. The gateway does not validate the field, and what a
+processor does with it is unverified. `Debug` output of the enrollment,
+recovery, and replacement commands now nests their shared context. Source
+breaks: `GatewaySaleRequestParts` and the raw
+`syrup_rail_nmi_client::SaleRequest` each gain `cardholder_ip`; add
+`cardholder_ip: None` to existing `SaleRequest` literals. A decorator that
+rebuilds a sale with `GatewaySaleRequest::new` must forward the address with
+`with_cardholder_ip`, and one that builds a `GatewaySaleRequestParts` literal
+must copy the incoming `cardholder_ip`, not `None`. Without an address nothing
+changes on the wire.
+
 0.6.0 also adds opt-in provider retry advice for automatic-renewal declines.
 The core `RenewalDeclineRetryAdvice` is `FollowSchedule`,
 `StopAutomaticRetries`, or `RetryNoEarlierThan(DunningRetryDelay)`, and
@@ -352,9 +400,14 @@ than being expired automatically.
 Hosts upgrading from 0.2.0 must add the subscription-charge and host-charge
 cleanup phases to their existing loop when applicable.
 
-Use `assert_runtime_schema_v6_compatible` after host migrations and before
-serving billing traffic. Version 0.6.0 supports PostgreSQL 18 and schema v6 only;
-the assertion is read-only and does not install or upgrade a schema.
+Use `assert_runtime_schema_v7_compatible` after host migrations and before
+serving billing traffic. This release supports PostgreSQL 18 and requires
+schema v7, because attempt reads and writes include `gateway_avs_response`; the
+assertion is read-only and does not install or upgrade a schema.
+`assert_runtime_schema_v6_or_v7_compatible` is moved behind the
+`schema-contract-test-support` feature (the 0.6.0 bridge release exports it in
+its default facade), and `assert_runtime_schema_v6_compatible` confirms a
+pre-upgrade v6 catalog.
 `assert_runtime_schema_v5_compatible` remains for confirming the pre-cutover
 state before a host commits `schema/v6/upgrade_from_v5.sql` with every billing
 writer stopped, and `assert_runtime_schema_v4_compatible` likewise before

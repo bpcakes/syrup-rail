@@ -11,6 +11,7 @@ fn classic_sale_applies_the_configured_duplicate_check_policy() {
         stored_credential: None,
         billing_contact: None,
         descriptor: None,
+        cardholder_ip: None,
     };
     let params = classic_sale_params(
         "private_key",
@@ -64,6 +65,7 @@ fn sale_customer_vault_form_adds_payment_method_to_vault() {
             address: None,
         }),
         descriptor: None,
+        cardholder_ip: None,
     };
     let params = classic_sale_params(
         "private_key",
@@ -111,6 +113,7 @@ fn sale_customer_vault_form_includes_recurring_merchant_flags() {
         }),
         billing_contact: None,
         descriptor: None,
+        cardholder_ip: None,
     };
     let params = classic_sale_params(
         "private_key",
@@ -174,7 +177,7 @@ fn store_payment_method_uses_validate_without_amount() {
 }
 
 #[test]
-fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
+fn form_params_borrow_caller_text_and_own_the_formatted_amount() {
     let private_key = Zeroizing::new("private_key_sentinel".to_owned());
     let request = SaleRequest {
         amount_cents: 4_900,
@@ -192,6 +195,7 @@ fn form_params_borrow_sensitive_values_and_own_only_public_scalars() {
             address: None,
         }),
         descriptor: None,
+        cardholder_ip: None,
     };
     let params = classic_sale_params(
         private_key.as_str(),
@@ -438,6 +442,7 @@ async fn invalid_mutation_shape_is_rejected_before_transport() {
             }),
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("invalid source/stored-credential combination must fail locally");
@@ -464,6 +469,7 @@ async fn initial_stored_credential_requires_vault_creation_before_transport() {
             stored_credential: Some(StoredCredential::InitialCustomer),
             billing_contact: None,
             descriptor: None,
+            cardholder_ip: None,
         })
         .await
         .expect_err("initial stored credential without vault creation must fail locally");
@@ -492,6 +498,7 @@ fn renewal_with_descriptor(descriptor: Option<crate::StatementDescriptor>) -> Sa
         }),
         billing_contact: None,
         descriptor,
+        cardholder_ip: None,
     }
 }
 
@@ -575,6 +582,7 @@ fn v5_one_time_sale_never_sends_descriptor_fields() {
         stored_credential: None,
         billing_contact: None,
         descriptor: Some(descriptor()),
+        cardholder_ip: None,
     };
     assert!(!sale_uses_classic_form(&request));
     let body = sale_body_json(

@@ -3,9 +3,11 @@ use super::*;
 impl SubscriptionBillingService {
     /// Runs one complete subscriber-initiated recovery payment boundary.
     ///
-    /// The command carries only the owner, requested plan/configuration, and
-    /// memory-only token/contact. Reservation derives the exact due period,
-    /// amount, subscription, and payment-state snapshot under lock.
+    /// The command carries only the owner, requested plan/configuration,
+    /// memory-only token/contact, and an optional cardholder network address
+    /// that is sent with the payment and never stored. Reservation derives the
+    /// exact due period, amount, subscription, and payment-state snapshot under
+    /// lock.
     pub async fn recover(
         &self,
         command: RecoverSubscriptionPayment,

@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_processor_charges (\n            attempt_id, billing_scope_id, gateway_account_id,\n            gateway_order_id, gateway_transaction_id\n        ) VALUES ($1, $2, $3, $4, $5)\n        RETURNING attempt_kind, amount_cents\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "amount_cents"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "736ee30f384a211b6538e6f833915918dd12bdb2b7e87b5c8f5843f252a79e37"
+}

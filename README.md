@@ -18,14 +18,14 @@ the layers a host needs:
 
 ```toml
 [dependencies]
-syrup-rail = "0.6.0"
-syrup-rail-postgres = "0.6.0"
-syrup-rail-nmi = "0.6.0" # only for NMI-backed hosts
+syrup-rail = "0.7.0"
+syrup-rail-postgres = "0.7.0"
+syrup-rail-nmi = "0.7.0" # only for NMI-backed hosts
 ```
 
 `syrup-rail-nmi` re-exports its matching raw client as
 `syrup_rail_nmi::nmi_client`. Hosts that need the raw client without the
-billing-domain adapter can depend on `syrup-rail-nmi-client = "0.6.0"`
+billing-domain adapter can depend on `syrup-rail-nmi-client = "0.7.0"`
 directly.
 
 ## Subscription terms
@@ -105,10 +105,16 @@ subscription entitlement changes from `AllowedDuringDunning` to `Suspended`
 at that boundary. Hosts that mirror access outside Syrup Rail must consume the
 event's `access` outcome from their transactional outbox.
 
-PostgreSQL 18 is the only supported database major, and schema v6 is the
+PostgreSQL 18 is the only supported database major, and schema v7 is the
 current contract. New hosts install
-[`schema/v6/install.sql`](crates/syrup-rail-postgres/schema/v6/install.sql).
-Existing schema-v5 hosts follow the checked-in
+[`schema/v7/install.sql`](crates/syrup-rail-postgres/schema/v7/install.sql).
+Existing schema-v6 hosts follow the
+[`v6` to `v7` guide](crates/syrup-rail-postgres/schema/v7/README.md), an
+online single-transaction upgrade that appends one nullable attempt column and
+updates host-charge submit admission;
+deploy a build that accepts v6 or v7 at startup, such as 0.6.0, first and
+commit the upgrade before deploying 0.7.0, which requires v7. Schema-v5 hosts first
+follow the checked-in
 [`v5` to `v6` cutover guide](crates/syrup-rail-postgres/schema/v6/README.md),
 a single stopped-writer transaction that widens two resolution-code
 constraints for typed billing-period expiry dispositions. Schema-v4 hosts first
@@ -139,19 +145,25 @@ changes cannot alter already-versioned wire data. Card brands in customer and
 event projections use a closed provider-neutral vocabulary; unknown provider
 text becomes `other` rather than being copied into the host payload.
 
-After the host has applied its immutable v6 install or committed the
-forward-only v5-to-v6 upgrade artifact, call
-`assert_runtime_schema_v6_compatible(&pool).await` during process startup and
-before accepting billing traffic. The assertion checks the complete canonical
-v6 catalog and fingerprint inside one repeatable-read, read-only transaction.
+After the host has applied its immutable v7 install or committed the
+forward-only v7 upgrade, call
+`assert_runtime_schema_v7_compatible(&pool).await` during process startup and
+before accepting billing traffic. The 0.7.0 runtime records each payment
+response's AVS result in the v7 `gateway_avs_response` column, so it requires
+v7. The assertion checks the complete canonical catalog inside one
+repeatable-read, read-only transaction and accepts exactly the v7 fingerprint.
+`assert_runtime_schema_v6_or_v7_compatible` is moved behind the
+`schema-contract-test-support` feature in 0.7.0 (the 0.6.0 bridge release
+exports it for hosts spanning the v6-to-v7 upgrade).
 It first rejects every PostgreSQL major other than 18. Separately named
 host-prefixed tables, constraints, indexes, functions, and triggers are valid
 extension points, but canonical table and view columns are closed: adding even
 a host-prefixed column to a canonical relation is unsupported and fails the
-fingerprint check. The assertion also fails closed for v1, v2, v3, v4, or other
-canonical drift. `assert_runtime_schema_v4_compatible` remains available to
-confirm the pre-cutover v4 state. Neither assertion executes install, upgrade,
-preflight, or audit SQL.
+fingerprint check. The assertion also fails closed for v1 through v6 or other
+canonical drift. `assert_runtime_schema_v6_compatible`,
+`assert_runtime_schema_v5_compatible`, and `assert_runtime_schema_v4_compatible`
+remain available to confirm pre-cutover states. None of these assertions execute
+install, upgrade, preflight, or audit SQL.
 Hosts remain responsible for applying and coordinating their own migrations.
 The compiled host integration example includes a default-feature helper for
 this startup check.
@@ -284,7 +296,7 @@ checks treat warnings as errors. Function-length and cognitive-complexity
 limits are deferred until the existing payment workflows and tests have been
 refactored to meet them.
 
-See [the 0.3 public API guide](docs/public-api.md) for the supported facade,
+See [the public API guide](docs/public-api.md) for the supported facade,
 advanced transaction-local composition points, and event compatibility policy.
 
 ## Releasing

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT concat_ws(\n            '|',\n            table_name,\n            ordinal_position::text,\n            column_name,\n            data_type,\n            udt_name,\n            is_nullable,\n            COALESCE(column_default, ''),\n            -- A length bound is part of the column's type. concat_ws skips\n            -- the NULL of an unbounded column, so that row hashes as before.\n            'max_length=' || character_maximum_length::text\n        )\n        FROM information_schema.columns\n        WHERE table_schema = 'public'\n            AND table_name = ANY($1)\n        ORDER BY table_name, ordinal_position\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "concat_ws",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ac808333088b1c44aabef776109d7b1dfa0a3843b60d1b7b23e801bb89014ece"
+}

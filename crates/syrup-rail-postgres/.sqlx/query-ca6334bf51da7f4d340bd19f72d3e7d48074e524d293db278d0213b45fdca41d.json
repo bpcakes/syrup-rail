@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT billing_host_charge_ledger_admission($1, $2, $3, 'submit', NULL, $4)",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_host_charge_ledger_admission",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "ca6334bf51da7f4d340bd19f72d3e7d48074e524d293db278d0213b45fdca41d"
+}

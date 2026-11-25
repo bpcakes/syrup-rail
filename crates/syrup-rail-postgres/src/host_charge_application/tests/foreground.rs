@@ -416,3 +416,197 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
     cleanup?;
     Ok(())
 }
+
+#[tokio::test]
+async fn host_charge_persists_avs_allows_retry_after_decline_and_replays_cross_release()
+-> Result<(), Box<dyn Error>> {
+    let database = TestDatabase::start("hc_avs_flow").await?;
+    let result = async {
+        sqlx::query!(
+            "CREATE TABLE host_charge_targets (id uuid PRIMARY KEY, \
+             billing_scope_id uuid NOT NULL, subscriber_id uuid NOT NULL, \
+             status text NOT NULL, amount_cents integer NOT NULL, currency text NOT NULL, \
+             paid_at timestamptz)"
+        )
+        .execute(&database.pool)
+        .await?;
+        let account = create_gateway_account(&database.pool, "nmi").await?;
+        let subscriber_id = Uuid::now_v7();
+        let target_id = Uuid::now_v7();
+        crate::test_support::fixture_query(
+            "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1500, 'USD', NULL)",
+        )
+        .bind(target_id)
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .execute(&database.pool)
+        .await?;
+
+        let declined = GatewayPaymentOutcome::new(
+            GatewayPaymentStatus::Declined,
+            ProcessorEvidence::new(
+                Some(GatewayTransactionId::new("host_txn_avs_declined")?),
+                None,
+                Some(GatewayDiagnostic::new("2")),
+                Some(GatewayDiagnostic::new("200")),
+                Some(GatewayDiagnostic::new("AVS declined")),
+                Some(GatewayDiagnostic::new("declined")),
+                GatewayPaymentDescriptor::default(),
+            )
+            .with_avs_response(syrup_rail::GatewayAvsResponse::parse("N")),
+        );
+        let gateway = Arc::new(ScriptedGateway {
+            account_mode: GatewayAccountMode::Live,
+            sale_calls: AtomicUsize::new(0),
+            outcome: Mutex::new(Some(declined)),
+        });
+        let resolver = Arc::new(StaticResolver {
+            gateway: resolved_gateway(account, gateway.clone()),
+            calls: AtomicUsize::new(0),
+        });
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let service = SubscriptionBillingService::new(
+            database.pool.clone(),
+            Arc::new(UnusedOffers),
+            resolver.clone(),
+            Arc::new(PermitAdmission {
+                calls: AtomicUsize::new(0),
+            }),
+            Arc::new(TestCoordinator {
+                pool: database.pool.clone(),
+                events: Arc::clone(&events),
+            }),
+        )
+        .with_host_charge_targets(Arc::new(TestTargets));
+
+        let command = |key: &str| {
+            ChargeHostTarget::new(
+                syrup_rail::BillingScopeId::new(account.billing_scope_id),
+                syrup_rail::SubscriberId::new(subscriber_id),
+                HostChargeTargetId::new(target_id),
+                GatewayConfigurationId::new(account.gateway_configuration_id),
+                PaymentToken::new("opaque-host-avs").unwrap(),
+                IdempotencyKey::new(key).unwrap(),
+                None,
+            )
+        };
+        let first = service.charge_host_target(command("hc-avs-1")).await?;
+        assert_eq!(first.status(), PaymentAttemptStatus::Declined);
+        assert_eq!(
+            first.attempt().state().processor_evidence().avs_response(),
+            syrup_rail::GatewayAvsResponse::parse("N")
+        );
+
+        // Retry on the same target after a declined attempt carrying AVS must
+        // pass schema v7's `billing_host_charge_ledger_admission` submit check
+        // and store the winning approval's AVS code.
+        let approved_without_avs = approved_outcome("host_txn_avs_approved");
+        let approved_with_avs = GatewayPaymentOutcome::new(
+            GatewayPaymentStatus::Approved,
+            approved_without_avs
+                .evidence()
+                .clone()
+                .with_avs_response(syrup_rail::GatewayAvsResponse::parse("Y")),
+        );
+        *gateway.outcome.lock().await = Some(approved_with_avs.clone());
+        let second = service.charge_host_target(command("hc-avs-2")).await?;
+        assert_eq!(second.status(), PaymentAttemptStatus::Approved);
+        assert_eq!(
+            second.attempt().state().processor_evidence().avs_response(),
+            syrup_rail::GatewayAvsResponse::parse("Y")
+        );
+
+        // Reconciling a 0.6.0-style parked host charge (without AVS) with the
+        // same approval carrying AVS replays the charge cleanly and stores AVS.
+        let replay_target = Uuid::now_v7();
+        crate::test_support::fixture_query(
+            "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1500, 'USD', NULL)",
+        )
+        .bind(replay_target)
+        .bind(account.billing_scope_id)
+        .bind(subscriber_id)
+        .execute(&database.pool)
+        .await?;
+        let replay_command = ChargeHostTarget::new(
+            syrup_rail::BillingScopeId::new(account.billing_scope_id),
+            syrup_rail::SubscriberId::new(subscriber_id),
+            HostChargeTargetId::new(replay_target),
+            GatewayConfigurationId::new(account.gateway_configuration_id),
+            PaymentToken::new("opaque-host-avs-replay").unwrap(),
+            IdempotencyKey::new("hc-avs-replay").unwrap(),
+            None,
+        );
+        let replay_attempt_id = PaymentAttemptId::new(Uuid::now_v7());
+        let replay_reservation = HostChargeReservation::from_command(
+            &replay_command,
+            syrup_rail::HostChargeTargetSnapshot::new(
+                HostChargeTargetId::new(replay_target),
+                ChargeAmount::new(1500, CurrencyCode::new("USD")?)?,
+            ),
+            &resolver.gateway,
+            replay_attempt_id,
+            GatewayAccountMode::Live,
+        )?;
+        let mut tx = database.pool.begin().await?;
+        assert!(matches!(
+            reserve_host_charge_in_transaction(&mut tx, &TestTargets, &replay_reservation).await?,
+            HostChargeReservationOutcome::Reserved(_)
+        ));
+        tx.commit().await?;
+        let mut tx = database.pool.begin().await?;
+        assert!(matches!(
+            admit_host_charge_submission_in_transaction(&mut tx, &TestTargets, &replay_reservation)
+                .await?,
+            HostChargeSubmissionOutcome::Admitted(_)
+        ));
+        tx.commit().await?;
+        let parked_without_avs = approved_outcome("host_txn_avs_parked");
+        let parked = park_host_charge_approved(
+            &database.pool,
+            &replay_reservation,
+            parked_without_avs.evidence(),
+        )
+        .await?;
+        assert_eq!(parked.status(), PaymentAttemptStatus::ReviewRequired);
+        assert_eq!(
+            parked.attempt().state().processor_evidence().avs_response(),
+            None
+        );
+
+        let reconciled_with_avs = GatewayPaymentOutcome::new(
+            GatewayPaymentStatus::Approved,
+            parked_without_avs
+                .evidence()
+                .clone()
+                .with_avs_response(syrup_rail::GatewayAvsResponse::parse("Y")),
+        );
+        let coordinator = TestCoordinator {
+            pool: database.pool.clone(),
+            events: Arc::clone(&events),
+        };
+        let applied = apply_reconciled_host_charge_gateway_outcome(
+            &database.pool,
+            &coordinator,
+            &TestTargets,
+            syrup_rail::BillingScopeId::new(account.billing_scope_id),
+            replay_attempt_id,
+            &reconciled_with_avs,
+        )
+        .await?;
+        assert_eq!(applied.status(), PaymentAttemptStatus::Approved);
+        assert_eq!(
+            applied
+                .attempt()
+                .state()
+                .processor_evidence()
+                .avs_response(),
+            syrup_rail::GatewayAvsResponse::parse("Y")
+        );
+        Ok::<_, Box<dyn Error>>(())
+    }
+    .await;
+    let cleanup = database.cleanup().await;
+    result?;
+    cleanup?;
+    Ok(())
+}

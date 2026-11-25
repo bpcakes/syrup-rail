@@ -4,13 +4,15 @@ use crate::{
     TransactionQuery, VaultAction,
 };
 
+use super::form::classic_cardholder_ip;
 use super::request_budget::{OutboundRequestValidator, RequestEncoding};
 use super::{
     MAX_NMI_ADDRESS_LINE_BYTES, MAX_NMI_CITY_BYTES, MAX_NMI_CONTACT_NAME_BYTES,
     MAX_NMI_DESCRIPTOR_BYTES, MAX_NMI_DESCRIPTOR_PHONE_BYTES, MAX_NMI_DESCRIPTOR_URL_BYTES,
-    MAX_NMI_EMAIL_BYTES, MAX_NMI_IDENTIFIER_BYTES, MAX_NMI_ORDER_ID_BYTES,
-    MAX_NMI_PAYMENT_TOKEN_BYTES, MAX_NMI_REPORT_DATE_BYTES, MAX_NMI_TRANSACTION_REPORTS,
-    MAX_NMI_ZIP_BYTES, SUPPORTED_NMI_CURRENCY, WireError, sale_uses_classic_form,
+    MAX_NMI_EMAIL_BYTES, MAX_NMI_IDENTIFIER_BYTES, MAX_NMI_IP_ADDRESS_BYTES,
+    MAX_NMI_ORDER_ID_BYTES, MAX_NMI_PAYMENT_TOKEN_BYTES, MAX_NMI_REPORT_DATE_BYTES,
+    MAX_NMI_TRANSACTION_REPORTS, MAX_NMI_ZIP_BYTES, SUPPORTED_NMI_CURRENCY, WireError,
+    sale_uses_classic_form,
 };
 
 pub(super) fn validate_sale_request(
@@ -278,6 +280,14 @@ fn validate_sale_request_size(
     }
     if let Some(descriptor) = &request.descriptor {
         validate_statement_descriptor(&mut validator, descriptor)?;
+    }
+    // The v5 sale sends no address.
+    if let (RequestEncoding::Form, Some(address)) = (encoding, request.cardholder_ip) {
+        validator.field(
+            &classic_cardholder_ip(address),
+            MAX_NMI_IP_ADDRESS_BYTES,
+            "cardholder address exceeds the supported size",
+        )?;
     }
     Ok(())
 }

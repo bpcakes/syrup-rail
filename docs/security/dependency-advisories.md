@@ -5,7 +5,8 @@ dedicated workflow also runs it every Monday so a newly published advisory is
 detected without waiting for a repository change. The script audits the
 complete lockfile and denies vulnerabilities, warnings, unmaintained packages,
 unsound packages, and yanked releases, except for the explicitly guarded
-lockfile-only advisory below. The test harness uses its supported external-server
+lockfile-only advisory and the single unmaintained notice described below. The
+test harness uses its supported external-server
 mode, removing Testcontainers, unmaintained `astral-tokio-tar`
 ([RUSTSEC-2026-0440](https://rustsec.org/advisories/RUSTSEC-2026-0440.html)), and
 `rustix` ([RUSTSEC-2026-0486](https://rustsec.org/advisories/RUSTSEC-2026-0486.html))
@@ -48,3 +49,31 @@ Remove the SQLite exception when the optional lockfile entry disappears or SQLx
 permits a patched SQLite version, and before intentionally enabling SQLite. Any
 new reachable SQLite use needs its own patched dependency review; this exception
 does not assert safety for downstream workspaces with different feature graphs.
+
+## Reachable unmaintained `chrono`
+
+[RUSTSEC-2026-0543](https://rustsec.org/advisories/RUSTSEC-2026-0543.html) is an
+informational `unmaintained` notice against every `chrono` version. It reports
+no vulnerability and has no patched release; it recommends `jiff` or `time`.
+
+Unlike the exceptions above, `chrono` is reachable and cannot be made
+unreachable by a lockfile change. `syrup-rail`, `syrup-rail-nmi`, and
+`syrup-rail-postgres` depend on it directly, SQLx's `chrono` feature maps
+PostgreSQL timestamps to it, and `chrono::DateTime<Utc>` is part of the public
+API of `syrup-rail` and `syrup-rail-postgres`. Replacing it changes public
+types for every host and needs its own breaking release, so it is not done as
+an advisory fix.
+
+Impact today is none: the notice describes maintenance status, not a defect in
+code this workspace runs. The risk is a later `chrono` defect that receives no
+upstream fix. The wrapper therefore passes `--ignore RUSTSEC-2026-0543` whenever
+`chrono` is locked, and ignores nothing else about the package: a vulnerability
+or unsoundness advisory against `chrono` is published under its own ID, stays
+denied, and fails every CI run and the Monday scheduled check. Wrapper tests
+cover the ignored notice, a preserved audit failure beside it, and its
+combination with the `rsa` exception.
+
+Remove this exception when the workspace no longer depends on `chrono`, or
+sooner if the advisory is withdrawn. If a denied `chrono` advisory appears
+before then, treat the migration to a maintained time library as release
+blocking rather than widening this exception.

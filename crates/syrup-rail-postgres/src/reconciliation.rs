@@ -165,10 +165,13 @@ pub async fn claim_exact_reconciliation_attempts(
     checked_query!("SELECT set_config('lock_timeout', '250ms', true)")
         .execute(&mut *transaction)
         .await?;
-    let rows = checked_query!(
+    // The claim names its returned columns: a `RETURNING attempts.*` statement
+    // cached on a pooled connection fails after a later schema appends a column.
+    let rows = crate::attempts::payment_attempt_columns_query!(
         r#"
         WITH candidate_attempts AS MATERIALIZED (
-            SELECT attempts.id AS attempt_id, attempts.created_at
+            SELECT attempts.id AS attempt_id,
+                attempts.created_at AS candidate_created_at
             FROM billing_payment_attempts AS attempts
             WHERE attempts.gateway_account_id = $1
                 AND attempts.submitted_at IS NOT NULL
@@ -240,14 +243,15 @@ pub async fn claim_exact_reconciliation_attempts(
             SET updated_at = clock_timestamp()
             FROM candidate_attempts
             WHERE attempts.id = candidate_attempts.attempt_id
-            RETURNING attempts.*
+            RETURNING "#,
+        r#"
         )
         SELECT updated_attempts.*
         FROM updated_attempts
         INNER JOIN candidate_attempts
             ON candidate_attempts.attempt_id = updated_attempts.id
-        ORDER BY candidate_attempts.created_at, candidate_attempts.attempt_id
-        "#,
+        ORDER BY candidate_attempts.candidate_created_at, candidate_attempts.attempt_id
+        "#;
         gateway_account_id.as_uuid(),
         RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS,
         EXACT_STALE_AFTER_SECONDS,

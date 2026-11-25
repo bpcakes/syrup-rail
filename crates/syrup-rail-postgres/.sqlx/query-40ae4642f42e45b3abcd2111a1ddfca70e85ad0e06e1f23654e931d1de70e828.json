@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT jsonb_build_array(\n            namespace.nspname,\n            language.lanname,\n            pg_catalog.pg_get_expr(routine.proargdefaults, 0),\n            jsonb_build_object(\n                'proname', routine.proname,\n                'procost', routine.procost,\n                'prorows', routine.prorows,\n                'provariadic', routine.provariadic,\n                'prosupport', routine.prosupport,\n                'prokind', routine.prokind,\n                'prosecdef', routine.prosecdef,\n                'proleakproof', routine.proleakproof,\n                'proisstrict', routine.proisstrict,\n                'proretset', routine.proretset,\n                'provolatile', routine.provolatile,\n                'proparallel', routine.proparallel,\n                'pronargs', routine.pronargs,\n                'pronargdefaults', routine.pronargdefaults,\n                'prorettype', routine.prorettype,\n                'proargtypes', routine.proargtypes,\n                'proallargtypes', routine.proallargtypes,\n                'proargmodes', routine.proargmodes,\n                'proargnames', routine.proargnames,\n                'protrftypes', routine.protrftypes,\n                'prosrc', routine.prosrc,\n                'probin', routine.probin,\n                'prosqlbody', routine.prosqlbody,\n                'proconfig', routine.proconfig\n            )\n        )::text\n        FROM pg_catalog.pg_proc AS routine\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = routine.pronamespace\n        INNER JOIN pg_catalog.pg_language AS language\n            ON language.oid = routine.prolang\n        WHERE namespace.nspname = 'public'\n            AND routine.prokind = 'f'\n            AND routine.proname = ANY($1)\n        ORDER BY routine.proname, routine.proargtypes\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "jsonb_build_array",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "40ae4642f42e45b3abcd2111a1ddfca70e85ad0e06e1f23654e931d1de70e828"
+}

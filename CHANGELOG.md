@@ -2,11 +2,111 @@
 
 All notable changes to the Syrup Rail crates are documented in this file.
 
+## [0.7.0] - Unreleased
+
+Records each payment response's address-verification (AVS) result on its
+attempt, in the schema-v7 `gateway_avs_response` column. This runtime requires
+schema v7. Billing decisions, replay, and processor-charge matching are
+unchanged.
+
+### Action required for hosts
+
+- Deploy 0.6.0, whose startup assertion accepts v6 or v7, as the bridge to
+  every serving and rollback-target host, then commit the online
+  `schema/v7/upgrade_from_v6.sql` following `schema/v7/README.md` before
+  0.7.0 serves billing traffic. A 0.6.0 build may run on the v7 catalog and
+  remains a valid rollback target: it reads only v6 columns and neither reads
+  nor updates `gateway_avs_response`.
+- Replace the startup call to `assert_runtime_schema_v6_or_v7_compatible`
+  with `assert_runtime_schema_v7_compatible`. In 0.7.0,
+  `assert_runtime_schema_v6_or_v7_compatible` is moved behind the
+  `schema-contract-test-support` feature (matching
+  `assert_runtime_schema_v3_compatible`) so upgrading hosts fail at compile
+  time rather than starting a 0.7.0 process against a v6 catalog.
+- `syrup_rail_nmi_client::PaymentOutcomeParts` gains a public `avs_response`
+  field; code that constructs the struct must set it.
+- `GatewaySaleRequestParts` gains `cardholder_ip: Option<CardholderIpAddress>`
+  and the raw `syrup_rail_nmi_client::SaleRequest` struct gains
+  `cardholder_ip: Option<IpAddr>`. Add `cardholder_ip: None` to existing
+  `SaleRequest` literals. A gateway decorator that rebuilds a sale with
+  `GatewaySaleRequest::new` must carry the address across with
+  `with_cardholder_ip`, or the provider receives the sale without it;
+  `GatewaySaleRequest::from(parts)` keeps it. One that builds a
+  `GatewaySaleRequestParts` literal must copy the incoming `cardholder_ip`, not
+  `None`.
+
+### Added
+
+- `GatewayAvsResponse`, a provider AVS result code: exactly one ASCII letter or
+  digit, case preserved. Any other value parses to `None` and is never
+  shortened into a code. Ordinary `Debug` and `Display` formatting are
+  value-free; read the validated code explicitly via `as_char()` or `as_str()`.
+- `ProcessorEvidence::with_avs_response`, `ProcessorEvidence::avs_response`,
+  and `GatewayPaymentOutcome::avs_response`.
+  The value is a diagnostic: the stored exact-replay and processor-charge
+  checks compare named columns that exclude it, and processor charges do not
+  store it, so evidence recorded by 0.6.0 without an AVS result still matches
+  the same response replayed by 0.7.0.
+- The NMI client carries the AVS result of classic transaction API responses
+  (`avsresponse` / `avs_response`, including sales and payment-method
+  validation), v5 JSON sale responses (`avs_response` / `avsresponse`), and
+  exact query API responses (`avs_response`) as
+  `PaymentOutcomeParts::avs_response`, unvalidated. The NMI adapter attaches it
+  to the outcome's evidence through `GatewayAvsResponse::parse`, so an
+  unrecognized value records no result and never changes the payment status.
+- Add the opt-in cardholder network address. `CardholderIpAddress` wraps an
+  `IpAddr` (an IPv4-mapped IPv6 address is stored as IPv4) and never prints
+  it. A host sets it with `SubscriptionPaymentContext::with_cardholder_ip`.
+  `SubscriptionPaymentContext::token_sale_request` builds the token sale the
+  customer submits, and the PostgreSQL enrollment and recovery workflows now
+  use it, so both forward the address through
+  `GatewaySaleRequest::with_cardholder_ip`.
+  It is request-scoped like the payment token: never persisted, absent from the
+  reservation and from replay equality (a retry may carry another address or
+  none; one that resumes a prepared attempt sends its own address, and one of a
+  submitted sale returns the recorded result and sends nothing; provider text
+  that repeats it is stored as provider text, though card-number redaction may
+  remove some or all of it), and never an input to a payment or entitlement
+  decision by Syrup Rail, though a merchant account's own IP rules may act on
+  it. Renewals, payment-method replacement and host charges do not send one. No
+  schema changes.
+- The NMI adapter forwards the address only for customer-initiated intents,
+  dropping it from a `RecurringStoredCredential` sale whatever the request
+  holds. The raw client sends it as the Classic `ipaddress` field ("IP address
+  of cardholder", documented format `xxx.xxx.xxx.xxx`), in dotted IPv4 or
+  compressed IPv6 form, and keeps it off the `Debug` allowlist. NMI's Classic
+  reference documents no IPv6 form, but its sandbox approved sales with IPv6
+  and recorded it as sent. The gateway does not validate the field, what a
+  processor does with it is unverified, and for a sale without the field the
+  sandbox recorded the submitting server's address. The v5 sale sends none. The
+  host remains responsible for whose address it is and for disclosing that it
+  is shared with the processor.
+
+### Changed
+
+- `EnrollSubscription`, `RecoverSubscriptionPayment`, and
+  `ReplaceSubscriptionPaymentMethod` print their shared context as a nested
+  `context` in `Debug` output, which shows whether a cardholder address is
+  attached and never the address.
+- Every attempt transition that records provider evidence writes
+  `gateway_avs_response` with the rest of that response's evidence, and attempt
+  reads return it. Reconciled approved and non-approved transitions keep the
+  stored AVS result when the reconciling observation has none, and a manual
+  failure keeps the attempt's result. A stored value that is not an AVS code
+  reads as no result rather than failing the attempt. Attempt reads name every
+  schema-v7 column.
+- Administrator transaction diagnostics share `GatewayAvsResponse`'s rule.
+- Update the locked `url` to 2.5.9 (and `form_urlencoded` to 1.2.3) for
+  RUSTSEC-2026-0592, a stack overflow in `Url::origin()` on nested `blob:` URLs.
+  Endpoint validation admits only HTTP(S) URLs, so this crate set never reached
+  it.
+
 ## [0.6.0] - Unreleased
 
 Breaking SQLx upgrade from the IdentityPro-consumed 0.5.5 revision
 `3a7756d1bcb6f7e1c8812b4ea0c46a210ebb413a`. Existing billing behavior and every
-schema-v6 artifact are preserved; dynamic statement descriptors are opt-in.
+schema-v6 artifact are preserved; schema v7 adds an unwritten attempt AVS
+result column, and dynamic statement descriptors are opt-in.
 This release does not include the separate unfinished features on the
 historically named `dev/0.6.0` branch.
 
@@ -17,8 +117,11 @@ historically named `dev/0.6.0` branch.
   trait implementations now use SQLx 0.9.0 types; SQLx 0.8 types are incompatible.
 - Upgrade host SQLx dependencies and SQLx CLI to 0.9.0, adapt host queries to
   its query-string API, and regenerate host query metadata with that CLI.
-- Keep the existing schema-v6 installation and startup assertion. No database
-  migration is required for a host already consuming 0.5.5 on schema v6.
+- Replace the startup call to `assert_runtime_schema_v6_compatible` with
+  `assert_runtime_schema_v6_or_v7_compatible` and deploy that build before any
+  build applies the online v7 upgrade, so it remains a valid rollback target.
+  No database migration is required for a host already consuming 0.5.5 on
+  schema v6 to deploy 0.6.0; the exact v6 assertion rejects a v7 catalog.
 - `GatewaySaleRequest::into_parts` now returns `GatewaySaleRequestParts`
   instead of a tuple. A gateway decorator that rebuilds the request it
   forwards must carry `descriptor` across with `with_descriptor`, or the
@@ -39,6 +142,11 @@ historically named `dev/0.6.0` branch.
 
 ### Changed
 
+- `GatewayTransactionDiagnosticsObservation::with_avs_response` retains only a
+  single ASCII letter or digit, matching schema v7's `varchar(1)` AVS column.
+  Any other value, which the generic 64-byte diagnostic code bound used to
+  admit, is omitted and marks the observation partial.
+
 - Replace boolean function parameters with named policies, existing evidence,
   and fixture builders throughout the workspace. Enforce zero boolean function
   parameters through workspace Clippy settings; defer function-length and
@@ -49,10 +157,21 @@ historically named `dev/0.6.0` branch.
   retaining bound values, SQL statements, and transaction behavior.
 - Preserve recovery's top-level transaction requirement through the exactly
   pinned SQLx core transaction-depth API.
-- Regenerate PostgreSQL query metadata against the unchanged schema v6.
+- Regenerate PostgreSQL query metadata against schema v7.
+- Name schema-v6 attempt columns explicitly in `claim_exact_reconciliation_attempts`
+  instead of returning `attempts.*`, so statements cached on pooled connections
+  keep working across the online schema-v7 column addition.
+- Fingerprint canonical PostgreSQL functions from their MVCC-visible `pg_proc`
+  tuples rather than `pg_get_functiondef(oid)` so a `REPEATABLE READ` startup
+  snapshot spanning an online function replacement stays consistent; every
+  pinned catalog fingerprint constant updates from that calculation change.
 - Update locked `ctutils`, `quinn-proto`, `rustls`, `rustls-webpki`, `tokio`, and
   `webpki-roots` to compatible patched versions required by the release audit.
   SQLx 0.9 also removes the previously excepted optional `rsa` dependency.
+- Ignore only the informational `RUSTSEC-2026-0543` notice that `chrono` is
+  unmaintained. `chrono` is reachable and part of the public API, so replacing
+  it needs its own breaking release; every other `chrono` advisory stays
+  denied. See `docs/security/dependency-advisories.md`.
 - Require roxmltree 0.21.2 or later within the compatible 0.21 line. Its
   iterative XML parser prevents deeply nested, byte-bounded responses from
   exhausting the stack before structural validation.
@@ -92,6 +211,15 @@ historically named `dev/0.6.0` branch.
 
 ### Added
 
+- Add schema v7 (`schema/v7/install.sql`, online `schema/v7/upgrade_from_v6.sql`),
+  appending the nullable `varchar(1)`
+  `billing_payment_attempts.gateway_avs_response` column and replacing
+  `billing_host_charge_ledger_admission` so `submit` admission also requires a
+  pending host-charge attempt to have no AVS result. No row,
+  constraint, index, trigger, or view changes; this release does not write the
+  column yet.
+- Add `assert_runtime_schema_v6_or_v7_compatible`, accepting exactly the v6 or
+  v7 catalog, and `assert_runtime_schema_v7_compatible`, accepting exactly v7.
 - Add provider retry advice for automatic-renewal failures.
   `RenewalDeclineRetryAdvice` (`FollowSchedule`, `StopAutomaticRetries`,
   `RetryNoEarlierThan`) and `advised_renewal_failure_disposition` apply it to

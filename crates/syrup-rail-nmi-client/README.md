@@ -17,7 +17,7 @@ manage NMI plans or subscription schedules.
 
 ```toml
 [dependencies]
-syrup-rail-nmi-client = "0.6.0"
+syrup-rail-nmi-client = "0.7.0"
 ```
 
 The client never retries mutations. `MutationError::Indeterminate` and
@@ -290,6 +290,31 @@ prove the descriptor printed. Descriptor values are merchant configuration for
 customer statements, so they stay visible in `Debug` output. The field breaks
 existing `SaleRequest` struct literals; add `descriptor: None` to keep sending
 none.
+
+`SaleRequest.cardholder_ip` optionally carries the cardholder's own network
+address for a sale the cardholder initiates; never pass the address of the
+merchant's server or staff. A Classic sale sends it as `ipaddress`, which NMI
+documents as "IP address of cardholder" in the format `xxx.xxx.xxx.xxx`. An
+IPv4 address, or an IPv4-mapped IPv6 one, is sent in dotted form and any other
+IPv6 address in compressed form. NMI's Classic reference documents no IPv6
+form, but NMI's sandbox approved Classic sales with IPv6, in short and full
+form, and recorded each address exactly as sent. It also recorded text that is
+not an address, so the gateway does not validate the field, and what a
+processor does with either form is unverified. For a sale without the field
+the sandbox recorded the submitting server's address. The v5 sale sends no
+address. The value is customer data: it is not on the form `Debug` allowlist
+and `SaleRequest` prints only `has_cardholder_ip`. The client does not decide
+whether a sale may carry an address; the adapter and the host do. The field
+breaks existing `SaleRequest` struct literals; add `cardholder_ip: None` to
+keep sending none.
+
+`PaymentOutcomeParts.avs_response` carries the response's raw AVS result as
+`Option<SensitiveText>` from Classic transaction API responses (`avsresponse` /
+`avs_response`), v5 JSON sale responses (`avs_response` / `avsresponse`), and
+exact query API responses (`avs_response`), unvalidated and redacted in
+`PaymentOutcome` `Debug` output. It is a diagnostic and never decides the
+payment status. Adding the field breaks existing `PaymentOutcomeParts` struct
+literals; add `avs_response: None` when constructing test or synthetic values.
 
 `Client::query_transaction_diagnostics` performs the same bounded one-shot query
 as `query_transaction`, selected only by transaction ID, and returns

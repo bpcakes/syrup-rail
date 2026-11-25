@@ -3,9 +3,9 @@ use sqlx_core::transaction::TransactionManager;
 use syrup_rail::{
     ApprovedProcessorEvidence, BillingEvent, BillingEventSubject, BillingScopeId,
     GatewayMutationError, GatewayNotSubmittedError, GatewayPaymentOutcome, GatewayPaymentStatus,
-    GatewayProviderKey, GatewaySaleIntent, GatewaySaleRequest, PaymentAttempt, PaymentAttemptId,
-    PaymentAttemptStatus, PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole,
-    ProcessorEvidence, RecoverSubscriptionPayment, SubscriptionEnrollmentPaymentResult,
+    GatewayProviderKey, PaymentAttempt, PaymentAttemptId, PaymentAttemptStatus,
+    PaymentResolutionCode, ProcessorChargeProgression, ProcessorChargeRole, ProcessorEvidence,
+    RecoverSubscriptionPayment, SubscriptionEnrollmentPaymentResult,
     SubscriptionPeriodExpiryPolicy, SubscriptionRecoveryReservation,
     SubscriptionRecoverySubmissionOutcome, SubscriptionRecoverySubmissionRejection,
 };
@@ -207,13 +207,9 @@ pub async fn submit_admitted_subscription_recovery(
         syrup_rail::ChargeAmount::try_from(admission.attempt.request().amount()).map_err(|_| {
             SubscriptionEnrollmentApplicationError::InvalidState(INVALID_APPLICATION_STATE)
         })?;
-    let request = GatewaySaleRequest::new(
+    let request = command.context().token_sale_request(
         charge,
         admission.attempt.request().gateway_order_id().clone(),
-        GatewaySaleIntent::InitialStoredCredential {
-            payment_token: command.payment_token().clone(),
-        },
-        Some(command.billing_contact().clone()),
     );
     match gateway.sale(request).await {
         Ok(outcome) => apply_subscription_recovery_gateway_outcome(

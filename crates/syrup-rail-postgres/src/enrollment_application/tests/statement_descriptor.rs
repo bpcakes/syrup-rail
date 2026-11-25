@@ -85,7 +85,7 @@ async fn enroll(fixture: &ApplicationFixture, key: &str) -> Result<SubscriptionI
         .id())
 }
 
-async fn renew_with(
+pub(super) async fn renew_with(
     fixture: &ApplicationFixture,
     subscription_id: SubscriptionId,
     transaction_id: &str,

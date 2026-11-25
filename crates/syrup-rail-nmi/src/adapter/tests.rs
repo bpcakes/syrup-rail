@@ -11,6 +11,7 @@ use super::*;
 
 mod billing_address;
 mod card_metadata;
+mod cardholder_ip;
 mod diagnostics;
 mod statement_descriptor;
 
@@ -28,7 +29,38 @@ fn empty_outcome(status: PaymentStatus) -> PaymentOutcomeParts {
         response_text: None,
         condition: None,
         descriptor: PaymentDescriptor::default(),
+        avs_response: None,
         diagnostics: Vec::new(),
+    }
+}
+
+#[test]
+fn avs_result_reaches_evidence_only_as_a_single_letter_or_digit() {
+    for (raw, expected) in [
+        (Some("Z"), Some('Z')),
+        (Some(" n "), Some('n')),
+        (Some("0"), Some('0')),
+        (None, None),
+        (Some(""), None),
+        (Some("YY"), None),
+        (Some("N/A"), None),
+        (Some("-"), None),
+        (Some("123 Main St"), None),
+    ] {
+        let mut parts = empty_outcome(PaymentStatus::Failed);
+        parts.response_code = Some(text("300"));
+        parts.response_text = Some(text("AVS REJECTED"));
+        parts.avs_response = raw.map(text);
+        let outcome = map_payment_outcome_parts(parts);
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Failed, "{raw:?}");
+        assert_eq!(
+            outcome
+                .evidence()
+                .avs_response()
+                .map(GatewayAvsResponse::as_char),
+            expected,
+            "{raw:?}"
+        );
     }
 }
 
@@ -393,6 +425,97 @@ async fn parsed_terminal_failure_with_empty_identity_stays_terminal() {
     assert_eq!(outcome.status(), GatewayPaymentStatus::Failed);
     assert!(outcome.transaction_id().is_none());
     assert!(outcome.diagnostics().is_empty());
+    server.await.expect("test server assertions should pass");
+}
+
+#[tokio::test]
+async fn v5_one_time_sale_carries_valid_avs_and_drops_invalid_values() {
+    for (body, expected_avs) in [
+        (
+            r#"{"response":"3","response_code":"300","response_text":"AVS REJECTED","avs_response":"Z","id":"txn_v5_avs_1"}"#,
+            Some('Z'),
+        ),
+        (
+            r#"{"response":"3","response_code":"300","response_text":"AVS REJECTED","avs_response":"YY","id":"txn_v5_avs_2"}"#,
+            None,
+        ),
+    ] {
+        let (gateway, server) = gateway_with_response(body).await;
+        let attempt_id: PaymentAttemptId = "00000000-0000-0000-0000-000000000302".parse().unwrap();
+        let request = GatewaySaleRequest::new(
+            ChargeAmount::new(100, CurrencyCode::new("USD").unwrap()).unwrap(),
+            GatewayOrderId::from_generated_attempt(
+                "ck_order_00000000000000000000000000000302",
+                attempt_id,
+            )
+            .unwrap(),
+            GatewaySaleIntent::OneTime {
+                payment_token: PaymentToken::new("tok_v5_avs").unwrap(),
+            },
+            None,
+        );
+        let outcome = gateway.sale(request).await.expect("v5 sale outcome");
+        assert_eq!(outcome.status(), GatewayPaymentStatus::Failed, "{body}");
+        assert_eq!(
+            outcome.avs_response().map(GatewayAvsResponse::as_char),
+            expected_avs,
+            "{body}"
+        );
+        server.await.expect("test server assertions should pass");
+    }
+}
+
+#[tokio::test]
+async fn classic_store_payment_method_and_exact_query_carry_avs_across_gateway_boundary() {
+    let (gateway, server) = gateway_with_response(
+        "response=1&responsetext=Approved&response_code=100&transactionid=txn_store_avs&customer_vault_id=vault_store_avs&avsresponse=Y",
+    )
+    .await;
+    let attempt_id: PaymentAttemptId = "00000000-0000-0000-0000-000000000303".parse().unwrap();
+    let store_request = GatewayStorePaymentMethodRequest::new(
+        PaymentToken::new("tok_store_avs").unwrap(),
+        GatewayOrderId::from_generated_attempt(
+            "ck_payment-method_00000000000000000000000000000303",
+            attempt_id,
+        )
+        .unwrap(),
+        None,
+    );
+    let stored = gateway
+        .store_payment_method(store_request)
+        .await
+        .expect("classic store_payment_method outcome");
+    assert_eq!(stored.status(), GatewayPaymentStatus::Approved);
+    assert_eq!(
+        stored.avs_response().map(GatewayAvsResponse::as_char),
+        Some('Y')
+    );
+    server.await.expect("test server assertions should pass");
+
+    let (gateway, server) = gateway_with_response(
+        "<nm_response><transaction><transaction_id>txn_query_avs</transaction_id>\
+         <condition>failed</condition><avs_response>Z</avs_response>\
+         <action><action_type>sale</action_type><success>0</success>\
+         <response_code>300</response_code><response_text>AVS REJECTED</response_text></action>\
+         </transaction></nm_response>",
+    )
+    .await;
+    let queried = gateway
+        .query_transaction(
+            GatewayQueryRequest::new(
+                Some(GatewayTransactionId::new("txn_query_avs").unwrap()),
+                None,
+            )
+            .unwrap(),
+        )
+        .await
+        .expect("exact query should succeed")
+        .expect("transaction should exist");
+    assert_eq!(queried.status(), GatewayPaymentStatus::Failed);
+    assert_eq!(
+        queried.avs_response().map(GatewayAvsResponse::as_char),
+        Some('Z')
+    );
     server.await.expect("test server assertions should pass");
 }
 

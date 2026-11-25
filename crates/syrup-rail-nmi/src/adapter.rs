@@ -1,15 +1,15 @@
 use async_trait::async_trait;
 use chrono::Duration;
 use syrup_rail::{
-    BillingAddress, BillingContact, BillingContactParts, GatewayAccountMode, GatewayDiagnostic,
-    GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy, GatewayMutationError,
-    GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDescriptor, GatewayPaymentDiagnostic,
-    GatewayPaymentMethodMetadata, GatewayPaymentOutcome, GatewayPaymentStatus, GatewayProviderKey,
-    GatewayQueryRequest, GatewaySaleIntent, GatewaySaleRequest, GatewaySaleRequestParts,
-    GatewayStorePaymentMethodRequest, GatewayTransactionDiagnostics,
-    GatewayTransactionDiagnosticsRequest, GatewayTransactionId, GatewayTransactionReport,
-    GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway, ProcessorEvidence,
-    StatementDescriptor,
+    BillingAddress, BillingContact, BillingContactParts, GatewayAccountMode, GatewayAvsResponse,
+    GatewayDiagnostic, GatewayError, GatewayLifecycleCursorKey, GatewayLifecycleQueryPolicy,
+    GatewayMutationError, GatewayNotSubmittedError, GatewayOrderId, GatewayPaymentDescriptor,
+    GatewayPaymentDiagnostic, GatewayPaymentMethodMetadata, GatewayPaymentOutcome,
+    GatewayPaymentStatus, GatewayProviderKey, GatewayQueryRequest, GatewaySaleIntent,
+    GatewaySaleRequest, GatewaySaleRequestParts, GatewayStorePaymentMethodRequest,
+    GatewayTransactionDiagnostics, GatewayTransactionDiagnosticsRequest, GatewayTransactionId,
+    GatewayTransactionReport, GatewayTransactionReportRequest, PaymentAttemptId, PaymentGateway,
+    ProcessorEvidence, StatementDescriptor,
 };
 use syrup_rail_nmi_client::{
     AccountMode, Client, MutationError, PaymentDescriptorParts, PaymentOutcomeDiagnostic,
@@ -186,6 +186,7 @@ fn map_payment_method_metadata(
             response_code: None,
             response_text: None,
             condition: None,
+            avs_response: None,
         },
     ))
 }
@@ -204,6 +205,7 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
         intent,
         billing_contact,
         descriptor,
+        cardholder_ip,
     } = request.into_parts();
     if charge.currency().as_str() != "USD" {
         return Err(GatewayMutationError::NotSubmitted(
@@ -212,6 +214,16 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
             )),
         ));
     }
+    // No cardholder takes part in a merchant-initiated charge, so one never
+    // carries a cardholder address, whatever the request holds. A one-time
+    // sale keeps its address here, but the raw client's v5 sale does not send
+    // one.
+    let cardholder_ip = match &intent {
+        GatewaySaleIntent::RecurringStoredCredential { .. } => None,
+        GatewaySaleIntent::OneTime { .. } | GatewaySaleIntent::InitialStoredCredential { .. } => {
+            cardholder_ip
+        }
+    };
     let (source, vault_action, stored_credential) = match intent {
         GatewaySaleIntent::OneTime { payment_token } => (
             PaymentSource::PaymentToken(payment_token.into_inner()),
@@ -246,6 +258,7 @@ fn map_sale_request(request: GatewaySaleRequest) -> Result<SaleRequest, GatewayM
         stored_credential,
         billing_contact: billing_contact.map(map_billing_contact),
         descriptor: descriptor.map(map_statement_descriptor),
+        cardholder_ip: cardholder_ip.map(syrup_rail::CardholderIpAddress::get),
     })
 }
 
@@ -343,6 +356,14 @@ fn map_payment_outcome_parts(parts: PaymentOutcomeParts) -> GatewayPaymentOutcom
         sanitized_text(parts.response_text),
         sanitized_text(parts.condition),
         map_payment_descriptor_parts(parts.descriptor.into_parts()),
+    )
+    // Anything but a single letter or digit is not an AVS result code and is
+    // dropped rather than shortened; the payment decision is unaffected.
+    .with_avs_response(
+        parts
+            .avs_response
+            .as_ref()
+            .and_then(|value| GatewayAvsResponse::parse(value.expose())),
     );
     GatewayPaymentOutcome::new(status, evidence).with_diagnostics(diagnostics)
 }

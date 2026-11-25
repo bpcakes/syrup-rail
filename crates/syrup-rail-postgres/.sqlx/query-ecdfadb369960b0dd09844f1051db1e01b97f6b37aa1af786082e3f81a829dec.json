@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET status = 'review_required',\n                gateway_transaction_id = $2,\n                gateway_payment_method_reference = $3,\n                gateway_response = $4, gateway_response_code = $5,\n                gateway_response_text = CASE\n                    WHEN $6::text IS NULL THEN $14\n                    ELSE left($14 || ' ' || $6, 512)\n                END,\n                gateway_condition = $7,\n                payment_type = $8, card_brand = $9, card_last4 = $10,\n                card_exp_month = $11, card_exp_year = $12,\n                resolution_code = $13,\n                gateway_avs_response = $15,\n                review_required_at = COALESCE(review_required_at, clock_timestamp()),\n                updated_at = clock_timestamp()\n            WHERE id = $1\n                AND status IN ('pending', 'unknown', 'review_required', 'declined', 'failed')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int2",
+        "Int2",
+        "Text",
+        "Text",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ecdfadb369960b0dd09844f1051db1e01b97f6b37aa1af786082e3f81a829dec"
+}

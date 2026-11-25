@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET current_period_start_at = $2, current_period_end_at = $3, next_renewal_at = $3, next_payment_attempt_at = $3 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "22e71d37e4a8a6b4396cac6b9422d40cd1a55f1a76a7a46d499fd5e041c494ad"
+}

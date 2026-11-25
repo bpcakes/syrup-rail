@@ -1,30 +1,36 @@
 # syrup-rail-postgres
 
 `syrup-rail-postgres` provides Syrup Rail's canonical provider-neutral ledger,
-SQLx operations, and high-level subscription billing service. Version 0.6.0
-supports PostgreSQL 18 only and uses schema v6.
+SQLx operations, and high-level subscription billing service. Version 0.7.0
+supports PostgreSQL 18 only and requires schema v7.
 
 ```toml
 [dependencies]
-syrup-rail = "0.6.0"
-syrup-rail-postgres = "0.6.0"
+syrup-rail = "0.7.0"
+syrup-rail-postgres = "0.7.0"
 ```
 
 Requires Rust 1.94 and SQLx 0.9.0. Host SQLx types must come from 0.9.0;
 0.8 pools, connections, transactions, and errors are not interchangeable.
 Upgrade the host's SQLx CLI to 0.9.0 and regenerate its query metadata.
-Schema v6 artifacts are unchanged from 0.5.5, so an existing v6 host needs no
-database migration for this package upgrade.
+Version 0.7.0 records the provider's AVS result in the v7
+`billing_payment_attempts.gateway_avs_response` column, so an existing v6 host
+commits the online v7 upgrade before deploying it. Schema v6 artifacts are
+unchanged from 0.5.5.
 
-New hosts install `schema/v6/install.sql` through their normal migration
-system. Existing schema-v5 hosts stop every billing writer and commit
+New hosts install `schema/v7/install.sql` through their normal migration
+system. Existing schema-v6 hosts commit the online
+`schema/v7/upgrade_from_v6.sql` following `schema/v7/README.md`, but only after
+every serving and rollback-target build accepts v6 or v7 at startup (the 0.6.0
+bridge release); deploy 0.7.0 only after `upgrade_from_v6.sql` commits. Existing
+schema-v5 hosts stop every billing writer and commit
 `schema/v6/upgrade_from_v5.sql` in one transaction, following
 `schema/v6/README.md`; old 0.5.4 binaries must not restart after that commit.
 Schema-v4 hosts first commit `schema/v5/upgrade_from_v4.sql` the same way,
 following `schema/v5/README.md`. Hosts still on schema v3 first complete the
 staged v4 cutover (`schema/v4/prepare_from_v3.sql`,
 `schema/v4/validate_from_v3.sql`, `schema/v4/index_from_v3.sql` outside a
-transaction, and `schema/v4/upgrade_from_v3.sql`). Schemas v1 through v5 are
+transaction, and `schema/v4/upgrade_from_v3.sql`). Schemas v1 through v6 are
 immutable. The
 detailed versioned guides explain the required lock, maintenance, and
 rehearsal boundaries.
@@ -34,7 +40,7 @@ verify the runtime catalog:
 
 ```rust,no_run
 # async fn verify(pool: &sqlx::PgPool) -> Result<(), syrup_rail_postgres::SchemaConformanceError> {
-syrup_rail_postgres::assert_runtime_schema_v6_compatible(pool).await?;
+syrup_rail_postgres::assert_runtime_schema_v7_compatible(pool).await?;
 # Ok(())
 # }
 ```
@@ -423,19 +429,26 @@ lifecycles keep their historical terms, and a repeated change is `Unchanged`.
 
 Schema v5 stores an optional customer-confirmed billing address on payment
 methods and all five attempt kinds. Approved enrollment, recovery, and
-payment-method replacement write the command's address to the stored method;
-a same-reference approval without an address keeps the whole stored address,
+payment-method replacement write the command's billing address to the stored
+method; a same-reference approval without one keeps the whole stored address,
 and a new card never inherits another card's address. Renewal reservation
 enters the payment-method approval domain before the subscription aggregate
 and copies the selected active method's address into the attempt, so a later
 method change cannot alter a reserved renewal. Submission sends only that
 snapshot, as an address-only contact, and an addressless renewal sends no
-contact. A same-key retry whose address differs from the durable attempt,
-including an address added to a historical addressless attempt, is an
+contact. A same-key retry whose billing address differs from the durable
+attempt, including one added to a historical addressless attempt, is an
 idempotency conflict before provider I/O. `scrub_subscriber_billing_data`
 clears the addresses under the scrub and approval domains, so a concurrent
 approval or renewal reservation cannot restore them; the host still takes its
 subject lock first.
+
+The optional cardholder network address on an enrollment or recovery command is
+separate and needs no schema: it is sent with that command's token sale and
+never stored. It is not part of replay identity, so a same-key retry with
+another network address, or none, is not a conflict. A retry that resumes a
+prepared attempt sends its own; a retry of a submitted sale returns the recorded
+result and sends nothing. Do not store the address to repeat it on retries.
 
 This package is proprietary software distributed under the terms in the
 packaged `LICENSE` file.
