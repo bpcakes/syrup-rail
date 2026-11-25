@@ -27,19 +27,19 @@ async fn assert_never_stored(
     addresses: &[&str],
     stored: &[&str],
 ) -> Result<(), Box<dyn Error>> {
-    let tables = sqlx::query_scalar::<_, String>(
+    let tables: Vec<String> = checked_query_scalar!(
         "SELECT quote_ident(table_schema) || '.' || quote_ident(table_name) \
          FROM information_schema.tables \
          WHERE table_type = 'BASE TABLE' \
-           AND table_schema NOT IN ('pg_catalog', 'information_schema')",
+           AND table_schema NOT IN ('pg_catalog', 'information_schema')"
     )
     .fetch_all(pool)
     .await?;
     let mut seen_in = BTreeSet::new();
     for table in tables {
-        let rows = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
-            "SELECT row_to_json(stored)::text FROM {table} AS stored"
-        )))
+        let rows = crate::test_support::fixture_query_scalar::<_, String>(sqlx::AssertSqlSafe(
+            format!("SELECT row_to_json(stored)::text FROM {table} AS stored"),
+        ))
         .fetch_all(pool)
         .await?;
         if stored
@@ -176,10 +176,12 @@ async fn make_recoverable(fixture: &ApplicationFixture) -> Result<(), Box<dyn Er
     )
     .await?;
     make_renewal_due(&fixture.database.pool, subscription_id).await?;
-    sqlx::query("UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1")
-        .bind(subscription_id.as_uuid())
-        .execute(&fixture.database.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1",
+        subscription_id.as_uuid(),
+    )
+    .execute(&fixture.database.pool)
+    .await?;
     Ok(())
 }
 

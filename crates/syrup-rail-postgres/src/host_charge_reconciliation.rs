@@ -73,7 +73,7 @@ pub async fn fail_stale_unsubmitted_host_charges(
     for candidate in candidates {
         let mut transaction = pool.begin().await?;
         set_application_timeouts(&mut transaction).await?;
-        let effective_at: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+        let effective_at: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
         let target_outcome = targets
@@ -104,7 +104,7 @@ pub async fn fail_stale_unsubmitted_host_charges(
             continue;
         }
 
-        let result = sqlx::query(
+        let result = sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'failed',
@@ -120,15 +120,15 @@ pub async fn fail_stale_unsubmitted_host_charges(
                 AND created_at <= clock_timestamp()
                     - ($8::bigint * interval '1 second')
             "#,
+            candidate.attempt_id,
+            candidate.billing_scope_id,
+            candidate.subscriber_id,
+            candidate.target_id,
+            gateway_account_id.as_uuid(),
+            STALE_UNSUBMITTED_HOST_CHARGE_TEXT,
+            LocalAttemptPolicy::expirable_status_values(),
+            policy.stale_after_seconds(),
         )
-        .bind(candidate.attempt_id)
-        .bind(candidate.billing_scope_id)
-        .bind(candidate.subscriber_id)
-        .bind(candidate.target_id)
-        .bind(gateway_account_id.as_uuid())
-        .bind(STALE_UNSUBMITTED_HOST_CHARGE_TEXT)
-        .bind(LocalAttemptPolicy::expirable_status_values())
-        .bind(policy.stale_after_seconds())
         .execute(&mut *transaction)
         .await;
         let result = match result {
@@ -158,7 +158,8 @@ async fn claim_stale_host_charge_candidates(
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::HostCharge);
     let mut transaction = pool.begin().await?;
     set_application_timeouts(&mut transaction).await?;
-    let candidates = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid)>(
+    let candidates = checked_query_as!(
+        (Uuid, Uuid, Uuid, Uuid),
         r#"
         WITH candidate_attempts AS MATERIALIZED (
             SELECT attempts.id AS attempt_id,
@@ -197,12 +198,12 @@ async fn claim_stale_host_charge_candidates(
             candidate_attempts.created_at,
             candidate_attempts.attempt_id
         "#,
+        gateway_account_id.as_uuid(),
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
+        RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS,
+        RECONCILIATION_PHASE_BATCH_SIZE,
     )
-    .bind(gateway_account_id.as_uuid())
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
-    .bind(RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS)
-    .bind(RECONCILIATION_PHASE_BATCH_SIZE)
     .fetch_all(&mut *transaction)
     .await?
     .into_iter()

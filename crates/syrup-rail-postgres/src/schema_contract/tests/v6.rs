@@ -40,7 +40,7 @@ async fn insert_host_charge_attempt(
     let attempt_id = Uuid::now_v7();
     let target_id = Uuid::now_v7();
     let order_id = format!("{label}-order-{}", opaque_fixture_uuid(attempt_id));
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             id, billing_scope_id, subscriber_id, host_charge_target_id,
@@ -53,16 +53,16 @@ async fn insert_host_charge_attempt(
             100, 'USD', $7, $8, $9, 'live'
         )
         "#,
+        attempt_id,
+        gateway.billing_scope_id,
+        Uuid::now_v7(),
+        target_id,
+        format!("{label}-key-{}", opaque_fixture_uuid(attempt_id)),
+        format!("host_charge:{target_id}:100:USD"),
+        gateway.gateway_account_id,
+        gateway.gateway_configuration_id,
+        &order_id,
     )
-    .bind(attempt_id)
-    .bind(gateway.billing_scope_id)
-    .bind(Uuid::now_v7())
-    .bind(target_id)
-    .bind(format!("{label}-key-{}", opaque_fixture_uuid(attempt_id)))
-    .bind(format!("host_charge:{target_id}:100:USD"))
-    .bind(gateway.gateway_account_id)
-    .bind(gateway.gateway_configuration_id)
-    .bind(&order_id)
     .execute(pool)
     .await?;
     Ok((attempt_id, order_id))
@@ -78,23 +78,23 @@ async fn insert_attestation_with_prior_code(
     let transaction_id = format!("txn_{}", opaque_fixture_uuid(Uuid::now_v7()));
     let (attempt_id, order_id) = insert_host_charge_attempt(pool, gateway, "v6-attest").await?;
     let charge_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_processor_charges (
             id, attempt_id, billing_scope_id, gateway_account_id, gateway_order_id,
             gateway_transaction_id, attempt_kind, amount_cents, currency
         ) VALUES ($1, $2, $3, $4, $5, $6, 'host_charge', 100, 'USD')
         "#,
+        charge_id,
+        attempt_id,
+        gateway.billing_scope_id,
+        gateway.gateway_account_id,
+        &order_id,
+        &transaction_id,
     )
-    .bind(charge_id)
-    .bind(attempt_id)
-    .bind(gateway.billing_scope_id)
-    .bind(gateway.gateway_account_id)
-    .bind(&order_id)
-    .bind(&transaction_id)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_external_reversal_attestations (
             attempt_id, processor_charge_id, actor_id, reversal_kind, reason,
@@ -107,15 +107,15 @@ async fn insert_attestation_with_prior_code(
             clock_timestamp()
         )
         "#,
+        attempt_id,
+        charge_id,
+        Uuid::now_v7(),
+        prior_resolution_code,
+        gateway.gateway_account_id,
+        gateway.gateway_configuration_id,
+        order_id,
+        transaction_id,
     )
-    .bind(attempt_id)
-    .bind(charge_id)
-    .bind(Uuid::now_v7())
-    .bind(prior_resolution_code)
-    .bind(gateway.gateway_account_id)
-    .bind(gateway.gateway_configuration_id)
-    .bind(order_id)
-    .bind(transaction_id)
     .execute(pool)
     .await
 }
@@ -145,9 +145,10 @@ async fn runtime_schema_v6_accepts_fresh_install_and_populated_v5_upgrade()
         upgraded.upgrade_v4_to_v5().await?;
         assert_v5_conforms(&upgraded.pool).await?;
         let rows_before = canonical_rows(&upgraded.pool).await?;
-        let attempt_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_payment_attempts")
-            .fetch_one(&upgraded.pool)
-            .await?;
+        let attempt_rows: i64 =
+            checked_query_scalar!("SELECT count(*) FROM billing_payment_attempts")
+                .fetch_one(&upgraded.pool)
+                .await?;
         assert!(attempt_rows >= 2, "fixture must be populated");
 
         upgraded.upgrade_v5_to_v6().await?;
@@ -159,7 +160,7 @@ async fn runtime_schema_v6_accepts_fresh_install_and_populated_v5_upgrade()
         assert_eq!(fresh_fingerprint, V6_CATALOG_FINGERPRINT);
         assert_ne!(V6_CATALOG_FINGERPRINT, V5_CATALOG_FINGERPRINT);
         for pool in [&fresh.pool, &upgraded.pool] {
-            let definition: String = sqlx::query_scalar(
+            let definition: String = checked_query_scalar!(
                 r#"
                 SELECT pg_get_constraintdef(oid)
                 FROM pg_constraint
@@ -210,7 +211,7 @@ async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
         crate::assert_runtime_schema_v6_compatible(&v6.pool).await?;
 
         // Restoring the narrower version-5 attempt list is drift.
-        let v5_definition: String = sqlx::query_scalar(
+        let v5_definition: String = checked_query_scalar!(
             r#"
             SELECT pg_get_constraintdef(oid)
             FROM pg_constraint
@@ -219,7 +220,7 @@ async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
         )
         .fetch_one(&v5.pool)
         .await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        crate::test_support::fixture_raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE billing_payment_attempts \
              DROP CONSTRAINT billing_payment_attempts_resolution_code_check; \
              ALTER TABLE billing_payment_attempts \
@@ -232,7 +233,7 @@ async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
             Err(crate::SchemaConformanceError::Contract { version: 6, .. })
         ));
 
-        let definition: String = sqlx::query_scalar(
+        let definition: String = checked_query_scalar!(
             r#"
             SELECT pg_get_constraintdef(oid)
             FROM pg_constraint
@@ -241,7 +242,7 @@ async fn schema_v6_and_v5_assertions_reject_each_other_and_constraint_drift()
         )
         .fetch_one(&unvalidated.pool)
         .await?;
-        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+        crate::test_support::fixture_raw_sql(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE billing_external_reversal_attestations \
              DROP CONSTRAINT billing_external_reversal_attestations_resolution_check; \
              ALTER TABLE billing_external_reversal_attestations \
@@ -287,11 +288,11 @@ async fn v6_constraints_accept_expiry_dispositions_that_v5_rejects() -> Result<(
             for code in V6_ATTEMPT_RESOLUTION_CODES {
                 let (attempt_id, _) =
                     insert_host_charge_attempt(&database.pool, account, "v6-code").await?;
-                let update = sqlx::query(
+                let update = sqlx::query!(
                     "UPDATE billing_payment_attempts SET resolution_code = $2 WHERE id = $1",
+                    attempt_id,
+                    code,
                 )
-                .bind(attempt_id)
-                .bind(code)
                 .execute(&database.pool)
                 .await;
                 if accepted {
@@ -352,7 +353,7 @@ async fn v5_to_v6_upgrade_rolls_back_on_lock_timeout_and_refuses_a_rerun_or_v4()
     let v4 = TestDatabase::start_v4("sr_v6_needs_v5").await?;
     let result = async {
         let mut blocker = database.pool.begin().await?;
-        sqlx::query("LOCK TABLE billing_payment_attempts IN ACCESS SHARE MODE")
+        sqlx::query!("LOCK TABLE billing_payment_attempts IN ACCESS SHARE MODE")
             .execute(&mut *blocker)
             .await?;
         let error = database

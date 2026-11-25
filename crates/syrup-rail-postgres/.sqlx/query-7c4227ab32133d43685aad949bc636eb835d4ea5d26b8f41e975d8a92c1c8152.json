@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT concat_ws(\n            '|',\n            relation.relname,\n            catalog_trigger.tgname,\n            catalog_trigger.tgenabled::text,\n            pg_catalog.pg_get_triggerdef(catalog_trigger.oid, true)\n        )\n        FROM pg_catalog.pg_trigger AS catalog_trigger\n        INNER JOIN pg_catalog.pg_class AS relation\n            ON relation.oid = catalog_trigger.tgrelid\n        INNER JOIN pg_catalog.pg_namespace AS namespace\n            ON namespace.oid = relation.relnamespace\n        WHERE namespace.nspname = 'public'\n            AND NOT catalog_trigger.tgisinternal\n            AND catalog_trigger.tgname = ANY($1)\n        ORDER BY relation.relname, catalog_trigger.tgname\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "concat_ws",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "NameArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7c4227ab32133d43685aad949bc636eb835d4ea5d26b8f41e975d8a92c1c8152"
+}

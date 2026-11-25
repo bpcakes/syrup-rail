@@ -1,0 +1,965 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT -- Every schema-v7 column of billing_payment_attempts, named explicitly.\n-- A cached `*` projection fails once a later schema appends a column, so\n-- runtime reads use this list and keep working across that upgrade.\n-- Comments here are part of the SQL text: keep them line comments.\nid, billing_scope_id, subscriber_id, plan_key,\n        host_charge_target_id, subscription_id, payment_method_id,\n        attempt_kind, status, idempotency_key, request_fingerprint,\n        amount_cents, currency, billing_period_start_at,\n        billing_period_end_at, gateway_account_id,\n        gateway_configuration_id, required_gateway_account_mode,\n        gateway_order_id,\n        gateway_transaction_id, gateway_payment_method_reference,\n        gateway_response, gateway_response_code, gateway_response_text,\n        gateway_condition, payment_type, card_brand, card_last4,\n        card_exp_month, card_exp_year, submitted_at, resolved_at,\n        created_at, updated_at, gateway_lifecycle_status,\n        gateway_lifecycle_action, gateway_lifecycle_at,\n        gateway_lifecycle_reconciled_at, refunded_amount_cents,\n        billing_first_name, billing_email, resolution_code, review_required_at,\n        payment_method_update_expected_payment_method_id,\n        payment_method_update_expected_initial_transaction_id,\n        subscription_expected_payment_method_id,\n        subscription_expected_initial_transaction_id,\n        subscription_expected_status,\n        subscription_initial_discount_claim_id,\n        subscription_initial_discount_code_id,\n        subscription_initial_discount_code_snapshot,\n        subscription_initial_discount_label_snapshot,\n        subscription_initial_discount_kind,\n        subscription_initial_discount_amount_off_cents,\n        subscription_initial_discount_percent_off_bps,\n        subscription_initial_discount_currency,\n        subscription_initial_discount_duration,\n        subscription_initial_discount_duration_months,\n        subscription_initial_discount_base_amount_cents,\n        subscription_initial_discount_discounted_amount_cents,\n        subscription_initial_terms_version,\n        subscription_initial_start_kind,\n        subscription_initial_trial_amount_cents,\n        subscription_initial_trial_period_kind,\n        subscription_initial_trial_period_count,\n        subscription_initial_recurring_base_amount_cents,\n        subscription_initial_recurring_period_kind,\n        subscription_initial_recurring_period_count,\n        subscription_initial_dunning_retry_delays_seconds,\n        subscription_initial_dunning_exhaustion,\n        subscription_initial_past_due_access, billing_last_name,\n        billing_address_line1, billing_address_line2, billing_address_city,\n        billing_address_region, billing_address_postal_code,\n        billing_address_country, gateway_avs_response\n FROM billing_payment_attempts  WHERE billing_scope_id = $1 AND id = $2 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "subscriber_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscriber_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "host_charge_target_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "host_charge_target_id"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "subscription_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_id"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "payment_method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "payment_method_id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "idempotency_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "idempotency_key"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "request_fingerprint",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "request_fingerprint"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "billing_period_start_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_period_start_at"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "billing_period_end_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_period_end_at"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "gateway_configuration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_configuration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 17,
+        "name": "required_gateway_account_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 18,
+        "name": "gateway_order_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "gateway_payment_method_reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "gateway_response",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_response"
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "gateway_response_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_response_code"
+          }
+        }
+      },
+      {
+        "ordinal": 23,
+        "name": "gateway_response_text",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_response_text"
+          }
+        }
+      },
+      {
+        "ordinal": 24,
+        "name": "gateway_condition",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_condition"
+          }
+        }
+      },
+      {
+        "ordinal": 25,
+        "name": "payment_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "payment_type"
+          }
+        }
+      },
+      {
+        "ordinal": 26,
+        "name": "card_brand",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "card_brand"
+          }
+        }
+      },
+      {
+        "ordinal": 27,
+        "name": "card_last4",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "card_last4"
+          }
+        }
+      },
+      {
+        "ordinal": 28,
+        "name": "card_exp_month",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "card_exp_month"
+          }
+        }
+      },
+      {
+        "ordinal": 29,
+        "name": "card_exp_year",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "card_exp_year"
+          }
+        }
+      },
+      {
+        "ordinal": 30,
+        "name": "submitted_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "submitted_at"
+          }
+        }
+      },
+      {
+        "ordinal": 31,
+        "name": "resolved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "resolved_at"
+          }
+        }
+      },
+      {
+        "ordinal": 32,
+        "name": "created_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "ordinal": 33,
+        "name": "updated_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "ordinal": 34,
+        "name": "gateway_lifecycle_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_status"
+          }
+        }
+      },
+      {
+        "ordinal": 35,
+        "name": "gateway_lifecycle_action",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_action"
+          }
+        }
+      },
+      {
+        "ordinal": 36,
+        "name": "gateway_lifecycle_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_at"
+          }
+        }
+      },
+      {
+        "ordinal": 37,
+        "name": "gateway_lifecycle_reconciled_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_reconciled_at"
+          }
+        }
+      },
+      {
+        "ordinal": 38,
+        "name": "refunded_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "refunded_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 39,
+        "name": "billing_first_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_first_name"
+          }
+        }
+      },
+      {
+        "ordinal": 40,
+        "name": "billing_email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_email"
+          }
+        }
+      },
+      {
+        "ordinal": 41,
+        "name": "resolution_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "resolution_code"
+          }
+        }
+      },
+      {
+        "ordinal": 42,
+        "name": "review_required_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "review_required_at"
+          }
+        }
+      },
+      {
+        "ordinal": 43,
+        "name": "payment_method_update_expected_payment_method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "payment_method_update_expected_payment_method_id"
+          }
+        }
+      },
+      {
+        "ordinal": 44,
+        "name": "payment_method_update_expected_initial_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "payment_method_update_expected_initial_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 45,
+        "name": "subscription_expected_payment_method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_expected_payment_method_id"
+          }
+        }
+      },
+      {
+        "ordinal": 46,
+        "name": "subscription_expected_initial_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_expected_initial_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 47,
+        "name": "subscription_expected_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_expected_status"
+          }
+        }
+      },
+      {
+        "ordinal": 48,
+        "name": "subscription_initial_discount_claim_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_claim_id"
+          }
+        }
+      },
+      {
+        "ordinal": 49,
+        "name": "subscription_initial_discount_code_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_code_id"
+          }
+        }
+      },
+      {
+        "ordinal": 50,
+        "name": "subscription_initial_discount_code_snapshot",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_code_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 51,
+        "name": "subscription_initial_discount_label_snapshot",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_label_snapshot"
+          }
+        }
+      },
+      {
+        "ordinal": 52,
+        "name": "subscription_initial_discount_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 53,
+        "name": "subscription_initial_discount_amount_off_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_amount_off_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 54,
+        "name": "subscription_initial_discount_percent_off_bps",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_percent_off_bps"
+          }
+        }
+      },
+      {
+        "ordinal": 55,
+        "name": "subscription_initial_discount_currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_currency"
+          }
+        }
+      },
+      {
+        "ordinal": 56,
+        "name": "subscription_initial_discount_duration",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_duration"
+          }
+        }
+      },
+      {
+        "ordinal": 57,
+        "name": "subscription_initial_discount_duration_months",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_duration_months"
+          }
+        }
+      },
+      {
+        "ordinal": 58,
+        "name": "subscription_initial_discount_base_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_base_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 59,
+        "name": "subscription_initial_discount_discounted_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_discount_discounted_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 60,
+        "name": "subscription_initial_terms_version",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_terms_version"
+          }
+        }
+      },
+      {
+        "ordinal": 61,
+        "name": "subscription_initial_start_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_start_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 62,
+        "name": "subscription_initial_trial_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_trial_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 63,
+        "name": "subscription_initial_trial_period_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_trial_period_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 64,
+        "name": "subscription_initial_trial_period_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_trial_period_count"
+          }
+        }
+      },
+      {
+        "ordinal": 65,
+        "name": "subscription_initial_recurring_base_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_recurring_base_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 66,
+        "name": "subscription_initial_recurring_period_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_recurring_period_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 67,
+        "name": "subscription_initial_recurring_period_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_recurring_period_count"
+          }
+        }
+      },
+      {
+        "ordinal": 68,
+        "name": "subscription_initial_dunning_retry_delays_seconds",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_dunning_retry_delays_seconds"
+          }
+        }
+      },
+      {
+        "ordinal": 69,
+        "name": "subscription_initial_dunning_exhaustion",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_dunning_exhaustion"
+          }
+        }
+      },
+      {
+        "ordinal": 70,
+        "name": "subscription_initial_past_due_access",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscription_initial_past_due_access"
+          }
+        }
+      },
+      {
+        "ordinal": 71,
+        "name": "billing_last_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_last_name"
+          }
+        }
+      },
+      {
+        "ordinal": 72,
+        "name": "billing_address_line1",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_line1"
+          }
+        }
+      },
+      {
+        "ordinal": 73,
+        "name": "billing_address_line2",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_line2"
+          }
+        }
+      },
+      {
+        "ordinal": 74,
+        "name": "billing_address_city",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_city"
+          }
+        }
+      },
+      {
+        "ordinal": 75,
+        "name": "billing_address_region",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_region"
+          }
+        }
+      },
+      {
+        "ordinal": 76,
+        "name": "billing_address_postal_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_postal_code"
+          }
+        }
+      },
+      {
+        "ordinal": 77,
+        "name": "billing_address_country",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_address_country"
+          }
+        }
+      },
+      {
+        "ordinal": 78,
+        "name": "gateway_avs_response",
+        "type_info": "Varchar",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_avs_response"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c263e91fbb56aa9cba3446c453ad2ce09ae28a95ee3a10a9d36a2fe0c18d9087"
+}

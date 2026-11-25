@@ -1,49 +1,100 @@
 use super::*;
 
-/// Reads every schema-v7 attempt column by name, so prepared statements keep
-/// working after a later schema appends a column.
-pub(crate) const PAYMENT_ATTEMPT_SELECT: &str = concat!(
-    "SELECT ",
-    include_str!("payment_attempt_columns.sql"),
-    " FROM billing_payment_attempts",
-);
+// Keep the v7 projection explicit for cached reads and reconciliation claims
+// so a later schema can append a column without changing either result shape.
+macro_rules! payment_attempt_columns_query {
+    ($before:literal $(+ $prefix:literal)*, $after:literal $(+ $suffix:literal)*; $($arg:expr),+ $(,)?) => {
+        checked_query!($before $(+ $prefix)* + r#"-- Every schema-v7 column of billing_payment_attempts, named explicitly.
+-- A cached `*` projection fails once a later schema appends a column, so
+-- runtime reads use this list and keep working across that upgrade.
+-- Comments here are part of the SQL text: keep them line comments.
+id, billing_scope_id, subscriber_id, plan_key,
+        host_charge_target_id, subscription_id, payment_method_id,
+        attempt_kind, status, idempotency_key, request_fingerprint,
+        amount_cents, currency, billing_period_start_at,
+        billing_period_end_at, gateway_account_id,
+        gateway_configuration_id, required_gateway_account_mode,
+        gateway_order_id,
+        gateway_transaction_id, gateway_payment_method_reference,
+        gateway_response, gateway_response_code, gateway_response_text,
+        gateway_condition, payment_type, card_brand, card_last4,
+        card_exp_month, card_exp_year, submitted_at, resolved_at,
+        created_at, updated_at, gateway_lifecycle_status,
+        gateway_lifecycle_action, gateway_lifecycle_at,
+        gateway_lifecycle_reconciled_at, refunded_amount_cents,
+        billing_first_name, billing_email, resolution_code, review_required_at,
+        payment_method_update_expected_payment_method_id,
+        payment_method_update_expected_initial_transaction_id,
+        subscription_expected_payment_method_id,
+        subscription_expected_initial_transaction_id,
+        subscription_expected_status,
+        subscription_initial_discount_claim_id,
+        subscription_initial_discount_code_id,
+        subscription_initial_discount_code_snapshot,
+        subscription_initial_discount_label_snapshot,
+        subscription_initial_discount_kind,
+        subscription_initial_discount_amount_off_cents,
+        subscription_initial_discount_percent_off_bps,
+        subscription_initial_discount_currency,
+        subscription_initial_discount_duration,
+        subscription_initial_discount_duration_months,
+        subscription_initial_discount_base_amount_cents,
+        subscription_initial_discount_discounted_amount_cents,
+        subscription_initial_terms_version,
+        subscription_initial_start_kind,
+        subscription_initial_trial_amount_cents,
+        subscription_initial_trial_period_kind,
+        subscription_initial_trial_period_count,
+        subscription_initial_recurring_base_amount_cents,
+        subscription_initial_recurring_period_kind,
+        subscription_initial_recurring_period_count,
+        subscription_initial_dunning_retry_delays_seconds,
+        subscription_initial_dunning_exhaustion,
+        subscription_initial_past_due_access, billing_last_name,
+        billing_address_line1, billing_address_line2, billing_address_city,
+        billing_address_region, billing_address_postal_code,
+        billing_address_country, gateway_avs_response
+"# + $after $(+ $suffix)*, $($arg),+)
+    };
+}
+pub(crate) use payment_attempt_columns_query;
 
-/// Column values for one optional billing address, in the canonical order
-/// `line1, line2, city, region, postal_code, country` used by every
-/// `billing_address_*` write.
-fn billing_address_columns(address: Option<&BillingAddress>) -> [Option<&str>; 6] {
-    match address {
-        Some(address) => [
-            Some(address.line1()),
-            address.line2(),
-            address.city(),
-            address.region(),
-            address.postal_code(),
-            Some(address.country()),
-        ],
-        None => [None; 6],
-    }
+macro_rules! payment_attempt_query {
+    ($after:literal; $($arg:expr),+ $(,)?) => {
+        payment_attempt_query!("", $after; $($arg),+)
+    };
+    ($before:literal, $after:literal; $($arg:expr),+ $(,)?) => {
+        $crate::attempts::payment_attempt_columns_query!(
+            $before + "SELECT ", " FROM billing_payment_attempts " + $after; $($arg),+
+        )
+    };
+}
+pub(crate) use payment_attempt_query;
+
+/// Values for the six canonical billing-address columns.
+#[derive(Default)]
+pub(crate) struct BillingAddressColumns<'a> {
+    pub line1: Option<&'a str>,
+    pub line2: Option<&'a str>,
+    pub city: Option<&'a str>,
+    pub region: Option<&'a str>,
+    pub postal_code: Option<&'a str>,
+    pub country: Option<&'a str>,
 }
 
-/// Binds the six `billing_address_*` values after a query's other parameters.
-pub(crate) trait BindBillingAddress<'q>: Sized {
-    fn bind_billing_address(self, address: Option<&'q BillingAddress>) -> Self;
-}
-
-impl<'q> BindBillingAddress<'q> for sqlx::query::Query<'q, Postgres, PgArguments> {
-    fn bind_billing_address(self, address: Option<&'q BillingAddress>) -> Self {
-        billing_address_columns(address)
-            .into_iter()
-            .fold(self, |query, value| query.bind(value))
-    }
-}
-
-impl<'q, O> BindBillingAddress<'q> for sqlx::query::QueryScalar<'q, Postgres, O, PgArguments> {
-    fn bind_billing_address(self, address: Option<&'q BillingAddress>) -> Self {
-        billing_address_columns(address)
-            .into_iter()
-            .fold(self, |query, value| query.bind(value))
-    }
+pub(crate) fn billing_address_columns(
+    address: Option<&BillingAddress>,
+) -> BillingAddressColumns<'_> {
+    address.map_or_else(BillingAddressColumns::default, |address| {
+        BillingAddressColumns {
+            line1: Some(address.line1()),
+            line2: address.line2(),
+            city: address.city(),
+            region: address.region(),
+            postal_code: address.postal_code(),
+            country: Some(address.country()),
+        }
+    })
 }
 
 /// Reads the six `billing_address_*` columns of an attempt or method row.
@@ -83,13 +134,13 @@ pub async fn find_payment_attempt_by_id_in_transaction(
     billing_scope_id: BillingScopeId,
     attempt_id: PaymentAttemptId,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let query = format!("{PAYMENT_ATTEMPT_SELECT} WHERE billing_scope_id = $1 AND id = $2");
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(billing_scope_id.as_uuid())
-        .bind(attempt_id.as_uuid())
-        .fetch_optional(&mut **transaction)
-        .await?;
+    let row = payment_attempt_query!(
+        "", " WHERE billing_scope_id = $1 AND id = $2";
+        billing_scope_id.as_uuid(),
+        attempt_id.as_uuid(),
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
@@ -103,17 +154,15 @@ pub(crate) async fn find_payment_attempt_by_idempotency_in_transaction(
     subscriber_id: SubscriberId,
     idempotency_key: &IdempotencyKey,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let query = format!(
-        "{PAYMENT_ATTEMPT_SELECT} \
-         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3"
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(billing_scope_id.as_uuid())
-        .bind(subscriber_id.as_uuid())
-        .bind(idempotency_key.expose())
-        .fetch_optional(&mut **transaction)
-        .await?;
+    let row = payment_attempt_query!(
+        "", " \
+         WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3";
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        idempotency_key.expose(),
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
@@ -124,18 +173,16 @@ pub async fn lock_payment_attempt_by_idempotency_in_transaction(
     subscriber_id: SubscriberId,
     idempotency_key: &IdempotencyKey,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let query = format!(
-        "{PAYMENT_ATTEMPT_SELECT} \
+    let row = payment_attempt_query!(
+        "", " \
          WHERE billing_scope_id = $1 AND subscriber_id = $2 AND idempotency_key = $3 \
-         FOR UPDATE"
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(billing_scope_id.as_uuid())
-        .bind(subscriber_id.as_uuid())
-        .bind(idempotency_key.expose())
-        .fetch_optional(&mut **transaction)
-        .await?;
+         FOR UPDATE";
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        idempotency_key.expose(),
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
@@ -144,14 +191,13 @@ pub(crate) async fn lock_payment_attempt_by_id_on_connection(
     billing_scope_id: BillingScopeId,
     attempt_id: PaymentAttemptId,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let query =
-        format!("{PAYMENT_ATTEMPT_SELECT} WHERE billing_scope_id = $1 AND id = $2 FOR UPDATE");
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(billing_scope_id.as_uuid())
-        .bind(attempt_id.as_uuid())
-        .fetch_optional(&mut *connection)
-        .await?;
+    let row = payment_attempt_query!(
+        "", " WHERE billing_scope_id = $1 AND id = $2 FOR UPDATE";
+        billing_scope_id.as_uuid(),
+        attempt_id.as_uuid(),
+    )
+    .fetch_optional(&mut *connection)
+    .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 
@@ -160,13 +206,13 @@ pub(crate) async fn find_payment_attempt_by_id_on_connection(
     billing_scope_id: BillingScopeId,
     attempt_id: PaymentAttemptId,
 ) -> Result<Option<PaymentAttempt>, PaymentAttemptStoreError> {
-    let query = format!("{PAYMENT_ATTEMPT_SELECT} WHERE billing_scope_id = $1 AND id = $2");
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(billing_scope_id.as_uuid())
-        .bind(attempt_id.as_uuid())
-        .fetch_optional(&mut *connection)
-        .await?;
+    let row = payment_attempt_query!(
+        "", " WHERE billing_scope_id = $1 AND id = $2";
+        billing_scope_id.as_uuid(),
+        attempt_id.as_uuid(),
+    )
+    .fetch_optional(&mut *connection)
+    .await?;
     row.as_ref().map(payment_attempt_from_row).transpose()
 }
 

@@ -32,7 +32,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         .id();
     let due_at = Utc::now() - ChronoDuration::days(1);
     let current_period_start_at = due_at - ChronoDuration::days(31);
-    let persisted_due_at: DateTime<Utc> = sqlx::query_scalar(
+    let persisted_due_at: DateTime<Utc> = checked_query_scalar!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'past_due',
@@ -44,10 +44,10 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         WHERE id = $1
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
+        current_period_start_at,
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(current_period_start_at)
-    .bind(due_at)
     .fetch_one(&fixture.database.pool)
     .await?;
 
@@ -236,7 +236,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
-    let discount: (i32, String, i32) = sqlx::query_as(
+    let discount: (i32, String, i32) = checked_query_as!(
         r#"
         SELECT discounts.periods_applied, discounts.status, subscriptions.amount_cents
         FROM billing_subscription_discounts AS discounts
@@ -244,8 +244,8 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             ON subscriptions.id = discounts.subscription_id
         WHERE discounts.subscription_id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&fixture.database.pool)
     .await?;
     assert_eq!(discount, (2, "active".to_owned(), 800));
@@ -263,7 +263,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
     let next_due_at = Utc::now() - ChronoDuration::hours(12);
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'past_due',
@@ -273,9 +273,9 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        next_due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(next_due_at)
     .execute(&fixture.database.pool)
     .await?;
     let replay_after_period_advance = service.recover(command).await?;
@@ -321,7 +321,7 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
         other => return Err(format!("unexpected stale recovery reservation: {other:?}").into()),
     };
     transaction.commit().await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'review_required',
@@ -330,8 +330,8 @@ async fn foreground_recovery_derives_locked_terms_applies_once_and_replays()
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        stale_attempt_id.as_uuid(),
     )
-    .bind(stale_attempt_id.as_uuid())
     .execute(&fixture.database.pool)
     .await?;
     let stale_resolver = Arc::new(StaticResolver {

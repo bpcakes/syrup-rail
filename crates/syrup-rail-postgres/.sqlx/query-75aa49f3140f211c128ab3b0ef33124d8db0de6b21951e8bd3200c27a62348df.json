@@ -1,0 +1,91 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT billing_address_line1, billing_address_line2, billing_address_city,\n            billing_address_region, billing_address_postal_code, billing_address_country\n        FROM billing_payment_methods\n        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3\n            AND gateway_account_id = $4 AND status = 'active'\n        FOR SHARE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "billing_address_line1",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "billing_address_line1"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_address_line2",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "billing_address_line2"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "billing_address_city",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "billing_address_city"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "billing_address_region",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "billing_address_region"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "billing_address_postal_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "billing_address_postal_code"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "billing_address_country",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "billing_address_country"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "75aa49f3140f211c128ab3b0ef33124d8db0de6b21951e8bd3200c27a62348df"
+}

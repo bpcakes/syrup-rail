@@ -35,12 +35,64 @@ impl Candidate {
     }
 }
 
-const CANDIDATE_SQL: &str = include_str!("candidate.sql");
-// Keep both production statements available verbatim to the generic-plan test.
-const LOCKED_CANDIDATE_SQL: &str = concat!(
-    include_str!("candidate.sql"),
-    " FOR UPDATE OF a, m, s FOR SHARE OF g"
-);
+// Keep the plan tests and the checked production statements on the same SQL.
+macro_rules! candidate_statement {
+    ($query:ident, $lock:literal $(, $arg:expr)*) => {
+        $query!(r#"SELECT g.id AS account_id, g.gateway_configuration_id AS configuration_id,
+       g.provider_key, a.gateway_transaction_id AS transaction_id,
+       m.gateway_payment_method_reference AS reference, m.id AS method_id,
+       s.id AS subscription_id, s.plan_key,
+       m.updated_at AS method_updated_at, s.updated_at AS subscription_updated_at,
+       m.card_brand, m.card_last4, m.card_exp_month, m.card_exp_year
+FROM billing_payment_attempts AS a
+JOIN billing_gateway_accounts AS g
+  ON g.id = a.gateway_account_id AND g.billing_scope_id = a.billing_scope_id
+JOIN billing_payment_methods AS m
+  ON m.id = a.payment_method_id AND m.billing_scope_id = a.billing_scope_id
+ AND m.subscriber_id = a.subscriber_id AND m.gateway_account_id = a.gateway_account_id
+ AND (m.gateway_payment_method_reference = a.gateway_payment_method_reference
+      OR (a.attempt_kind = 'subscription_renewal'
+          AND a.gateway_payment_method_reference IS NULL))
+JOIN billing_subscriptions AS s
+  ON s.id = a.subscription_id AND s.billing_scope_id = a.billing_scope_id
+ AND s.subscriber_id = a.subscriber_id AND s.gateway_account_id = a.gateway_account_id
+ AND s.plan_key = a.plan_key
+WHERE a.billing_scope_id = $1 AND a.subscriber_id = $2 AND a.id = $3
+  AND a.status = 'approved' AND a.gateway_transaction_id IS NOT NULL
+  AND m.status = 'active'
+  AND m.gateway_payment_method_reference <> 'erased:' || m.id::text
+  AND EXISTS (
+      SELECT 1 FROM billing_payment_attempts AS current_approval
+      JOIN billing_subscriptions AS current_subscription
+        ON current_subscription.id = current_approval.subscription_id
+       AND current_subscription.plan_key = current_approval.plan_key
+      WHERE current_approval.payment_method_id = m.id
+        AND current_approval.status = 'approved'
+        AND current_subscription.billing_scope_id = a.billing_scope_id
+        AND current_subscription.subscriber_id = a.subscriber_id
+        AND current_subscription.gateway_account_id = a.gateway_account_id
+        AND current_subscription.payment_method_id = m.id
+  )
+  AND NOT EXISTS (
+      SELECT 1 FROM billing_payment_attempts AS newer
+      WHERE newer.payment_method_id = m.id AND newer.status = 'approved'
+        AND (newer.resolved_at, newer.id) > (a.resolved_at, a.id)
+  )
+"# + $lock $(, $arg)*)
+    };
+}
+
+#[cfg(test)]
+const CANDIDATE_SQL: &str = candidate_statement!(concat_sql, "");
+#[cfg(test)]
+const LOCKED_CANDIDATE_SQL: &str =
+    candidate_statement!(concat_sql, " FOR UPDATE OF a, m, s FOR SHARE OF g");
+
+macro_rules! candidate_query {
+    ($($sql:tt)*) => {
+        checked_query_as!(Candidate, $($sql)*)
+    };
+}
 
 #[cfg(test)]
 #[path = "query_plan_tests.rs"]
@@ -50,12 +102,15 @@ pub(super) async fn load_candidate(
     connection: &mut PgConnection,
     command: RefreshPaymentMethodMetadata,
 ) -> Result<Option<Candidate>, sqlx::Error> {
-    sqlx::query_as(CANDIDATE_SQL)
-        .bind(command.billing_scope_id.as_uuid())
-        .bind(command.subscriber_id.as_uuid())
-        .bind(command.attempt_id.as_uuid())
-        .fetch_optional(connection)
-        .await
+    candidate_statement!(
+        candidate_query,
+        "",
+        command.billing_scope_id.into_uuid(),
+        command.subscriber_id.into_uuid(),
+        command.attempt_id.into_uuid()
+    )
+    .fetch_optional(connection)
+    .await
 }
 
 pub(super) async fn lock_candidate(
@@ -67,7 +122,7 @@ pub(super) async fn lock_candidate(
     // Give the scoped cancellation test time to abort, with a server-side bound.
     #[cfg(test)]
     if super::EXTEND_WRITE_WAIT.try_with(|()| ()).is_ok() {
-        sqlx::query("SELECT set_config('lock_timeout', '60s', true), set_config('statement_timeout', '60s', true)")
+        checked_query!("SELECT set_config('lock_timeout', '60s', true) AS lock_timeout, set_config('statement_timeout', '60s', true)")
             .execute(&mut *connection).await?;
     }
     // v0.5.2 scrub and approval use different domains. Enter both before any row
@@ -96,12 +151,15 @@ pub(super) async fn lock_candidate(
         .await?;
     // Keep configuration/provider identity stable from revalidation through
     // commit. Snapshot comparison alone cannot close that final write window.
-    sqlx::query_as(LOCKED_CANDIDATE_SQL)
-        .bind(command.billing_scope_id.as_uuid())
-        .bind(command.subscriber_id.as_uuid())
-        .bind(command.attempt_id.as_uuid())
-        .fetch_optional(connection)
-        .await
+    candidate_statement!(
+        candidate_query,
+        " FOR UPDATE OF a, m, s FOR SHARE OF g",
+        command.billing_scope_id.into_uuid(),
+        command.subscriber_id.into_uuid(),
+        command.attempt_id.into_uuid()
+    )
+    .fetch_optional(connection)
+    .await
 }
 
 pub(super) async fn fill_missing_fields(
@@ -133,7 +191,7 @@ pub(super) async fn fill_missing_fields(
     {
         return Ok(Outcome::Unchanged);
     }
-    let written = sqlx::query(
+    let written = sqlx::query!(
         r#"
         UPDATE billing_payment_methods
         SET card_brand = COALESCE(card_brand, $2),
@@ -143,12 +201,12 @@ pub(super) async fn fill_missing_fields(
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        current.method_id,
+        brand_text,
+        last4,
+        month,
+        year,
     )
-    .bind(current.method_id)
-    .bind(brand_text)
-    .bind(last4)
-    .bind(month)
-    .bind(year)
     .execute(connection)
     .await?;
     if written.rows_affected() != 1 {

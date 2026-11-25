@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET status = 'failed', resolution_code = $3,\n            gateway_response_text = $4,\n            resolved_at = COALESCE(resolved_at, clock_timestamp()),\n            updated_at = clock_timestamp()\n        WHERE subscription_id = $1\n            AND attempt_kind IN ('subscription_renewal', 'subscription_recovery')\n            AND billing_period_start_at = $2\n            AND status = 'pending' AND submitted_at IS NULL\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9ca0cdcd14dde60358f0d8be8ba70e8effe381d47e9bdafce38e799258ed35a4"
+}

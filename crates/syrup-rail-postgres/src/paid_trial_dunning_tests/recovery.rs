@@ -12,7 +12,7 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     };
     let subscriber_id = SubscriberId::new(Uuid::now_v7());
     let code_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discount_codes (
             id, billing_scope_id, plan_key, code_normalized, display_code,
@@ -23,12 +23,12 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
             'active', 'percent_off', 2000, 'USD', 'limited_months', 3
         )
         "#,
+        code_id,
+        account.billing_scope_id,
     )
-    .bind(code_id)
-    .bind(account.billing_scope_id)
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discount_claims (
             id, billing_scope_id, subscriber_id, plan_key,
@@ -40,11 +40,11 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
             2000, 'USD', 'limited_months', 3, 2900, 2320, 'saved'
         )
         "#,
+        Uuid::now_v7(),
+        account.billing_scope_id,
+        subscriber_id.as_uuid(),
+        code_id,
     )
-    .bind(Uuid::now_v7())
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(code_id)
     .execute(&database.pool)
     .await?;
     let discount = SubscriptionDiscountSnapshot::new(
@@ -100,21 +100,21 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         .expect("approved trial creates subscription");
     let subscription_id = initial_subscription.id();
     let original_payment_method_id = initial_subscription.payment_method_id();
-    let initial_discount: (i32, i32, String, i32) = sqlx::query_as(
+    let initial_discount: (i32, i32, String, i32) = checked_query_as!(
         r#"
         SELECT periods_applied, periods_total, discounts.status, subscriptions.amount_cents
         FROM billing_subscription_discounts AS discounts
         JOIN billing_subscriptions AS subscriptions ON subscriptions.id = discounts.subscription_id
         WHERE discounts.subscription_id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(initial_discount, (0, 3, "active".to_owned(), 2_320));
 
     let unpaid_history_id = Uuid::now_v7();
-    sqlx::query(
+    checked_query!(
         r#"
         WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)
         INSERT INTO billing_subscriptions (
@@ -133,32 +133,32 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
             'continue_until_dunning_exhausted', NULL, observed_at
         FROM clock
         "#,
+        unpaid_history_id,
+        account.billing_scope_id,
+        subscriber_id.as_uuid(),
+        account.gateway_account_id,
+        original_payment_method_id.as_uuid(),
+        format!("unpaid_history_{}", unpaid_history_id.simple()),
     )
-    .bind(unpaid_history_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(account.gateway_account_id)
-    .bind(original_payment_method_id.as_uuid())
-    .bind(format!("unpaid_history_{}", unpaid_history_id.simple()))
     .execute(&database.pool)
     .await?;
 
     let due_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+        checked_query_scalar!("SELECT clock_timestamp() - interval '1 second'")
             .fetch_one(&database.pool)
             .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '7 days',
+        SET current_period_start_at = $2::timestamptz - interval '7 days',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
     .execute(&database.pool)
     .await?;
     let queued_renewal = ChargeRenewal::new(
@@ -176,10 +176,10 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
     )
     .await?;
 
-    let scheduled_retry: Option<DateTime<Utc>> = sqlx::query_scalar(
+    let scheduled_retry: Option<DateTime<Utc>> = checked_query_scalar!(
         "SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     let failed_recovery_command = RecoverSubscriptionPayment::new(
@@ -207,10 +207,10 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         failed_recovery_result.attempt().status(),
         syrup_rail::PaymentAttemptStatus::Declined
     );
-    let retry_after_failed_recovery: Option<DateTime<Utc>> = sqlx::query_scalar(
+    let retry_after_failed_recovery: Option<DateTime<Utc>> = checked_query_scalar!(
         "SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(retry_after_failed_recovery, scheduled_retry);
@@ -244,10 +244,10 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         unknown.observation_diagnostics(),
         &[GatewayPaymentDiagnostic::ProcessorReportedDuplicate]
     );
-    let retry_after_unknown: Option<DateTime<Utc>> = sqlx::query_scalar(
+    let retry_after_unknown: Option<DateTime<Utc>> = checked_query_scalar!(
         "SELECT next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(retry_after_unknown, scheduled_retry);
@@ -305,23 +305,24 @@ async fn paid_trial_recovery_collects_discounted_recurring_period_and_invalidate
         subscription.next_renewal_at(),
         subscription.current_period().end_at()
     );
-    let recovered_discount: (i32, String, i32) = sqlx::query_as(
+    let recovered_discount: (i32, String, i32) = checked_query_as!(
         r#"
         SELECT discounts.periods_applied, discounts.status, subscriptions.amount_cents
         FROM billing_subscription_discounts AS discounts
         JOIN billing_subscriptions AS subscriptions ON subscriptions.id = discounts.subscription_id
         WHERE discounts.subscription_id = $1
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(recovered_discount, (1, "active".to_owned(), 2_320));
-    let original_method_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_payment_methods WHERE id = $1")
-            .bind(original_payment_method_id.as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
+    let original_method_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_payment_methods WHERE id = $1",
+        original_payment_method_id.as_uuid(),
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(original_method_status, "disabled");
 
     let mut transaction = database.pool.begin().await?;

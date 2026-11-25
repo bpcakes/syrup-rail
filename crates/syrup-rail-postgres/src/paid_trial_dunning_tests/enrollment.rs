@@ -32,22 +32,22 @@ impl SubscriptionOfferStore for AttemptHistoryOfferStore {
         connection: &mut PgConnection,
         context: crate::SubscriptionEnrollmentOfferContext<'_>,
     ) -> Result<Option<syrup_rail::SubscriptionOffer>, sqlx::Error> {
-        let (other_initial_attempts, in_flight_attempts): (i64, i64) = sqlx::query_as(
+        let (other_initial_attempts, in_flight_attempts): (i64, i64) = checked_query_as!(
             r#"
             SELECT
                 count(*) FILTER (WHERE id <> $4),
-                count(*) FILTER (WHERE id = $4)
+                count(*) FILTER (WHERE id = $4) AS in_flight_count
             FROM billing_payment_attempts
             WHERE billing_scope_id = $1
                 AND subscriber_id = $2
                 AND plan_key = $3
                 AND attempt_kind = 'subscription_initial'
             "#,
+            context.billing_scope_id().into_uuid(),
+            context.subscriber_id().into_uuid(),
+            context.plan_key().as_str(),
+            context.attempt_id().into_uuid(),
         )
-        .bind(context.billing_scope_id().as_uuid())
-        .bind(context.subscriber_id().as_uuid())
-        .bind(context.plan_key().as_str())
-        .bind(context.attempt_id().as_uuid())
         .fetch_one(connection)
         .await?;
         self.observations
@@ -240,21 +240,21 @@ async fn fixed_day_recurring_cadence_persists_and_drives_the_next_renewal()
     let subscription_id = subscription.id();
 
     let due_at: DateTime<Utc> =
-        sqlx::query_scalar("SELECT clock_timestamp() - interval '1 second'")
+        checked_query_scalar!("SELECT clock_timestamp() - interval '1 second'")
             .fetch_one(&database.pool)
             .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscriptions
-        SET current_period_start_at = $2 - interval '14 days',
+        SET current_period_start_at = $2::timestamptz - interval '14 days',
             current_period_end_at = $2,
             next_renewal_at = $2,
             next_payment_attempt_at = $2
         WHERE id = $1
         "#,
+        subscription_id.as_uuid(),
+        due_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(due_at)
     .execute(&database.pool)
     .await?;
 
@@ -406,11 +406,12 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
         syrup_rail::PaymentAttemptStatus::Declined
     );
     assert!(declined.subscription().is_none());
-    let declined_subscriptions: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1")
-            .bind(declined_subscriber.as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
+    let declined_subscriptions: i64 = checked_query_scalar!(
+        "SELECT count(*) FROM billing_subscriptions WHERE subscriber_id = $1",
+        declined_subscriber.as_uuid(),
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(declined_subscriptions, 0);
     assert_eq!(events.lock().await.len(), 1);
 
@@ -542,10 +543,10 @@ async fn enrollment_compatibility_decline_reconciliation_replay_and_term_mismatc
             syrup_rail::SubscriptionEnrollmentReservationRejection::EnrollmentTermsChanged,
         )
     );
-    let mismatch_attempts: i64 = sqlx::query_scalar(
+    let mismatch_attempts: i64 = checked_query_scalar!(
         "SELECT count(*) FROM billing_payment_attempts WHERE subscriber_id = $1",
+        mismatch_subscriber.as_uuid(),
     )
-    .bind(mismatch_subscriber.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(mismatch_attempts, 0);
@@ -562,7 +563,7 @@ async fn indefinite_discounted_paid_trial_starts_with_zero_recurring_periods_app
     let offer = paid_trial_offer()?;
     let subscriber_id = SubscriberId::new(Uuid::now_v7());
     let code_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discount_codes (
             id, billing_scope_id, plan_key, code_normalized, display_code,
@@ -572,12 +573,12 @@ async fn indefinite_discounted_paid_trial_starts_with_zero_recurring_periods_app
             'amount_off', 500, 'USD', 'indefinite'
         )
         "#,
+        code_id,
+        account.billing_scope_id,
     )
-    .bind(code_id)
-    .bind(account.billing_scope_id)
     .execute(&database.pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discount_claims (
             id, billing_scope_id, subscriber_id, plan_key,
@@ -589,11 +590,11 @@ async fn indefinite_discounted_paid_trial_starts_with_zero_recurring_periods_app
             500, 'USD', 'indefinite', 2900, 2400, 'saved'
         )
         "#,
+        Uuid::now_v7(),
+        account.billing_scope_id,
+        subscriber_id.as_uuid(),
+        code_id,
     )
-    .bind(Uuid::now_v7())
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(code_id)
     .execute(&database.pool)
     .await?;
     let discount = SubscriptionDiscountSnapshot::new(
@@ -627,10 +628,10 @@ async fn indefinite_discounted_paid_trial_starts_with_zero_recurring_periods_app
     let subscription = result.subscription().expect("paid trial subscription");
     assert_eq!(subscription.phase(), SubscriptionPhase::PaidTrial);
     assert_eq!(subscription.recurring_charge().cents(), 2_400);
-    let discount_state: (i32, Option<i32>, String) = sqlx::query_as(
+    let discount_state: (i32, Option<i32>, String) = checked_query_as!(
         "SELECT periods_applied, periods_total, status FROM billing_subscription_discounts WHERE subscription_id = $1",
+        subscription.id().into_uuid(),
     )
-    .bind(subscription.id().as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!(discount_state, (0, None, "active".to_owned()));

@@ -6,6 +6,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 
+#[macro_use]
+mod checked_sql;
 mod attempts;
 mod billing_portal;
 mod cancellation;

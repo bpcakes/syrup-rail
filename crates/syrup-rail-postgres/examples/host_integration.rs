@@ -7,6 +7,8 @@
 //! no database or provider I/O; this example is intended to be copied into a
 //! host application.
 
+#![allow(clippy::disallowed_methods)] // The host example owns its outbox schema.
+
 #[path = "host_integration/outbox.rs"]
 mod outbox;
 

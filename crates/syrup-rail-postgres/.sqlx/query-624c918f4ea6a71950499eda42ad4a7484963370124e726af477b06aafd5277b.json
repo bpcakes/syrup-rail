@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET past_due_access = 'continue_until_dunning_exhausted' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "624c918f4ea6a71950499eda42ad4a7484963370124e726af477b06aafd5277b"
+}

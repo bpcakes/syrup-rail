@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET status = 'failed', gateway_response_text = $2,\n            gateway_condition = 'failed', resolved_at = clock_timestamp(),\n            updated_at = clock_timestamp()\n        WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2bf309200ca5a45bb7f71b6c08561764f675810fb06270d60fa0594853b9b9d8"
+}

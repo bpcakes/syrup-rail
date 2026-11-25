@@ -1,7 +1,11 @@
 use std::{error::Error, io};
 
 use postgres_test_harness::{DatabaseLease, HarnessConfig, PostgresHarness};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{
+    Database, FromRow, PgPool, SqlSafeStr,
+    postgres::PgPoolOptions,
+    query::{Query, QueryAs, QueryScalar},
+};
 use uuid::Uuid;
 
 use syrup_rail::{
@@ -16,6 +20,42 @@ use crate::schema_contract::{
     V4_INSTALL_SQL, V4_TO_V5_UPGRADE_SQL, V5_INSTALL_SQL, V5_TO_V6_UPGRADE_SQL, V6_INSTALL_SQL,
     V6_TO_V7_UPGRADE_SQL, V7_INSTALL_SQL,
 };
+
+// The live gate knows the canonical schema. These entry points are for test
+// relations created in fixtures and statements built by the test harness.
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn fixture_query<DB: Database>(
+    sql: impl SqlSafeStr,
+) -> Query<'static, DB, DB::Arguments> {
+    sqlx::query(sql)
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn fixture_query_as<DB, O>(
+    sql: impl SqlSafeStr,
+) -> QueryAs<'static, DB, O, DB::Arguments>
+where
+    DB: Database,
+    O: for<'r> FromRow<'r, DB::Row>,
+{
+    sqlx::query_as(sql)
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn fixture_query_scalar<DB, O>(
+    sql: impl SqlSafeStr,
+) -> QueryScalar<'static, DB, O, DB::Arguments>
+where
+    DB: Database,
+    (O,): for<'r> FromRow<'r, DB::Row>,
+{
+    sqlx::query_scalar(sql)
+}
+
+#[allow(clippy::disallowed_methods)]
+pub(crate) fn fixture_raw_sql(sql: impl SqlSafeStr) -> sqlx::RawSql {
+    sqlx::raw_sql(sql)
+}
 
 pub(crate) struct TestDatabase {
     harness: PostgresHarness,
@@ -56,13 +96,13 @@ pub(crate) async fn assert_attempt_billing_address(
         Option<String>,
         Option<String>,
         String,
-    ) = sqlx::query_as(
+    ) = checked_query_as!(
         "SELECT billing_address_line1, billing_address_line2, billing_address_city, \
              billing_address_region, billing_address_postal_code, billing_address_country \
              FROM billing_payment_attempts WHERE billing_scope_id = $1 AND id = $2",
+        scope.as_uuid(),
+        attempt_id.as_uuid(),
     )
-    .bind(scope.as_uuid())
-    .bind(attempt_id.as_uuid())
     .fetch_one(pool)
     .await?;
     assert_eq!(
@@ -136,7 +176,7 @@ impl TestDatabase {
         let database = Self::start_v1(project).await?;
         {
             let mut transaction = database.pool.begin().await?;
-            sqlx::raw_sql(V1_TO_V2_UPGRADE_SQL)
+            fixture_raw_sql(V1_TO_V2_UPGRADE_SQL)
                 .execute(&mut *transaction)
                 .await?;
             transaction.commit().await?;
@@ -158,7 +198,7 @@ impl TestDatabase {
 
     pub(crate) async fn upgrade_v2_to_v3(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(V2_TO_V3_UPGRADE_SQL)
+        fixture_raw_sql(V2_TO_V3_UPGRADE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -167,7 +207,7 @@ impl TestDatabase {
 
     pub(crate) async fn upgrade_v6_to_v7(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(V6_TO_V7_UPGRADE_SQL)
+        fixture_raw_sql(V6_TO_V7_UPGRADE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -176,7 +216,7 @@ impl TestDatabase {
 
     pub(crate) async fn upgrade_v5_to_v6(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(V5_TO_V6_UPGRADE_SQL)
+        fixture_raw_sql(V5_TO_V6_UPGRADE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -185,7 +225,7 @@ impl TestDatabase {
 
     pub(crate) async fn upgrade_v4_to_v5(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(V4_TO_V5_UPGRADE_SQL)
+        fixture_raw_sql(V4_TO_V5_UPGRADE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -201,7 +241,7 @@ impl TestDatabase {
 
     pub(crate) async fn prepare_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(V3_TO_V4_PREPARE_SQL)
+        fixture_raw_sql(V3_TO_V4_PREPARE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -210,7 +250,7 @@ impl TestDatabase {
 
     pub(crate) async fn validate_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(V3_TO_V4_VALIDATE_SQL)
+        fixture_raw_sql(V3_TO_V4_VALIDATE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -232,14 +272,14 @@ impl TestDatabase {
             "schema-v4 index artifact must contain exactly two simple statements"
         );
         for statement in statements {
-            sqlx::raw_sql(statement).execute(&self.pool).await?;
+            fixture_raw_sql(statement).execute(&self.pool).await?;
         }
         Ok(())
     }
 
     pub(crate) async fn finalize_v3_to_v4(&self) -> Result<(), Box<dyn Error>> {
         let mut transaction = self.pool.begin().await?;
-        sqlx::raw_sql(V3_TO_V4_UPGRADE_SQL)
+        fixture_raw_sql(V3_TO_V4_UPGRADE_SQL)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
@@ -256,7 +296,7 @@ impl TestDatabase {
             .max_connections(4)
             .connect(lease.database_url())
             .await?;
-        sqlx::raw_sql(install_sql).execute(&pool).await?;
+        fixture_raw_sql(install_sql).execute(&pool).await?;
         Ok(Self {
             harness,
             lease,
@@ -316,14 +356,14 @@ pub(crate) async fn create_gateway_account(
     pool: &PgPool,
     provider_key: &str,
 ) -> Result<GatewayAccountFixture, sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_gateway_provider_rate_limits (provider_key)
         VALUES ($1)
         ON CONFLICT (provider_key) DO NOTHING
         "#,
+        provider_key,
     )
-    .bind(provider_key)
     .execute(pool)
     .await?;
 
@@ -332,7 +372,7 @@ pub(crate) async fn create_gateway_account(
         gateway_account_id: Uuid::now_v7(),
         gateway_configuration_id: Uuid::now_v7(),
     };
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_gateway_accounts (
             id,
@@ -341,11 +381,11 @@ pub(crate) async fn create_gateway_account(
             gateway_configuration_id
         ) VALUES ($1, $2, $3, $4)
         "#,
+        fixture.gateway_account_id,
+        fixture.billing_scope_id,
+        provider_key,
+        fixture.gateway_configuration_id,
     )
-    .bind(fixture.gateway_account_id)
-    .bind(fixture.billing_scope_id)
-    .bind(provider_key)
-    .bind(fixture.gateway_configuration_id)
     .execute(pool)
     .await?;
     Ok(fixture)

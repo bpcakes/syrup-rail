@@ -20,7 +20,7 @@ pub(super) async fn matching_charge(
     transaction_id: Option<&str>,
 ) -> Result<Option<sqlx::postgres::PgRow>, sqlx::Error> {
     let descriptor = evidence.descriptor();
-    sqlx::query(
+    checked_query!(
         r#"
         SELECT id, charge_role,
             gateway_payment_method_reference IS NOT DISTINCT FROM $3
@@ -37,23 +37,21 @@ pub(super) async fn matching_charge(
         WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2
         FOR UPDATE
         "#,
-    )
-    .bind(attempt.identity().attempt_id().as_uuid())
-    .bind(transaction_id)
-    .bind(
+        attempt.identity().attempt_id().into_uuid(),
+        transaction_id,
         evidence
             .payment_method_reference()
             .map(|value| value.expose()),
+        evidence.response().map(GatewayDiagnostic::expose),
+        evidence.response_code().map(GatewayDiagnostic::expose),
+        evidence.response_text().map(GatewayDiagnostic::expose),
+        evidence.condition().map(GatewayDiagnostic::expose),
+        descriptor.payment_type().map(GatewayDiagnostic::expose),
+        descriptor.card_brand().map(GatewayDiagnostic::expose),
+        descriptor.card_last_four().map(|value| value.expose()),
+        descriptor.card_exp_month(),
+        descriptor.card_exp_year(),
     )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
     .fetch_optional(connection)
     .await
 }
@@ -63,7 +61,7 @@ pub(super) async fn owned_by_other_attempt(
     attempt: &PaymentAttempt,
     transaction_id: &str,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1 FROM billing_processor_charges
@@ -71,10 +69,10 @@ pub(super) async fn owned_by_other_attempt(
                 AND attempt_id <> $3
         )
         "#,
+        attempt.identity().gateway_account_id().into_uuid(),
+        transaction_id,
+        attempt.identity().attempt_id().into_uuid(),
     )
-    .bind(attempt.identity().gateway_account_id().as_uuid())
-    .bind(transaction_id)
-    .bind(attempt.identity().attempt_id().as_uuid())
     .fetch_one(connection)
     .await
 }
@@ -87,7 +85,7 @@ pub(super) async fn identify_transactionless(
     requested_progression: ProcessorChargeProgression,
 ) -> Result<Option<ChargeRecord>, ProcessorChargeStoreError> {
     let descriptor = evidence.descriptor();
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, charge_role,
             gateway_payment_method_reference IS NOT DISTINCT FROM $2
@@ -105,22 +103,20 @@ pub(super) async fn identify_transactionless(
             AND billing_canonical_gateway_transaction_id(gateway_transaction_id) IS NULL
         FOR UPDATE
         "#,
-    )
-    .bind(attempt.identity().attempt_id().as_uuid())
-    .bind(
+        attempt.identity().attempt_id().into_uuid(),
         evidence
             .payment_method_reference()
             .map(|value| value.expose()),
+        evidence.response().map(GatewayDiagnostic::expose),
+        evidence.response_code().map(GatewayDiagnostic::expose),
+        evidence.response_text().map(GatewayDiagnostic::expose),
+        evidence.condition().map(GatewayDiagnostic::expose),
+        descriptor.payment_type().map(GatewayDiagnostic::expose),
+        descriptor.card_brand().map(GatewayDiagnostic::expose),
+        descriptor.card_last_four().map(|value| value.expose()),
+        descriptor.card_exp_month(),
+        descriptor.card_exp_year(),
     )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
@@ -129,13 +125,13 @@ pub(super) async fn identify_transactionless(
     if !row.try_get::<bool, _>("evidence_matches")? {
         return Ok(None);
     }
-    let id = row.try_get("id")?;
+    let id: Uuid = row.try_get("id")?;
     let role = parse_role(&row.try_get::<String, _>("charge_role")?)?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_processor_charges SET gateway_transaction_id = $2, updated_at = clock_timestamp() WHERE id = $1",
+        id,
+        transaction_id,
     )
-    .bind(id)
-    .bind(transaction_id)
     .execute(&mut *connection)
     .await?;
     let progression = initial_charge_progression(
@@ -144,7 +140,7 @@ pub(super) async fn identify_transactionless(
         Some(transaction_id),
         requested_progression,
     );
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_processor_charges
         SET progression_state = $2, state_code = $3,
@@ -159,10 +155,10 @@ pub(super) async fn identify_transactionless(
             updated_at = clock_timestamp()
         WHERE id = $1
         "#,
+        id,
+        progression.as_str(),
+        Option::<&str>::None,
     )
-    .bind(id)
-    .bind(progression.as_str())
-    .bind(Option::<&str>::None)
     .execute(&mut *connection)
     .await?;
     Ok(Some(ChargeRecord {
@@ -176,7 +172,7 @@ pub(super) async fn charge_by_id(
     connection: &mut PgConnection,
     charge_id: Uuid,
 ) -> Result<ProcessorCharge, ProcessorChargeStoreError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, attempt_id, billing_scope_id, gateway_account_id,
             gateway_order_id, attempt_kind, amount_cents, currency,
@@ -187,8 +183,8 @@ pub(super) async fn charge_by_id(
             card_exp_month, card_exp_year, observed_at
         FROM billing_processor_charges WHERE id = $1 FOR UPDATE
         "#,
+        charge_id,
     )
-    .bind(charge_id)
     .fetch_one(connection)
     .await?;
     processor_charge_from_row(&row).map_err(map_operator_error)

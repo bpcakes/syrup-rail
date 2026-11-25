@@ -24,7 +24,7 @@ async fn canonical_rows_without_v7_column(pool: &PgPool) -> Result<Vec<String>, 
             "#
         );
         snapshots.push(
-            sqlx::query_scalar(sqlx::AssertSqlSafe(query.as_str()))
+            crate::test_support::fixture_query_scalar(sqlx::AssertSqlSafe(query.as_str()))
                 .fetch_one(pool)
                 .await?,
         );
@@ -35,10 +35,10 @@ async fn canonical_rows_without_v7_column(pool: &PgPool) -> Result<Vec<String>, 
 async fn v7_column_shape(
     pool: &PgPool,
 ) -> Result<Option<(String, String, i16, Option<i32>)>, sqlx::Error> {
-    sqlx::query_as(
+    checked_query_as!(
         r#"
         SELECT columns.data_type, columns.is_nullable, attributes.attnum,
-            columns.character_maximum_length::integer
+            columns.character_maximum_length::integer AS max_length
         FROM information_schema.columns AS columns
         JOIN pg_catalog.pg_attribute AS attributes
             ON attributes.attrelid = 'public.billing_payment_attempts'::regclass
@@ -47,8 +47,8 @@ async fn v7_column_shape(
             AND columns.table_name = 'billing_payment_attempts'
             AND columns.column_name = $1
         "#,
+        V7_COLUMN,
     )
-    .bind(V7_COLUMN)
     .fetch_optional(pool)
     .await
 }
@@ -57,12 +57,12 @@ async fn v7_column_shape(
 /// constraint count. PostgreSQL 18 records CHECK and NOT NULL constraints in
 /// `pg_constraint`, and adding either scans the table under the lock.
 async fn attempt_table_storage(pool: &PgPool) -> Result<(i64, i64), sqlx::Error> {
-    sqlx::query_as(
+    checked_query_as!(
         "SELECT relation.relfilenode::bigint, \
              (SELECT count(*) FROM pg_catalog.pg_constraint \
               WHERE conrelid = relation.oid) \
          FROM pg_catalog.pg_class AS relation \
-         WHERE relation.oid = 'public.billing_payment_attempts'::regclass",
+         WHERE relation.oid = 'public.billing_payment_attempts'::regclass"
     )
     .fetch_one(pool)
     .await
@@ -74,18 +74,18 @@ async fn attempt_table_storage(pool: &PgPool) -> Result<(i64, i64), sqlx::Error>
 async fn assert_avs_length_bound(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     let mut transaction = pool.begin().await?;
     let attempt_id: Uuid =
-        sqlx::query_scalar("SELECT id FROM billing_payment_attempts ORDER BY id LIMIT 1")
+        checked_query_scalar!("SELECT id FROM billing_payment_attempts ORDER BY id LIMIT 1")
             .fetch_one(&mut *transaction)
             .await?;
-    let write = "UPDATE billing_payment_attempts SET gateway_avs_response = $1 WHERE id = $2";
-    sqlx::query(write)
-        .bind("Y")
-        .bind(attempt_id)
-        .execute(&mut *transaction)
-        .await?;
-    let error = sqlx::query(write)
-        .bind("YY")
-        .bind(attempt_id)
+    let write = |avs: &str| {
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET gateway_avs_response = $1 WHERE id = $2",
+            avs,
+            attempt_id,
+        )
+    };
+    write("Y").execute(&mut *transaction).await?;
+    let error = write("YY")
         .execute(&mut *transaction)
         .await
         .expect_err("a two-character AVS value must be rejected");
@@ -115,9 +115,10 @@ async fn runtime_schema_v7_accepts_fresh_install_and_populated_v6_upgrade()
         upgraded.upgrade_v5_to_v6().await?;
         assert_v6_conforms(&upgraded.pool).await?;
         let rows_before = canonical_rows_without_v7_column(&upgraded.pool).await?;
-        let attempt_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_payment_attempts")
-            .fetch_one(&upgraded.pool)
-            .await?;
+        let attempt_rows: i64 =
+            checked_query_scalar!("SELECT count(*) FROM billing_payment_attempts")
+                .fetch_one(&upgraded.pool)
+                .await?;
         assert!(attempt_rows >= 2, "fixture must be populated");
         let storage_before = attempt_table_storage(&upgraded.pool).await?;
 
@@ -152,8 +153,8 @@ async fn runtime_schema_v7_accepts_fresh_install_and_populated_v6_upgrade()
             canonical_rows_without_v7_column(&upgraded.pool).await?,
             rows_before
         );
-        let populated: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM billing_payment_attempts WHERE gateway_avs_response IS NOT NULL",
+        let populated: i64 = checked_query_scalar!(
+            "SELECT count(*) FROM billing_payment_attempts WHERE gateway_avs_response IS NOT NULL"
         )
         .fetch_one(&upgraded.pool)
         .await?;
@@ -269,7 +270,7 @@ async fn assert_submit_rejects_avs_evidence(pool: &PgPool) -> Result<(), Box<dyn
     let subscriber_id = Uuid::now_v7();
     let target_id = Uuid::now_v7();
     let attempt_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             id,
@@ -291,13 +292,13 @@ async fn assert_submit_rejects_avs_evidence(pool: &PgPool) -> Result<(), Box<dyn
             'host_charge:avs', 100, 'USD', $5, $6, 'avs-order', 'test'
         )
         "#,
+        attempt_id,
+        gateway.billing_scope_id,
+        subscriber_id,
+        target_id,
+        gateway.gateway_account_id,
+        gateway.gateway_configuration_id,
     )
-    .bind(attempt_id)
-    .bind(gateway.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(target_id)
-    .bind(gateway.gateway_account_id)
-    .bind(gateway.gateway_configuration_id)
     .execute(pool)
     .await?;
     assert_admission(
@@ -309,10 +310,12 @@ async fn assert_submit_rejects_avs_evidence(pool: &PgPool) -> Result<(), Box<dyn
     )
     .await?;
 
-    sqlx::query("UPDATE billing_payment_attempts SET gateway_avs_response = 'Y' WHERE id = $1")
-        .bind(attempt_id)
-        .execute(pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET gateway_avs_response = 'Y' WHERE id = $1",
+        attempt_id,
+    )
+    .execute(pool)
+    .await?;
     assert_admission(
         pool,
         gateway,
@@ -351,7 +354,7 @@ async fn v6_to_v7_upgrade_rolls_back_on_lock_timeout_and_refuses_a_rerun_or_v5()
         // with ALTER TABLE; the upgrade gives up at its lock timeout instead
         // of queueing other statements behind it indefinitely.
         let mut blocker = database.pool.begin().await?;
-        sqlx::query("LOCK TABLE billing_payment_attempts IN ROW EXCLUSIVE MODE")
+        sqlx::query!("LOCK TABLE billing_payment_attempts IN ROW EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await?;
         let error = database
@@ -431,7 +434,7 @@ async fn read_attempts_on(
     let target_id = Uuid::now_v7();
     let charge_attempt_id = Uuid::now_v7();
     let order_id = format!("cached-order-{label}");
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             id, billing_scope_id, subscriber_id, host_charge_target_id,
@@ -444,29 +447,29 @@ async fn read_attempts_on(
             100, 'USD', $7, $8, $9, 'live'
         )
         "#,
+        charge_attempt_id,
+        scope_id,
+        attempt.identity().subscriber_id().into_uuid(),
+        target_id,
+        format!("cached-key-{label}"),
+        format!("host_charge:{target_id}:100:USD"),
+        gateway_account_id,
+        attempt.identity().gateway_configuration_id().into_uuid(),
+        &order_id,
     )
-    .bind(charge_attempt_id)
-    .bind(scope_id)
-    .bind(attempt.identity().subscriber_id().as_uuid())
-    .bind(target_id)
-    .bind(format!("cached-key-{label}"))
-    .bind(format!("host_charge:{target_id}:100:USD"))
-    .bind(gateway_account_id)
-    .bind(attempt.identity().gateway_configuration_id().as_uuid())
-    .bind(&order_id)
     .execute(pool)
     .await?;
-    let admission: String = sqlx::query_scalar(
+    let admission: String = checked_query_scalar!(
         "SELECT billing_host_charge_ledger_admission($1, $2, $3, 'submit', NULL, $4)",
+        scope_id,
+        attempt.identity().subscriber_id().into_uuid(),
+        target_id,
+        charge_attempt_id,
     )
-    .bind(scope_id)
-    .bind(attempt.identity().subscriber_id().as_uuid())
-    .bind(target_id)
-    .bind(charge_attempt_id)
     .fetch_one(pool)
     .await?;
     assert_eq!(admission, "safe");
-    let dimensions: (String, i32) = sqlx::query_as(
+    let dimensions: (String, i32) = checked_query_as!(
         r#"
         INSERT INTO billing_processor_charges (
             attempt_id, billing_scope_id, gateway_account_id,
@@ -474,12 +477,12 @@ async fn read_attempts_on(
         ) VALUES ($1, $2, $3, $4, $5)
         RETURNING attempt_kind, amount_cents
         "#,
+        charge_attempt_id,
+        scope_id,
+        gateway_account_id,
+        &order_id,
+        format!("txn_{}", opaque_fixture_uuid(charge_attempt_id)),
     )
-    .bind(charge_attempt_id)
-    .bind(scope_id)
-    .bind(gateway_account_id)
-    .bind(&order_id)
-    .bind(format!("txn_{}", opaque_fixture_uuid(charge_attempt_id)))
     .fetch_one(pool)
     .await?;
     assert_eq!(dimensions, ("host_charge".to_owned(), 100));
@@ -501,9 +504,9 @@ async fn runtime_reads_and_functions_run_on_a_populated_upgraded_v7_catalog()
         database.upgrade_v5_to_v6().await?;
         database.upgrade_v6_to_v7().await?;
         assert_v7_conforms(&database.pool).await?;
-        let (scope_id, attempt_id, gateway_account_id): (Uuid, Uuid, Uuid) = sqlx::query_as(
+        let (scope_id, attempt_id, gateway_account_id): (Uuid, Uuid, Uuid) = checked_query_as!(
             "SELECT billing_scope_id, id, gateway_account_id FROM billing_payment_attempts \
-             ORDER BY created_at, id LIMIT 1",
+             ORDER BY created_at, id LIMIT 1"
         )
         .fetch_one(&database.pool)
         .await?;
@@ -511,13 +514,13 @@ async fn runtime_reads_and_functions_run_on_a_populated_upgraded_v7_catalog()
             .max_connections(1)
             .connect_with((*database.pool.connect_options()).clone())
             .await?;
-        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        let pid: i32 = checked_query_scalar!("SELECT pg_backend_pid()")
             .fetch_one(&serving)
             .await?;
         let rounds = async {
             read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "first").await?;
             read_attempts_on(&serving, scope_id, attempt_id, gateway_account_id, "again").await?;
-            let pid_after: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            let pid_after: i32 = checked_query_scalar!("SELECT pg_backend_pid()")
                 .fetch_one(&serving)
                 .await?;
             assert_eq!(pid_after, pid);
@@ -544,9 +547,11 @@ async fn catalog_snapshot_spanning_cutover_keeps_the_v6_fingerprint() -> Result<
             .await?;
         // Pin the repeatable-read snapshot before the online upgrade commits,
         // matching a startup assertion that races the migration.
-        sqlx::query("SELECT current_setting('server_version_num')::integer")
-            .execute(&mut *snapshot)
-            .await?;
+        checked_query!(
+            "SELECT current_setting('server_version_num')::integer AS server_version_num"
+        )
+        .execute(&mut *snapshot)
+        .await?;
         database.upgrade_v6_to_v7().await?;
         assert_schema_conforms(
             &mut snapshot,

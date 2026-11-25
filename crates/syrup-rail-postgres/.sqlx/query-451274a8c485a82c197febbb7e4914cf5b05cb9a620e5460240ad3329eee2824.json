@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE billing_subscription_discounts\n                    SET periods_applied = 1\n                    WHERE subscription_id = $1 AND plan_key = $2\n                        AND status = 'active' AND periods_applied = 0\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "451274a8c485a82c197febbb7e4914cf5b05cb9a620e5460240ad3329eee2824"
+}

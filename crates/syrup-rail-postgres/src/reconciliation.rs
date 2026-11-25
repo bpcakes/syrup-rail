@@ -130,7 +130,8 @@ impl ChargeProgression {
 pub async fn reconciliation_gateway_accounts(
     pool: &PgPool,
 ) -> Result<Vec<GatewayAccountReconciliationCandidate>, sqlx::Error> {
-    let rows = sqlx::query_as::<_, (Uuid, Uuid)>(
+    let rows = checked_query_as!(
+        (Uuid, Uuid),
         r#"
         SELECT billing_scope_id, id
         FROM billing_gateway_accounts
@@ -161,12 +162,12 @@ pub async fn claim_exact_reconciliation_attempts(
     gateway_account_id: GatewayAccountId,
 ) -> Result<Vec<PaymentAttempt>, PaymentAttemptStoreError> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SELECT set_config('lock_timeout', '250ms', true)")
+    checked_query!("SELECT set_config('lock_timeout', '250ms', true)")
         .execute(&mut *transaction)
         .await?;
     // The claim names its returned columns: a `RETURNING attempts.*` statement
     // cached on a pooled connection fails after a later schema appends a column.
-    let rows = sqlx::query(concat!(
+    let rows = crate::attempts::payment_attempt_columns_query!(
         r#"
         WITH candidate_attempts AS MATERIALIZED (
             SELECT attempts.id AS attempt_id,
@@ -243,7 +244,6 @@ pub async fn claim_exact_reconciliation_attempts(
             FROM candidate_attempts
             WHERE attempts.id = candidate_attempts.attempt_id
             RETURNING "#,
-        include_str!("attempts/payment_attempt_columns.sql"),
         r#"
         )
         SELECT updated_attempts.*
@@ -251,13 +251,13 @@ pub async fn claim_exact_reconciliation_attempts(
         INNER JOIN candidate_attempts
             ON candidate_attempts.attempt_id = updated_attempts.id
         ORDER BY candidate_attempts.candidate_created_at, candidate_attempts.attempt_id
-        "#,
-    ))
-    .bind(gateway_account_id.as_uuid())
-    .bind(RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS)
-    .bind(EXACT_STALE_AFTER_SECONDS)
-    .bind(EXACT_RECENT_TERMINAL_SECONDS)
-    .bind(RECONCILIATION_PHASE_BATCH_SIZE)
+        "#;
+        gateway_account_id.as_uuid(),
+        RECONCILIATION_CLAIM_RETRY_AFTER_SECONDS,
+        EXACT_STALE_AFTER_SECONDS,
+        EXACT_RECENT_TERMINAL_SECONDS,
+        RECONCILIATION_PHASE_BATCH_SIZE,
+    )
     .fetch_all(&mut *transaction)
     .await?;
     let attempts = rows
@@ -279,7 +279,7 @@ pub async fn apply_exact_query_observation(
     observation: ExactQueryObservation,
 ) -> Result<bool, PaymentAttemptStoreError> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SELECT set_config('lock_timeout', '250ms', true)")
+    checked_query!("SELECT set_config('lock_timeout', '250ms', true)")
         .execute(&mut *transaction)
         .await?;
     let current = lock_payment_attempt_by_id_on_connection(
@@ -300,7 +300,7 @@ pub async fn apply_exact_query_observation(
         transaction.commit().await?;
         return Ok(false);
     };
-    let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+    let now: DateTime<Utc> = checked_query_scalar!("SELECT clock_timestamp()")
         .fetch_one(&mut *transaction)
         .await?;
     let stale = submitted_at <= now - chrono::Duration::seconds(EXACT_STALE_AFTER_SECONDS);
@@ -351,7 +351,7 @@ pub async fn apply_exact_query_observation(
     };
 
     let result = if next_status == PaymentAttemptStatus::Failed {
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'failed', gateway_response_text = $2,
@@ -359,13 +359,13 @@ pub async fn apply_exact_query_observation(
                 resolved_at = clock_timestamp(), updated_at = clock_timestamp()
             WHERE id = $1 AND status IN ('pending', 'review_required')
             "#,
+            current.identity().attempt_id().into_uuid(),
+            message,
         )
-        .bind(current.identity().attempt_id().as_uuid())
-        .bind(message)
         .execute(&mut *transaction)
         .await?
     } else if next_status == PaymentAttemptStatus::ReviewRequired {
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'review_required',
@@ -377,22 +377,22 @@ pub async fn apply_exact_query_observation(
                 updated_at = clock_timestamp()
             WHERE id = $1 AND status IN ('pending', 'unknown', 'review_required')
             "#,
+            current.identity().attempt_id().into_uuid(),
+            message,
         )
-        .bind(current.identity().attempt_id().as_uuid())
-        .bind(message)
         .execute(&mut *transaction)
         .await?
     } else {
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET gateway_response_text = $2, updated_at = clock_timestamp()
             WHERE id = $1 AND status = $3
             "#,
+            current.identity().attempt_id().into_uuid(),
+            message,
+            status.as_str(),
         )
-        .bind(current.identity().attempt_id().as_uuid())
-        .bind(message)
-        .bind(status.as_str())
         .execute(&mut *transaction)
         .await?
     };
@@ -410,10 +410,10 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
 ) -> Result<u64, sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
     let mut transaction = pool.begin().await?;
-    sqlx::query("SELECT set_config('lock_timeout', '250ms', true)")
+    checked_query!("SELECT set_config('lock_timeout', '250ms', true)")
         .execute(&mut *transaction)
         .await?;
-    let result = sqlx::query(
+    let result = checked_query!(
         r#"
         WITH stale_attempts AS (
             SELECT id
@@ -437,12 +437,12 @@ pub async fn fail_stale_unsubmitted_payment_method_replacements(
         FROM stale_attempts
         WHERE attempts.id = stale_attempts.id
         "#,
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
+        gateway_account_id.as_uuid(),
+        RECONCILIATION_PHASE_BATCH_SIZE,
+        STALE_PAYMENT_METHOD_REPLACEMENT_RESPONSE_TEXT,
     )
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
-    .bind(gateway_account_id.as_uuid())
-    .bind(RECONCILIATION_PHASE_BATCH_SIZE)
-    .bind(STALE_PAYMENT_METHOD_REPLACEMENT_RESPONSE_TEXT)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -460,10 +460,10 @@ pub async fn fail_stale_unsubmitted_subscription_charges(
 ) -> Result<u64, sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionRenewal);
     let mut transaction = pool.begin().await?;
-    sqlx::query("SELECT set_config('lock_timeout', '250ms', true)")
+    checked_query!("SELECT set_config('lock_timeout', '250ms', true)")
         .execute(&mut *transaction)
         .await?;
-    let result = sqlx::query(
+    let result = checked_query!(
         r#"
         WITH stale_attempts AS (
             SELECT id
@@ -490,13 +490,13 @@ pub async fn fail_stale_unsubmitted_subscription_charges(
         FROM stale_attempts
         WHERE attempts.id = stale_attempts.id
         "#,
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
+        gateway_account_id.as_uuid(),
+        RECONCILIATION_PHASE_BATCH_SIZE,
+        STALE_UNSUBMITTED_RENEWAL_TEXT,
+        STALE_UNSUBMITTED_RECOVERY_TEXT,
     )
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
-    .bind(gateway_account_id.as_uuid())
-    .bind(RECONCILIATION_PHASE_BATCH_SIZE)
-    .bind(STALE_UNSUBMITTED_RENEWAL_TEXT)
-    .bind(STALE_UNSUBMITTED_RECOVERY_TEXT)
     .execute(&mut *transaction)
     .await?;
     transaction.commit().await?;
@@ -513,7 +513,8 @@ pub async fn fail_stale_unsubmitted_subscription_enrollments(
     gateway_account_id: GatewayAccountId,
 ) -> Result<u64, sqlx::Error> {
     let policy = LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionInitial);
-    let candidates = sqlx::query_as::<_, (Uuid, Uuid, String)>(
+    let candidates = checked_query_as!(
+        (Uuid, Uuid, String),
         r#"
         SELECT DISTINCT billing_scope_id, subscriber_id, plan_key
         FROM billing_payment_attempts
@@ -525,10 +526,10 @@ pub async fn fail_stale_unsubmitted_subscription_enrollments(
                 - ($3::bigint * interval '1 second')
         ORDER BY billing_scope_id, subscriber_id, plan_key
         "#,
+        gateway_account_id.as_uuid(),
+        LocalAttemptPolicy::expirable_status_values(),
+        policy.stale_after_seconds(),
     )
-    .bind(gateway_account_id.as_uuid())
-    .bind(LocalAttemptPolicy::expirable_status_values())
-    .bind(policy.stale_after_seconds())
     .fetch_all(pool)
     .await?;
 
@@ -580,7 +581,8 @@ pub async fn classify_pending_processor_charges(
         });
     }
 
-    let upper_bound = sqlx::query_as::<_, (DateTime<Utc>, Uuid)>(
+    let upper_bound = checked_query_as!(
+        (DateTime<Utc>, Uuid),
         r#"
         SELECT observed_at, id
         FROM billing_processor_charges
@@ -588,8 +590,8 @@ pub async fn classify_pending_processor_charges(
         ORDER BY observed_at DESC, id DESC
         LIMIT 1
         "#,
+        gateway_account_id.as_uuid(),
     )
-    .bind(gateway_account_id.as_uuid())
     .fetch_optional(pool)
     .await?;
     let Some((upper_observed_at, upper_id)) = upper_bound else {
@@ -604,7 +606,7 @@ pub async fn classify_pending_processor_charges(
     let mut skipped_locked = 0;
     let mut cursor: Option<(DateTime<Utc>, Uuid)> = None;
     while transitioned < transition_limit {
-        let rows = sqlx::query(
+        let rows = checked_query!(
             r#"
             SELECT charges.id, charges.attempt_id,
                 billing_canonical_gateway_transaction_id(
@@ -626,13 +628,13 @@ pub async fn classify_pending_processor_charges(
             ORDER BY charges.observed_at, charges.id
             LIMIT $6
             "#,
+            gateway_account_id.as_uuid(),
+            cursor.as_ref().map(|(observed_at, _)| observed_at),
+            cursor.as_ref().map(|(_, id)| id),
+            upper_observed_at,
+            upper_id,
+            PROCESSOR_CHARGE_CANDIDATE_PAGE_SIZE,
         )
-        .bind(gateway_account_id.as_uuid())
-        .bind(cursor.as_ref().map(|(observed_at, _)| observed_at))
-        .bind(cursor.as_ref().map(|(_, id)| id))
-        .bind(upper_observed_at)
-        .bind(upper_id)
-        .bind(PROCESSOR_CHARGE_CANDIDATE_PAGE_SIZE)
         .fetch_all(pool)
         .await?;
         let candidates = rows

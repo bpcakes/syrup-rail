@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_processor_charges (\n            id, attempt_id, billing_scope_id, gateway_account_id,\n            gateway_order_id, gateway_transaction_id,\n            gateway_payment_method_reference, gateway_response,\n            gateway_response_code, gateway_response_text,\n            gateway_condition, payment_type, card_brand, card_last4,\n            card_exp_month, card_exp_year, charge_role, progression_state,\n            state_code, observed_at, applied_at, attempt_kind, plan_key,\n            host_charge_target_id, amount_cents, currency\n        )\n        SELECT\n            $2, id, billing_scope_id, gateway_account_id,\n            gateway_order_id, gateway_transaction_id,\n            gateway_payment_method_reference, gateway_response,\n            gateway_response_code, gateway_response_text,\n            gateway_condition, payment_type, card_brand, card_last4,\n            card_exp_month, card_exp_year, 'primary', 'applied',\n            'billing_scrub_fixture', now(), now(), attempt_kind, plan_key,\n            host_charge_target_id, amount_cents, currency\n        FROM billing_payment_attempts\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1efbd429be1cddbf77b1e8b8cb92c7622581a274256e042db95044c4dbef7cd6"
+}

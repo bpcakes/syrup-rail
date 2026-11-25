@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH candidate_attempts AS MATERIALIZED (\n            SELECT attempts.id AS attempt_id,\n                attempts.billing_scope_id,\n                attempts.subscriber_id,\n                attempts.host_charge_target_id AS target_id,\n                attempts.created_at,\n                attempts.updated_at AS claimed_order_at\n            FROM billing_payment_attempts AS attempts\n            WHERE attempts.gateway_account_id = $1\n                AND attempts.attempt_kind = 'host_charge'\n                AND attempts.status = ANY($2::text[])\n                AND attempts.submitted_at IS NULL\n                AND attempts.created_at <= clock_timestamp()\n                    - ($3::bigint * interval '1 second')\n                AND attempts.updated_at <= clock_timestamp()\n                    - ($4::bigint * interval '1 second')\n            ORDER BY attempts.updated_at, attempts.created_at, attempts.id\n            LIMIT $5\n            FOR UPDATE OF attempts SKIP LOCKED\n        ), claimed_attempts AS (\n            UPDATE billing_payment_attempts AS attempts\n            SET updated_at = clock_timestamp()\n            FROM candidate_attempts\n            WHERE attempts.id = candidate_attempts.attempt_id\n            RETURNING attempts.id\n        )\n        SELECT candidate_attempts.attempt_id,\n            candidate_attempts.billing_scope_id,\n            candidate_attempts.subscriber_id,\n            candidate_attempts.target_id\n        FROM candidate_attempts\n        INNER JOIN claimed_attempts\n            ON claimed_attempts.id = candidate_attempts.attempt_id\n        ORDER BY candidate_attempts.claimed_order_at,\n            candidate_attempts.created_at,\n            candidate_attempts.attempt_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "billing_scope_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "billing_scope_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "subscriber_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "subscriber_id"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "target_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "host_charge_target_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "62a60a1cb5b56dc2adbf319e74d5e337dbe69a6c98dba7b8883bc1c3099d53d9"
+}

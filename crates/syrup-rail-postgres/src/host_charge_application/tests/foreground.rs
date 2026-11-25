@@ -5,7 +5,7 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
 {
     let database = TestDatabase::start("rail_host_svc").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -23,7 +23,7 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -82,11 +82,11 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_payment_attempts \
              SET gateway_payment_method_reference = 'host_vault_durable' WHERE id = $1",
+            first.attempt().identity().attempt_id().into_uuid(),
         )
-        .bind(first.attempt().identity().attempt_id().as_uuid())
         .execute(&database.pool)
         .await?;
         let applied_reservation = HostChargeReservation::from_command(
@@ -121,26 +121,28 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
             applied_conflict.observation_diagnostics(),
             &[GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference]
         );
-        let applied_progression: String = sqlx::query_scalar(
+        let applied_progression: String = checked_query_scalar!(
             "SELECT progression_state FROM billing_processor_charges \
              WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            first.attempt().identity().attempt_id().into_uuid(),
+            "host_txn_approved",
         )
-        .bind(first.attempt().identity().attempt_id().as_uuid())
-        .bind("host_txn_approved")
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(applied_progression, "applied");
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_payment_attempts \
              SET gateway_payment_method_reference = 'host_vault_observed' WHERE id = $1",
+            first.attempt().identity().attempt_id().into_uuid(),
         )
-        .bind(first.attempt().identity().attempt_id().as_uuid())
         .execute(&database.pool)
         .await?;
-        sqlx::query("UPDATE host_charge_targets SET status = 'reversed' WHERE id = $1")
-            .bind(target_id)
-            .execute(&database.pool)
-            .await?;
+        crate::test_support::fixture_query(
+            "UPDATE host_charge_targets SET status = 'reversed' WHERE id = $1",
+        )
+        .bind(target_id)
+        .execute(&database.pool)
+        .await?;
         let duplicate_replay = processor_duplicate_outcome();
         let reconciled_replay = apply_reconciled_host_charge_gateway_outcome(
             &database.pool,
@@ -168,16 +170,17 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 1);
 
-        let target_status: String =
-            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
-                .bind(target_id)
-                .fetch_one(&database.pool)
-                .await?;
-        assert_eq!(target_status, "reversed");
-        let charge_state: String = sqlx::query_scalar(
-            "SELECT progression_state FROM billing_processor_charges WHERE attempt_id = $1",
+        let target_status: String = crate::test_support::fixture_query_scalar(
+            "SELECT status FROM host_charge_targets WHERE id = $1",
         )
-        .bind(first.attempt().identity().attempt_id().as_uuid())
+        .bind(target_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(target_status, "reversed");
+        let charge_state: String = checked_query_scalar!(
+            "SELECT progression_state FROM billing_processor_charges WHERE attempt_id = $1",
+            first.attempt().identity().attempt_id().into_uuid(),
+        )
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(charge_state, "applied");
@@ -221,25 +224,25 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
             terminal_approval.observation_diagnostics(),
             &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
         );
-        let terminal_approval_charge: String = sqlx::query_scalar(
+        let terminal_approval_charge: String = checked_query_scalar!(
             "SELECT progression_state FROM billing_processor_charges \
              WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            first.attempt().identity().attempt_id().into_uuid(),
+            "host_txn_late_approval",
         )
-        .bind(first.attempt().identity().attempt_id().as_uuid())
-        .bind("host_txn_late_approval")
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(terminal_approval_charge, "external_reversal_required");
 
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_processor_charges \
              SET progression_state = 'reconciliation_required', \
                  reconciliation_required_at = clock_timestamp(), \
                  external_reversal_required_at = NULL \
              WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            first.attempt().identity().attempt_id().into_uuid(),
+            "host_txn_late_approval",
         )
-        .bind(first.attempt().identity().attempt_id().as_uuid())
-        .bind("host_txn_late_approval")
         .execute(&database.pool)
         .await?;
         let promoted_terminal_approval = apply_reconciled_host_charge_gateway_outcome(
@@ -256,18 +259,18 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
             promoted_terminal_approval.observation_diagnostics(),
             &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
         );
-        let promoted_terminal_charge: String = sqlx::query_scalar(
+        let promoted_terminal_charge: String = checked_query_scalar!(
             "SELECT progression_state FROM billing_processor_charges \
              WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            first.attempt().identity().attempt_id().into_uuid(),
+            "host_txn_late_approval",
         )
-        .bind(first.attempt().identity().attempt_id().as_uuid())
-        .bind("host_txn_late_approval")
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(promoted_terminal_charge, "external_reversal_required");
 
         let conflicting_target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(conflicting_target_id)
@@ -350,12 +353,12 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
             conflict.observation_diagnostics(),
             &[GatewayPaymentDiagnostic::InvalidOrConflictingPaymentMethodReference]
         );
-        let conflict_state: (Option<String>, Option<String>, String) = sqlx::query_as(
+        let conflict_state: (Option<String>, Option<String>, String) = checked_query_as!(
             "SELECT gateway_transaction_id, gateway_payment_method_reference, \
                     progression_state \
              FROM billing_processor_charges WHERE attempt_id = $1",
+            conflicting_attempt_id.as_uuid(),
         )
-        .bind(conflicting_attempt_id.as_uuid())
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(
@@ -377,20 +380,21 @@ async fn foreground_host_charge_is_one_shot_atomic_and_replay_first() -> Result<
             fallback.observation_diagnostics(),
             &[GatewayPaymentDiagnostic::InvalidOrConflictingTransactionIdentifier]
         );
-        let fallback_charge_state: String = sqlx::query_scalar(
+        let fallback_charge_state: String = checked_query_scalar!(
             "SELECT progression_state FROM billing_processor_charges \
              WHERE attempt_id = $1 AND gateway_transaction_id = $2",
+            conflicting_attempt_id.as_uuid(),
+            "host_txn_fallback_conflict",
         )
-        .bind(conflicting_attempt_id.as_uuid())
-        .bind("host_txn_fallback_conflict")
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(fallback_charge_state, "reconciliation_required");
-        let target_status: String =
-            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
-                .bind(conflicting_target_id)
-                .fetch_one(&database.pool)
-                .await?;
+        let target_status: String = crate::test_support::fixture_query_scalar(
+            "SELECT status FROM host_charge_targets WHERE id = $1",
+        )
+        .bind(conflicting_target_id)
+        .fetch_one(&database.pool)
+        .await?;
         assert_eq!(target_status, "pending");
         let event_keys = events
             .lock()
@@ -418,18 +422,18 @@ async fn host_charge_persists_avs_allows_retry_after_decline_and_replays_cross_r
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("hc_avs_flow").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             "CREATE TABLE host_charge_targets (id uuid PRIMARY KEY, \
              billing_scope_id uuid NOT NULL, subscriber_id uuid NOT NULL, \
              status text NOT NULL, amount_cents integer NOT NULL, currency text NOT NULL, \
-             paid_at timestamptz)",
+             paid_at timestamptz)"
         )
         .execute(&database.pool)
         .await?;
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1500, 'USD', NULL)",
         )
         .bind(target_id)
@@ -515,7 +519,7 @@ async fn host_charge_persists_avs_allows_retry_after_decline_and_replays_cross_r
         // Reconciling a 0.6.0-style parked host charge (without AVS) with the
         // same approval carrying AVS replays the charge cleanly and stores AVS.
         let replay_target = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1500, 'USD', NULL)",
         )
         .bind(replay_target)

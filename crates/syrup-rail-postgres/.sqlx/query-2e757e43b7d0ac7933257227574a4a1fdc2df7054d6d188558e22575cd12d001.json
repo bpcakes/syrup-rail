@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH stale_attempts AS (\n            SELECT id\n            FROM billing_payment_attempts\n            WHERE subscription_id = $1\n                AND attempt_kind = 'subscription_payment_method_update'\n                AND status = ANY($2::text[])\n                AND submitted_at IS NULL\n                AND created_at <= now() - ($3::bigint * interval '1 second')\n            FOR UPDATE SKIP LOCKED\n        )\n        UPDATE billing_payment_attempts attempts\n        SET status = 'failed',\n            gateway_response_text = COALESCE(gateway_response_text, $4),\n            gateway_condition = COALESCE(gateway_condition, 'failed'),\n            resolved_at = now(),\n            updated_at = now()\n        FROM stale_attempts\n        WHERE attempts.id = stale_attempts.id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "TextArray",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2e757e43b7d0ac7933257227574a4a1fdc2df7054d6d188558e22575cd12d001"
+}

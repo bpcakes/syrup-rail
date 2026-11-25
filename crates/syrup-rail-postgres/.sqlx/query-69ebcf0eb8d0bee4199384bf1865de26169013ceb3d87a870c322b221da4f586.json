@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = $1 WHERE provider_key = 'frozen-provider'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "69ebcf0eb8d0bee4199384bf1865de26169013ceb3d87a870c322b221da4f586"
+}

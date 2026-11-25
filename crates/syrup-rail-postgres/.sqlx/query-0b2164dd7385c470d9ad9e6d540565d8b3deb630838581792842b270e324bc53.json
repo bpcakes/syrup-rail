@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT gateway_configuration_id FROM billing_gateway_accounts WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_configuration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "gateway_configuration_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0b2164dd7385c470d9ad9e6d540565d8b3deb630838581792842b270e324bc53"
+}

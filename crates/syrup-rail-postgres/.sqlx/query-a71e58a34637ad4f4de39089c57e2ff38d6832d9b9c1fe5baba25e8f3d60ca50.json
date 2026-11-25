@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET status = 'failed', resolution_code = $2,\n                resolved_at = $3, updated_at = $3\n            WHERE id = $1 AND status = $4\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a71e58a34637ad4f4de39089c57e2ff38d6832d9b9c1fe5baba25e8f3d60ca50"
+}

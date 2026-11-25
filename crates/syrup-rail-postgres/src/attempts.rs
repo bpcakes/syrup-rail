@@ -1,10 +1,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use sqlx::{
-    PgConnection, Postgres, Row, Transaction,
-    postgres::{PgArguments, PgRow},
-};
+use sqlx::{PgConnection, Postgres, Row, Transaction, postgres::PgRow};
 use syrup_rail::{
     BillingAddress, BillingContactSnapshot, BillingPeriod, BillingScopeId, ChargeAmount,
     CumulativeRefundCents, CurrencyCode, DiscountClaimId, DiscountCodeId, GatewayAccountId,
@@ -67,9 +64,9 @@ pub use payment_method_replacement::{
 pub(crate) use persistence::find_payment_attempt_by_idempotency_in_transaction;
 use persistence::map_subscription_persistence_error;
 pub(crate) use persistence::{
-    BindBillingAddress, PAYMENT_ATTEMPT_SELECT, billing_address_from_row,
-    find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
-    payment_attempt_from_row, processor_evidence_from_row,
+    billing_address_columns, billing_address_from_row, find_payment_attempt_by_id_on_connection,
+    lock_payment_attempt_by_id_on_connection, payment_attempt_columns_query,
+    payment_attempt_from_row, payment_attempt_query, processor_evidence_from_row,
 };
 pub use persistence::{
     find_payment_attempt_by_id_in_transaction, lock_payment_attempt_by_idempotency_in_transaction,

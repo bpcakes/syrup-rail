@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO billing_payment_attempts (\n                required_gateway_account_mode,\n                id, billing_scope_id, subscriber_id, plan_key,\n                subscription_id, payment_method_id, attempt_kind, status,\n                idempotency_key, request_fingerprint, amount_cents, currency,\n                billing_period_start_at, billing_period_end_at,\n                gateway_account_id, gateway_configuration_id, gateway_order_id,\n                gateway_transaction_id, submitted_at, resolved_at,\n                subscription_expected_payment_method_id,\n                subscription_expected_initial_transaction_id,\n                subscription_expected_status\n            ) VALUES (\n                'live',\n                $1, $2, $3, 'premium', $4, $5,\n                'subscription_recovery', 'approved', $6, $7, 1000, 'USD',\n                $8, $9, $10, $11, $12, 'txn-recovery', now(), now(),\n                $13, 'txn-initial', 'past_due'\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e1888f1847041e4f8561ca2070a3ad3b4dbf0497d584e07daa565fe4f8643c2a"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            CREATE TABLE host_subscription_offers (\n                billing_scope_id uuid NOT NULL,\n                plan_key text NOT NULL,\n                amount_cents integer NOT NULL,\n                currency text NOT NULL,\n                PRIMARY KEY (billing_scope_id, plan_key)\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "8fefd6b4d4cc2990bb706c2bc142a51e32de0b5b5cf2d228c392075cf8394f5c"
+}

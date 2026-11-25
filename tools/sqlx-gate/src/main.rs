@@ -97,6 +97,7 @@ fn load_install_sql(crate_root: &Path) -> Result<&'static str, String> {
     }
 }
 
+#[allow(clippy::disallowed_methods)] // Install the schema before describing its queries.
 async fn run_gate(
     crate_root: &Path,
     database_url: &str,

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM billing_payment_attempts AS attempts\n            INNER JOIN billing_subscriptions AS subscriptions\n                ON subscriptions.id = attempts.subscription_id\n            WHERE attempts.subscription_id = $1\n                AND attempts.id <> $2\n                AND attempts.attempt_kind IN ('subscription_renewal', 'subscription_recovery')\n                AND (\n                    attempts.status IN ('pending', 'unknown', 'review_required')\n                    OR (\n                        attempts.status = 'approved'\n                        AND attempts.billing_period_start_at = subscriptions.next_renewal_at\n                    )\n                )\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "61a76862990f365e9ee02a3f91498c0a61c9f9183e591c0e338a54e105da7d14"
+}

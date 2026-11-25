@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_payment_attempts (\n            id, billing_scope_id, subscriber_id, host_charge_target_id,\n            attempt_kind, status, idempotency_key, request_fingerprint,\n            amount_cents, currency, gateway_account_id,\n            gateway_configuration_id, gateway_order_id,\n            billing_first_name, billing_last_name, billing_email,\n            required_gateway_account_mode,\n            billing_address_line1, billing_address_line2, billing_address_city,\n            billing_address_region, billing_address_postal_code, billing_address_country\n        ) VALUES (\n            $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,\n            $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,\n            $20, $21\n        )\n        ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0ec316e78aba6a47cf4fdd7dfddb4c1fc291b440f6c418882d8e2f3c6c0d51a1"
+}

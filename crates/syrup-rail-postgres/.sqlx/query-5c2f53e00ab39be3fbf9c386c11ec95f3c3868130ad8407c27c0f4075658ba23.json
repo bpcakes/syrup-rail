@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO billing_payment_attempts (\n                required_gateway_account_mode,\n                id, billing_scope_id, subscriber_id, plan_key,\n                attempt_kind, status, idempotency_key, request_fingerprint,\n                amount_cents, currency, gateway_account_id,\n                gateway_configuration_id, gateway_order_id,\n                gateway_transaction_id, gateway_response, gateway_response_code,\n                gateway_response_text, gateway_condition, resolution_code,\n                submitted_at, review_required_at,\n                subscription_initial_terms_version,\n                subscription_initial_start_kind,\n                subscription_initial_recurring_base_amount_cents,\n                subscription_initial_recurring_period_kind,\n                subscription_initial_recurring_period_count,\n                subscription_initial_dunning_retry_delays_seconds,\n                subscription_initial_dunning_exhaustion,\n                subscription_initial_past_due_access\n            ) VALUES (\n                'live',\n                $1, $2, $3, 'base', 'subscription_initial', 'review_required',\n                $4, $5, 500, 'USD', $6, $7, $8, 'txn-grant-conflict',\n                '1', '100', 'Approved', 'complete',\n                'subscription_initial_current_grant_conflict',\n                clock_timestamp(), clock_timestamp(), 2, 'recurring_immediately',\n                500, 'calendar_months', 1, ARRAY[]::bigint[],\n                'remain_past_due', 'suspend_immediately'\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5c2f53e00ab39be3fbf9c386c11ec95f3c3868130ad8407c27c0f4075658ba23"
+}

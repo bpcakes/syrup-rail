@@ -1,4 +1,5 @@
 use super::*;
+use crate::attempts::payment_attempt_query;
 use syrup_rail::{
     BillingEvent, RenewalDeclineRetryAdvice, RenewalFailureDisposition,
     SubscriptionPaymentFailureDisposition,
@@ -268,7 +269,8 @@ async fn lock_retryable_subscription(
     let period = target
         .period()
         .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
-    Ok(sqlx::query_scalar::<_, Uuid>(
+    Ok(checked_query_scalar!(
+        Uuid,
         r#"
         SELECT id FROM billing_subscriptions
         WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
@@ -277,11 +279,11 @@ async fn lock_retryable_subscription(
             AND next_payment_attempt_at IS NOT NULL
         FOR NO KEY UPDATE
         "#,
+        subscription_id.as_uuid(),
+        attempt.identity().billing_scope_id().into_uuid(),
+        attempt.identity().subscriber_id().into_uuid(),
+        period.start_at(),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(attempt.identity().billing_scope_id().as_uuid())
-    .bind(attempt.identity().subscriber_id().as_uuid())
-    .bind(period.start_at())
     .fetch_optional(connection)
     .await?
     .is_some())
@@ -300,7 +302,8 @@ async fn expedite_retry(
     let period = target
         .period()
         .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
-    let retry_at = sqlx::query_scalar::<_, DateTime<Utc>>(
+    let retry_at = checked_query_scalar!(
+        DateTime<Utc>,
         r#"
         UPDATE billing_subscriptions
         SET next_payment_attempt_at = LEAST(next_payment_attempt_at, clock_timestamp()),
@@ -310,12 +313,12 @@ async fn expedite_retry(
             AND next_renewal_at = $4 AND next_payment_attempt_at = $5
         RETURNING next_payment_attempt_at
         "#,
+        subscription_id.as_uuid(),
+        attempt.identity().billing_scope_id().into_uuid(),
+        attempt.identity().subscriber_id().into_uuid(),
+        period.start_at(),
+        scheduled_at,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(attempt.identity().billing_scope_id().as_uuid())
-    .bind(attempt.identity().subscriber_id().as_uuid())
-    .bind(period.start_at())
-    .bind(scheduled_at)
     .fetch_optional(connection)
     .await?
     .ok_or(OperatorReviewError::InvalidState(INVALID_OPERATOR_STATE))?;
@@ -345,12 +348,12 @@ async fn payment_attempt_by_id(
     pool: &PgPool,
     attempt_id: PaymentAttemptId,
 ) -> Result<Option<PaymentAttempt>, OperatorReviewError> {
-    let query = format!("{} WHERE id = $1", crate::attempts::PAYMENT_ATTEMPT_SELECT);
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let row = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(attempt_id.as_uuid())
-        .fetch_optional(pool)
-        .await?;
+    let row = payment_attempt_query!(
+        "", " WHERE id = $1";
+        attempt_id.as_uuid(),
+    )
+    .fetch_optional(pool)
+    .await?;
     row.as_ref()
         .map(payment_attempt_from_row)
         .transpose()
@@ -362,7 +365,7 @@ async fn processor_charge_blocks_failure(
     attempt_id: PaymentAttemptId,
     mode: ManualFailureMode<'_>,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         SELECT EXISTS (
             SELECT 1
@@ -373,9 +376,9 @@ async fn processor_charge_blocks_failure(
                 ))
         )
         "#,
+        attempt_id.as_uuid(),
+        matches!(mode, ManualFailureMode::RetryRenewal),
     )
-    .bind(attempt_id.as_uuid())
-    .bind(matches!(mode, ManualFailureMode::RetryRenewal))
     .fetch_one(&mut *connection)
     .await
 }
@@ -388,7 +391,7 @@ async fn update_attempt_for_manual_failure(
     let descriptor = evidence.descriptor();
     let avs_response = evidence.avs_response();
     let avs_response = avs_response.as_ref().map(GatewayAvsResponse::as_str);
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed',
@@ -408,28 +411,24 @@ async fn update_attempt_for_manual_failure(
             updated_at = clock_timestamp()
         WHERE id = $1 AND status = 'review_required'
         "#,
-    )
-    .bind(attempt.identity().attempt_id().as_uuid())
-    .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
-    .bind(
+        attempt.identity().attempt_id().into_uuid(),
+        evidence.transaction_id().map(GatewayTransactionId::expose),
         evidence
             .payment_method_reference()
             .map(GatewayPaymentMethodReference::expose),
-    )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(
+        evidence.response().map(GatewayDiagnostic::expose),
+        evidence.response_code().map(GatewayDiagnostic::expose),
+        evidence.response_text().map(GatewayDiagnostic::expose),
+        evidence.condition().map(GatewayDiagnostic::expose),
+        descriptor.payment_type().map(GatewayDiagnostic::expose),
+        descriptor.card_brand().map(GatewayDiagnostic::expose),
         descriptor
             .card_last_four()
             .map(syrup_rail::CardLastFour::expose),
+        descriptor.card_exp_month(),
+        descriptor.card_exp_year(),
+        avs_response,
     )
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .bind(avs_response)
     .execute(&mut *connection)
     .await?;
     Ok(result.rows_affected())

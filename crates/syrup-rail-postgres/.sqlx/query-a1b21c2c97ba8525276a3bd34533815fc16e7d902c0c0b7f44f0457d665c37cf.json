@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT attempt_kind, host_charge_target_id, amount_cents, currency, progression_state FROM billing_processor_charges WHERE attempt_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "host_charge_target_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "host_charge_target_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "progression_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "progression_state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "a1b21c2c97ba8525276a3bd34533815fc16e7d902c0c0b7f44f0457d665c37cf"
+}

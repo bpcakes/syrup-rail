@@ -92,7 +92,7 @@ pub(crate) async fn persist_attempt_transition(
         message,
     } = transition
     {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'review_required',
@@ -100,7 +100,7 @@ pub(crate) async fn persist_attempt_transition(
                 gateway_payment_method_reference = $3,
                 gateway_response = $4, gateway_response_code = $5,
                 gateway_response_text = CASE
-                    WHEN $6 IS NULL THEN $14
+                    WHEN $6::text IS NULL THEN $14
                     ELSE left($14 || ' ' || $6, 512)
                 END,
                 gateway_condition = $7,
@@ -113,26 +113,24 @@ pub(crate) async fn persist_attempt_transition(
             WHERE id = $1
                 AND status IN ('pending', 'unknown', 'review_required', 'declined', 'failed')
             "#,
-        )
-        .bind(attempt.identity().attempt_id().as_uuid())
-        .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
-        .bind(
+            attempt.identity().attempt_id().into_uuid(),
+            evidence.transaction_id().map(GatewayTransactionId::expose),
             evidence
                 .payment_method_reference()
                 .map(|value| value.expose()),
+            evidence.response().map(GatewayDiagnostic::expose),
+            evidence.response_code().map(GatewayDiagnostic::expose),
+            evidence.response_text().map(GatewayDiagnostic::expose),
+            evidence.condition().map(GatewayDiagnostic::expose),
+            descriptor.payment_type().map(GatewayDiagnostic::expose),
+            descriptor.card_brand().map(GatewayDiagnostic::expose),
+            descriptor.card_last_four().map(|value| value.expose()),
+            descriptor.card_exp_month(),
+            descriptor.card_exp_year(),
+            resolution_code.map(PaymentResolutionCode::as_str),
+            message,
+            avs_response,
         )
-        .bind(evidence.response().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-        .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-        .bind(evidence.condition().map(GatewayDiagnostic::expose))
-        .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-        .bind(descriptor.card_last_four().map(|value| value.expose()))
-        .bind(descriptor.card_exp_month())
-        .bind(descriptor.card_exp_year())
-        .bind(resolution_code.map(PaymentResolutionCode::as_str))
-        .bind(message)
-        .bind(avs_response)
         .execute(&mut *connection)
         .await?;
         if result.rows_affected() != 1 {
@@ -163,7 +161,7 @@ pub(crate) async fn persist_attempt_transition(
         } => (status.payment_status(), resolution_code, None, None),
         AttemptTransition::LateApprovalReview { .. } => unreachable!(),
     };
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = $2,
@@ -184,28 +182,26 @@ pub(crate) async fn persist_attempt_transition(
             updated_at = clock_timestamp()
         WHERE id = $1 AND status IN ('pending', 'unknown', 'review_required')
         "#,
-    )
-    .bind(attempt.identity().attempt_id().as_uuid())
-    .bind(status.as_str())
-    .bind(subscription_id.map(SubscriptionId::into_uuid))
-    .bind(payment_method_id.map(PaymentMethodId::into_uuid))
-    .bind(evidence.transaction_id().map(GatewayTransactionId::expose))
-    .bind(
+        attempt.identity().attempt_id().into_uuid(),
+        status.as_str(),
+        subscription_id.map(SubscriptionId::into_uuid),
+        payment_method_id.map(PaymentMethodId::into_uuid),
+        evidence.transaction_id().map(GatewayTransactionId::expose),
         evidence
             .payment_method_reference()
             .map(|value| value.expose()),
+        evidence.response().map(GatewayDiagnostic::expose),
+        evidence.response_code().map(GatewayDiagnostic::expose),
+        evidence.response_text().map(GatewayDiagnostic::expose),
+        evidence.condition().map(GatewayDiagnostic::expose),
+        descriptor.payment_type().map(GatewayDiagnostic::expose),
+        descriptor.card_brand().map(GatewayDiagnostic::expose),
+        descriptor.card_last_four().map(|value| value.expose()),
+        descriptor.card_exp_month(),
+        descriptor.card_exp_year(),
+        resolution_code.map(PaymentResolutionCode::as_str),
+        avs_response,
     )
-    .bind(evidence.response().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_code().map(GatewayDiagnostic::expose))
-    .bind(evidence.response_text().map(GatewayDiagnostic::expose))
-    .bind(evidence.condition().map(GatewayDiagnostic::expose))
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .bind(resolution_code.map(PaymentResolutionCode::as_str))
-    .bind(avs_response)
     .execute(connection)
     .await?;
     if result.rows_affected() != 1 {
@@ -222,10 +218,10 @@ pub(crate) async fn admit_prepared_attempt(
     attempt: &PaymentAttempt,
 ) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
     let identity = attempt.identity();
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         "UPDATE billing_payment_attempts SET submitted_at = clock_timestamp(), updated_at = clock_timestamp() WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL",
+        identity.attempt_id().into_uuid(),
     )
-    .bind(identity.attempt_id().as_uuid())
     .execute(&mut **transaction)
     .await?;
     if updated.rows_affected() != 1 {
@@ -248,7 +244,7 @@ pub(super) async fn reject_prepared_attempt(
     resolution_code: PaymentResolutionCode,
     message: &'static str,
 ) -> Result<PaymentAttempt, PaymentAttemptStoreError> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET status = 'failed', resolution_code = $2,
@@ -257,10 +253,10 @@ pub(super) async fn reject_prepared_attempt(
             updated_at = clock_timestamp()
         WHERE id = $1 AND status = 'pending' AND submitted_at IS NULL
         "#,
+        attempt.identity().attempt_id().into_uuid(),
+        resolution_code.as_str(),
+        message,
     )
-    .bind(attempt.identity().attempt_id().as_uuid())
-    .bind(resolution_code.as_str())
-    .bind(message)
     .execute(&mut **transaction)
     .await?;
     find_payment_attempt_by_id_in_transaction(

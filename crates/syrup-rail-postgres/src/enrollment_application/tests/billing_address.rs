@@ -1,7 +1,10 @@
 //! Schema-v5 billing-address persistence across enrollment, recovery, replacement,
 //! renewal reservation and submission, replay, and subscriber scrubbing.
 
+mod fixtures;
 mod recovery;
+
+use fixtures::{current_method, method_address};
 
 use std::time::Duration;
 
@@ -119,42 +122,12 @@ fn declined_store_outcome(transaction_id: &str) -> GatewayPaymentOutcome {
     )
 }
 
-async fn method_address(
-    pool: &sqlx::PgPool,
-    payment_method_id: PaymentMethodId,
-) -> Result<AddressColumns, sqlx::Error> {
-    sqlx::query_as(
-        r#"
-        SELECT billing_address_line1, billing_address_line2, billing_address_city,
-            billing_address_region, billing_address_postal_code, billing_address_country
-        FROM billing_payment_methods
-        WHERE id = $1
-        "#,
-    )
-    .bind(payment_method_id.as_uuid())
-    .fetch_one(pool)
-    .await
-}
-
-async fn current_method(
-    pool: &sqlx::PgPool,
-    subscription_id: SubscriptionId,
-) -> Result<PaymentMethodId, sqlx::Error> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT payment_method_id FROM billing_subscriptions WHERE id = $1",
-    )
-    .bind(subscription_id.as_uuid())
-    .fetch_one(pool)
-    .await
-    .map(PaymentMethodId::new)
-}
-
 /// Makes the subscription's next renewal due and returns its period start.
 pub(super) async fn make_renewal_due(
     pool: &sqlx::PgPool,
     subscription_id: SubscriptionId,
 ) -> Result<DateTime<Utc>, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         r#"
         UPDATE billing_subscriptions
         SET current_period_start_at = now() - interval '1 month 1 hour',
@@ -165,8 +138,8 @@ pub(super) async fn make_renewal_due(
         WHERE id = $1
         RETURNING next_renewal_at
         "#,
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(pool)
     .await
 }
@@ -252,7 +225,7 @@ async fn reserve_renewal(
 /// Waits until exactly `count` sessions are blocked on an advisory lock.
 async fn wait_for_advisory_waiters(pool: &sqlx::PgPool, count: i64) -> Result<(), Box<dyn Error>> {
     for _ in 0..500 {
-        let waiting: i64 = sqlx::query_scalar(
+        let waiting: i64 = checked_query_scalar!(
             r#"
             SELECT count(*)
             FROM pg_locks
@@ -351,7 +324,7 @@ async fn reserved_renewal_submits_its_snapshot_after_the_method_address_changes(
     let newer = address("9 Newer Rd");
     let method_id = current_method(&fixture.database.pool, subscription_id).await?;
     let newer_columns = columns(&newer);
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_methods
         SET billing_address_line1 = $2, billing_address_line2 = $3,
@@ -359,14 +332,14 @@ async fn reserved_renewal_submits_its_snapshot_after_the_method_address_changes(
             billing_address_postal_code = $6, billing_address_country = $7
         WHERE id = $1
         "#,
+        method_id.as_uuid(),
+        newer_columns.0,
+        newer_columns.1,
+        newer_columns.2,
+        newer_columns.3,
+        newer_columns.4,
+        newer_columns.5,
     )
-    .bind(method_id.as_uuid())
-    .bind(newer_columns.0)
-    .bind(newer_columns.1)
-    .bind(newer_columns.2)
-    .bind(newer_columns.3)
-    .bind(newer_columns.4)
-    .bind(newer_columns.5)
     .execute(&fixture.database.pool)
     .await?;
 
@@ -406,10 +379,12 @@ async fn renewal_without_an_active_method_stores_no_address_and_admission_fails_
     )
     .await?;
     let method_id = current_method(&fixture.database.pool, subscription_id).await?;
-    sqlx::query("UPDATE billing_payment_methods SET status = 'disabled' WHERE id = $1")
-        .bind(method_id.as_uuid())
-        .execute(&fixture.database.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_payment_methods SET status = 'disabled' WHERE id = $1",
+        method_id.as_uuid(),
+    )
+    .execute(&fixture.database.pool)
+    .await?;
 
     let (reservation, attempt) = reserve_renewal(&fixture, subscription_id).await?;
     assert_eq!(attempt.request().billing_contact().address(), None);
@@ -517,11 +492,12 @@ async fn same_reference_approval_replaces_or_keeps_the_whole_address() -> Result
         method_address(&fixture.database.pool, method_id).await?,
         columns(&home)
     );
-    let name: Option<String> =
-        sqlx::query_scalar("SELECT billing_name FROM billing_payment_methods WHERE id = $1")
-            .bind(method_id.as_uuid())
-            .fetch_one(&fixture.database.pool)
-            .await?;
+    let name: Option<String> = checked_query_scalar!(
+        "SELECT billing_name FROM billing_payment_methods WHERE id = $1",
+        method_id.as_uuid(),
+    )
+    .fetch_one(&fixture.database.pool)
+    .await?;
     assert_eq!(name.as_deref(), Some("Grace Hopper"));
 
     // A sparser address replaces the whole value; no old field survives.
@@ -662,7 +638,7 @@ async fn assert_subscriber_address_pii_cleared(
     pool: &sqlx::PgPool,
     subscriber_id: SubscriberId,
 ) -> Result<(), Box<dyn Error>> {
-    let remaining: i64 = sqlx::query_scalar(
+    let remaining: i64 = checked_query_scalar!(
         r#"
         SELECT
             (SELECT count(*) FROM billing_payment_methods
@@ -677,8 +653,8 @@ async fn assert_subscriber_address_pii_cleared(
                     billing_address_region, billing_address_postal_code,
                     billing_address_country) <> 0)
         "#,
+        subscriber_id.as_uuid(),
     )
-    .bind(subscriber_id.as_uuid())
     .fetch_one(pool)
     .await?;
     assert_eq!(
@@ -861,8 +837,8 @@ async fn renewal_reservation_rejects_an_account_changed_between_locator_and_lock
     let pool = &fixture.database.pool;
     // Shipped schemas allow one account per scope, so an account switch needs
     // this test-only relaxation to reach the defensive locator check.
-    sqlx::raw_sql(
-        "ALTER TABLE billing_gateway_accounts DROP CONSTRAINT billing_gateway_accounts_scope_key",
+    sqlx::query!(
+        "ALTER TABLE billing_gateway_accounts DROP CONSTRAINT billing_gateway_accounts_scope_key"
     )
     .execute(pool)
     .await?;
@@ -871,27 +847,27 @@ async fn renewal_reservation_rejects_an_account_changed_between_locator_and_lock
         gateway_account_id: Uuid::now_v7(),
         gateway_configuration_id: Uuid::now_v7(),
     };
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO billing_gateway_accounts (id, billing_scope_id, provider_key, gateway_configuration_id) VALUES ($1, $2, 'nmi', $3)",
+        switched.gateway_account_id,
+        switched.billing_scope_id,
+        switched.gateway_configuration_id,
     )
-    .bind(switched.gateway_account_id)
-    .bind(switched.billing_scope_id)
-    .bind(switched.gateway_configuration_id)
     .execute(pool)
     .await?;
     let switched_method = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
             gateway_payment_method_reference, status
         ) VALUES ($1, $2, $3, $4, 'vault_switched', 'active')
         "#,
+        switched_method,
+        switched.billing_scope_id,
+        fixture.command.subscriber_id().into_uuid(),
+        switched.gateway_account_id,
     )
-    .bind(switched_method)
-    .bind(switched.billing_scope_id)
-    .bind(fixture.command.subscriber_id().as_uuid())
-    .bind(switched.gateway_account_id)
     .execute(pool)
     .await?;
 
@@ -925,15 +901,15 @@ async fn renewal_reservation_rejects_an_account_changed_between_locator_and_lock
     wait_for_advisory_waiters(pool, 1).await?;
     // Historical attempts pin the account through foreign keys; skip their
     // referential triggers for this single simulated switch.
-    sqlx::query("SET LOCAL session_replication_role = replica")
+    sqlx::query!("SET LOCAL session_replication_role = replica")
         .execute(&mut *holder)
         .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET gateway_account_id = $2, payment_method_id = $3 WHERE id = $1",
+        subscription_id.as_uuid(),
+        switched.gateway_account_id,
+        switched_method,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(switched.gateway_account_id)
-    .bind(switched_method)
     .execute(&mut *holder)
     .await?;
     holder.commit().await?;
@@ -943,10 +919,10 @@ async fn renewal_reservation_rejects_an_account_changed_between_locator_and_lock
             SubscriptionRenewalReservationRejection::GatewayConfigurationChanged
         )
     );
-    let renewals: i64 = sqlx::query_scalar(
+    let renewals: i64 = checked_query_scalar!(
         "SELECT count(*) FROM billing_payment_attempts WHERE subscription_id = $1 AND attempt_kind = 'subscription_renewal'",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(pool)
     .await?;
     assert_eq!(renewals, 0);

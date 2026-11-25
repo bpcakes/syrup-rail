@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT charges.charge_role,\n            billing_canonical_gateway_transaction_id(\n                charges.gateway_transaction_id\n            ) AS transaction_id,\n            CASE\n                WHEN billing_canonical_gateway_transaction_id(\n                    attempts.gateway_transaction_id\n                ) IS NOT NULL\n                    AND billing_canonical_gateway_transaction_id(\n                        charges.gateway_transaction_id\n                    ) IS NOT NULL\n                THEN billing_canonical_gateway_transaction_id(\n                    attempts.gateway_transaction_id\n                ) = billing_canonical_gateway_transaction_id(\n                    charges.gateway_transaction_id\n                )\n                WHEN billing_canonical_gateway_transaction_id(\n                    attempts.gateway_transaction_id\n                ) IS NULL\n                    AND billing_canonical_gateway_transaction_id(\n                        charges.gateway_transaction_id\n                    ) IS NULL\n                THEN attempts.gateway_order_id = charges.gateway_order_id\n                    AND attempts.gateway_payment_method_reference\n                        IS NOT DISTINCT FROM charges.gateway_payment_method_reference\n                    AND attempts.gateway_response\n                        IS NOT DISTINCT FROM charges.gateway_response\n                    AND attempts.gateway_response_code\n                        IS NOT DISTINCT FROM charges.gateway_response_code\n                    AND attempts.gateway_response_text\n                        IS NOT DISTINCT FROM charges.gateway_response_text\n                    AND attempts.gateway_condition\n                        IS NOT DISTINCT FROM charges.gateway_condition\n                    AND attempts.payment_type IS NOT DISTINCT FROM charges.payment_type\n                    AND attempts.card_brand IS NOT DISTINCT FROM charges.card_brand\n                    AND attempts.card_last4 IS NOT DISTINCT FROM charges.card_last4\n                    AND attempts.card_exp_month\n                        IS NOT DISTINCT FROM charges.card_exp_month\n                    AND attempts.card_exp_year\n                        IS NOT DISTINCT FROM charges.card_exp_year\n                ELSE false\n            END AS same_charge,\n            charges.attempt_id = attempts.id\n                AND charges.billing_scope_id = attempts.billing_scope_id\n                AND charges.gateway_account_id = attempts.gateway_account_id\n                AND charges.gateway_order_id = attempts.gateway_order_id\n                AND charges.attempt_kind = attempts.attempt_kind\n                AND charges.plan_key IS NOT DISTINCT FROM attempts.plan_key\n                AND charges.host_charge_target_id\n                    IS NOT DISTINCT FROM attempts.host_charge_target_id\n                AND charges.amount_cents = attempts.amount_cents\n                AND charges.currency = attempts.currency AS dimensions_match\n        FROM billing_processor_charges charges\n        INNER JOIN billing_payment_attempts attempts\n            ON attempts.id = charges.attempt_id\n        WHERE charges.id = $1 AND attempts.id = $2\n            AND charges.progression_state = 'pending'\n        FOR UPDATE OF charges SKIP LOCKED\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "charge_role",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "charge_role"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "transaction_id",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "same_charge",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "dimensions_match",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "4e06e58e8a12839b8e34ae74c2db1b010a2875a2e06a32cf49341cefa535db08"
+}

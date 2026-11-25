@@ -81,7 +81,7 @@ impl SubscriptionOfferStore for TestOfferStore {
         billing_scope_id: BillingScopeId,
         plan_key: &PlanKey,
     ) -> Result<Option<SubscriptionOffer>, sqlx::Error> {
-        let row = sqlx::query(
+        let row = crate::test_support::fixture_query(
             r#"
                 SELECT amount_cents, currency, recurring_period_kind,
                     recurring_period_count
@@ -157,7 +157,7 @@ async fn quote_validation_uses_the_callers_connection_and_blocks_price_updates()
             let pool = database.pool.clone();
             let plan_for_update = plan.clone();
             let mut update = tokio::spawn(async move {
-                sqlx::query(
+                crate::test_support::fixture_query(
                     "UPDATE test_subscription_offers SET amount_cents = 6900 WHERE billing_scope_id = $1 AND plan_key = $2",
                 )
                 .bind(scope.as_uuid())
@@ -171,7 +171,7 @@ async fn quote_validation_uses_the_callers_connection_and_blocks_price_updates()
             transaction.commit().await?;
             update.await??;
 
-            let amount: i32 = sqlx::query_scalar(
+            let amount: i32 = crate::test_support::fixture_query_scalar(
                 "SELECT amount_cents FROM test_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
             )
             .bind(scope.as_uuid())
@@ -220,10 +220,10 @@ async fn discount_code_and_claim_policy_is_exact_plan_scoped_and_snapshot_preser
         ) {
             return Err(io::Error::other("invalid offer-relative terms were accepted").into());
         }
-        let invalid_count: i64 = sqlx::query_scalar(
+        let invalid_count: i64 = checked_query_scalar!(
             "SELECT count(*) FROM billing_subscription_discount_codes WHERE id = $1",
+            invalid_id.as_uuid(),
         )
-        .bind(invalid_id.as_uuid())
         .fetch_one(&database.pool)
         .await?;
         if invalid_count != 0 {
@@ -379,7 +379,7 @@ async fn historical_code_records_remain_listable_and_disableable_after_cadence_d
         )?;
         create_subscription_discount_code(&database.pool, &TestOfferStore, &creation).await?;
 
-        sqlx::query(
+        crate::test_support::fixture_query(
             r#"
                 UPDATE test_subscription_offers
                 SET recurring_period_kind = 'fixed_days', recurring_period_count = 30
@@ -499,7 +499,7 @@ async fn clear_is_blocked_by_an_exact_plan_initial_attempt() -> Result<(), Box<d
 }
 
 async fn create_offer_table(pool: &PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
             CREATE TABLE test_subscription_offers (
                 billing_scope_id uuid NOT NULL,
@@ -523,7 +523,7 @@ async fn insert_offer(
     plan: &PlanKey,
     amount_cents: i32,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    crate::test_support::fixture_query(
             "INSERT INTO test_subscription_offers (billing_scope_id, plan_key, amount_cents, currency) VALUES ($1, $2, $3, 'USD')",
         )
         .bind(scope.as_uuid())
@@ -543,7 +543,7 @@ async fn insert_pending_initial_attempt(
     gateway_configuration: Uuid,
 ) -> Result<(), sqlx::Error> {
     let attempt = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -566,16 +566,16 @@ async fn insert_pending_initial_attempt(
                 'remain_past_due', 'suspend_immediately'
             )
             "#,
+        attempt,
+        scope,
+        subscriber,
+        plan,
+        format!("discount-{}", attempt.simple()),
+        format!("initial:{plan}:100:USD"),
+        gateway_account,
+        gateway_configuration,
+        format!("discount-order-{}", attempt.simple()),
     )
-    .bind(attempt)
-    .bind(scope)
-    .bind(subscriber)
-    .bind(plan)
-    .bind(format!("discount-{}", attempt.simple()))
-    .bind(format!("initial:{plan}:100:USD"))
-    .bind(gateway_account)
-    .bind(gateway_configuration)
-    .bind(format!("discount-order-{}", attempt.simple()))
     .execute(pool)
     .await?;
     Ok(())

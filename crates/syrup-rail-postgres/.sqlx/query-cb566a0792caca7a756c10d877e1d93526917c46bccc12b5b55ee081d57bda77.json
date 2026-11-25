@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT card_exp_month, card_exp_year FROM billing_processor_charges WHERE attempt_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "card_exp_month",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "card_exp_month"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "card_exp_year",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "card_exp_year"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "cb566a0792caca7a756c10d877e1d93526917c46bccc12b5b55ee081d57bda77"
+}

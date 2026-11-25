@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET status = 'review_required',\n                gateway_response_text = 'legacy empty exact-query observation'\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2a0fa812c83e1dc06c25accbc8d72ba63e12d56a69b69910d0bd976334d2b56f"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_external_reversal_attestations (\n            attempt_id, processor_charge_id, actor_id, reversal_kind, reason,\n            prior_resolution_code, final_resolution_code, gateway_account_id,\n            gateway_configuration_id, gateway_order_id, amount_cents, currency,\n            gateway_transaction_id, attested_at\n        ) VALUES (\n            $1, $2, $3, 'refund', 'operator confirmed full refund', $4,\n            'processor_charge_externally_refunded', $5, $6, $7, 100, 'USD', $8,\n            clock_timestamp()\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "878f539887c187bb3a555c83c931dddd3bc6f71f961554fadc2b41e4fdfa1a6f"
+}

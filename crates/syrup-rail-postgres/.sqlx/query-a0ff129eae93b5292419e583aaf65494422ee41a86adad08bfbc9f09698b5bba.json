@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscriptions\n        SET current_period_start_at = now() - interval '1 month 1 hour',\n            current_period_end_at = now() - interval '1 hour',\n            next_renewal_at = now() - interval '1 hour',\n            next_payment_attempt_at = now() - interval '1 hour',\n            updated_at = clock_timestamp()\n        WHERE id = $1\n        RETURNING next_renewal_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_renewal_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_renewal_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a0ff129eae93b5292419e583aaf65494422ee41a86adad08bfbc9f09698b5bba"
+}

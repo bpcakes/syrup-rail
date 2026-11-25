@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_methods\n            SET gateway_payment_method_reference = 'portal-method-reference-secret',\n                billing_name = 'Portal Private Name',\n                billing_email = 'portal-private@example.test'\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "72514d57513d8ea006568e77baf409cd14cfdfb3bd154dce94eef14dbd5bc713"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_methods AS methods\n        SET status = 'disabled', updated_at = clock_timestamp()\n        WHERE methods.id = $1 AND methods.status = 'active'\n            AND NOT EXISTS (\n                SELECT 1 FROM billing_subscriptions AS subscriptions\n                WHERE subscriptions.payment_method_id = methods.id\n                    AND subscriptions.status IN ('active', 'past_due')\n            )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7f743ab0aeb0dc0b3b77f1121e2b9f6caffb7cb4e2a90f190a7b76f2537b2200"
+}

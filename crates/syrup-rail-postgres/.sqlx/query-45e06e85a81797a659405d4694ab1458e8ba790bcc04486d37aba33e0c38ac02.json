@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE billing_payment_attempts\n                SET status = 'review_required', review_required_at = created_at\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "45e06e85a81797a659405d4694ab1458e8ba790bcc04486d37aba33e0c38ac02"
+}

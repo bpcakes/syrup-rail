@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET status = 'review_required',\n                gateway_response_text = CASE\n                    WHEN status = 'review_required'\n                        AND NULLIF(BTRIM(gateway_response_text), '') IS NOT NULL\n                    THEN gateway_response_text ELSE $2\n                END,\n                updated_at = clock_timestamp()\n            WHERE id = $1 AND status IN ('pending', 'unknown', 'review_required')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bcb8c68c562bd2afd3385c7e9947cd133f101b81a9025dcf355b64b60b9c6003"
+}

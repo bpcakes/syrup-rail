@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_methods\n        SET card_brand = COALESCE(card_brand, $2),\n            card_last4 = COALESCE(card_last4, $3),\n            card_exp_month = COALESCE(card_exp_month, $4),\n            card_exp_year = COALESCE(card_exp_year, $5),\n            updated_at = clock_timestamp()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int2",
+        "Int2"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "96f13d5eea0972e2e5450349ad9d423af0177d18962bfcc697be3c84438b637c"
+}

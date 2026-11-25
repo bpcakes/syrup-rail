@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_subscription_discount_codes (\n            id, billing_scope_id, plan_key, code_normalized, display_code,\n            label, status, discount_kind, amount_off_cents, percent_off_bps,\n            currency, duration, duration_months\n        )\n        VALUES ($1, $2, $3, $4, $4, $5, 'active', $6, $7, $8, $9, $10, $11)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9d1eae017fbc9acbd0176a29a7241955f6060ad4221c4141cd6769ad99ec428b"
+}

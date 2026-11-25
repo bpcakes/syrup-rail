@@ -232,7 +232,7 @@ pub async fn list_subscription_discount_codes_in_transaction(
     plan_key: &PlanKey,
 ) -> Result<Vec<SubscriptionDiscountCodeRecord>, SubscriptionDiscountOperationError> {
     set_lock_timeout(transaction).await?;
-    let rows = sqlx::query(
+    let rows = checked_query!(
         r#"
         SELECT id, billing_scope_id, plan_key, code_normalized, display_code,
             label, status, discount_kind, amount_off_cents, percent_off_bps,
@@ -241,9 +241,9 @@ pub async fn list_subscription_discount_codes_in_transaction(
         WHERE billing_scope_id = $1 AND plan_key = $2
         ORDER BY status, code_normalized, created_at DESC
         "#,
+        billing_scope_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_all(&mut **transaction)
     .await?;
     rows.iter().map(code_from_row).collect()
@@ -316,7 +316,7 @@ pub async fn create_subscription_discount_code_in_transaction(
     .map_err(|_| SubscriptionDiscountOperationError::InvalidConfiguration)?;
     let (amount_off_cents, percent_off_bps) = discount_value(creation.kind());
     let duration_months = duration_months(creation.duration());
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discount_codes (
             id, billing_scope_id, plan_key, code_normalized, display_code,
@@ -325,18 +325,18 @@ pub async fn create_subscription_discount_code_in_transaction(
         )
         VALUES ($1, $2, $3, $4, $4, $5, 'active', $6, $7, $8, $9, $10, $11)
         "#,
+        creation.id().into_uuid(),
+        creation.billing_scope_id().into_uuid(),
+        creation.plan_key().as_str(),
+        creation.code().as_str(),
+        creation.label(),
+        creation.kind().as_str(),
+        amount_off_cents,
+        percent_off_bps,
+        creation.currency().as_str().to_owned(),
+        creation.duration().as_str(),
+        duration_months,
     )
-    .bind(creation.id().as_uuid())
-    .bind(creation.billing_scope_id().as_uuid())
-    .bind(creation.plan_key().as_str())
-    .bind(creation.code().as_str())
-    .bind(creation.label())
-    .bind(creation.kind().as_str())
-    .bind(amount_off_cents)
-    .bind(percent_off_bps)
-    .bind(creation.currency().as_str())
-    .bind(creation.duration().as_str())
-    .bind(duration_months)
     .execute(&mut **transaction)
     .await?;
     let row = code_by_id(
@@ -387,7 +387,7 @@ pub async fn update_subscription_discount_code_in_transaction(
             .map_err(|_| SubscriptionDiscountOperationError::InvalidConfiguration)?;
     }
     let (amount_off_cents, percent_off_bps) = discount_value(update.kind());
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         UPDATE billing_subscription_discount_codes
         SET label = $4, status = $5, discount_kind = $6,
@@ -398,18 +398,18 @@ pub async fn update_subscription_discount_code_in_transaction(
             label, status, discount_kind, amount_off_cents, percent_off_bps,
             currency, duration, duration_months, created_at, updated_at
         "#,
+        update.id().into_uuid(),
+        update.billing_scope_id().into_uuid(),
+        update.plan_key().as_str(),
+        update.label(),
+        update.status().as_str(),
+        update.kind().as_str(),
+        amount_off_cents,
+        percent_off_bps,
+        update.currency().as_str().to_owned(),
+        update.duration().as_str(),
+        duration_months(update.duration()),
     )
-    .bind(update.id().as_uuid())
-    .bind(update.billing_scope_id().as_uuid())
-    .bind(update.plan_key().as_str())
-    .bind(update.label())
-    .bind(update.status().as_str())
-    .bind(update.kind().as_str())
-    .bind(amount_off_cents)
-    .bind(percent_off_bps)
-    .bind(update.currency().as_str())
-    .bind(update.duration().as_str())
-    .bind(duration_months(update.duration()))
     .fetch_optional(&mut **transaction)
     .await?;
     if row.is_some() && update.status() == SubscriptionDiscountCodeStatus::Disabled {
@@ -445,7 +445,7 @@ pub async fn disable_subscription_discount_code_in_transaction(
     discount_code_id: DiscountCodeId,
 ) -> Result<Option<SubscriptionDiscountCodeRecord>, SubscriptionDiscountOperationError> {
     set_lock_timeout(transaction).await?;
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         UPDATE billing_subscription_discount_codes
         SET status = 'disabled', updated_at = now()
@@ -454,10 +454,10 @@ pub async fn disable_subscription_discount_code_in_transaction(
             label, status, discount_kind, amount_off_cents, percent_off_bps,
             currency, duration, duration_months, created_at, updated_at
         "#,
+        discount_code_id.as_uuid(),
+        billing_scope_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(discount_code_id.as_uuid())
-    .bind(billing_scope_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_optional(&mut **transaction)
     .await?;
     if row.is_some() {
@@ -559,10 +559,10 @@ pub(crate) async fn claim_subscription_discount_on_connection(
         return Ok(SubscriptionDiscountClaimOutcome::BlockedByInitialAttempt);
     }
     if let Some(existing) = existing {
-        let result = sqlx::query(
+        let result = sqlx::query!(
             "UPDATE billing_subscription_discount_claims SET status = 'superseded', superseded_at = now() WHERE id = $1 AND status = 'saved'",
+            existing.id().into_uuid(),
         )
-        .bind(existing.id().as_uuid())
         .execute(&mut *connection)
         .await?;
         if result.rows_affected() != 1 {
@@ -573,7 +573,7 @@ pub(crate) async fn claim_subscription_discount_on_connection(
     }
     let quoted_code = quote.code();
     let (amount_off_cents, percent_off_bps) = discount_value(quoted_code.kind());
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         INSERT INTO billing_subscription_discount_claims (
             id, billing_scope_id, subscriber_id, plan_key, discount_code_id,
@@ -589,22 +589,22 @@ pub(crate) async fn claim_subscription_discount_on_connection(
             status, claimed_at, applied_at, applied_subscription_id,
             applied_payment_attempt_id, superseded_at
         "#,
+        claim.id().into_uuid(),
+        claim.billing_scope_id().into_uuid(),
+        claim.subscriber_id().into_uuid(),
+        claim.plan_key().as_str(),
+        quoted_code.id().into_uuid(),
+        quoted_code.code().as_str(),
+        quoted_code.label(),
+        quoted_code.kind().as_str(),
+        amount_off_cents,
+        percent_off_bps,
+        quoted_code.currency().as_str().to_owned(),
+        quoted_code.duration().as_str(),
+        duration_months(quoted_code.duration()),
+        quote.base_charge().cents(),
+        quote.discounted_charge().cents(),
     )
-    .bind(claim.id().as_uuid())
-    .bind(claim.billing_scope_id().as_uuid())
-    .bind(claim.subscriber_id().as_uuid())
-    .bind(claim.plan_key().as_str())
-    .bind(quoted_code.id().as_uuid())
-    .bind(quoted_code.code().as_str())
-    .bind(quoted_code.label())
-    .bind(quoted_code.kind().as_str())
-    .bind(amount_off_cents)
-    .bind(percent_off_bps)
-    .bind(quoted_code.currency().as_str())
-    .bind(quoted_code.duration().as_str())
-    .bind(duration_months(quoted_code.duration()))
-    .bind(quote.base_charge().cents())
-    .bind(quote.discounted_charge().cents())
     .fetch_one(&mut *connection)
     .await?;
     Ok(SubscriptionDiscountClaimOutcome::Saved(Box::new(
@@ -669,7 +669,7 @@ pub(crate) async fn clear_subscription_discount_on_connection(
     let Some(existing) = existing else {
         return Ok(SubscriptionDiscountClearOutcome::NotFound);
     };
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         UPDATE billing_subscription_discount_claims
         SET status = 'expired'
@@ -682,11 +682,11 @@ pub(crate) async fn clear_subscription_discount_on_connection(
             status, claimed_at, applied_at, applied_subscription_id,
             applied_payment_attempt_id, superseded_at
         "#,
+        existing.id().into_uuid(),
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(existing.id().as_uuid())
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_one(&mut *connection)
     .await?;
     Ok(SubscriptionDiscountClearOutcome::Cleared(Box::new(
@@ -700,7 +700,7 @@ pub async fn saved_subscription_discount_claim(
     subscriber_id: SubscriberId,
     plan_key: &PlanKey,
 ) -> Result<Option<SubscriptionDiscountClaimRecord>, SubscriptionDiscountOperationError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, billing_scope_id, subscriber_id, plan_key,
             discount_code_id, code_snapshot, label_snapshot, discount_kind,
@@ -713,10 +713,10 @@ pub async fn saved_subscription_discount_claim(
             AND status = 'saved'
         ORDER BY claimed_at DESC, id DESC LIMIT 1
         "#,
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_optional(pool)
     .await?;
     row.as_ref().map(claim_from_row).transpose()
@@ -732,7 +732,7 @@ pub async fn mark_subscription_discount_claim_applied_in_transaction(
     payment_attempt_id: PaymentAttemptId,
 ) -> Result<SubscriptionDiscountClaimRecord, SubscriptionDiscountOperationError> {
     set_lock_timeout(transaction).await?;
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         UPDATE billing_subscription_discount_claims claims
         SET status = 'applied', applied_at = now(),
@@ -761,13 +761,13 @@ pub async fn mark_subscription_discount_claim_applied_in_transaction(
             claims.applied_at, claims.applied_subscription_id,
             claims.applied_payment_attempt_id, claims.superseded_at
         "#,
+        claim_id.as_uuid(),
+        billing_scope_id.as_uuid(),
+        subscriber_id.as_uuid(),
+        plan_key.as_str(),
+        subscription_id.as_uuid(),
+        payment_attempt_id.as_uuid(),
     )
-    .bind(claim_id.as_uuid())
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscriber_id.as_uuid())
-    .bind(plan_key.as_str())
-    .bind(subscription_id.as_uuid())
-    .bind(payment_attempt_id.as_uuid())
     .fetch_optional(&mut **transaction)
     .await?
     .ok_or(sqlx::Error::RowNotFound)?;

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscriptions\n        SET status = 'past_due', unpaid_at = NULL,\n            next_payment_attempt_at = clock_timestamp() + interval '1 day'\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c2ca37a39a91fb6e7a62193b39d8bd5b7714442f6873e349846b14a0c792c1f"
+}

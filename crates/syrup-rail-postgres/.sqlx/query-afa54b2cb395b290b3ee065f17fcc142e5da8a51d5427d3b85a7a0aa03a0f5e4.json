@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_payment_attempts SET gateway_payment_method_reference = 'host_vault_durable' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "afa54b2cb395b290b3ee065f17fcc142e5da8a51d5427d3b85a7a0aa03a0f5e4"
+}

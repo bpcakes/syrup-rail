@@ -12,7 +12,7 @@ use thiserror::Error;
 
 use crate::{
     attempts::{
-        AttemptReplayDisposition, BindBillingAddress, attempt_replay_disposition,
+        AttemptReplayDisposition, attempt_replay_disposition,
         find_payment_attempt_by_idempotency_in_transaction, prepared_replay_required_mode_changed,
     },
     host_error::{BoxError, RedactedHostErrorSource},
@@ -414,7 +414,9 @@ pub async fn reserve_host_charge_in_transaction(
         });
     }
 
-    let inserted = sqlx::query(
+    let billing_address =
+        crate::attempts::billing_address_columns(request.billing_contact().address());
+    let inserted = sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             id, billing_scope_id, subscriber_id, host_charge_target_id,
@@ -432,23 +434,28 @@ pub async fn reserve_host_charge_in_transaction(
         )
         ON CONFLICT (billing_scope_id, subscriber_id, idempotency_key) DO NOTHING
         "#,
+        identity.attempt_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        target_id.as_uuid(),
+        request.idempotency_key().expose(),
+        request.fingerprint().expose(),
+        request.amount().cents(),
+        request.amount().currency().as_str().to_owned(),
+        identity.gateway_account_id().into_uuid(),
+        identity.gateway_configuration_id().into_uuid(),
+        request.gateway_order_id().expose(),
+        request.billing_contact().first_name(),
+        request.billing_contact().last_name(),
+        request.billing_contact().email(),
+        identity.required_gateway_account_mode().as_str(),
+        billing_address.line1,
+        billing_address.line2,
+        billing_address.city,
+        billing_address.region,
+        billing_address.postal_code,
+        billing_address.country,
     )
-    .bind(identity.attempt_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(target_id.as_uuid())
-    .bind(request.idempotency_key().expose())
-    .bind(request.fingerprint().expose())
-    .bind(request.amount().cents())
-    .bind(request.amount().currency().as_str())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(identity.gateway_configuration_id().as_uuid())
-    .bind(request.gateway_order_id().expose())
-    .bind(request.billing_contact().first_name())
-    .bind(request.billing_contact().last_name())
-    .bind(request.billing_contact().email())
-    .bind(identity.required_gateway_account_mode().as_str())
-    .bind_billing_address(request.billing_contact().address())
     .execute(&mut **transaction)
     .await?;
     let attempt_id = if inserted.rows_affected() == 1 {
@@ -553,7 +560,7 @@ pub async fn admit_host_charge_submission_in_transaction(
         HostChargeSubmissionDecision::Rejected { reason } => Some(reason),
     };
     if let Some(reason) = rejection {
-        let updated = sqlx::query(
+        let updated = sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'failed',
@@ -564,11 +571,11 @@ pub async fn admit_host_charge_submission_in_transaction(
                 AND host_charge_target_id = $4 AND attempt_kind = 'host_charge'
                 AND status = 'pending' AND submitted_at IS NULL
             "#,
+            identity.attempt_id().into_uuid(),
+            identity.billing_scope_id().into_uuid(),
+            identity.subscriber_id().into_uuid(),
+            target_id.as_uuid(),
         )
-        .bind(identity.attempt_id().as_uuid())
-        .bind(identity.billing_scope_id().as_uuid())
-        .bind(identity.subscriber_id().as_uuid())
-        .bind(target_id.as_uuid())
         .execute(&mut **transaction)
         .await?;
         if updated.rows_affected() != 1 {
@@ -721,17 +728,17 @@ pub async fn host_charge_ledger_admission(
         }
         HostChargeLedgerAdmissionMode::Release => ("release", None, None),
     };
-    let result: String = sqlx::query_scalar(
+    let result: String = checked_query_scalar!(
         r#"
         SELECT billing_host_charge_ledger_admission($1, $2, $3, $4, $5, $6)
         "#,
+        query.billing_scope_id().into_uuid(),
+        query.subscriber_id().into_uuid(),
+        query.target_id().into_uuid(),
+        mode,
+        idempotency_key,
+        attempt_id,
     )
-    .bind(query.billing_scope_id().into_uuid())
-    .bind(query.subscriber_id().into_uuid())
-    .bind(query.target_id().into_uuid())
-    .bind(mode)
-    .bind(idempotency_key)
-    .bind(attempt_id)
     .fetch_one(connection)
     .await?;
 
@@ -744,93 +751,4 @@ pub async fn host_charge_ledger_admission(
 }
 
 #[cfg(test)]
-mod tests {
-    use std::error::Error;
-
-    use uuid::Uuid;
-
-    use super::*;
-    use crate::test_support::{TestDatabase, create_gateway_account};
-
-    #[tokio::test]
-    async fn admission_distinguishes_safe_contender_and_unsafe_modes() -> Result<(), Box<dyn Error>>
-    {
-        let database = TestDatabase::start("rail_host_admit").await?;
-        let result = async {
-            let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
-            let subscriber_id = SubscriberId::new(Uuid::now_v7());
-            let target_id = HostChargeTargetId::new(Uuid::now_v7());
-            let idempotency_key = IdempotencyKey::new("host-charge-test")?;
-
-            let mut connection = database.pool.acquire().await?;
-            let reserve = HostChargeLedgerAdmissionQuery::new(
-                BillingScopeId::new(gateway.billing_scope_id),
-                subscriber_id,
-                target_id,
-                HostChargeLedgerAdmissionMode::Reserve {
-                    idempotency_key: idempotency_key.clone(),
-                },
-            );
-            assert_eq!(
-                host_charge_ledger_admission(&mut connection, &reserve).await?,
-                HostChargeLedgerAdmission::Safe
-            );
-
-            let attempt_id = PaymentAttemptId::new(Uuid::now_v7());
-            sqlx::query(
-                r#"
-                INSERT INTO billing_payment_attempts (
-                    id, billing_scope_id, subscriber_id, host_charge_target_id,
-                    attempt_kind, status, idempotency_key, request_fingerprint,
-                    amount_cents, currency, gateway_account_id,
-                    gateway_configuration_id, gateway_order_id,
-                    required_gateway_account_mode
-                ) VALUES (
-                    $1, $2, $3, $4, 'host_charge', 'pending', $5, $6,
-                    100, 'USD', $7, $8, 'host-charge-test-order', 'live'
-                )
-                "#,
-            )
-            .bind(attempt_id.as_uuid())
-            .bind(gateway.billing_scope_id)
-            .bind(subscriber_id.as_uuid())
-            .bind(target_id.as_uuid())
-            .bind(idempotency_key.expose())
-            .bind(format!("host_charge:{}:100:USD", target_id.as_uuid()))
-            .bind(gateway.gateway_account_id)
-            .bind(gateway.gateway_configuration_id)
-            .execute(&mut *connection)
-            .await?;
-
-            assert_eq!(
-                host_charge_ledger_admission(&mut connection, &reserve).await?,
-                HostChargeLedgerAdmission::IdempotentContender
-            );
-            let submit = HostChargeLedgerAdmissionQuery::new(
-                BillingScopeId::new(gateway.billing_scope_id),
-                subscriber_id,
-                target_id,
-                HostChargeLedgerAdmissionMode::Submit { attempt_id },
-            );
-            assert_eq!(
-                host_charge_ledger_admission(&mut connection, &submit).await?,
-                HostChargeLedgerAdmission::Safe
-            );
-            let release = HostChargeLedgerAdmissionQuery::new(
-                BillingScopeId::new(gateway.billing_scope_id),
-                subscriber_id,
-                target_id,
-                HostChargeLedgerAdmissionMode::Release,
-            );
-            assert_eq!(
-                host_charge_ledger_admission(&mut connection, &release).await?,
-                HostChargeLedgerAdmission::Unsafe
-            );
-            Ok::<_, Box<dyn Error>>(())
-        }
-        .await;
-        let cleanup = database.cleanup().await;
-        result?;
-        cleanup
-    }
-}
+mod tests;

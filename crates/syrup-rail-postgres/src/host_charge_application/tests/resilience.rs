@@ -5,7 +5,7 @@ async fn unreserved_rate_limit_avoids_attempt_and_extends_provider_cooldown()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("rail_host_rate").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -23,7 +23,7 @@ async fn unreserved_rate_limit_avoids_attempt_and_extends_provider_cooldown()
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -77,24 +77,22 @@ async fn unreserved_rate_limit_avoids_attempt_and_extends_provider_cooldown()
         assert_eq!(gateway.readiness_calls.load(Ordering::SeqCst), 1);
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
 
-        let attempt_count: i64 = sqlx::query_scalar(
+        let attempt_count: i64 = checked_query_scalar!(
             "SELECT COUNT(*) FROM billing_payment_attempts \
              WHERE billing_scope_id = $1 AND subscriber_id = $2",
+            account.billing_scope_id,
+            subscriber_id,
         )
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(attempt_count, 0);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
-        let cooldown_is_active: bool = sqlx::query_scalar(
-            "SELECT rate_limited_until > clock_timestamp() FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
-        )
+        let cooldown_is_active: bool = checked_query_scalar!("SELECT rate_limited_until > clock_timestamp() FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'")
         .fetch_one(&database.pool)
         .await?;
         assert!(cooldown_is_active);
         let target_status: String =
-            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
+            crate::test_support::fixture_query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
                 .bind(target_id)
                 .fetch_one(&database.pool)
                 .await?;
@@ -112,7 +110,7 @@ async fn unreserved_rate_limit_avoids_attempt_and_extends_provider_cooldown()
 async fn terminal_approval_race_does_not_mark_host_target_paid() -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("rail_host_race").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -130,7 +128,7 @@ async fn terminal_approval_race_does_not_mark_host_target_paid() -> Result<(), B
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -177,16 +175,17 @@ async fn terminal_approval_race_does_not_mark_host_target_paid() -> Result<(), B
         assert_eq!(payment.attempt().status(), PaymentAttemptStatus::Failed);
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 1);
         assert!(events.lock().await.is_empty());
-        let target_status: String =
-            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
-                .bind(target_id)
-                .fetch_one(&database.pool)
-                .await?;
-        assert_eq!(target_status, "pending");
-        let charge_state: String = sqlx::query_scalar(
-            "SELECT progression_state FROM billing_processor_charges WHERE attempt_id = $1",
+        let target_status: String = crate::test_support::fixture_query_scalar(
+            "SELECT status FROM host_charge_targets WHERE id = $1",
         )
-        .bind(payment.attempt().identity().attempt_id().as_uuid())
+        .bind(target_id)
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(target_status, "pending");
+        let charge_state: String = checked_query_scalar!(
+            "SELECT progression_state FROM billing_processor_charges WHERE attempt_id = $1",
+            payment.attempt().identity().attempt_id().into_uuid(),
+        )
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(charge_state, "pending");
@@ -204,7 +203,7 @@ async fn matching_retry_resumes_prepared_attempt_without_readiness_loser_overwri
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("rail_host_resume").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -222,7 +221,7 @@ async fn matching_retry_resumes_prepared_attempt_without_readiness_loser_overwri
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)

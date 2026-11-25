@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at)\n        INSERT INTO billing_payment_attempts (\n            id, billing_scope_id, subscriber_id, plan_key, subscription_id,\n            payment_method_id, attempt_kind, status, idempotency_key,\n            request_fingerprint, amount_cents, currency,\n            billing_period_start_at, billing_period_end_at,\n            gateway_account_id, gateway_configuration_id, gateway_order_id,\n            resolution_code, resolved_at, created_at, updated_at,\n            subscription_expected_payment_method_id,\n            subscription_expected_initial_transaction_id,\n            subscription_expected_status,\n            required_gateway_account_mode\n        ) SELECT\n            $1, $2, $3, 'identity_pro', $4, $5, 'subscription_renewal',\n            'failed', $6, $7, 2900, 'USD', $8, $8::timestamptz + interval '1 month',\n            $9, $10, $11, $12, observed_at,\n            observed_at - interval '25 hours', observed_at,\n            $5, subscriptions.initial_transaction_id, 'active', 'live'\n        FROM clock\n        JOIN billing_subscriptions AS subscriptions ON subscriptions.id = $4\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "03295bb9deed1f3cfba9422b00e379a6bee92afa90a3e1d5d39f74f9be02c5af"
+}

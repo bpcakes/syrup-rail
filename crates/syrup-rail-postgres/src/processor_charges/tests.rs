@@ -35,7 +35,7 @@ async fn insert_host_charge_attempt(
 ) -> Result<PaymentAttemptId, sqlx::Error> {
     let attempt_id = PaymentAttemptId::new(Uuid::now_v7());
     let host_charge_target_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -49,16 +49,16 @@ async fn insert_host_charge_attempt(
                 100, 'USD', $7, $8, $9
             )
             "#,
+        attempt_id.as_uuid(),
+        gateway.billing_scope_id,
+        Uuid::now_v7(),
+        host_charge_target_id,
+        format!("charge-test-{attempt_id}"),
+        format!("host_charge:{host_charge_target_id}:100:USD"),
+        gateway.gateway_account_id,
+        gateway.gateway_configuration_id,
+        gateway_order_id,
     )
-    .bind(attempt_id.as_uuid())
-    .bind(gateway.billing_scope_id)
-    .bind(Uuid::now_v7())
-    .bind(host_charge_target_id)
-    .bind(format!("charge-test-{attempt_id}"))
-    .bind(format!("host_charge:{host_charge_target_id}:100:USD"))
-    .bind(gateway.gateway_account_id)
-    .bind(gateway.gateway_configuration_id)
-    .bind(gateway_order_id)
     .execute(pool)
     .await?;
     Ok(attempt_id)
@@ -99,7 +99,7 @@ async fn insert_subscription_attempt(
     let subscription_id = Uuid::now_v7();
     let plan_key = PlanKey::new("fallback-plan")?;
     let gateway_order_id = GatewayOrderId::from_correlation(gateway_order)?;
-    sqlx::query(
+    checked_query!(
         r#"
             WITH input AS (
                 SELECT
@@ -174,17 +174,17 @@ async fn insert_subscription_attempt(
                 CASE WHEN attempt_kind = 'subscription_recovery' THEN 'active' END
             FROM input CROSS JOIN subscription
             "#,
+        attempt_id.as_uuid(),
+        gateway.billing_scope_id,
+        subscriber_id.as_uuid(),
+        gateway.gateway_account_id,
+        gateway.gateway_configuration_id,
+        plan_key.as_str(),
+        gateway_order_id.expose(),
+        attempt_kind.as_str(),
+        payment_method_id,
+        subscription_id,
     )
-    .bind(attempt_id.as_uuid())
-    .bind(gateway.billing_scope_id)
-    .bind(subscriber_id.as_uuid())
-    .bind(gateway.gateway_account_id)
-    .bind(gateway.gateway_configuration_id)
-    .bind(plan_key.as_str())
-    .bind(gateway_order_id.expose())
-    .bind(attempt_kind.as_str())
-    .bind(payment_method_id)
-    .bind(subscription_id)
     .execute(pool)
     .await?;
 
@@ -270,22 +270,23 @@ async fn lock_free_expired_primary_evidence_starts_in_typed_external_reversal()
                     outcome
                 );
             }
-            let charge: (String, Option<String>, bool) = sqlx::query_as(
+            let charge: (String, Option<String>, bool) = checked_query_as!(
                 r#"
                 SELECT progression_state, state_code,
-                    external_reversal_required_at IS NOT NULL
+                    external_reversal_required_at IS NOT NULL AS reversal_required
                 FROM billing_processor_charges WHERE attempt_id = $1
                 "#,
+                recovery.identity.attempt_id().into_uuid(),
             )
-            .bind(recovery.identity.attempt_id().as_uuid())
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(charge, expected);
-            let status: String =
-                sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-                    .bind(recovery.identity.attempt_id().as_uuid())
-                    .fetch_one(&database.pool)
-                    .await?;
+            let status: String = checked_query_scalar!(
+                "SELECT status FROM billing_payment_attempts WHERE id = $1",
+                recovery.identity.attempt_id().into_uuid(),
+            )
+            .fetch_one(&database.pool)
+            .await?;
             assert_eq!(
                 status, "pending",
                 "the lock-free write never touches the attempt"
@@ -370,10 +371,10 @@ async fn lock_free_subscription_evidence_preserves_replay_and_ownership()
                 .await?,
                 LockFreeApprovedEvidenceOutcome::OwnedByOtherAttempt
             );
-            let dimensions: (String, Option<Uuid>, i32, String, String) = sqlx::query_as(
+            let dimensions: (String, Option<Uuid>, i32, String, String) = checked_query_as!(
                 "SELECT attempt_kind, host_charge_target_id, amount_cents, currency, progression_state FROM billing_processor_charges WHERE attempt_id = $1",
+                owner.identity.attempt_id().into_uuid(),
             )
-            .bind(owner.identity.attempt_id().as_uuid())
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(
@@ -386,10 +387,10 @@ async fn lock_free_subscription_evidence_preserves_replay_and_ownership()
                     "pending".to_owned(),
                 )
             );
-            let contender_charges: i64 = sqlx::query_scalar(
+            let contender_charges: i64 = checked_query_scalar!(
                 "SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1",
+                contender.identity.attempt_id().into_uuid(),
             )
-            .bind(contender.identity.attempt_id().as_uuid())
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(contender_charges, 0);
@@ -407,7 +408,7 @@ async fn compensating_store_retries_transient_database_failures() -> Result<(), 
     let result = async {
         let gateway = create_gateway_account(&database.pool, "test_gateway").await?;
         let attempt_id = insert_host_charge_attempt(&database.pool, gateway, "retry-order").await?;
-        sqlx::raw_sql(
+        crate::test_support::fixture_raw_sql(
             r#"
                 CREATE SEQUENCE processor_charge_retry_sequence;
                 CREATE FUNCTION fail_first_processor_charge_writes()
@@ -436,15 +437,16 @@ async fn compensating_store_retries_transient_database_failures() -> Result<(), 
         )
         .await?;
         assert_eq!(outcome, CompensatingProcessorChargeOutcome::Observed);
-        let attempts: i64 =
-            sqlx::query_scalar("SELECT last_value::bigint FROM processor_charge_retry_sequence")
-                .fetch_one(&database.pool)
-                .await?;
-        assert_eq!(attempts, 3);
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1",
+        let attempts: i64 = crate::test_support::fixture_query_scalar(
+            "SELECT last_value::bigint FROM processor_charge_retry_sequence",
         )
-        .bind(attempt_id.as_uuid())
+        .fetch_one(&database.pool)
+        .await?;
+        assert_eq!(attempts, 3);
+        let count: i64 = checked_query_scalar!(
+            "SELECT count(*) FROM billing_processor_charges WHERE attempt_id = $1",
+            attempt_id.as_uuid(),
+        )
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(count, 1);

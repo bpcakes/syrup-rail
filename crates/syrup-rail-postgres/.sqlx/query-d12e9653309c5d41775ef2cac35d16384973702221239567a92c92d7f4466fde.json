@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ANALYZE billing_payment_attempts",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "d12e9653309c5d41775ef2cac35d16384973702221239567a92c92d7f4466fde"
+}

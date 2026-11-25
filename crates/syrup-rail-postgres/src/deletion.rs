@@ -28,7 +28,7 @@ pub async fn scrub_subscriber_billing_data(
     // Payment methods are shared across plan aggregates. Enter every affected
     // subscriber/account mutation domain in deterministic account order before
     // locking either the attempts or methods that carry its mutable projection.
-    let gateway_account_ids = sqlx::query_scalar::<_, uuid::Uuid>(
+    let gateway_account_ids: Vec<uuid::Uuid> = checked_query_scalar!(
         r#"
         SELECT gateway_account_id
         FROM (
@@ -44,9 +44,9 @@ pub async fn scrub_subscriber_billing_data(
         ) AS affected_accounts
         ORDER BY gateway_account_id
         "#,
+        billing_scope_id,
+        subscriber_id,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
     .fetch_all(&mut *connection)
     .await?;
     for gateway_account_id in &gateway_account_ids {
@@ -68,7 +68,7 @@ pub async fn scrub_subscriber_billing_data(
     )
     .await?;
 
-    let payment_attempts = sqlx::query(
+    let payment_attempts = sqlx::query!(
         r#"
         UPDATE billing_payment_attempts
         SET billing_first_name = NULL,
@@ -91,14 +91,14 @@ pub async fn scrub_subscriber_billing_data(
             updated_at = now()
         WHERE billing_scope_id = $1 AND subscriber_id = $2
         "#,
+        billing_scope_id,
+        subscriber_id,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
     .execute(&mut *connection)
     .await?
     .rows_affected();
 
-    let payment_methods = sqlx::query(
+    let payment_methods = sqlx::query!(
         r#"
         UPDATE billing_payment_methods
         SET status = 'disabled',
@@ -119,9 +119,9 @@ pub async fn scrub_subscriber_billing_data(
             updated_at = now()
         WHERE billing_scope_id = $1 AND subscriber_id = $2
         "#,
+        billing_scope_id,
+        subscriber_id,
     )
-    .bind(billing_scope_id)
-    .bind(subscriber_id)
     .execute(&mut *connection)
     .await?
     .rows_affected();
@@ -138,10 +138,12 @@ pub(crate) async fn lock_payment_method_scrub_domain(
     subscriber_id: SubscriberId,
     gateway_account_id: &uuid::Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('syrup-rail:payment-method:' || $1::uuid::text || ':' || $2::uuid::text || ':' || $3::uuid::text, 0))")
-        .bind(billing_scope_id.as_uuid())
-        .bind(gateway_account_id)
-        .bind(subscriber_id.as_uuid())
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended('syrup-rail:payment-method:' || $1::uuid::text || ':' || $2::uuid::text || ':' || $3::uuid::text, 0))",
+        billing_scope_id.as_uuid(),
+        gateway_account_id,
+        subscriber_id.as_uuid(),
+    )
         .execute(connection).await?;
     Ok(())
 }

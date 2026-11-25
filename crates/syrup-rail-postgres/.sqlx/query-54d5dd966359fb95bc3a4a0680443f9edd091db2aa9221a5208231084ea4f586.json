@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (to_jsonb(m) - ARRAY['card_brand', 'card_last4', 'card_exp_month', 'card_exp_year', 'updated_at']::text[])::text FROM billing_payment_methods m WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "text",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "54d5dd966359fb95bc3a4a0680443f9edd091db2aa9221a5208231084ea4f586"
+}

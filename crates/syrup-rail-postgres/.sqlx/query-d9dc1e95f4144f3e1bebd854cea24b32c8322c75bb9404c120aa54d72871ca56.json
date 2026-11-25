@@ -1,0 +1,141 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    SELECT\n        attempts.attempt_kind,\n        attempts.status,\n        attempts.submitted_at IS NOT NULL AS submitted,\n        attempts.gateway_transaction_id,\n        public.billing_canonical_gateway_transaction_id(attempts.gateway_transaction_id)\n            IS NOT NULL AS has_transaction_id,\n        attempts.amount_cents,\n        attempts.currency,\n        attempts.gateway_order_id,\n        attempts.gateway_account_id,\n        accounts.gateway_configuration_id,\n        accounts.provider_key\n    FROM billing_payment_attempts AS attempts\n    INNER JOIN billing_gateway_accounts AS accounts\n        ON accounts.id = attempts.gateway_account_id\n        AND accounts.billing_scope_id = attempts.billing_scope_id\n    WHERE attempts.billing_scope_id = $1\n        AND attempts.subscriber_id = $2\n        AND attempts.id = $4\n        AND (attempts.attempt_kind = 'host_charge' OR attempts.plan_key = $3)\n",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attempt_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "attempt_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "submitted",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "gateway_transaction_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_transaction_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "has_transaction_id",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "gateway_order_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_order_id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "gateway_account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "gateway_configuration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "gateway_configuration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "provider_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "provider_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true,
+      null,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d9dc1e95f4144f3e1bebd854cea24b32c8322c75bb9404c120aa54d72871ca56"
+}

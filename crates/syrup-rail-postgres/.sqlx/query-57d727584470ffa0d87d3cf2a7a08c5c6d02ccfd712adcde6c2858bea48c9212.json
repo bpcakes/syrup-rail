@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT gateway_configuration_id, mutation_rate_limited_until::text\n                FROM billing_gateway_accounts\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_configuration_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_gateway_accounts",
+            "name": "gateway_configuration_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "mutation_rate_limited_until",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "57d727584470ffa0d87d3cf2a7a08c5c6d02ccfd712adcde6c2858bea48c9212"
+}

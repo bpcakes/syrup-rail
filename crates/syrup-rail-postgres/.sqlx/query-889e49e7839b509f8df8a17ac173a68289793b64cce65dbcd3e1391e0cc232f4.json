@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT status = 'disabled'\n                AND gateway_payment_method_reference = 'erased:' || id::text\n            FROM billing_payment_methods\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "?column?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "889e49e7839b509f8df8a17ac173a68289793b64cce65dbcd3e1391e0cc232f4"
+}

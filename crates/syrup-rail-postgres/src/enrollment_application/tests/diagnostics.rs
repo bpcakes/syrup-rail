@@ -195,7 +195,7 @@ async fn canonical_rows(pool: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error>
         "billing_gateway_provider_rate_limits",
     ] {
         rows.push(
-            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            crate::test_support::fixture_query_scalar(sqlx::AssertSqlSafe(format!(
                 "SELECT COALESCE(jsonb_agg(to_jsonb(rows) ORDER BY to_jsonb(rows)::text), '[]'::jsonb)::text FROM public.{table} AS rows"
             )))
             .fetch_one(pool)
@@ -206,15 +206,13 @@ async fn canonical_rows(pool: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Error>
 }
 
 async fn database_now(pool: &sqlx::PgPool) -> Result<DateTime<Utc>, sqlx::Error> {
-    sqlx::query_scalar("SELECT clock_timestamp()")
+    checked_query_scalar!("SELECT clock_timestamp()")
         .fetch_one(pool)
         .await
 }
 
 async fn provider_cooldown_remaining(pool: &sqlx::PgPool) -> Result<f64, sqlx::Error> {
-    sqlx::query_scalar(
-        "SELECT EXTRACT(EPOCH FROM rate_limited_until - clock_timestamp())::float8 FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
-    )
+    checked_query_scalar!("SELECT EXTRACT(EPOCH FROM rate_limited_until - clock_timestamp())::float8 FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'")
     .fetch_one(pool)
     .await
 }
@@ -390,11 +388,11 @@ async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<()
         "review_required",
         "declined",
     ] {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_payment_attempts SET status = $2, resolved_at = COALESCE(resolved_at, now()) WHERE id = $1",
+            renewal_id.as_uuid(),
+            status,
         )
-        .bind(renewal_id.as_uuid())
-        .bind(status)
         .execute(&pool)
         .await?;
         assert_eq!(
@@ -403,10 +401,10 @@ async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<()
             "{status}"
         );
     }
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_payment_attempts SET status = 'pending', gateway_transaction_id = NULL WHERE id = $1",
+        renewal_id.as_uuid(),
     )
-    .bind(renewal_id.as_uuid())
     .execute(&pool)
     .await?;
     assert_eq!(
@@ -414,23 +412,27 @@ async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<()
         vec![Eligibility::Ineligible(Ineligibility::Pending)],
         "pending takes precedence over a missing transaction ID"
     );
-    sqlx::query("UPDATE billing_payment_attempts SET status = 'unknown' WHERE id = $1")
-        .bind(renewal_id.as_uuid())
-        .execute(&pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET status = 'unknown' WHERE id = $1",
+        renewal_id.as_uuid(),
+    )
+    .execute(&pool)
+    .await?;
     assert_eq!(
         single(renewal_id).await?,
         vec![Eligibility::Ineligible(Ineligibility::NoTransactionId)]
     );
     // Leave a terminal failure without a transaction ID so recovery may run.
-    sqlx::query("UPDATE billing_payment_attempts SET status = 'failed' WHERE id = $1")
-        .bind(renewal_id.as_uuid())
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "UPDATE billing_subscriptions SET status = 'past_due', next_payment_attempt_at = next_renewal_at WHERE id = $1",
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET status = 'failed' WHERE id = $1",
+        renewal_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query!(
+        "UPDATE billing_subscriptions SET status = 'past_due', next_payment_attempt_at = next_renewal_at WHERE id = $1",
+        subscription_id.as_uuid(),
+    )
     .execute(&pool)
     .await?;
     let recovery_gateway = Arc::new(ScriptedGateway::new(Ok(approved_outcome_with_reference(
@@ -477,7 +479,7 @@ async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<()
     // A host charge of the same subscriber has no plan.
     let host_charge_id = PaymentAttemptId::new(Uuid::now_v7());
     let target_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             id, billing_scope_id, subscriber_id, host_charge_target_id, attempt_kind,
@@ -490,16 +492,16 @@ async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<()
             $9, 'txn_host_charge', now(), now(), 'live'
         )
         "#,
+        host_charge_id.as_uuid(),
+        fixture.gateway_account.billing_scope_id,
+        fixture.command.subscriber_id().into_uuid(),
+        target_id,
+        format!("diag-host-{}", target_id.simple()),
+        format!("host_charge:{target_id}:500:USD"),
+        fixture.gateway_account.gateway_account_id,
+        fixture.gateway_account.gateway_configuration_id,
+        format!("diag-host-order-{}", target_id.simple()),
     )
-    .bind(host_charge_id.as_uuid())
-    .bind(fixture.gateway_account.billing_scope_id)
-    .bind(fixture.command.subscriber_id().as_uuid())
-    .bind(target_id)
-    .bind(format!("diag-host-{}", target_id.simple()))
-    .bind(format!("host_charge:{target_id}:500:USD"))
-    .bind(fixture.gateway_account.gateway_account_id)
-    .bind(fixture.gateway_account.gateway_configuration_id)
-    .bind(format!("diag-host-order-{}", target_id.simple()))
     .execute(&pool)
     .await?;
 
@@ -553,10 +555,10 @@ async fn eligibility_follows_kind_status_ownership_and_precedence() -> Result<()
     );
 
     // Unpaid collection history stays diagnosable.
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET status = 'unpaid', unpaid_at = now(), next_payment_attempt_at = NULL WHERE id = $1",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .execute(&pool)
     .await?;
     assert_eq!(
@@ -637,24 +639,20 @@ async fn cooldowns_and_short_deadlines_stop_before_provider_io() -> Result<(), B
             Outcome::TimedOut
         );
     }
-    sqlx::query(
-        "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = clock_timestamp() + interval '1 minute' WHERE provider_key = 'nmi'",
-    )
+    sqlx::query!("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = clock_timestamp() + interval '1 minute' WHERE provider_key = 'nmi'")
     .execute(pool)
     .await?;
     assert_eq!(
         diagnose(&fixture, &gateway, attempt_id, DEADLINE).await?,
         Outcome::CooldownActive(GatewayMutationCooldownScope::Provider)
     );
-    sqlx::query(
-        "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'",
-    )
+    sqlx::query!("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'")
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_gateway_accounts SET mutation_rate_limited_until = clock_timestamp() + interval '1 minute' WHERE id = $1",
+        fixture.gateway_account.gateway_account_id,
     )
-    .bind(fixture.gateway_account.gateway_account_id)
     .execute(pool)
     .await?;
     assert_eq!(
@@ -691,12 +689,10 @@ async fn rate_limited_diagnostics_extend_the_provider_cooldown_at_the_deadline()
     assert!(provider_cooldown_remaining(&pool).await? > 50.0);
 
     // A cooldown that cannot be recorded is an error, not a silent outcome.
-    sqlx::query(
-        "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'",
-    )
+    sqlx::query!("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'")
     .execute(&pool)
     .await?;
-    sqlx::raw_sql(
+    crate::test_support::fixture_raw_sql(
         r#"
         CREATE FUNCTION test_reject_provider_cooldown() RETURNS trigger
         LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected cooldown failure'; END; $$;
@@ -810,10 +806,10 @@ async fn rate_limited_diagnostics_fail_a_racing_renewal_before_submission()
         .await?;
     assert!(matches!(outcome, SubscriptionRenewalOutcome::Noop));
     assert_eq!(racing.sale_calls.load(Ordering::SeqCst), 0);
-    let (status, resolution_code): (String, Option<String>) = sqlx::query_as(
+    let (status, resolution_code): (String, Option<String>) = checked_query_as!(
         "SELECT status, resolution_code FROM billing_payment_attempts WHERE subscription_id = $1 AND attempt_kind = 'subscription_renewal'",
+        subscription_id.as_uuid(),
     )
-    .bind(subscription_id.as_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(status, "failed");
@@ -821,11 +817,12 @@ async fn rate_limited_diagnostics_fail_a_racing_renewal_before_submission()
         resolution_code.as_deref(),
         Some("gateway_provider_rate_limited_before_submission")
     );
-    let subscription_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id.as_uuid())
-            .fetch_one(&pool)
-            .await?;
+    let subscription_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
+    )
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(
         subscription_status, "active",
         "the readiness failure is not past due"
@@ -851,11 +848,13 @@ async fn configuration_rotation_before_and_during_the_query() -> Result<(), Box<
         gateway_configuration_id: Uuid::now_v7(),
         ..fixture.gateway_account
     };
-    sqlx::query("UPDATE billing_gateway_accounts SET gateway_configuration_id = $2 WHERE id = $1")
-        .bind(rotated.gateway_account_id)
-        .bind(rotated.gateway_configuration_id)
-        .execute(&pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2 WHERE id = $1",
+        rotated.gateway_account_id,
+        rotated.gateway_configuration_id,
+    )
+    .execute(&pool)
+    .await?;
     let stale = DiagnosticsGateway::new(Ok(observed(GatewayDiagnosticOperation::Sale)));
     assert_eq!(
         diagnose(&fixture, &stale, attempt_id, DEADLINE).await?,
@@ -890,11 +889,11 @@ async fn configuration_rotation_before_and_during_the_query() -> Result<(), Box<
         Ok(observed(GatewayDiagnosticOperation::Sale)),
         Duration::ZERO,
         Some(Box::pin(async move {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2 WHERE id = $1",
+                account_id,
+                Uuid::now_v7(),
             )
-            .bind(account_id)
-            .bind(Uuid::now_v7())
             .execute(&hook_pool)
             .await
             .expect("rotation during query");
@@ -935,7 +934,7 @@ async fn late_approval_rewrites_during_the_query_are_target_changes() -> Result<
             Ok(observed(GatewayDiagnosticOperation::Sale)),
             Duration::ZERO,
             Some(Box::pin(async move {
-                sqlx::query(rewrite)
+                crate::test_support::fixture_query(rewrite)
                     .bind(attempt_id.as_uuid())
                     .execute(&hook_pool)
                     .await
@@ -987,10 +986,10 @@ async fn diagnostics_leave_a_concurrent_scrub_intact() -> Result<(), Box<dyn Err
     assert!(matches!(outcome, Outcome::Observed(_)));
     let after = canonical_rows(&pool).await?;
     assert_ne!(after, before, "the scrub committed");
-    let scrubbed: (Option<String>, Option<String>, String, Option<String>) = sqlx::query_as(
+    let scrubbed: (Option<String>, Option<String>, String, Option<String>) = checked_query_as!(
         "SELECT billing_first_name, billing_email, status, gateway_transaction_id FROM billing_payment_attempts WHERE id = $1",
+        attempt_id.as_uuid(),
     )
-    .bind(attempt_id.as_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(
@@ -1086,11 +1085,11 @@ async fn provider_errors_are_revalidated_before_they_are_reported() -> Result<()
     let account_id = fixture.gateway_account.gateway_account_id;
     let rotate = |pool: sqlx::PgPool| -> Hook {
         Box::pin(async move {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2 WHERE id = $1",
+                account_id,
+                Uuid::now_v7(),
             )
-            .bind(account_id)
-            .bind(Uuid::now_v7())
             .execute(&pool)
             .await
             .expect("rotation during query");
@@ -1112,10 +1111,10 @@ async fn provider_errors_are_revalidated_before_they_are_reported() -> Result<()
 
     // A rate limit during a rotation still records the provider cooldown.
     let current = crate::test_support::GatewayAccountFixture {
-        gateway_configuration_id: sqlx::query_scalar(
+        gateway_configuration_id: checked_query_scalar!(
             "SELECT gateway_configuration_id FROM billing_gateway_accounts WHERE id = $1",
+            account_id,
         )
-        .bind(account_id)
         .fetch_one(&pool)
         .await?,
         ..fixture.gateway_account
@@ -1138,18 +1137,16 @@ async fn provider_errors_are_revalidated_before_they_are_reported() -> Result<()
         Outcome::ConfigurationChanged
     );
     assert!(provider_cooldown_remaining(&pool).await? > 50.0);
-    sqlx::query(
-        "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'",
-    )
+    sqlx::query!("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = '-infinity' WHERE provider_key = 'nmi'")
     .execute(&pool)
     .await?;
 
     // A late-approval rewrite during a failed query is a target change.
     let current = crate::test_support::GatewayAccountFixture {
-        gateway_configuration_id: sqlx::query_scalar(
+        gateway_configuration_id: checked_query_scalar!(
             "SELECT gateway_configuration_id FROM billing_gateway_accounts WHERE id = $1",
+            account_id,
         )
-        .bind(account_id)
         .fetch_one(&pool)
         .await?,
         ..fixture.gateway_account
@@ -1159,10 +1156,10 @@ async fn provider_errors_are_revalidated_before_they_are_reported() -> Result<()
         Err(GatewayError::Malformed(GatewayDiagnostic::new("bad xml"))),
         Duration::ZERO,
         Some(Box::pin(async move {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+                attempt_id.as_uuid(),
             )
-            .bind(attempt_id.as_uuid())
             .execute(&hook_pool)
             .await
             .expect("rewrite during query");
@@ -1323,7 +1320,7 @@ async fn assert_pool_recovers(
     stalled.store(false, Ordering::SeqCst);
     let one: i32 = tokio::time::timeout(
         Duration::from_secs(5),
-        sqlx::query_scalar("SELECT 1").fetch_one(pool),
+        checked_query_scalar!("SELECT 1").fetch_one(pool),
     )
     .await
     .expect("the pool serves new work")?;

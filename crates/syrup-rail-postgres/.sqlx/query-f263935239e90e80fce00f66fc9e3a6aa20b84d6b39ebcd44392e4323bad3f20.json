@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET status = 'failed', resolved_at = clock_timestamp(),\n            gateway_transaction_id = 'txn_terminal_winner',\n            gateway_payment_method_reference = 'vault_terminal_winner',\n            gateway_response_text = 'local failure', updated_at = clock_timestamp()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f263935239e90e80fce00f66fc9e3a6aa20b84d6b39ebcd44392e4323bad3f20"
+}

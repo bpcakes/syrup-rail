@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO billing_payment_attempts (\n                required_gateway_account_mode,\n                id, billing_scope_id, subscriber_id, plan_key, attempt_kind,\n                status, idempotency_key, request_fingerprint, amount_cents,\n                currency, gateway_account_id, gateway_configuration_id,\n                gateway_order_id, subscription_initial_terms_version,\n                subscription_initial_start_kind,\n                subscription_initial_recurring_base_amount_cents,\n                subscription_initial_recurring_period_kind,\n                subscription_initial_recurring_period_count,\n                subscription_initial_dunning_retry_delays_seconds,\n                subscription_initial_dunning_exhaustion,\n                subscription_initial_past_due_access\n            ) VALUES (\n                'test', $1, $2, $3, 'base_subscription',\n                'subscription_initial', 'pending', $4, $5, 100, 'USD',\n                $6, $7, $8, 2, 'recurring_immediately', 100,\n                'calendar_months', 1, ARRAY[]::bigint[],\n                'remain_past_due', 'suspend_immediately'\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "936142d421c80f6919df52260b23796355c4ec9da50842aac461c1033849a06c"
+}

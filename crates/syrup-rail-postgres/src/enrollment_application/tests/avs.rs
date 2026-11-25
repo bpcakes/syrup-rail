@@ -26,10 +26,12 @@ async fn stored_avs(
     pool: &sqlx::PgPool,
     attempt_id: PaymentAttemptId,
 ) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT gateway_avs_response FROM billing_payment_attempts WHERE id = $1")
-        .bind(attempt_id.as_uuid())
-        .fetch_one(pool)
-        .await
+    checked_query_scalar!(
+        "SELECT gateway_avs_response FROM billing_payment_attempts WHERE id = $1",
+        attempt_id.as_uuid(),
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn reloaded(
@@ -123,10 +125,12 @@ async fn a_stored_value_that_is_not_an_avs_code_reads_as_none() -> Result<(), Bo
         ))
         .await?;
     let attempt_id = result.attempt().identity().attempt_id();
-    sqlx::query("UPDATE billing_payment_attempts SET gateway_avs_response = '-' WHERE id = $1")
-        .bind(attempt_id.as_uuid())
-        .execute(&fixture.database.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET gateway_avs_response = '-' WHERE id = $1",
+        attempt_id.as_uuid(),
+    )
+    .execute(&fixture.database.pool)
+    .await?;
     let reloaded = reloaded(&fixture, attempt_id).await?;
     assert_eq!(reloaded.state().processor_evidence().avs_response(), None);
     assert_eq!(reloaded.status(), PaymentAttemptStatus::Failed);
@@ -442,14 +446,14 @@ async fn payment_method_replacement_and_reconciliation_claim_carry_avs_while_por
     assert_eq!(unknown.status(), PaymentAttemptStatus::Unknown);
     assert_eq!(stored_avs(pool, attempt_id).await?, Some("Z".to_owned()));
 
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_payment_attempts \
          SET created_at = clock_timestamp() - interval '15 minutes', \
              submitted_at = clock_timestamp() - interval '12 minutes', \
              updated_at = clock_timestamp() - interval '10 minutes' \
          WHERE id = $1",
+        attempt_id.as_uuid(),
     )
-    .bind(attempt_id.as_uuid())
     .execute(pool)
     .await?;
     let claimed = crate::claim_exact_reconciliation_attempts(
@@ -514,15 +518,15 @@ async fn renewal_non_approved_outcome_stores_avs_result() -> Result<(), Box<dyn 
     let subscription = enrolled.subscription().expect("active subscription");
     let due_at = *subscription.next_renewal_at() - chrono::Duration::days(60);
     let period_start_at = due_at - chrono::Duration::days(30);
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions \
          SET current_period_start_at = $2, current_period_end_at = $3, \
              next_renewal_at = $3, next_payment_attempt_at = $3 \
          WHERE id = $1",
+        subscription.id().into_uuid(),
+        period_start_at,
+        due_at,
     )
-    .bind(subscription.id().as_uuid())
-    .bind(period_start_at)
-    .bind(due_at)
     .execute(pool)
     .await?;
 

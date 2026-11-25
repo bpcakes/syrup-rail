@@ -168,14 +168,14 @@ struct CooldownDuringReadinessGateway {
 #[async_trait]
 impl PaymentGateway for CooldownDuringReadinessGateway {
     async fn account_mode(&self) -> Result<GatewayAccountMode, GatewayError> {
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_gateway_accounts
             SET mutation_rate_limited_until = clock_timestamp() + interval '1 minute'
             WHERE id = $1
             "#,
+            self.account_id,
         )
-        .bind(self.account_id)
         .execute(&self.pool)
         .await
         .expect("test readiness cooldown write");
@@ -424,7 +424,7 @@ impl SubscriptionOfferStore for TestOfferStore {
         billing_scope_id: BillingScopeId,
         plan_key: &PlanKey,
     ) -> Result<Option<syrup_rail::SubscriptionOffer>, sqlx::Error> {
-        let row = sqlx::query_as::<_, (i32, String)>(
+        let row = crate::test_support::fixture_query_as::<_, (i32, String)>(
             r#"
             SELECT amount_cents, currency
             FROM host_subscription_offers
@@ -629,11 +629,13 @@ async fn hold_subscription_aggregate_lock(
     plan_key: &str,
 ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))")
-        .bind(subscriber_id)
-        .bind(plan_key)
-        .execute(&mut *transaction)
-        .await?;
+    checked_query!(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2, 0))",
+        subscriber_id,
+        plan_key,
+    )
+    .execute(&mut *transaction)
+    .await?;
     Ok(transaction)
 }
 

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscriptions\n        SET current_period_start_at = $2::timestamptz - interval '14 days',\n            current_period_end_at = $2,\n            next_renewal_at = $2,\n            next_payment_attempt_at = $2\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e9a0adea509152c1c59d92911113897a1f4f1e8b58850d69e03b93ac6d7ee0b7"
+}

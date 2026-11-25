@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_payment_attempts\n            SET updated_at = clock_timestamp() - interval '2 minutes'\n            WHERE gateway_account_id = $1 AND id <> $2 AND status = 'pending'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a0615c53689ef9929fbea69b1138162ae84bec128995937256a9002a2076e041"
+}

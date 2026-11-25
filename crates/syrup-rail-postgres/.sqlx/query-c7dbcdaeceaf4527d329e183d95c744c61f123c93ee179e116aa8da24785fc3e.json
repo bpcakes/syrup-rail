@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT gateway_lifecycle_status, refunded_amount_cents,\n                gateway_lifecycle_action\n            FROM billing_payment_attempts\n            WHERE gateway_transaction_id = 'txn-late'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_lifecycle_status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_status"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "refunded_amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "refunded_amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "gateway_lifecycle_action",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "gateway_lifecycle_action"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c7dbcdaeceaf4527d329e183d95c744c61f123c93ee179e116aa8da24785fc3e"
+}

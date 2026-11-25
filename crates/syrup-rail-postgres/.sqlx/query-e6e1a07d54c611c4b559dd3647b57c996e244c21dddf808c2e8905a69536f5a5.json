@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM billing_payment_attempts\n            WHERE billing_scope_id = $1 AND subscriber_id = $2 AND plan_key = $3\n                AND attempt_kind = 'subscription_initial'\n                AND (\n                    status IN ('pending', 'unknown')\n                    OR (\n                        status = 'review_required'\n                        AND resolution_code IS DISTINCT FROM\n                            'subscription_initial_current_subscription_conflict'\n                    )\n                )\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e6e1a07d54c611c4b559dd3647b57c996e244c21dddf808c2e8905a69536f5a5"
+}

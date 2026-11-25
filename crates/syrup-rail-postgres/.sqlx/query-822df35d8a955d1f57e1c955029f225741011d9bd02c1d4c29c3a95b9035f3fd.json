@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        CREATE TABLE host_reconciliation_targets (\n            id uuid PRIMARY KEY,\n            billing_scope_id uuid NOT NULL,\n            subscriber_id uuid NOT NULL,\n            attempt_id uuid NOT NULL,\n            status text NOT NULL\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "822df35d8a955d1f57e1c955029f225741011d9bd02c1d4c29c3a95b9035f3fd"
+}

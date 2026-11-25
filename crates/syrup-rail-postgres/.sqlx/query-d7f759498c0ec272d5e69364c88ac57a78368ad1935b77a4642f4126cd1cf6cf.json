@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT attempts.required_gateway_account_mode,\n            subscriptions.required_gateway_account_mode AS subscription_mode\n        FROM billing_payment_attempts AS attempts\n        JOIN billing_subscriptions AS subscriptions\n            ON subscriptions.id = attempts.subscription_id\n        WHERE attempts.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "required_gateway_account_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "subscription_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d7f759498c0ec272d5e69364c88ac57a78368ad1935b77a4642f4126cd1cf6cf"
+}

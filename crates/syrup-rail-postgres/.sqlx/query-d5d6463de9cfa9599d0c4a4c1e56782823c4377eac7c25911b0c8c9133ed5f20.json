@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1\n            FROM billing_payment_attempts\n            WHERE subscription_id = $1\n                AND attempt_kind IN ('subscription_renewal', 'subscription_recovery')\n                AND billing_period_start_at = $2\n                AND status IN ('pending', 'unknown', 'review_required', 'approved')\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "d5d6463de9cfa9599d0c4a4c1e56782823c4377eac7c25911b0c8c9133ed5f20"
+}

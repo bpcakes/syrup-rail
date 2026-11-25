@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_payment_attempts\n        SET status = 'review_required',\n            gateway_response_text = 'legacy empty exact-query observation',\n            created_at = clock_timestamp() - interval '31 minutes'\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9162db58366c08093cf6eef8f5b84dfe96145e553cd3ea5050747191eb7d633c"
+}

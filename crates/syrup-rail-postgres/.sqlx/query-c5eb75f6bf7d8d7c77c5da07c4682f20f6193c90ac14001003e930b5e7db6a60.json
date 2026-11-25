@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscription_discount_claims SET status = 'superseded', superseded_at = now() WHERE id = $1 AND status = 'saved'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c5eb75f6bf7d8d7c77c5da07c4682f20f6193c90ac14001003e930b5e7db6a60"
+}

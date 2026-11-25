@@ -681,8 +681,8 @@ async fn assert_schema_conforms_in_one_read_only_snapshot(
         .begin_with("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .await?;
     let result = async {
-        let server_version_num =
-            sqlx::query_scalar::<_, i32>("SELECT current_setting('server_version_num')::integer")
+        let server_version_num: i32 =
+            checked_query_scalar!("SELECT current_setting('server_version_num')::integer")
                 .fetch_one(&mut *transaction)
                 .await?;
         require_supported_postgres_version_num(server_version_num)?;
@@ -793,20 +793,20 @@ async fn require_relations(
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    let actual = sqlx::query_scalar::<_, String>(
+    let actual: Vec<String> = checked_query_scalar!(
         r#"
         SELECT relation.relname
         FROM pg_catalog.pg_class AS relation
         INNER JOIN pg_catalog.pg_namespace AS namespace
             ON namespace.oid = relation.relnamespace
         WHERE namespace.nspname = 'public'
-            AND relation.relkind = $1
+            AND relation.relkind = $1::text::"char"
             AND relation.relname = ANY($2)
         ORDER BY relation.relname
         "#,
+        relation_kind.to_string(),
+        &expected_names,
     )
-    .bind(relation_kind.to_string())
-    .bind(&expected_names)
     .fetch_all(&mut *connection)
     .await?;
     require_exact_set(version, "relations", expected, actual)
@@ -820,7 +820,7 @@ async fn require_functions(
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    let actual = sqlx::query_scalar::<_, String>(
+    let actual: Vec<String> = checked_query_scalar!(
         r#"
         SELECT DISTINCT function.proname
         FROM pg_catalog.pg_proc AS function
@@ -831,8 +831,8 @@ async fn require_functions(
             AND function.proname = ANY($1)
         ORDER BY function.proname
         "#,
+        &expected,
     )
-    .bind(&expected)
     .fetch_all(&mut *connection)
     .await?;
     require_exact_set(version, "functions", REQUIRED_FUNCTIONS, actual)
@@ -846,7 +846,7 @@ async fn require_triggers(
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    let actual = sqlx::query_scalar::<_, String>(
+    let actual: Vec<String> = checked_query_scalar!(
         r#"
         SELECT trigger.tgname
         FROM pg_catalog.pg_trigger AS trigger
@@ -860,8 +860,8 @@ async fn require_triggers(
             AND trigger.tgname = ANY($1)
         ORDER BY trigger.tgname
         "#,
+        &expected,
     )
-    .bind(&expected)
     .fetch_all(&mut *connection)
     .await?;
     require_exact_set(version, "triggers", REQUIRED_TRIGGERS, actual)
@@ -873,7 +873,7 @@ async fn require_view_columns(
     view: &str,
     expected_columns: &[&str],
 ) -> Result<(), SchemaConformanceError> {
-    let actual = sqlx::query_scalar::<_, String>(
+    let actual: Vec<String> = checked_query_scalar!(
         r#"
         SELECT column_name
         FROM information_schema.columns
@@ -881,8 +881,8 @@ async fn require_view_columns(
             AND table_name = $1
         ORDER BY ordinal_position
         "#,
+        view,
     )
-    .bind(view)
     .fetch_all(&mut *connection)
     .await?;
     let expected = expected_columns
@@ -907,7 +907,7 @@ async fn reject_legacy_columns(
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    let legacy = sqlx::query_as::<_, (String, String)>(
+    let legacy: Vec<(String, String)> = checked_query_as!(
         r#"
         SELECT table_name, column_name
         FROM information_schema.columns
@@ -930,8 +930,8 @@ async fn reject_legacy_columns(
             )
         ORDER BY table_name, column_name
         "#,
+        &tables,
     )
-    .bind(&tables)
     .fetch_all(&mut *connection)
     .await?;
     if legacy.is_empty() {
@@ -952,7 +952,7 @@ async fn require_validated_constraints(
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    let invalid = sqlx::query_as::<_, (String, String)>(
+    let invalid: Vec<(String, String)> = checked_query_as!(
         r#"
         SELECT relation.relname, catalog_constraint.conname
         FROM pg_catalog.pg_constraint AS catalog_constraint
@@ -966,8 +966,8 @@ async fn require_validated_constraints(
             AND NOT catalog_constraint.convalidated
         ORDER BY relation.relname, catalog_constraint.conname
         "#,
+        &tables,
     )
-    .bind(&tables)
     .fetch_all(&mut *connection)
     .await?;
     if invalid.is_empty() {
@@ -1061,7 +1061,7 @@ async fn load_billing_index_catalog(
         .iter()
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
-    sqlx::query_as::<_, BillingIndexCatalogEntry>(
+    checked_query_as!(
         r#"
         SELECT
             table_relation.relname AS table_name,
@@ -1170,9 +1170,9 @@ async fn load_billing_index_catalog(
             AND index_relation.relname LIKE 'billing\_%' ESCAPE '\'
         ORDER BY table_relation.relname, index_relation.relname
         "#,
+        &tables,
+        CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN,
     )
-    .bind(&tables)
-    .bind(CONCURRENT_REINDEX_SHADOW_INDEX_PATTERN)
     .fetch_all(&mut *connection)
     .await
 }
@@ -1338,7 +1338,7 @@ async fn catalog_index_shape(
     connection: &mut PgConnection,
     index_name: &str,
 ) -> Result<Option<CatalogIndexShape>, sqlx::Error> {
-    sqlx::query_as::<_, CatalogIndexShape>(
+    checked_query_as!(
         r#"
         SELECT
         table_relation.relname AS table_name,
@@ -1422,8 +1422,8 @@ async fn catalog_index_shape(
             AND index_relation.relkind = 'i'
             AND index_relation.relname = $1
         "#,
+        index_name,
     )
-    .bind(index_name)
     .fetch_optional(&mut *connection)
     .await
 }

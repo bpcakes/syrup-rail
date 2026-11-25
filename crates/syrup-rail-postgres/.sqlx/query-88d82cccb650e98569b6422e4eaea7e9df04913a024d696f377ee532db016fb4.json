@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT progression_state FROM billing_processor_charges",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "progression_state",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "progression_state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "88d82cccb650e98569b6422e4eaea7e9df04913a024d696f377ee532db016fb4"
+}

@@ -1,0 +1,123 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n        table_relation.relname AS table_name,\n        access_method.amname AS access_method,\n        ARRAY(\n            SELECT pg_catalog.pg_get_indexdef(\n                catalog_index.indexrelid,\n                key_position.position,\n                true\n            )\n            FROM generate_series(\n                1,\n                catalog_index.indnkeyatts\n            ) AS key_position(position)\n            ORDER BY key_position.position\n        ) AS key_expressions,\n        ARRAY(\n            SELECT concat(\n                CASE WHEN pg_catalog.pg_index_column_has_property(\n                    catalog_index.indexrelid,\n                    key_position.position,\n                    'desc'\n                ) THEN 'DESC' ELSE 'ASC' END,\n                CASE WHEN pg_catalog.pg_index_column_has_property(\n                    catalog_index.indexrelid,\n                    key_position.position,\n                    'nulls_first'\n                ) THEN ' NULLS FIRST' ELSE ' NULLS LAST' END\n            )\n            FROM generate_series(\n                1,\n                catalog_index.indnkeyatts\n            ) AS key_position(position)\n            ORDER BY key_position.position\n        ) AS key_orderings,\n        ARRAY(\n            SELECT concat(operator_class_namespace.nspname, '.', operator_class.opcname)\n            FROM unnest(catalog_index.indclass::oid[]) WITH ORDINALITY\n                AS key_operator_class(operator_class_oid, position)\n            INNER JOIN pg_catalog.pg_opclass AS operator_class\n                ON operator_class.oid = key_operator_class.operator_class_oid\n            INNER JOIN pg_catalog.pg_namespace AS operator_class_namespace\n                ON operator_class_namespace.oid = operator_class.opcnamespace\n            WHERE key_operator_class.position <= catalog_index.indnkeyatts\n            ORDER BY key_operator_class.position\n        ) AS key_opclasses,\n        ARRAY(\n            SELECT pg_catalog.pg_get_indexdef(\n                catalog_index.indexrelid,\n                included_position.position,\n                true\n            )\n            FROM generate_series(\n                catalog_index.indnkeyatts::integer + 1,\n                catalog_index.indnatts::integer\n            ) AS included_position(position)\n            ORDER BY included_position.position\n        ) AS included_expressions,\n        pg_catalog.pg_get_expr(\n            catalog_index.indpred,\n            catalog_index.indrelid,\n            true\n        ) AS predicate,\n        catalog_index.indisunique AS is_unique,\n        catalog_index.indisvalid AS is_valid,\n        catalog_index.indisready AS is_ready,\n        catalog_index.indislive AS is_live\n        FROM pg_catalog.pg_class AS index_relation\n        INNER JOIN pg_catalog.pg_index AS catalog_index\n            ON catalog_index.indexrelid = index_relation.oid\n        INNER JOIN pg_catalog.pg_class AS table_relation\n            ON table_relation.oid = catalog_index.indrelid\n        INNER JOIN pg_catalog.pg_namespace AS index_namespace\n            ON index_namespace.oid = index_relation.relnamespace\n        INNER JOIN pg_catalog.pg_namespace AS table_namespace\n            ON table_namespace.oid = table_relation.relnamespace\n        INNER JOIN pg_catalog.pg_am AS access_method\n            ON access_method.oid = index_relation.relam\n        WHERE index_namespace.nspname = 'public'\n            AND table_namespace.nspname = 'public'\n            AND index_relation.relkind = 'i'\n            AND index_relation.relname = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "table_name",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_class",
+            "name": "relname"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "access_method",
+        "type_info": "Name",
+        "origin": {
+          "Table": {
+            "table": "pg_am",
+            "name": "amname"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "key_expressions",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "key_orderings",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "key_opclasses",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "included_expressions",
+        "type_info": "TextArray",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "predicate",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "is_unique",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisunique"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "is_valid",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisvalid"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "is_ready",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indisready"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "is_live",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "pg_index",
+            "name": "indislive"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Name"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c08fcc218cedb12cbb96501a8e15cc31ec2e942deeeb8c050bc1d0ef565bf878"
+}

@@ -18,10 +18,10 @@ async fn canonical_function_signatures_use_only_built_in_types() -> Result<(), B
             .collect::<Vec<_>>();
         // PostgreSQL's source fixes every OID below 10000. Higher ones are
         // assigned when the server is built, at initdb, or afterwards.
-        let signatures: Vec<(String, bool)> = sqlx::query_as(
+        let signatures: Vec<(String, bool)> = checked_query_as!(
             r#"
             SELECT
-                routine.oid::regprocedure::text,
+                routine.oid::regprocedure::text AS signature,
                 EXISTS (
                     SELECT 1
                     FROM unnest(
@@ -39,8 +39,8 @@ async fn canonical_function_signatures_use_only_built_in_types() -> Result<(), B
                 AND routine.proname = ANY($1)
             ORDER BY 1
             "#,
+            &functions,
         )
-        .bind(&functions)
         .fetch_all(&database.pool)
         .await?;
         assert!(

@@ -15,7 +15,7 @@ async fn manual_failure_uses_the_paid_trial_subscription_dunning_policy()
         let subscriber_id = Uuid::now_v7();
         let (subscription_id, attempt_id) =
             insert_review_renewal(&database, &account, subscriber_id, "paid-trial").await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
                 UPDATE billing_subscriptions
                 SET phase = 'paid_trial',
@@ -27,8 +27,8 @@ async fn manual_failure_uses_the_paid_trial_subscription_dunning_policy()
                     past_due_access = 'continue_until_dunning_exhausted'
                 WHERE id = $1
                 "#,
+            subscription_id,
         )
-        .bind(subscription_id)
         .execute(&database.pool)
         .await?;
 
@@ -46,7 +46,7 @@ async fn manual_failure_uses_the_paid_trial_subscription_dunning_policy()
             String,
             DateTime<Utc>,
             DateTime<Utc>,
-        ) = sqlx::query_as(
+        ) = checked_query_as!(
             r#"
                 SELECT subscriptions.status, subscriptions.phase,
                     subscriptions.next_payment_attempt_at, attempts.resolved_at
@@ -55,9 +55,9 @@ async fn manual_failure_uses_the_paid_trial_subscription_dunning_policy()
                     ON attempts.subscription_id = subscriptions.id
                 WHERE subscriptions.id = $1 AND attempts.id = $2
                 "#,
+            subscription_id,
+            attempt_id,
         )
-        .bind(subscription_id)
-        .bind(attempt_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(status, "past_due");
@@ -105,17 +105,17 @@ async fn manual_failure_of_preserved_active_recovery_does_not_consume_dunning()
             // New recovery reservations require `past_due`, but v2 preserves an
             // already-durable v1 recovery whose expected subscription state was
             // `active`. Reclassify the fixture to exercise that cutover path.
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE billing_payment_attempts SET attempt_kind = 'subscription_recovery' WHERE id = $1",
+                attempt_id,
             )
-            .bind(attempt_id)
             .execute(&database.pool)
             .await?;
 
-            let before: (String, DateTime<Utc>, Option<DateTime<Utc>>) = sqlx::query_as(
+            let before: (String, DateTime<Utc>, Option<DateTime<Utc>>) = checked_query_as!(
                 "SELECT status, next_renewal_at, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+                subscription_id,
             )
-            .bind(subscription_id)
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(before.0, "active");
@@ -133,10 +133,10 @@ async fn manual_failure_of_preserved_active_recovery_does_not_consume_dunning()
             assert_eq!(attempt.kind(), PaymentAttemptKind::SubscriptionRecovery);
             assert_eq!(attempt.status(), PaymentAttemptStatus::Failed);
 
-            let after: (String, DateTime<Utc>, Option<DateTime<Utc>>) = sqlx::query_as(
+            let after: (String, DateTime<Utc>, Option<DateTime<Utc>>) = checked_query_as!(
                 "SELECT status, next_renewal_at, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+                subscription_id,
             )
-            .bind(subscription_id)
             .fetch_one(&database.pool)
             .await?;
             assert_eq!(after, before);
@@ -154,7 +154,7 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
 {
     let database = TestDatabase::start("rail_manual").await?;
     let account = create_gateway_account(&database.pool, "nmi").await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             CREATE TABLE manual_failure_host_targets (
                 id uuid PRIMARY KEY,
@@ -186,10 +186,10 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
     .await?;
     assert!(matches!(outcome, ManualAttemptFailureOutcome::Failed(_)));
     let (attempt_status, response_text, condition): (String, Option<String>, Option<String>) =
-            sqlx::query_as(
+            checked_query_as!(
                 "SELECT status, gateway_response_text, gateway_condition FROM billing_payment_attempts WHERE id = $1",
+                renewal_attempt_id,
             )
-            .bind(renewal_attempt_id)
             .fetch_one(&database.pool)
             .await?;
     assert_eq!(attempt_status, "failed");
@@ -198,11 +198,12 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
         Some(syrup_rail::MANUAL_ATTEMPT_FAILURE_NOTE)
     );
     assert_eq!(condition.as_deref(), Some("failed"));
-    let subscription_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id)
-            .fetch_one(&database.pool)
-            .await?;
+    let subscription_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_subscriptions WHERE id = $1",
+        subscription_id,
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(subscription_status, "past_due");
     let recorded_events = events.lock().await;
     assert_eq!(recorded_events.len(), 1);
@@ -242,17 +243,17 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
         .await
         .is_err()
     );
-    let rolled_back: (String, String) = sqlx::query_as(
-            "SELECT attempts.status, subscriptions.status FROM billing_payment_attempts attempts INNER JOIN billing_subscriptions subscriptions ON subscriptions.id = attempts.subscription_id WHERE attempts.id = $1",
-        )
-        .bind(blocked_attempt_id)
+    let rolled_back: (String, String) = checked_query_as!(
+        "SELECT attempts.status, subscriptions.status AS subscription_status FROM billing_payment_attempts attempts INNER JOIN billing_subscriptions subscriptions ON subscriptions.id = attempts.subscription_id WHERE attempts.id = $1",
+        blocked_attempt_id,
+    )
         .fetch_one(&database.pool)
         .await?;
     assert_eq!(
         rolled_back,
         ("review_required".to_owned(), "active".to_owned())
     );
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_processor_charges (
                 id, attempt_id, billing_scope_id, gateway_account_id,
@@ -265,9 +266,9 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
                 attempt_kind, plan_key, amount_cents, currency
             FROM billing_payment_attempts WHERE id = $1
             "#,
+        blocked_attempt_id,
+        Uuid::now_v7(),
     )
-    .bind(blocked_attempt_id)
-    .bind(Uuid::now_v7())
     .execute(&database.pool)
     .await?;
     assert!(matches!(
@@ -280,11 +281,12 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
         .await?,
         ManualAttemptFailureOutcome::KeptOpen(_)
     ));
-    let blocked_subscription_status: String =
-        sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-            .bind(blocked_subscription_id)
-            .fetch_one(&database.pool)
-            .await?;
+    let blocked_subscription_status: String = checked_query_scalar!(
+        "SELECT status FROM billing_subscriptions WHERE id = $1",
+        blocked_subscription_id,
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(blocked_subscription_status, "active");
 
     let host_subscriber_id = Uuid::now_v7();
@@ -292,7 +294,7 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
     // A random UUID can contain a PAN-shaped digit run. Pin one so this fixture
     // must use the generated-order grammar below.
     let host_attempt_id = Uuid::parse_str("41111111-1111-1111-1111-111111111111")?;
-    sqlx::query(
+    crate::test_support::fixture_query(
             "INSERT INTO manual_failure_host_targets (id, billing_scope_id, subscriber_id, status) VALUES ($1, $2, $3, 'pending')",
         )
         .bind(host_target_id)
@@ -300,7 +302,7 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
         .bind(host_subscriber_id)
         .execute(&database.pool)
         .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -314,16 +316,16 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
                 500, 'USD', $7, $8, $9, clock_timestamp()
             )
             "#,
+        host_attempt_id,
+        account.billing_scope_id,
+        host_subscriber_id,
+        host_target_id,
+        format!("idem-{host_attempt_id}"),
+        format!("fingerprint-{host_attempt_id}"),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("host-order-{}", host_attempt_id.simple()),
     )
-    .bind(host_attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(host_subscriber_id)
-    .bind(host_target_id)
-    .bind(format!("idem-{host_attempt_id}"))
-    .bind(format!("fingerprint-{host_attempt_id}"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("host-order-{}", host_attempt_id.simple()))
     .execute(&database.pool)
     .await?;
     assert!(matches!(
@@ -336,7 +338,7 @@ async fn manual_failure_is_policy_safe_atomic_eventful_and_host_exact() -> Resul
         .await?,
         ManualAttemptFailureOutcome::Failed(_)
     ));
-    let host_state: (String, String) = sqlx::query_as(
+    let host_state: (String, String) = crate::test_support::fixture_query_as(
             "SELECT attempts.status, targets.status FROM billing_payment_attempts attempts INNER JOIN manual_failure_host_targets targets ON targets.id = attempts.host_charge_target_id WHERE attempts.id = $1",
         )
         .bind(host_attempt_id)
@@ -362,10 +364,12 @@ async fn manual_failure_preserves_the_attempts_avs_result() -> Result<(), Box<dy
         let subscriber_id = Uuid::now_v7();
         let (_, attempt_id) =
             insert_review_renewal(&database, &account, subscriber_id, "avs-manual").await?;
-        sqlx::query("UPDATE billing_payment_attempts SET gateway_avs_response = 'Z' WHERE id = $1")
-            .bind(attempt_id)
-            .execute(&database.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE billing_payment_attempts SET gateway_avs_response = 'Z' WHERE id = $1",
+            attempt_id,
+        )
+        .execute(&database.pool)
+        .await?;
 
         let outcome = fail_review_required_attempt(
             &database.pool,
@@ -381,10 +385,10 @@ async fn manual_failure_preserves_the_attempts_avs_result() -> Result<(), Box<dy
             attempt.state().processor_evidence().avs_response(),
             syrup_rail::GatewayAvsResponse::parse("Z")
         );
-        let stored_avs: Option<String> = sqlx::query_scalar(
+        let stored_avs: Option<String> = checked_query_scalar!(
             "SELECT gateway_avs_response FROM billing_payment_attempts WHERE id = $1",
+            attempt_id,
         )
-        .bind(attempt_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(stored_avs.as_deref(), Some("Z"));

@@ -12,17 +12,23 @@ use thiserror::Error;
 use crate::entitlement::{EntitlementQueryError, entitlement_on_connection};
 
 const INVALID_BILLING_PORTAL_STATE: &str = "canonical subscription billing portal state is invalid";
-const SUBSCRIPTION_PAYMENT_HISTORY_FIRST_PAGE_SQL: &str = concat!(
-    include_str!("billing_portal/subscription_payment_history_page_head.sql"),
-    include_str!("billing_portal/subscription_payment_history_page_body.sql"),
-    "LIMIT $4\n"
-);
-const SUBSCRIPTION_PAYMENT_HISTORY_CONTINUATION_SQL: &str = concat!(
-    include_str!("billing_portal/subscription_payment_history_page_head.sql"),
-    "    AND (created_at, id) < ($4::timestamptz, $5::uuid)\n",
-    include_str!("billing_portal/subscription_payment_history_page_body.sql"),
-    "LIMIT $6\n"
-);
+#[macro_use]
+mod page_sql;
+
+macro_rules! history_first_page {
+    ($query:ident $(, $arg:expr)*) => {
+        payment_history_statement!($query, "", "LIMIT $4\n" $(, $arg)*)
+    };
+}
+macro_rules! history_continuation {
+    ($query:ident $(, $arg:expr)*) => {
+        payment_history_statement!(
+            $query,
+            "    AND (created_at, id) < ($4::timestamptz, $5::uuid)\n",
+            "LIMIT $6\n" $(, $arg)*
+        )
+    };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SubscriptionPaymentHistoryPageQuery {
@@ -38,10 +44,11 @@ impl SubscriptionPaymentHistoryPageQuery {
         }
     }
 
+    #[cfg(test)]
     const fn sql(self) -> &'static str {
         match self {
-            Self::First => SUBSCRIPTION_PAYMENT_HISTORY_FIRST_PAGE_SQL,
-            Self::Continuation(_) => SUBSCRIPTION_PAYMENT_HISTORY_CONTINUATION_SQL,
+            Self::First => history_first_page!(concat_sql),
+            Self::Continuation(_) => history_continuation!(concat_sql),
         }
     }
 
@@ -50,16 +57,21 @@ impl SubscriptionPaymentHistoryPageQuery {
         identity: &'args SubscriptionBillingPortalQuery,
         limit: SubscriptionPaymentHistoryPageLimit,
     ) -> Query<'args, Postgres, PgArguments> {
-        let query = sqlx::query(self.sql())
-            .bind(identity.billing_scope_id().into_uuid())
-            .bind(identity.subscriber_id().into_uuid())
-            .bind(identity.plan_key().as_str());
+        let scope = identity.billing_scope_id().into_uuid();
+        let subscriber = identity.subscriber_id().into_uuid();
+        let plan = identity.plan_key().as_str();
+        let limit = limit.get() + 1;
         match self {
-            Self::First => query.bind(limit.get() + 1),
-            Self::Continuation(cursor) => query
-                .bind(cursor.created_at())
-                .bind(cursor.payment_attempt_id().into_uuid())
-                .bind(limit.get() + 1),
+            Self::First => history_first_page!(checked_query, scope, subscriber, plan, limit),
+            Self::Continuation(cursor) => history_continuation!(
+                checked_query,
+                scope,
+                subscriber,
+                plan,
+                cursor.created_at(),
+                cursor.payment_attempt_id().into_uuid(),
+                limit
+            ),
         }
     }
 }
@@ -85,7 +97,7 @@ pub async fn subscription_billing_portal(
     query: &SubscriptionBillingPortalQuery,
 ) -> Result<SubscriptionBillingPortalSnapshot, SubscriptionBillingPortalQueryError> {
     let mut transaction = pool.begin().await?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+    sqlx::query!("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
         .execute(&mut *transaction)
         .await?;
 
@@ -170,7 +182,7 @@ async fn payment_method_display(
     query: &SubscriptionBillingPortalQuery,
     payment_method_id: syrup_rail::PaymentMethodId,
 ) -> Result<Option<SubscriptionPaymentMethodDisplay>, SubscriptionBillingPortalQueryError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT card_brand, card_last4, card_exp_month, card_exp_year
         FROM billing_payment_methods
@@ -179,10 +191,10 @@ async fn payment_method_display(
             AND subscriber_id = $3
             AND status = 'active'
         "#,
+        payment_method_id.as_uuid(),
+        query.billing_scope_id().into_uuid(),
+        query.subscriber_id().into_uuid(),
     )
-    .bind(payment_method_id.as_uuid())
-    .bind(query.billing_scope_id().as_uuid())
-    .bind(query.subscriber_id().as_uuid())
     .fetch_optional(connection)
     .await?;
     let Some(row) = row else {

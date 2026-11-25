@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = CASE WHEN $1 THEN '-infinity'::timestamptz ELSE clock_timestamp() + interval '1 hour' END WHERE provider_key = 'nmi'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "087581bf72209d58b8afaf6b01942cf26cdb499040983566fd5452119f92aaab"
+}

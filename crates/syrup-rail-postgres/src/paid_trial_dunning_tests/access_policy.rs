@@ -113,11 +113,12 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         "suspend_terminal_failure_2",
     )
     .await?;
-    let status: String =
-        sqlx::query_scalar("SELECT status FROM billing_subscriptions WHERE id = $1")
-            .bind(suspended_id.as_uuid())
-            .fetch_one(&database.pool)
-            .await?;
+    let status: String = checked_query_scalar!(
+        "SELECT status FROM billing_subscriptions WHERE id = $1",
+        suspended_id.as_uuid(),
+    )
+    .fetch_one(&database.pool)
+    .await?;
     assert_eq!(status, "unpaid");
     let emitted = events.lock().await.clone();
     assert!(emitted.iter().any(|event| matches!(
@@ -195,10 +196,10 @@ async fn access_policies_drive_terminal_and_cancellation_timestamps_without_rein
         "remain_failure_2",
     )
     .await?;
-    let (status, next_payment): (String, Option<DateTime<Utc>>) = sqlx::query_as(
+    let (status, next_payment): (String, Option<DateTime<Utc>>) = checked_query_as!(
         "SELECT status, next_payment_attempt_at FROM billing_subscriptions WHERE id = $1",
+        remain_id.as_uuid(),
     )
-    .bind(remain_id.as_uuid())
     .fetch_one(&database.pool)
     .await?;
     assert_eq!((status.as_str(), next_payment), ("past_due", None));

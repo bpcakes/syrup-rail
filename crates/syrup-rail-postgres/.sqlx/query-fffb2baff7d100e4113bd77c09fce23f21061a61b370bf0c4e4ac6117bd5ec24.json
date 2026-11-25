@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_subscription_grants (\n            id,\n            billing_scope_id,\n            subscriber_id,\n            plan_key,\n            grant_kind,\n            reason,\n            starts_at,\n            ends_at,\n            granted_by_actor_id,\n            created_at,\n            updated_at\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $7, $7)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fffb2baff7d100e4113bd77c09fce23f21061a61b370bf0c4e4ac6117bd5ec24"
+}

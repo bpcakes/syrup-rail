@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT gateway_payment_method_reference\n                FROM billing_payment_methods\n                WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3\n                    AND gateway_account_id = $4 AND status = 'active'\n                FOR SHARE\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "gateway_payment_method_reference",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_methods",
+            "name": "gateway_payment_method_reference"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4fdb5fcbc992b1e67e470a6cf1bc1b47696c9221d038e17a46761db9ab631081"
+}

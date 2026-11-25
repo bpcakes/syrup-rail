@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT charges.id, charges.attempt_id,\n                billing_canonical_gateway_transaction_id(\n                    charges.gateway_transaction_id\n                ) AS transaction_id,\n                charges.observed_at\n            FROM billing_processor_charges charges\n            INNER JOIN billing_payment_attempts attempts\n                ON attempts.id = charges.attempt_id\n                AND attempts.gateway_account_id = $1\n            WHERE charges.gateway_account_id = $1\n                AND charges.progression_state = 'pending'\n                AND (\n                    $2::timestamptz IS NULL\n                    OR (charges.observed_at, charges.id)\n                        > ($2::timestamptz, $3::uuid)\n                )\n                AND (charges.observed_at, charges.id) <= ($4, $5)\n            ORDER BY charges.observed_at, charges.id\n            LIMIT $6\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "attempt_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "attempt_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "transaction_id",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "observed_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_processor_charges",
+            "name": "observed_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz",
+        "Uuid",
+        "Timestamptz",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "bb1c53abe270f5e102c4aa76084b1fe765c8d74ed23682d52c569809943c60ec"
+}

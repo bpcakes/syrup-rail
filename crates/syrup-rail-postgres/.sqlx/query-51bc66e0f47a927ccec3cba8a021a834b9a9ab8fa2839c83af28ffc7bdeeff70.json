@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            COALESCE(accounts.mutation_rate_limited_until > clock_timestamp(), false) AS account_active,\n            provider.rate_limited_until > clock_timestamp() AS provider_active\n        FROM billing_gateway_accounts AS accounts\n        INNER JOIN billing_gateway_provider_rate_limits AS provider\n            ON provider.provider_key = accounts.provider_key\n        WHERE accounts.id = $1 AND accounts.provider_key = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_active",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "provider_active",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "51bc66e0f47a927ccec3cba8a021a834b9a9ab8fa2839c83af28ffc7bdeeff70"
+}

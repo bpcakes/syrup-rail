@@ -53,7 +53,7 @@ impl HostChargeTargetStore for ReconciliationTargets {
         connection: &mut PgConnection,
         transition: HostChargeTargetTransition,
     ) -> Result<HostChargeTargetTransitionOutcome, HostChargeTargetError> {
-        let current = sqlx::query_as::<_, (Uuid, String)>(
+        let current = crate::test_support::fixture_query_as::<_, (Uuid, String)>(
             r#"
             SELECT attempt_id, status
             FROM host_reconciliation_targets
@@ -77,7 +77,7 @@ impl HostChargeTargetStore for ReconciliationTargets {
         }
         match status.as_str() {
             "reserved" => {
-                sqlx::query(
+                crate::test_support::fixture_query(
                     "UPDATE host_reconciliation_targets SET status = 'released' WHERE id = $1",
                 )
                 .bind(transition.target_id().as_uuid())
@@ -163,14 +163,16 @@ async fn unreleasable_oldest_targets_do_not_starve_later_cleanup() -> Result<(),
             insert_host_charge(&database.pool, account, Utc::now() - Duration::minutes(32)).await?;
         let releasable =
             insert_host_charge(&database.pool, account, Utc::now() - Duration::minutes(31)).await?;
-        sqlx::query("DELETE FROM host_reconciliation_targets WHERE id = $1")
+        crate::test_support::fixture_query("DELETE FROM host_reconciliation_targets WHERE id = $1")
             .bind(missing.1)
             .execute(&database.pool)
             .await?;
-        sqlx::query("UPDATE host_reconciliation_targets SET status = 'paid' WHERE id = $1")
-            .bind(inapplicable.1)
-            .execute(&database.pool)
-            .await?;
+        crate::test_support::fixture_query(
+            "UPDATE host_reconciliation_targets SET status = 'paid' WHERE id = $1",
+        )
+        .bind(inapplicable.1)
+        .execute(&database.pool)
+        .await?;
 
         let summary = fail_stale_unsubmitted_host_charges(
             &database.pool,
@@ -203,7 +205,7 @@ async fn unreleasable_oldest_targets_do_not_starve_later_cleanup() -> Result<(),
 }
 
 async fn install_reconciliation_targets(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         CREATE TABLE host_reconciliation_targets (
             id uuid PRIMARY KEY,
@@ -227,7 +229,7 @@ async fn insert_host_charge(
     let attempt_id = Uuid::now_v7();
     let target_id = Uuid::now_v7();
     let subscriber_id = Uuid::now_v7();
-    sqlx::query(
+    crate::test_support::fixture_query(
         r#"
         INSERT INTO host_reconciliation_targets (
             id, billing_scope_id, subscriber_id, attempt_id, status
@@ -240,7 +242,7 @@ async fn insert_host_charge(
     .bind(attempt_id)
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -254,32 +256,36 @@ async fn insert_host_charge(
             100, 'USD', $7, $8, $9, $10, $10
         )
         "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        target_id,
+        format!("idem_{}", attempt_id.simple()),
+        format!("host_charge:{target_id}:100:USD"),
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        format!("order_{}", attempt_id.simple()),
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(target_id)
-    .bind(format!("idem_{}", attempt_id.simple()))
-    .bind(format!("host_charge:{target_id}:100:USD"))
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(format!("order_{}", attempt_id.simple()))
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok((attempt_id, target_id, subscriber_id))
 }
 
 async fn attempt_status(pool: &sqlx::PgPool, attempt_id: Uuid) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT status FROM billing_payment_attempts WHERE id = $1")
-        .bind(attempt_id)
-        .fetch_one(pool)
-        .await
+    checked_query_scalar!(
+        "SELECT status FROM billing_payment_attempts WHERE id = $1",
+        attempt_id,
+    )
+    .fetch_one(pool)
+    .await
 }
 
 async fn target_status(pool: &sqlx::PgPool, target_id: Uuid) -> Result<String, sqlx::Error> {
-    sqlx::query_scalar("SELECT status FROM host_reconciliation_targets WHERE id = $1")
-        .bind(target_id)
-        .fetch_one(pool)
-        .await
+    crate::test_support::fixture_query_scalar(
+        "SELECT status FROM host_reconciliation_targets WHERE id = $1",
+    )
+    .bind(target_id)
+    .fetch_one(pool)
+    .await
 }

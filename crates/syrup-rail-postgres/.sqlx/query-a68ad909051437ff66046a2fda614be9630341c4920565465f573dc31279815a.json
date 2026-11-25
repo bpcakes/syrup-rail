@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscriptions\n        SET status = 'canceled', canceled_at = clock_timestamp(),\n            next_payment_attempt_at = NULL\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a68ad909051437ff66046a2fda614be9630341c4920565465f573dc31279815a"
+}

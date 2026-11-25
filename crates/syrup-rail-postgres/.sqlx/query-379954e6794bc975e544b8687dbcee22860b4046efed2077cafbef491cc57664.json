@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET status = 'past_due', next_payment_attempt_at = next_renewal_at WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "379954e6794bc975e544b8687dbcee22860b4046efed2077cafbef491cc57664"
+}

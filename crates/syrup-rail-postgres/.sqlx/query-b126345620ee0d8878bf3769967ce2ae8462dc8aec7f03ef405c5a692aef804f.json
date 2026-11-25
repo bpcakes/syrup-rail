@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE billing_subscriptions\n            SET payment_method_id = $2, initial_transaction_id = $3,\n                updated_at = clock_timestamp()\n            WHERE id = $1 AND billing_scope_id = $4 AND subscriber_id = $5\n                AND gateway_account_id = $6 AND plan_key = $7\n                AND status IN ('active', 'past_due')\n                AND payment_method_id = $8 AND initial_transaction_id = $9\n                AND required_gateway_account_mode = $10\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b126345620ee0d8878bf3769967ce2ae8462dc8aec7f03ef405c5a692aef804f"
+}

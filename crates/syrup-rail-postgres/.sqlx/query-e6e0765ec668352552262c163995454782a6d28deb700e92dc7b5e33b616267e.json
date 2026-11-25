@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO billing_processor_charges (\n                id, attempt_id, billing_scope_id, gateway_account_id,\n                gateway_order_id, gateway_transaction_id, charge_role,\n                progression_state, observed_at, attempt_kind, plan_key,\n                amount_cents, currency\n            ) SELECT\n                $2, id, billing_scope_id, gateway_account_id, gateway_order_id,\n                'txn-blocked', 'primary', 'pending', clock_timestamp(),\n                attempt_kind, plan_key, amount_cents, currency\n            FROM billing_payment_attempts WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e6e0765ec668352552262c163995454782a6d28deb700e92dc7b5e33b616267e"
+}

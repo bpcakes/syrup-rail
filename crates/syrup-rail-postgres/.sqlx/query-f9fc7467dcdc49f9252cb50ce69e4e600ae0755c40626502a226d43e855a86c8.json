@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_payment_methods (\n            id, billing_scope_id, subscriber_id, gateway_account_id,\n            gateway_payment_method_reference, status\n        ) VALUES ($1, $2, $3, $4, 'vault_switched', 'active')\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f9fc7467dcdc49f9252cb50ce69e4e600ae0755c40626502a226d43e855a86c8"
+}

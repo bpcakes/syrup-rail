@@ -9,7 +9,7 @@ async fn host_charge_persists_billing_address_and_rejects_changed_address_replay
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("address_host").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             "CREATE TABLE host_charge_targets (id uuid PRIMARY KEY, \
              billing_scope_id uuid NOT NULL, subscriber_id uuid NOT NULL, \
              status text NOT NULL, amount_cents integer NOT NULL, currency text NOT NULL, \
@@ -20,7 +20,7 @@ async fn host_charge_persists_billing_address_and_rejects_changed_address_replay
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = HostChargeTargetId::new(Uuid::now_v7());
-        sqlx::query(
+        crate::test_support::fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id.as_uuid())

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_payment_methods SET card_brand = 'unrecognized provider scheme' WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cc2740853a1666b2d3b8260edc4a463dbc96af47782e0176097f31270263ef7a"
+}

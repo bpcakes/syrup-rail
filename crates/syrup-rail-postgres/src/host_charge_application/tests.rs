@@ -35,7 +35,7 @@ use crate::{
     HostChargeReservationOutcome, HostChargeSubmissionAdmission, HostChargeSubmissionDecision,
     HostChargeTargetReservation, SubscriptionBillingService, SubscriptionOfferStore,
     host_charge_ledger_admission, reserve_host_charge_in_transaction,
-    test_support::{TestDatabase, create_gateway_account},
+    test_support::{TestDatabase, create_gateway_account, fixture_query, fixture_query_scalar},
 };
 
 mod readiness_replay;
@@ -216,7 +216,7 @@ impl PaymentGateway for TerminalRaceGateway {
         request: GatewaySaleRequest,
     ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
         self.sale_calls.fetch_add(1, Ordering::SeqCst);
-        let updated = sqlx::query(
+        let updated = sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'failed', resolved_at = clock_timestamp(),
@@ -224,8 +224,8 @@ impl PaymentGateway for TerminalRaceGateway {
                 gateway_condition = 'failed', updated_at = clock_timestamp()
             WHERE gateway_order_id = $1 AND status = 'pending'
             "#,
+            request.order_id().expose(),
         )
-        .bind(request.order_id().expose())
         .execute(&self.pool)
         .await
         .expect("simulate a terminal attempt race");
@@ -464,7 +464,7 @@ impl HostChargeTargetStore for TestTargets {
         connection: &mut PgConnection,
         reservation: &HostChargeTargetReservation,
     ) -> Result<HostChargeReservationDecision, HostChargeTargetError> {
-        let row = sqlx::query_as::<_, (String, i32, String)>(
+        let row = crate::test_support::fixture_query_as::<_, (String, i32, String)>(
             r#"
             SELECT status, amount_cents, currency
             FROM host_charge_targets
@@ -517,7 +517,7 @@ impl HostChargeTargetStore for TestTargets {
         connection: &mut PgConnection,
         admission: &HostChargeSubmissionAdmission,
     ) -> Result<HostChargeSubmissionDecision, HostChargeTargetError> {
-        let row = sqlx::query_as::<_, (String, i32, String)>(
+        let row = crate::test_support::fixture_query_as::<_, (String, i32, String)>(
             r#"
             SELECT status, amount_cents, currency
             FROM host_charge_targets
@@ -569,7 +569,7 @@ impl HostChargeTargetStore for TestTargets {
         connection: &mut PgConnection,
         transition: HostChargeTargetTransition,
     ) -> Result<HostChargeTargetTransitionOutcome, HostChargeTargetError> {
-        let current: Option<String> = sqlx::query_scalar(
+        let current: Option<String> = crate::test_support::fixture_query_scalar(
             r#"
             SELECT status FROM host_charge_targets
             WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3
@@ -587,7 +587,7 @@ impl HostChargeTargetStore for TestTargets {
         };
         match transition.kind() {
             HostChargeTargetTransitionKind::Paid if current == "pending" => {
-                sqlx::query(
+                crate::test_support::fixture_query(
                     "UPDATE host_charge_targets SET status = 'paid', paid_at = $2 WHERE id = $1",
                 )
                 .bind(transition.target_id().as_uuid())

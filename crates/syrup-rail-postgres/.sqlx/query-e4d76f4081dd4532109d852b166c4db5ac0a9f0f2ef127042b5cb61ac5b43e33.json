@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_gateway_provider_rate_limits AS provider_limits\n        SET rate_limited_until = GREATEST(\n            provider_limits.rate_limited_until,\n            clock_timestamp() + make_interval(secs => $4::bigint)\n        )\n        FROM billing_gateway_accounts AS accounts\n        WHERE provider_limits.provider_key = $1\n            AND accounts.provider_key = provider_limits.provider_key\n            AND accounts.id = $2\n            AND accounts.billing_scope_id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Uuid",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e4d76f4081dd4532109d852b166c4db5ac0a9f0f2ef127042b5cb61ac5b43e33"
+}

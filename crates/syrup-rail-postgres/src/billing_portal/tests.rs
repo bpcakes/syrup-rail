@@ -154,10 +154,10 @@ async fn billing_portal_projects_empty_active_trial_dunning_cancellation_and_gra
             SubscriptionPhase::Recurring,
         )
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_subscriptions SET past_due_access = 'continue_until_dunning_exhausted' WHERE id = $1",
+            dunning.subscription_id,
         )
-        .bind(dunning.subscription_id)
         .execute(&database.pool)
         .await?;
         let dunning_snapshot = subscription_billing_portal(&database.pool, &dunning.query()).await?;
@@ -225,7 +225,7 @@ async fn billing_portal_is_exact_and_hides_scrubbed_or_sensitive_method_data()
             SubscriptionPhase::Recurring,
         )
         .await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_methods
             SET gateway_payment_method_reference = 'portal-method-reference-secret',
@@ -233,8 +233,8 @@ async fn billing_portal_is_exact_and_hides_scrubbed_or_sensitive_method_data()
                 billing_email = 'portal-private@example.test'
             WHERE id = $1
             "#,
+            fixture.payment_method_id,
         )
-        .bind(fixture.payment_method_id)
         .execute(&database.pool)
         .await?;
 
@@ -256,7 +256,7 @@ async fn billing_portal_is_exact_and_hides_scrubbed_or_sensitive_method_data()
             }
         }
 
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_methods
             SET card_brand = '   ',
@@ -265,8 +265,8 @@ async fn billing_portal_is_exact_and_hides_scrubbed_or_sensitive_method_data()
                 card_exp_year = NULL
             WHERE id = $1
             "#,
+            fixture.payment_method_id,
         )
-        .bind(fixture.payment_method_id)
         .execute(&database.pool)
         .await?;
         let normalized_empty_snapshot =
@@ -349,7 +349,7 @@ async fn payment_history_first_and_continuation_plans_use_the_exact_ordered_inde
         .await?;
         let newest_at = Utc.with_ymd_and_hms(2026, 8, 12, 12, 0, 0).unwrap();
         insert_payment_history_population(&database.pool, &fixture, newest_at, 4_096).await?;
-        sqlx::query("ANALYZE billing_payment_attempts")
+        checked_query!("ANALYZE billing_payment_attempts")
             .execute(&database.pool)
             .await?;
 
@@ -368,7 +368,7 @@ async fn payment_history_first_and_continuation_plans_use_the_exact_ordered_inde
                 "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
                 page_query.sql()
             );
-            let plan_row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain_sql.as_str()))
+            let plan_row = crate::test_support::fixture_raw_sql(sqlx::AssertSqlSafe(explain_sql.as_str()))
                 .fetch_one(&database.pool)
                 .await?;
             let plan: serde_json::Value = plan_row.try_get(0)?;
@@ -581,7 +581,7 @@ async fn insert_subscription(
     let payment_method_id = Uuid::now_v7();
     let subscription_id = Uuid::now_v7();
     let initial_transaction_id = format!("txn_{}", subscription_id.simple());
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
@@ -589,12 +589,12 @@ async fn insert_subscription(
             card_exp_month, card_exp_year
         ) VALUES ($1, $2, $3, $4, $5, 'active', 'Visa', '4242', 12, 2032)
         "#,
+        payment_method_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        format!("vault_{}", payment_method_id.simple()),
     )
-    .bind(payment_method_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(format!("vault_{}", payment_method_id.simple()))
     .execute(pool)
     .await?;
 
@@ -609,7 +609,7 @@ async fn insert_subscription(
         SubscriptionPhase::PaidTrial => (Some(99_i32), Some("calendar_months"), Some(1_i32)),
         SubscriptionPhase::Recurring => (None, None, None),
     };
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscriptions (
             required_gateway_account_mode,
@@ -627,23 +627,23 @@ async fn insert_subscription(
             'remain_past_due', 'suspend_immediately', $16
         )
         "#,
+        subscription_id,
+        account.billing_scope_id,
+        subscriber_id,
+        plan_key,
+        status.as_str(),
+        account.gateway_account_id,
+        payment_method_id,
+        period_start,
+        period_end,
+        &initial_transaction_id,
+        canceled_at,
+        phase.as_str(),
+        trial_amount_cents,
+        trial_period_kind,
+        trial_period_count,
+        next_payment_attempt_at,
     )
-    .bind(subscription_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(plan_key)
-    .bind(status.as_str())
-    .bind(account.gateway_account_id)
-    .bind(payment_method_id)
-    .bind(period_start)
-    .bind(period_end)
-    .bind(&initial_transaction_id)
-    .bind(canceled_at)
-    .bind(phase.as_str())
-    .bind(trial_amount_cents)
-    .bind(trial_period_kind)
-    .bind(trial_period_count)
-    .bind(next_payment_attempt_at)
     .execute(pool)
     .await?;
     Ok(PortalFixture {
@@ -661,7 +661,7 @@ async fn insert_applied_discount(
     pool: &PgPool,
     fixture: &PortalFixture,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discounts (
             subscription_id, billing_scope_id, subscriber_id, plan_key,
@@ -673,11 +673,11 @@ async fn insert_applied_discount(
             'USD', 'indefinite', 5900, 5890, 1, 'active'
         )
         "#,
+        fixture.subscription_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        fixture.plan_key.as_str(),
     )
-    .bind(fixture.subscription_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(fixture.plan_key.as_str())
     .execute(pool)
     .await?;
     Ok(())
@@ -688,7 +688,7 @@ async fn insert_saved_discount(
     query: &SubscriptionBillingPortalQuery,
 ) -> Result<(), sqlx::Error> {
     let discount_code_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discount_codes (
             id, billing_scope_id, plan_key, code_normalized, display_code,
@@ -698,13 +698,13 @@ async fn insert_saved_discount(
             'active', 'amount_off', 10, 'USD', 'indefinite'
         )
         "#,
+        discount_code_id,
+        query.billing_scope_id().into_uuid(),
+        query.plan_key().as_str(),
     )
-    .bind(discount_code_id)
-    .bind(query.billing_scope_id().as_uuid())
-    .bind(query.plan_key().as_str())
     .execute(pool)
     .await?;
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_discount_claims (
             id, billing_scope_id, subscriber_id, plan_key, discount_code_id,
@@ -715,12 +715,12 @@ async fn insert_saved_discount(
             'amount_off', 10, 'USD', 'indefinite', 5900, 5890, 'saved'
         )
         "#,
+        Uuid::now_v7(),
+        query.billing_scope_id().into_uuid(),
+        query.subscriber_id().into_uuid(),
+        query.plan_key().as_str(),
+        discount_code_id,
     )
-    .bind(Uuid::now_v7())
-    .bind(query.billing_scope_id().as_uuid())
-    .bind(query.subscriber_id().as_uuid())
-    .bind(query.plan_key().as_str())
-    .bind(discount_code_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -731,7 +731,7 @@ async fn insert_grant(
     query: &SubscriptionBillingPortalQuery,
 ) -> Result<Uuid, sqlx::Error> {
     let grant_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_subscription_grants (
             id, billing_scope_id, subscriber_id, plan_key, grant_kind, reason,
@@ -742,12 +742,12 @@ async fn insert_grant(
             clock_timestamp() + interval '1 day', $5
         )
         "#,
+        grant_id,
+        query.billing_scope_id().into_uuid(),
+        query.subscriber_id().into_uuid(),
+        query.plan_key().as_str(),
+        Uuid::now_v7(),
     )
-    .bind(grant_id)
-    .bind(query.billing_scope_id().as_uuid())
-    .bind(query.subscriber_id().as_uuid())
-    .bind(query.plan_key().as_str())
-    .bind(Uuid::now_v7())
     .execute(pool)
     .await?;
     Ok(grant_id)
@@ -759,7 +759,7 @@ async fn insert_payment_method_update_attempt(
     attempt_id: Uuid,
     created_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -777,27 +777,27 @@ async fn insert_payment_method_update_attempt(
             'live',
             $1, $2, $3, $4, $5, $6,
             'subscription_payment_method_update', 'failed', $7, $8, 0, 'USD',
-            $9, $10, $11, 'history-transaction-secret-' || $1::text,
+            $9, $10, $11, 'history-transaction-secret-' || $1::uuid::text,
             'history-method-reference-secret', 'history-response-secret',
             'history-response-code-secret', 'history-response-text-secret',
             'history-condition-secret', 'History', 'Private Name',
             'history-private@example.test', $6, $12, $13, $13, $13, $13
         )
         "#,
+        attempt_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        fixture.plan_key.as_str(),
+        fixture.subscription_id,
+        fixture.payment_method_id,
+        format!("history_idempotency_{attempt_id}"),
+        format!("history_fingerprint_{attempt_id}"),
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        format!("history_order_{attempt_id}"),
+        &fixture.initial_transaction_id,
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(fixture.plan_key.as_str())
-    .bind(fixture.subscription_id)
-    .bind(fixture.payment_method_id)
-    .bind(format!("history_idempotency_{attempt_id}"))
-    .bind(format!("history_fingerprint_{attempt_id}"))
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(format!("history_order_{attempt_id}"))
-    .bind(&fixture.initial_transaction_id)
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -809,7 +809,7 @@ async fn insert_payment_history_population(
     newest_at: DateTime<Utc>,
     population: i32,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -849,17 +849,17 @@ async fn insert_payment_history_population(
                 - ((value - 1) / 4) * interval '1 second' AS observed_at
         ) AS clock
         "#,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        fixture.plan_key.as_str(),
+        fixture.subscription_id,
+        fixture.payment_method_id,
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        &fixture.initial_transaction_id,
+        newest_at,
+        population,
     )
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(fixture.plan_key.as_str())
-    .bind(fixture.subscription_id)
-    .bind(fixture.payment_method_id)
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(&fixture.initial_transaction_id)
-    .bind(newest_at)
-    .bind(population)
     .execute(pool)
     .await?;
     Ok(())
@@ -871,7 +871,7 @@ async fn insert_renewal_attempt(
     attempt_id: Uuid,
     created_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -889,22 +889,22 @@ async fn insert_renewal_attempt(
             $15, $15, $15, $15
         )
         "#,
+        attempt_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        fixture.plan_key.as_str(),
+        fixture.subscription_id,
+        fixture.payment_method_id,
+        format!("renewal_idempotency_{attempt_id}"),
+        format!("renewal_fingerprint_{attempt_id}"),
+        fixture.period_end,
+        fixture.period_end + Duration::days(30),
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        format!("renewal_order_{attempt_id}"),
+        &fixture.initial_transaction_id,
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(fixture.plan_key.as_str())
-    .bind(fixture.subscription_id)
-    .bind(fixture.payment_method_id)
-    .bind(format!("renewal_idempotency_{attempt_id}"))
-    .bind(format!("renewal_fingerprint_{attempt_id}"))
-    .bind(fixture.period_end)
-    .bind(fixture.period_end + Duration::days(30))
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(format!("renewal_order_{attempt_id}"))
-    .bind(&fixture.initial_transaction_id)
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok(())
@@ -916,7 +916,7 @@ async fn insert_host_charge(
     attempt_id: Uuid,
     created_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         INSERT INTO billing_payment_attempts (
             required_gateway_account_mode,
@@ -930,17 +930,17 @@ async fn insert_host_charge(
             $7, $8, $9, $10, $10
         )
         "#,
+        attempt_id,
+        fixture.account.billing_scope_id,
+        fixture.subscriber_id,
+        Uuid::now_v7(),
+        format!("host_idempotency_{attempt_id}"),
+        format!("host_fingerprint_{attempt_id}"),
+        fixture.account.gateway_account_id,
+        fixture.account.gateway_configuration_id,
+        format!("host_order_{attempt_id}"),
+        created_at,
     )
-    .bind(attempt_id)
-    .bind(fixture.account.billing_scope_id)
-    .bind(fixture.subscriber_id)
-    .bind(Uuid::now_v7())
-    .bind(format!("host_idempotency_{attempt_id}"))
-    .bind(format!("host_fingerprint_{attempt_id}"))
-    .bind(fixture.account.gateway_account_id)
-    .bind(fixture.account.gateway_configuration_id)
-    .bind(format!("host_order_{attempt_id}"))
-    .bind(created_at)
     .execute(pool)
     .await?;
     Ok(())

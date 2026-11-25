@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE billing_subscriptions SET initial_transaction_id = 'txn_external_before_park', updated_at = clock_timestamp() WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "27cd0a96d368eac2998a99844b4e55fc6c290f128547fb3d7f6db2d90eaf803a"
+}

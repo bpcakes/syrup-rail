@@ -8,7 +8,7 @@ async fn active_grant_blocks_only_its_exact_plan() -> Result<(), Box<dyn Error>>
     set_offer(&database, account.billing_scope_id, "basic", 1_000).await?;
     set_offer(&database, account.billing_scope_id, "premium", 2_000).await?;
     let subscriber_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_subscription_grants (
                 id, billing_scope_id, subscriber_id, plan_key, grant_kind,
@@ -19,11 +19,11 @@ async fn active_grant_blocks_only_its_exact_plan() -> Result<(), Box<dyn Error>>
                 clock_timestamp() + interval '1 day', $4
             )
             "#,
+        Uuid::now_v7(),
+        account.billing_scope_id,
+        subscriber_id,
+        Uuid::now_v7(),
     )
-    .bind(Uuid::now_v7())
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(Uuid::now_v7())
     .execute(&database.pool)
     .await?;
     let gateway = resolved_gateway(account);
@@ -106,11 +106,11 @@ async fn gateway_configuration_rotation_rejects_prepared_submission() -> Result<
     ));
     transaction.commit().await?;
 
-    sqlx::query(
-            "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2, updated_at = clock_timestamp() WHERE id = $1",
-        )
-        .bind(account.gateway_account_id)
-        .bind(Uuid::now_v7())
+    sqlx::query!(
+        "UPDATE billing_gateway_accounts SET gateway_configuration_id = $2, updated_at = clock_timestamp() WHERE id = $1",
+        account.gateway_account_id,
+        Uuid::now_v7(),
+    )
         .execute(&database.pool)
         .await?;
     let mut transaction = database.pool.begin().await?;
@@ -222,7 +222,7 @@ async fn enrollment_admission_returns_typed_rejection_for_changed_required_mode(
         SubscriptionEnrollmentReservationOutcome::Reserved(_)
     ));
     transaction.commit().await?;
-    sqlx::query(
+    crate::test_support::fixture_query(
         "DELETE FROM host_subscription_offers WHERE billing_scope_id = $1 AND plan_key = $2",
     )
     .bind(account.billing_scope_id)
@@ -259,7 +259,7 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let attempt_id = Uuid::now_v7();
     let subscriber_id = Uuid::now_v7();
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -278,25 +278,25 @@ async fn loaders_preserve_exact_scope_and_redact_durable_values() -> Result<(), 
                 $15, $16, $17, $18
             )
             "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        Uuid::now_v7(),
+        "idempotency-secret",
+        "fingerprint-secret",
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        "order-secret",
+        "transaction-secret",
+        "method-secret",
+        "response-secret",
+        "code-secret",
+        "text-secret",
+        "condition-secret",
+        "Sensitive",
+        "Name",
+        "secret@example.test",
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(Uuid::now_v7())
-    .bind("idempotency-secret")
-    .bind("fingerprint-secret")
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind("order-secret")
-    .bind("transaction-secret")
-    .bind("method-secret")
-    .bind("response-secret")
-    .bind("code-secret")
-    .bind("text-secret")
-    .bind("condition-secret")
-    .bind("Sensitive")
-    .bind("Name")
-    .bind("secret@example.test")
     .execute(&database.pool)
     .await?;
 
@@ -362,26 +362,26 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
         (expected_method_id, "vault-expected"),
         (related_method_id, "vault-related"),
     ] {
-        sqlx::query(
+        sqlx::query!(
             r#"
                 INSERT INTO billing_payment_methods (
                     id, billing_scope_id, subscriber_id, gateway_account_id,
                     gateway_payment_method_reference, status
                 ) VALUES ($1, $2, $3, $4, $5, 'active')
                 "#,
+            method_id,
+            account.billing_scope_id,
+            subscriber_id,
+            account.gateway_account_id,
+            reference,
         )
-        .bind(method_id)
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
-        .bind(account.gateway_account_id)
-        .bind(reference)
         .execute(&database.pool)
         .await?;
     }
     let subscription_id = Uuid::now_v7();
     let period_start = Utc::now();
     let period_end = period_start + Duration::days(30);
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_subscriptions (
             required_gateway_account_mode,
@@ -398,14 +398,14 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
                 ARRAY[]::bigint[], 'remain_past_due', 'suspend_immediately', $7
             )
             "#,
+        subscription_id,
+        account.billing_scope_id,
+        subscriber_id,
+        account.gateway_account_id,
+        related_method_id,
+        period_start,
+        period_end,
     )
-    .bind(subscription_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(account.gateway_account_id)
-    .bind(related_method_id)
-    .bind(period_start)
-    .bind(period_end)
     .execute(&database.pool)
     .await?;
 
@@ -413,7 +413,7 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
     let charge_start = period_end;
     let charge_end = charge_start + Duration::days(30);
     let order_id = format!("sr_recovery_{}", attempt_id.simple());
-    sqlx::query(
+    sqlx::query!(
         r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -434,20 +434,20 @@ async fn recovery_keeps_related_and_expected_payment_methods_distinct() -> Resul
                 $13, 'txn-initial', 'past_due'
             )
             "#,
+        attempt_id,
+        account.billing_scope_id,
+        subscriber_id,
+        subscription_id,
+        related_method_id,
+        "recovery-key",
+        "recovery-fingerprint",
+        charge_start,
+        charge_end,
+        account.gateway_account_id,
+        account.gateway_configuration_id,
+        order_id,
+        expected_method_id,
     )
-    .bind(attempt_id)
-    .bind(account.billing_scope_id)
-    .bind(subscriber_id)
-    .bind(subscription_id)
-    .bind(related_method_id)
-    .bind("recovery-key")
-    .bind("recovery-fingerprint")
-    .bind(charge_start)
-    .bind(charge_end)
-    .bind(account.gateway_account_id)
-    .bind(account.gateway_configuration_id)
-    .bind(order_id)
-    .bind(expected_method_id)
     .execute(&database.pool)
     .await?;
 

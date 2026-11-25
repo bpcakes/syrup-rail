@@ -29,7 +29,7 @@ impl PaymentGateway for ConcurrentResolutionRateLimitedGateway {
         if self.readiness_calls.fetch_add(1, Ordering::SeqCst) == 0 {
             return Ok(GatewayAccountMode::Live);
         }
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'failed', gateway_response_text = 'concurrently resolved',
@@ -38,9 +38,9 @@ impl PaymentGateway for ConcurrentResolutionRateLimitedGateway {
             WHERE billing_scope_id = $1 AND subscriber_id = $2
                 AND attempt_kind = 'host_charge' AND status = 'pending'
             "#,
+            self.billing_scope_id,
+            self.subscriber_id,
         )
-        .bind(self.billing_scope_id)
-        .bind(self.subscriber_id)
         .execute(&self.pool)
         .await
         .expect("concurrent terminal resolution must succeed");
@@ -88,7 +88,7 @@ impl PaymentGateway for ConcurrentConfigurationNotSubmittedGateway {
         &self,
         _request: GatewaySaleRequest,
     ) -> Result<GatewayPaymentOutcome, GatewayMutationError> {
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'failed',
@@ -99,9 +99,9 @@ impl PaymentGateway for ConcurrentConfigurationNotSubmittedGateway {
             WHERE billing_scope_id = $1 AND subscriber_id = $2
                 AND attempt_kind = 'host_charge' AND status = 'pending'
             "#,
+            self.billing_scope_id,
+            self.subscriber_id,
         )
-        .bind(self.billing_scope_id)
-        .bind(self.subscriber_id)
         .execute(&self.pool)
         .await
         .expect("concurrent terminal resolution must succeed");
@@ -280,7 +280,7 @@ async fn assert_cooldown_stops_before_gateway_resolution(
 ) -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start(database_name).await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -298,19 +298,19 @@ async fn assert_cooldown_stops_before_gateway_resolution(
         let account = create_gateway_account(&database.pool, "nmi").await?;
         match expected_scope {
             GatewayMutationCooldownScope::Account => {
-                sqlx::query(
+                sqlx::query!(
                     r#"
                     UPDATE billing_gateway_accounts
                     SET mutation_rate_limited_until = clock_timestamp() + interval '1 minute'
                     WHERE id = $1
                     "#,
+                    account.gateway_account_id,
                 )
-                .bind(account.gateway_account_id)
                 .execute(&database.pool)
                 .await?;
             }
             GatewayMutationCooldownScope::Provider => {
-                sqlx::query(
+                sqlx::query!(
                     r#"
                     UPDATE billing_gateway_provider_rate_limits
                     SET rate_limited_until = clock_timestamp() + interval '1 minute'
@@ -323,7 +323,7 @@ async fn assert_cooldown_stops_before_gateway_resolution(
         }
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -376,7 +376,7 @@ async fn assert_cooldown_stops_before_gateway_resolution(
         assert_eq!(gateway.readiness_calls.load(Ordering::SeqCst), 0);
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
-        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_payment_attempts")
+        let attempts: i64 = checked_query_scalar!("SELECT count(*) FROM billing_payment_attempts")
             .fetch_one(&database.pool)
             .await?;
         assert_eq!(attempts, 0);
@@ -413,7 +413,7 @@ async fn provider_cooldown_stops_host_charge_before_gateway_resolution()
 async fn active_cooldown_releases_an_already_reserved_host_target() -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_cd_reserved").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -431,7 +431,7 @@ async fn active_cooldown_releases_an_already_reserved_host_target() -> Result<()
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -472,7 +472,7 @@ async fn active_cooldown_releases_an_already_reserved_host_target() -> Result<()
             HostChargeReservationOutcome::Reserved(_)
         ));
         transaction.commit().await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_gateway_provider_rate_limits \
              SET rate_limited_until = clock_timestamp() + interval '1 minute' \
              WHERE provider_key = 'nmi'",
@@ -538,7 +538,7 @@ async fn active_cooldown_releases_an_already_reserved_host_target() -> Result<()
 async fn unchanged_target_release_cannot_terminalize_attempt() -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_rel_refuse").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -556,7 +556,7 @@ async fn unchanged_target_release_cannot_terminalize_attempt() -> Result<(), Box
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -613,21 +613,21 @@ async fn unchanged_target_release_cannot_terminalize_attempt() -> Result<(), Box
         .expect_err("an unchanged target release must abort attempt resolution");
         assert!(matches!(error, HostChargeApplicationError::InvalidState(_)));
 
-        let attempt_state: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        let attempt_state: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, resolution_code, resolved_at FROM billing_payment_attempts WHERE id = $1",
+            attempt_id.as_uuid(),
         )
-        .bind(attempt_id.as_uuid())
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(attempt_state, ("pending".to_owned(), None, None));
         let target_state: String =
-            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
+            fixture_query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
                 .bind(target_id)
                 .fetch_one(&database.pool)
                 .await?;
         assert_eq!(target_state, "pending");
 
-        sqlx::query(
+        sqlx::query!(
             r#"
             UPDATE billing_payment_attempts
             SET status = 'failed',
@@ -638,8 +638,8 @@ async fn unchanged_target_release_cannot_terminalize_attempt() -> Result<(), Box
                 updated_at = clock_timestamp()
             WHERE id = $1
             "#,
+            attempt_id.as_uuid(),
         )
-        .bind(attempt_id.as_uuid())
         .execute(&database.pool)
         .await?;
         let concurrent = resolve_host_charge_before_submission(
@@ -667,7 +667,7 @@ async fn unreserved_mode_mismatch_precedes_admission_and_reservation() -> Result
 {
     let database = TestDatabase::start("host_ready_new").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -685,7 +685,7 @@ async fn unreserved_mode_mismatch_precedes_admission_and_reservation() -> Result
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -736,12 +736,12 @@ async fn unreserved_mode_mismatch_precedes_admission_and_reservation() -> Result
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
         assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
         assert_eq!(admission.calls.load(Ordering::SeqCst), 0);
-        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_payment_attempts")
+        let attempts: i64 = checked_query_scalar!("SELECT count(*) FROM billing_payment_attempts")
             .fetch_one(&database.pool)
             .await?;
         assert_eq!(attempts, 0);
         let target_status: String =
-            sqlx::query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
+            fixture_query_scalar("SELECT status FROM host_charge_targets WHERE id = $1")
                 .bind(target_id)
                 .fetch_one(&database.pool)
                 .await?;
@@ -760,7 +760,7 @@ async fn prepared_replay_resolves_deterministic_readiness_before_returning_error
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_ready_rpl").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -778,7 +778,7 @@ async fn prepared_replay_resolves_deterministic_readiness_before_returning_error
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -852,11 +852,11 @@ async fn prepared_replay_resolves_deterministic_readiness_before_returning_error
             error,
             SubscriptionBillingServiceError::GatewayReadiness(GatewayError::Configuration(_))
         ));
-        let state: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        let state: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, resolution_code, submitted_at \
              FROM billing_payment_attempts WHERE id = $1",
+            attempt_id.as_uuid(),
         )
-        .bind(attempt_id.as_uuid())
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(
@@ -894,7 +894,7 @@ async fn prepared_replay_rate_limit_resolves_attempt_and_extends_provider_cooldo
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_rate_rpl").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -912,7 +912,7 @@ async fn prepared_replay_rate_limit_resolves_attempt_and_extends_provider_cooldo
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -1003,7 +1003,7 @@ async fn prepared_replay_rate_limit_resolves_attempt_and_extends_provider_cooldo
                 .submitted_at()
                 .is_none()
         );
-        let provider_cooldown_is_active: bool = sqlx::query_scalar(
+        let provider_cooldown_is_active: bool = checked_query_scalar!(
             "SELECT rate_limited_until > clock_timestamp() \
              FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
         )
@@ -1029,7 +1029,7 @@ async fn final_mode_mismatch_releases_the_host_target_with_the_terminal_attempt(
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_final_mode").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -1047,7 +1047,7 @@ async fn final_mode_mismatch_releases_the_host_target_with_the_terminal_attempt(
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -1116,12 +1116,12 @@ async fn final_mode_mismatch_releases_the_host_target_with_the_terminal_attempt(
             detail.expose(),
             "Payment was not submitted because the payment processor account mode did not match this deployment."
         );
-        let attempt: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        let attempt: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts \
              WHERE billing_scope_id = $1 AND subscriber_id = $2",
+            account.billing_scope_id,
+            subscriber_id,
         )
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(
@@ -1149,7 +1149,7 @@ async fn final_unavailable_mode_query_restores_host_charge_for_same_key_retry()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_final_retry").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -1167,7 +1167,7 @@ async fn final_unavailable_mode_query_restores_host_charge_for_same_key_retry()
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -1230,12 +1230,12 @@ async fn final_unavailable_mode_query_restores_host_charge_for_same_key_retry()
                 GatewayNotSubmittedError::AccountModeVerification(GatewayError::Unavailable(_))
             )
         ));
-        let prepared: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        let prepared: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts \
              WHERE billing_scope_id = $1 AND subscriber_id = $2",
+            account.billing_scope_id,
+            subscriber_id,
         )
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(prepared, ("pending".to_owned(), None, None));
@@ -1243,7 +1243,7 @@ async fn final_unavailable_mode_query_restores_host_charge_for_same_key_retry()
         assert_eq!(targets.admission_calls.load(Ordering::SeqCst), 1);
         assert_eq!(targets.release_transitions.load(Ordering::SeqCst), 0);
 
-        sqlx::query("UPDATE host_charge_targets SET amount_cents = 1300 WHERE id = $1")
+        fixture_query("UPDATE host_charge_targets SET amount_cents = 1300 WHERE id = $1")
             .bind(target_id)
             .execute(&database.pool)
             .await?;
@@ -1257,7 +1257,7 @@ async fn final_unavailable_mode_query_restores_host_charge_for_same_key_retry()
         ));
         assert_eq!(gateway.sale_calls.load(Ordering::SeqCst), 0);
 
-        sqlx::query("UPDATE host_charge_targets SET amount_cents = 1250 WHERE id = $1")
+        fixture_query("UPDATE host_charge_targets SET amount_cents = 1250 WHERE id = $1")
             .bind(target_id)
             .execute(&database.pool)
             .await?;
@@ -1281,7 +1281,7 @@ async fn final_mode_query_rate_limit_persists_provider_cooldown_and_releases_tar
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_mode_rate").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -1299,7 +1299,7 @@ async fn final_mode_query_rate_limit_persists_provider_cooldown_and_releases_tar
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -1361,12 +1361,12 @@ async fn final_mode_query_rate_limit_persists_provider_cooldown_and_releases_tar
                 GatewayNotSubmittedError::AccountModeVerification(GatewayError::RateLimited(_))
             )
         ));
-        let attempt: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        let attempt: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts \
              WHERE billing_scope_id = $1 AND subscriber_id = $2",
+            account.billing_scope_id,
+            subscriber_id,
         )
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(
@@ -1377,18 +1377,18 @@ async fn final_mode_query_rate_limit_persists_provider_cooldown_and_releases_tar
                 None,
             )
         );
-        let provider_cooldown_is_active: bool = sqlx::query_scalar(
+        let provider_cooldown_is_active: bool = checked_query_scalar!(
             "SELECT rate_limited_until > clock_timestamp() \
              FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
         )
         .fetch_one(&database.pool)
         .await?;
         assert!(provider_cooldown_is_active);
-        let account_cooldown_is_active: bool = sqlx::query_scalar(
+        let account_cooldown_is_active: bool = checked_query_scalar!(
             "SELECT COALESCE(mutation_rate_limited_until > clock_timestamp(), FALSE) \
              FROM billing_gateway_accounts WHERE id = $1",
+            account.gateway_account_id,
         )
-        .bind(account.gateway_account_id)
         .fetch_one(&database.pool)
         .await?;
         assert!(!account_cooldown_is_active);
@@ -1409,7 +1409,7 @@ async fn final_mode_query_rate_limit_persists_provider_cooldown_and_releases_tar
 async fn concurrent_same_code_resolution_returns_canonical_payment() -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_conc_same").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -1427,7 +1427,7 @@ async fn concurrent_same_code_resolution_returns_canonical_payment() -> Result<(
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -1487,7 +1487,7 @@ async fn concurrent_terminal_resolution_cannot_roll_back_provider_cooldown()
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_conc_rate").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -1505,7 +1505,7 @@ async fn concurrent_terminal_resolution_cannot_roll_back_provider_cooldown()
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -1553,7 +1553,7 @@ async fn concurrent_terminal_resolution_cannot_roll_back_provider_cooldown()
             None,
             "the concurrent canonical resolution must win"
         );
-        let provider_cooldown_is_active: bool = sqlx::query_scalar(
+        let provider_cooldown_is_active: bool = checked_query_scalar!(
             "SELECT rate_limited_until > clock_timestamp() \
              FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
         )
@@ -1574,7 +1574,7 @@ async fn final_mutation_rate_limit_persists_account_cooldown_and_releases_target
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("host_final_rate").await?;
     let result = async {
-        sqlx::query(
+        sqlx::query!(
             r#"
             CREATE TABLE host_charge_targets (
                 id uuid PRIMARY KEY,
@@ -1592,7 +1592,7 @@ async fn final_mutation_rate_limit_persists_account_cooldown_and_releases_target
         let account = create_gateway_account(&database.pool, "nmi").await?;
         let subscriber_id = Uuid::now_v7();
         let target_id = Uuid::now_v7();
-        sqlx::query(
+        fixture_query(
             "INSERT INTO host_charge_targets VALUES ($1, $2, $3, 'pending', 1250, 'USD', NULL)",
         )
         .bind(target_id)
@@ -1655,12 +1655,12 @@ async fn final_mutation_rate_limit_persists_account_cooldown_and_releases_target
                 GatewayNotSubmittedError::RateLimited(_)
             )
         ));
-        let attempt: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        let attempt: (String, Option<String>, Option<DateTime<Utc>>) = checked_query_as!(
             "SELECT status, resolution_code, submitted_at FROM billing_payment_attempts \
              WHERE billing_scope_id = $1 AND subscriber_id = $2",
+            account.billing_scope_id,
+            subscriber_id,
         )
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
         .fetch_one(&database.pool)
         .await?;
         assert_eq!(
@@ -1671,11 +1671,11 @@ async fn final_mutation_rate_limit_persists_account_cooldown_and_releases_target
                 None,
             )
         );
-        let account_cooldown_is_active: bool = sqlx::query_scalar(
+        let account_cooldown_is_active: bool = checked_query_scalar!(
             "SELECT mutation_rate_limited_until > clock_timestamp() \
              FROM billing_gateway_accounts WHERE id = $1",
+            account.gateway_account_id,
         )
-        .bind(account.gateway_account_id)
         .fetch_one(&database.pool)
         .await?;
         assert!(account_cooldown_is_active);

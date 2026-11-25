@@ -52,7 +52,7 @@ async fn canonical_catalog_fingerprint(
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>();
 
-    let columns = sqlx::query_scalar::<_, String>(
+    let columns: Vec<String> = checked_query_scalar!(
         r#"
         SELECT concat_ws(
             '|',
@@ -72,11 +72,11 @@ async fn canonical_catalog_fingerprint(
             AND table_name = ANY($1)
         ORDER BY table_name, ordinal_position
         "#,
+        &tables,
     )
-    .bind(&tables)
     .fetch_all(&mut *connection)
     .await?;
-    let constraints = sqlx::query_scalar::<_, String>(
+    let constraints: Vec<String> = checked_query_scalar!(
         r#"
         SELECT concat_ws(
             '|',
@@ -96,8 +96,8 @@ async fn canonical_catalog_fingerprint(
             AND catalog_constraint.conname LIKE 'billing\_%' ESCAPE '\'
         ORDER BY relation.relname, catalog_constraint.conname
         "#,
+        &tables,
     )
-    .bind(&tables)
     .fetch_all(&mut *connection)
     .await?;
     let indexes = billing_indexes
@@ -105,7 +105,7 @@ async fn canonical_catalog_fingerprint(
         .filter(|index| index.active_concurrent_reindex_pid.is_none())
         .map(|index| index.definition.clone())
         .collect::<Vec<_>>();
-    let view_definitions = sqlx::query_scalar::<_, String>(
+    let view_definitions: Vec<String> = checked_query_scalar!(
         r#"
         SELECT concat_ws(
             '|',
@@ -120,8 +120,8 @@ async fn canonical_catalog_fingerprint(
             AND relation.relname = ANY($1)
         ORDER BY relation.relname
         "#,
+        &views,
     )
-    .bind(&views)
     .fetch_all(&mut *connection)
     .await?;
     // Read the MVCC-visible pg_proc tuple directly rather than calling
@@ -133,7 +133,7 @@ async fn canonical_catalog_fingerprint(
     // row records argument and return types as type OIDs, which are the same
     // in every database only for built-in types; a test keeps canonical
     // function signatures to those.
-    let function_definitions = sqlx::query_scalar::<_, String>(
+    let function_definitions: Vec<String> = checked_query_scalar!(
         r#"
         SELECT jsonb_build_array(
             namespace.nspname,
@@ -176,11 +176,11 @@ async fn canonical_catalog_fingerprint(
             AND routine.proname = ANY($1)
         ORDER BY routine.proname, routine.proargtypes
         "#,
+        &functions,
     )
-    .bind(&functions)
     .fetch_all(&mut *connection)
     .await?;
-    let trigger_definitions = sqlx::query_scalar::<_, String>(
+    let trigger_definitions: Vec<String> = checked_query_scalar!(
         r#"
         SELECT concat_ws(
             '|',
@@ -199,8 +199,8 @@ async fn canonical_catalog_fingerprint(
             AND catalog_trigger.tgname = ANY($1)
         ORDER BY relation.relname, catalog_trigger.tgname
         "#,
+        &triggers,
     )
-    .bind(&triggers)
     .fetch_all(&mut *connection)
     .await?;
 

@@ -4,10 +4,10 @@ pub(super) async fn count_pending_processor_charges(
     pool: &PgPool,
     gateway_account_id: GatewayAccountId,
 ) -> Result<u64, sqlx::Error> {
-    let count: i64 = sqlx::query_scalar(
+    let count: i64 = checked_query_scalar!(
         "SELECT count(*)::bigint FROM billing_processor_charges WHERE gateway_account_id = $1 AND progression_state = 'pending'",
+        gateway_account_id.as_uuid(),
     )
-    .bind(gateway_account_id.as_uuid())
     .fetch_one(pool)
     .await?;
     u64::try_from(count).map_err(|_| invalid_reconciliation_state())
@@ -17,15 +17,15 @@ pub(super) async fn attempt_locator(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     attempt_id: Uuid,
 ) -> Result<Option<AttemptLocator>, sqlx::Error> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, billing_scope_id, subscriber_id, plan_key,
             gateway_account_id, attempt_kind
         FROM billing_payment_attempts
         WHERE id = $1
         "#,
+        attempt_id,
     )
-    .bind(attempt_id)
     .fetch_optional(&mut **transaction)
     .await?;
     row.as_ref().map(attempt_locator_from_row).transpose()
@@ -60,7 +60,7 @@ pub(super) async fn lock_attempt_for_classification(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     locator: AttemptLocator,
 ) -> Result<Option<LockedAttempt>, sqlx::Error> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, billing_scope_id, subscriber_id, plan_key,
             gateway_account_id, attempt_kind, status, resolution_code,
@@ -72,8 +72,8 @@ pub(super) async fn lock_attempt_for_classification(
         WHERE id = $1
         FOR UPDATE SKIP LOCKED
         "#,
+        locator.id,
     )
-    .bind(locator.id)
     .fetch_optional(&mut **transaction)
     .await?;
     let Some(row) = row else {
@@ -107,7 +107,7 @@ pub(super) async fn lock_pending_charge_for_classification(
     charge_id: Uuid,
     attempt_id: Uuid,
 ) -> Result<Option<(ChargeRole, Option<String>, ChargeIdentityMatch, bool)>, sqlx::Error> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT charges.charge_role,
             billing_canonical_gateway_transaction_id(
@@ -168,9 +168,9 @@ pub(super) async fn lock_pending_charge_for_classification(
             AND charges.progression_state = 'pending'
         FOR UPDATE OF charges SKIP LOCKED
         "#,
+        charge_id,
+        attempt_id,
     )
-    .bind(charge_id)
-    .bind(attempt_id)
     .fetch_optional(&mut **transaction)
     .await?;
     row.map(|row| {
@@ -207,16 +207,17 @@ pub(super) async fn classify_pending_charge(
             Some("processor_charge_transaction_identity_required".to_owned()),
         ));
     };
-    let attestation = sqlx::query_as::<_, (Uuid, String)>(
+    let attestation = checked_query_as!(
+        (Uuid, String),
         r#"
         SELECT processor_charge_id, final_resolution_code
         FROM billing_external_reversal_attestations
         WHERE attempt_id = $1 AND gateway_transaction_id = $2
         FOR UPDATE
         "#,
+        attempt.locator.id,
+        transaction_id,
     )
-    .bind(attempt.locator.id)
-    .bind(transaction_id)
     .fetch_optional(&mut **transaction)
     .await?;
     if let Some((attested_charge_id, final_resolution_code)) = attestation {
@@ -287,7 +288,7 @@ pub(super) async fn transition_pending_charge(
     progression: ChargeProgression,
     state_code: Option<&str>,
 ) -> Result<(), sqlx::Error> {
-    let result = sqlx::query(
+    let result = sqlx::query!(
         r#"
         UPDATE billing_processor_charges
         SET progression_state = $2,
@@ -326,10 +327,10 @@ pub(super) async fn transition_pending_charge(
                 )
             )
         "#,
+        charge_id,
+        progression.as_str(),
+        state_code,
     )
-    .bind(charge_id)
-    .bind(progression.as_str())
-    .bind(state_code)
     .execute(&mut **transaction)
     .await?;
     if result.rows_affected() != 1 {

@@ -198,7 +198,7 @@ async fn apply_renewal_approved_on_connection(
         return park_expired_period_approval(connection, &attempt, charge.id, evidence).await;
     }
     let expected = reservation.expected_state();
-    let updated = sqlx::query(
+    let updated = sqlx::query!(
         r#"
         UPDATE billing_subscriptions
         SET status = 'active', phase = 'recurring', current_period_start_at = $2,
@@ -212,19 +212,24 @@ async fn apply_renewal_approved_on_connection(
             AND amount_cents = $11 AND currency = $12
             AND next_renewal_at = $2
         "#,
+        reservation.subscription_id().into_uuid(),
+        reservation.period().start_at(),
+        reservation.period().end_at(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        reservation.plan_key().as_str(),
+        expected.status().as_str(),
+        expected.payment_method_id().into_uuid(),
+        expected.initial_transaction_id().expose(),
+        reservation.request().amount().cents(),
+        reservation
+            .request()
+            .amount()
+            .currency()
+            .as_str()
+            .to_owned(),
     )
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(reservation.period().start_at())
-    .bind(reservation.period().end_at())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
-    .bind(expected.status().as_str())
-    .bind(expected.payment_method_id().as_uuid())
-    .bind(expected.initial_transaction_id().expose())
-    .bind(reservation.request().amount().cents())
-    .bind(reservation.request().amount().currency().as_str())
     .execute(&mut *connection)
     .await?;
     if updated.rows_affected() != 1 {

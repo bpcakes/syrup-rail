@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "ALTER TABLE billing_gateway_accounts DROP CONSTRAINT billing_gateway_accounts_provider_fk",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b6f82572ce90dd8842f9d55499f03018b8ed1fe5720cb81fbd21406dac07731b"
+}

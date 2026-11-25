@@ -50,7 +50,7 @@ pub(crate) async fn attestation_by_charge(
     connection: &mut PgConnection,
     charge_id: Uuid,
 ) -> Result<Option<ExternalReversalAttestation>, OperatorReviewError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT processor_charge_id, attempt_id, actor_id, reversal_kind, reason,
             prior_resolution_code, final_resolution_code,
@@ -62,8 +62,8 @@ pub(crate) async fn attestation_by_charge(
         FROM billing_external_reversal_attestations
         WHERE processor_charge_id = $1 FOR UPDATE
         "#,
+        charge_id,
     )
-    .bind(charge_id)
     .fetch_optional(connection)
     .await?;
     row.as_ref().map(attestation_from_row).transpose()

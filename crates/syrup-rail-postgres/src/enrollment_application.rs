@@ -18,10 +18,9 @@ use uuid::Uuid;
 use crate::{
     BillingTransaction, BillingTransactionError,
     attempts::{
-        AttemptApproval, AttemptResolutionStatus, AttemptTransition, BindBillingAddress,
-        PaymentAttemptStoreError, find_payment_attempt_by_id_on_connection,
-        lock_payment_attempt_by_id_on_connection, lock_subscription_aggregate,
-        persist_attempt_transition,
+        AttemptApproval, AttemptResolutionStatus, AttemptTransition, PaymentAttemptStoreError,
+        find_payment_attempt_by_id_on_connection, lock_payment_attempt_by_id_on_connection,
+        lock_subscription_aggregate, persist_attempt_transition,
     },
     processor_charges::{
         LockFreeApprovedEvidenceOutcome, LockFreeApprovedEvidenceTerms, ObservedCharge,
@@ -82,9 +81,9 @@ pub(crate) use renewal::{
     admit_subscription_renewal_submission_with_policy, resolve_renewal_non_approved_outcome,
 };
 
+pub(crate) use crate::attempts::set_enrollment_timeouts as set_application_timeouts;
+
 const BILLING_LOCK_TIMEOUT: Duration = Duration::from_millis(250);
-const BILLING_ROW_LOCK_TIMEOUT: &str = "250ms";
-const BILLING_OPERATION_TIMEOUT: &str = "5s";
 const APPROVED_EVIDENCE_WRITE_ATTEMPTS: usize = 3;
 const APPROVED_EVIDENCE_RETRY_DELAY: Duration = Duration::from_millis(50);
 const APPROVED_APPLICATION_ATTEMPTS: usize = 3;
@@ -268,7 +267,7 @@ async fn recovery_subscription_matches(
 ) -> Result<bool, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
     let expected = reservation.expected_state();
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT status, payment_method_id, initial_transaction_id, next_renewal_at,
             required_gateway_account_mode
@@ -277,12 +276,12 @@ async fn recovery_subscription_matches(
             AND gateway_account_id = $4 AND plan_key = $5
         FOR UPDATE
         "#,
+        reservation.subscription_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        reservation.plan_key().as_str(),
     )
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
@@ -310,7 +309,7 @@ async fn renewal_subscription_matches(
 ) -> Result<bool, SubscriptionEnrollmentApplicationError> {
     let identity = reservation.identity();
     let expected = reservation.expected_state();
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT status, payment_method_id, initial_transaction_id,
             amount_cents, currency, next_renewal_at, required_gateway_account_mode
@@ -319,12 +318,12 @@ async fn renewal_subscription_matches(
             AND gateway_account_id = $4 AND plan_key = $5
         FOR UPDATE
         "#,
+        reservation.subscription_id().into_uuid(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        reservation.plan_key().as_str(),
     )
-    .bind(reservation.subscription_id().as_uuid())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(reservation.plan_key().as_str())
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
@@ -351,7 +350,7 @@ async fn disable_payment_method_if_unreferenced(
     connection: &mut PgConnection,
     payment_method_id: PaymentMethodId,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_payment_methods AS methods
         SET status = 'disabled', updated_at = clock_timestamp()
@@ -362,8 +361,8 @@ async fn disable_payment_method_if_unreferenced(
                     AND subscriptions.status IN ('active', 'past_due')
             )
         "#,
+        payment_method_id.as_uuid(),
     )
-    .bind(payment_method_id.as_uuid())
     .execute(connection)
     .await?;
     Ok(())
@@ -374,16 +373,16 @@ async fn advance_subscription_discount_after_successful_charge(
     subscription_id: SubscriptionId,
     plan_key: &PlanKey,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT duration, status, periods_total, periods_applied, base_amount_cents
         FROM billing_subscription_discounts
         WHERE subscription_id = $1 AND plan_key = $2
         FOR UPDATE
         "#,
+        subscription_id.as_uuid(),
+        plan_key.as_str(),
     )
-    .bind(subscription_id.as_uuid())
-    .bind(plan_key.as_str())
     .fetch_optional(&mut *connection)
     .await?;
     let Some(row) = row else {
@@ -398,16 +397,16 @@ async fn advance_subscription_discount_after_successful_charge(
     if duration == "indefinite" {
         match periods_applied {
             0 => {
-                sqlx::query(
+                sqlx::query!(
                     r#"
                     UPDATE billing_subscription_discounts
                     SET periods_applied = 1
                     WHERE subscription_id = $1 AND plan_key = $2
                         AND status = 'active' AND periods_applied = 0
                     "#,
+                    subscription_id.as_uuid(),
+                    plan_key.as_str(),
                 )
-                .bind(subscription_id.as_uuid())
-                .bind(plan_key.as_str())
                 .execute(&mut *connection)
                 .await?;
                 return Ok(());
@@ -433,7 +432,7 @@ async fn advance_subscription_discount_after_successful_charge(
     }
     let next_periods_applied = periods_applied + 1;
     let completed = next_periods_applied == periods_total;
-    sqlx::query(
+    sqlx::query!(
         r#"
         UPDATE billing_subscription_discounts
         SET periods_applied = $3,
@@ -441,20 +440,20 @@ async fn advance_subscription_discount_after_successful_charge(
             completed_at = CASE WHEN $4 THEN clock_timestamp() ELSE NULL END
         WHERE subscription_id = $1 AND plan_key = $2
         "#,
+        subscription_id.as_uuid(),
+        plan_key.as_str(),
+        next_periods_applied,
+        completed,
     )
-    .bind(subscription_id.as_uuid())
-    .bind(plan_key.as_str())
-    .bind(next_periods_applied)
-    .bind(completed)
     .execute(&mut *connection)
     .await?;
     if completed {
         let base_amount_cents: i32 = row.try_get("base_amount_cents")?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE billing_subscriptions SET amount_cents = $2, updated_at = clock_timestamp() WHERE id = $1",
+            subscription_id.as_uuid(),
+            base_amount_cents,
         )
-        .bind(subscription_id.as_uuid())
-        .bind(base_amount_cents)
         .execute(&mut *connection)
         .await?;
     }
@@ -1055,10 +1054,10 @@ async fn clear_resolved_attempt_submission(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let result = sqlx::query(
+    let result = sqlx::query!(
         "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() WHERE id = $1",
+        attempt.identity().attempt_id().into_uuid(),
     )
-    .bind(attempt.identity().attempt_id().as_uuid())
     .execute(connection)
     .await?;
     if result.rows_affected() != 1 {
@@ -1077,11 +1076,11 @@ pub(crate) async fn restore_prepared_attempt_submission(
     connection: &mut PgConnection,
     attempt: &PaymentAttempt,
 ) -> Result<(), SubscriptionEnrollmentApplicationError> {
-    let result = sqlx::query(
+    let result = sqlx::query!(
         "UPDATE billing_payment_attempts SET submitted_at = NULL, updated_at = clock_timestamp() \
          WHERE id = $1 AND status = 'pending' AND submitted_at IS NOT NULL",
+        attempt.identity().attempt_id().into_uuid(),
     )
-    .bind(attempt.identity().attempt_id().as_uuid())
     .execute(connection)
     .await?;
     if result.rows_affected() != 1 {
@@ -1146,29 +1145,16 @@ fn is_retryable_evidence_error(error: &SubscriptionEnrollmentApplicationError) -
     )
 }
 
-pub(crate) async fn set_application_timeouts(
-    connection: &mut PgConnection,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "SELECT set_config('lock_timeout', $1, true), set_config('statement_timeout', $2, true)",
-    )
-    .bind(BILLING_ROW_LOCK_TIMEOUT)
-    .bind(BILLING_OPERATION_TIMEOUT)
-    .execute(connection)
-    .await?;
-    Ok(())
-}
-
 pub(crate) async fn lock_payment_method_domain(
     connection: &mut PgConnection,
     subscriber_id: SubscriberId,
     gateway_account_id: &Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    checked_query!(
         "SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text || ':' || $2::uuid::text, 0))",
+        gateway_account_id,
+        subscriber_id.as_uuid(),
     )
-    .bind(gateway_account_id)
-    .bind(subscriber_id.as_uuid())
     .execute(connection)
     .await?;
     Ok(())
@@ -1211,7 +1197,9 @@ async fn upsert_payment_method(
     // approval without one keeps all six. A shared predicate, rather than
     // per-column COALESCE, can never splice fields from two addresses. Names
     // and email keep their overwrite-on-conflict behavior.
-    let row_id: Uuid = sqlx::query_scalar(
+    let billing_address =
+        crate::attempts::billing_address_columns(attempt.request().billing_contact().address());
+    let row_id: Uuid = checked_query_scalar!(
         r#"
         INSERT INTO billing_payment_methods (
             id, billing_scope_id, subscriber_id, gateway_account_id,
@@ -1251,20 +1239,25 @@ async fn upsert_payment_method(
             updated_at = clock_timestamp()
         RETURNING id
         "#,
+        Uuid::now_v7(),
+        identity.billing_scope_id().into_uuid(),
+        identity.subscriber_id().into_uuid(),
+        identity.gateway_account_id().into_uuid(),
+        reference.expose(),
+        descriptor.payment_type().map(GatewayDiagnostic::expose),
+        descriptor.card_brand().map(GatewayDiagnostic::expose),
+        descriptor.card_last_four().map(|value| value.expose()),
+        descriptor.card_exp_month(),
+        descriptor.card_exp_year(),
+        attempt.request().billing_contact().name(),
+        attempt.request().billing_contact().email(),
+        billing_address.line1,
+        billing_address.line2,
+        billing_address.city,
+        billing_address.region,
+        billing_address.postal_code,
+        billing_address.country,
     )
-    .bind(Uuid::now_v7())
-    .bind(identity.billing_scope_id().as_uuid())
-    .bind(identity.subscriber_id().as_uuid())
-    .bind(identity.gateway_account_id().as_uuid())
-    .bind(reference.expose())
-    .bind(descriptor.payment_type().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_brand().map(GatewayDiagnostic::expose))
-    .bind(descriptor.card_last_four().map(|value| value.expose()))
-    .bind(descriptor.card_exp_month())
-    .bind(descriptor.card_exp_year())
-    .bind(attempt.request().billing_contact().name())
-    .bind(attempt.request().billing_contact().email())
-    .bind_billing_address(attempt.request().billing_contact().address())
     .fetch_one(connection)
     .await?;
     Ok(PaymentMethodId::new(row_id))
@@ -1522,10 +1515,10 @@ pub(crate) async fn charge_is_externally_reversed(
     connection: &mut PgConnection,
     charge_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    sqlx::query_scalar(
+    checked_query_scalar!(
         "SELECT progression_state = 'externally_reversed' FROM billing_processor_charges WHERE id = $1",
+        charge_id,
     )
-    .bind(charge_id)
     .fetch_one(connection)
     .await
 }
@@ -1569,7 +1562,7 @@ async fn load_subscription(
     billing_scope_id: BillingScopeId,
     subscription_id: SubscriptionId,
 ) -> Result<Option<Subscription>, SubscriptionEnrollmentApplicationError> {
-    let row = sqlx::query(
+    let row = checked_query!(
         r#"
         SELECT id, plan_key, status, payment_method_id, amount_cents, currency,
             current_period_start_at, current_period_end_at, next_renewal_at,
@@ -1579,9 +1572,9 @@ async fn load_subscription(
         FROM billing_subscriptions
         WHERE billing_scope_id = $1 AND id = $2
         "#,
+        billing_scope_id.as_uuid(),
+        subscription_id.as_uuid(),
     )
-    .bind(billing_scope_id.as_uuid())
-    .bind(subscription_id.as_uuid())
     .fetch_optional(connection)
     .await?;
     row.map(|row| decode_subscription_row(&row).map_err(map_subscription_persistence_error))

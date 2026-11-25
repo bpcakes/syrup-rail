@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            CREATE TEMPORARY TABLE billing_subscriptions (\n                id uuid NOT NULL,\n                billing_scope_id uuid NOT NULL,\n                subscriber_id uuid NOT NULL,\n                plan_key text NOT NULL,\n                status text NOT NULL,\n                required_gateway_account_mode text NOT NULL,\n                current_period_end_at text NOT NULL,\n                past_due_access text NOT NULL,\n                next_payment_attempt_at timestamptz\n            ) ON COMMIT DROP\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "afffab6e5ab38505dcd2ea4e4f6763361853139976e0015bffed8ff5ec6e52f2"
+}

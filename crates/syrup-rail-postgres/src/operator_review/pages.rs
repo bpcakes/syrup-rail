@@ -1,13 +1,14 @@
 use super::*;
+use crate::attempts::payment_attempt_query;
 
 pub async fn attempt_review_page(
     pool: &PgPool,
     limit: OperatorReviewPageLimit,
     cursor: Option<AttemptReviewCursor>,
 ) -> Result<AttemptReviewPage, OperatorReviewError> {
-    let query = format!(
+    let rows = payment_attempt_query!(
         r#"
-        {}
+        "#, r#"
         WHERE status = 'review_required'
             AND review_required_at IS NOT NULL
             AND NOT EXISTS (
@@ -21,16 +22,13 @@ pub async fn attempt_review_page(
             )
         ORDER BY review_required_at, id
         LIMIT $3
-        "#,
-        crate::attempts::PAYMENT_ATTEMPT_SELECT
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let rows = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(cursor.map(AttemptReviewCursor::reviewed_at))
-        .bind(cursor.map(|value| value.attempt_id().into_uuid()))
-        .bind(limit.get() + 1)
-        .fetch_all(pool)
-        .await?;
+        "#;
+        cursor.map(AttemptReviewCursor::reviewed_at),
+        cursor.map(|value| value.attempt_id().into_uuid()),
+        limit.get() + 1,
+    )
+    .fetch_all(pool)
+    .await?;
     let mut items = rows
         .iter()
         .map(payment_attempt_from_row)
@@ -62,7 +60,7 @@ pub async fn processor_charge_review_page(
     limit: OperatorReviewPageLimit,
     cursor: Option<ProcessorChargeReviewCursor>,
 ) -> Result<ProcessorChargeReviewPage, OperatorReviewError> {
-    let query = format!(
+    let rows = payment_attempt_query!(
         r#"
         SELECT attempts.*,
             charges.id AS review_charge_id,
@@ -90,7 +88,7 @@ pub async fn processor_charge_review_page(
             charges.observed_at AS review_charge_observed_at,
             charges.external_reversal_required_at AS review_charge_required_at
         FROM billing_processor_charges charges
-        INNER JOIN ({}) attempts ON attempts.id = charges.attempt_id
+        INNER JOIN ("#, r#") attempts ON attempts.id = charges.attempt_id
         WHERE charges.progression_state = 'external_reversal_required'
             AND charges.external_reversal_required_at IS NOT NULL
             AND charges.amount_cents > 0
@@ -108,14 +106,11 @@ pub async fn processor_charge_review_page(
             )
         ORDER BY charges.external_reversal_required_at, charges.id
         LIMIT $3
-        "#,
-        crate::attempts::PAYMENT_ATTEMPT_SELECT
-    );
-    // Only crate-owned SQL fragments are interpolated; values remain bound below.
-    let rows = sqlx::query(sqlx::AssertSqlSafe(query))
-        .bind(cursor.map(ProcessorChargeReviewCursor::reviewed_at))
-        .bind(cursor.map(|value| value.processor_charge_id().into_uuid()))
-        .bind(limit.get() + 1)
+        "#;
+        cursor.map(ProcessorChargeReviewCursor::reviewed_at),
+        cursor.map(|value| value.processor_charge_id().into_uuid()),
+        limit.get() + 1,
+    )
         .fetch_all(pool)
         .await?;
     let mut items = rows

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE billing_payment_attempts IN ROW EXCLUSIVE MODE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "628e918542100d257eab05979b9c7b2c3ece6b27c554ac1b37591bd112e4c51c"
+}

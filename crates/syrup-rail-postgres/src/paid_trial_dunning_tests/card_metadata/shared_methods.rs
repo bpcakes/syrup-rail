@@ -15,11 +15,12 @@ async fn card_metadata_latest_approval_can_repair_a_method_still_used_by_another
             "txn_second_replacement",
         )
         .await?;
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM billing_payment_methods WHERE id = $1")
-                .bind(first.method_id)
-                .fetch_one(&db.pool)
-                .await?;
+        let status: String = checked_query_scalar!(
+            "SELECT status FROM billing_payment_methods WHERE id = $1",
+            first.method_id,
+        )
+        .fetch_one(&db.pool)
+        .await?;
         assert_eq!(
             status, "active",
             "the first plan still uses the shared method"
@@ -125,11 +126,12 @@ async fn approve_shared_plan(pool: &PgPool, first: &Fixture) -> Result<Fixture, 
     )
     .await?;
     let subscription_id = payment.subscription().expect("second plan approved").id();
-    let method_id: Uuid =
-        sqlx::query_scalar("SELECT payment_method_id FROM billing_subscriptions WHERE id = $1")
-            .bind(subscription_id.as_uuid())
-            .fetch_one(pool)
-            .await?;
+    let method_id: Uuid = checked_query_scalar!(
+        "SELECT payment_method_id FROM billing_subscriptions WHERE id = $1",
+        subscription_id.as_uuid(),
+    )
+    .fetch_one(pool)
+    .await?;
     Ok(Fixture {
         account: first.account,
         subscriber_id: first.subscriber_id,

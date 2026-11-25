@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE billing_subscriptions\n        SET current_period_start_at = boundary.at - interval '2 days',\n            current_period_end_at = boundary.at - interval '1 day',\n            next_renewal_at = boundary.at - interval '1 day'\n        FROM (SELECT clock_timestamp() AS at) boundary\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a8b8203e17ea32813e81b2c06403e916020b62ed2b6556e98b934e664f1ffdc7"
+}

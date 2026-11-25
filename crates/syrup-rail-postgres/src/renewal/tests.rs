@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::*;
 use crate::test_support::{
-    TestDatabase, create_gateway_account, explain_plan_root, find_plan_index_node,
+    TestDatabase, create_gateway_account, explain_plan_root, find_plan_index_node, fixture_raw_sql,
     plan_has_node_type,
 };
 
@@ -23,9 +23,7 @@ async fn due_selection_is_provider_keyed_and_has_a_fixed_shared_bound() -> Resul
     let nmi_subscription = insert_due_subscription(&database.pool, nmi, "nmi-plan").await?;
     let other_subscription = insert_due_subscription(&database.pool, other, "other-plan").await?;
 
-    sqlx::query(
-        "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = clock_timestamp() + interval '1 hour' WHERE provider_key = 'nmi'",
-    )
+    sqlx::query!("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = clock_timestamp() + interval '1 hour' WHERE provider_key = 'nmi'")
     .execute(&database.pool)
     .await?;
     let due = due_renewals(&database.pool).await?;
@@ -44,10 +42,10 @@ async fn mode_specific_due_selection_does_not_spend_page_capacity_on_other_mode(
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let live_subscription = insert_due_subscription(&database.pool, account, "live-plan").await?;
     let test_subscription = insert_due_subscription(&database.pool, account, "test-plan").await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET required_gateway_account_mode = 'test' WHERE id = $1",
+        test_subscription,
     )
-    .bind(test_subscription)
     .execute(&database.pool)
     .await?;
 
@@ -76,14 +74,14 @@ async fn representative_first_and_continuation_plans_are_limit_driven_and_index_
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let due_at = Utc::now() - Duration::minutes(5);
     insert_due_subscription_population(&database.pool, account, due_at, 4_096).await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions \
          SET required_gateway_account_mode = 'test' \
          WHERE id IN (SELECT id FROM billing_subscriptions ORDER BY id LIMIT 2048)",
     )
     .execute(&database.pool)
     .await?;
-    sqlx::raw_sql(
+    fixture_raw_sql(
         r#"
         ANALYZE billing_subscriptions;
         ANALYZE billing_gateway_accounts;
@@ -127,7 +125,7 @@ async fn representative_first_and_continuation_plans_are_limit_driven_and_index_
                 "EXPLAIN (GENERIC_PLAN TRUE, FORMAT JSON, COSTS OFF) {}",
                 page_query.sql(required_mode)
             );
-            let plan_row = sqlx::raw_sql(sqlx::AssertSqlSafe(explain_sql.as_str()))
+            let plan_row = fixture_raw_sql(sqlx::AssertSqlSafe(explain_sql.as_str()))
                 .fetch_one(&mut *transaction)
                 .await?;
             let plan: serde_json::Value = plan_row.try_get(0)?;
@@ -194,8 +192,8 @@ async fn pages_drain_205_tied_due_subscriptions_once_and_legacy_wrapper_keeps_fi
 -> Result<(), Box<dyn Error>> {
     let database = TestDatabase::start("renew_pages_205").await?;
     let account = create_gateway_account(&database.pool, "nmi").await?;
-    let due_at =
-        sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp() - interval '5 minutes'")
+    let due_at: DateTime<Utc> =
+        checked_query_scalar!("SELECT clock_timestamp() - interval '5 minutes'")
             .fetch_one(&database.pool)
             .await?;
     let mut expected_ids = Vec::new();
@@ -461,10 +459,12 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
             ),
     )
     .await?;
-    sqlx::query("UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1")
-        .bind(stale_review_attempt)
-        .execute(&database.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_payment_attempts SET status = 'review_required' WHERE id = $1",
+        stale_review_attempt,
+    )
+    .execute(&database.pool)
+    .await?;
     let past_due = insert_due_subscription_at(
         &database.pool,
         account,
@@ -473,10 +473,12 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
         due_at,
     )
     .await?;
-    sqlx::query("UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1")
-        .bind(past_due.subscription_id)
-        .execute(&database.pool)
-        .await?;
+    sqlx::query!(
+        "UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1",
+        past_due.subscription_id,
+    )
+    .execute(&database.pool)
+    .await?;
 
     let future = insert_due_subscription_at(
         &database.pool,
@@ -494,10 +496,10 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
         due_at,
     )
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET status = 'canceled', canceled_at = clock_timestamp(), next_payment_attempt_at = NULL WHERE id = $1",
+        canceled.subscription_id,
     )
-    .bind(canceled.subscription_id)
     .execute(&database.pool)
     .await?;
     let unpaid = insert_due_subscription_at(
@@ -508,18 +510,16 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
         due_at,
     )
     .await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_subscriptions SET status = 'unpaid', unpaid_at = clock_timestamp(), next_payment_attempt_at = NULL WHERE id = $1",
+        unpaid.subscription_id,
     )
-    .bind(unpaid.subscription_id)
     .execute(&database.pool)
     .await?;
 
     let provider_cooldown_account =
         create_gateway_account(&database.pool, "provider-cooldown").await?;
-    sqlx::query(
-        "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = clock_timestamp() + interval '1 hour' WHERE provider_key = 'provider-cooldown'",
-    )
+    sqlx::query!("UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = clock_timestamp() + interval '1 hour' WHERE provider_key = 'provider-cooldown'")
     .execute(&database.pool)
     .await?;
     let provider_cooldown = insert_due_subscription_at(
@@ -533,10 +533,10 @@ async fn all_existing_due_renewal_eligibility_gates_remain_effective() -> Result
 
     let account_cooldown_account =
         create_gateway_account(&database.pool, "account-cooldown").await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_gateway_accounts SET mutation_rate_limited_until = clock_timestamp() + interval '1 hour' WHERE id = $1",
+        account_cooldown_account.gateway_account_id,
     )
-    .bind(account_cooldown_account.gateway_account_id)
     .execute(&database.pool)
     .await?;
     let account_cooldown = insert_due_subscription_at(
@@ -739,10 +739,10 @@ async fn continuation_keeps_every_clock_dependent_gate_at_the_first_page_time()
 
     let provider_cooldown_account =
         create_gateway_account(&database.pool, "frozen-provider").await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_gateway_provider_rate_limits SET rate_limited_until = $1 WHERE provider_key = 'frozen-provider'",
+        window_opens_at,
     )
-    .bind(window_opens_at)
     .execute(&database.pool)
     .await?;
     insert_due_subscription_at(
@@ -755,11 +755,11 @@ async fn continuation_keeps_every_clock_dependent_gate_at_the_first_page_time()
     .await?;
 
     let account_cooldown_account = create_gateway_account(&database.pool, "frozen-account").await?;
-    sqlx::query(
+    sqlx::query!(
         "UPDATE billing_gateway_accounts SET mutation_rate_limited_until = $2 WHERE id = $1",
+        account_cooldown_account.gateway_account_id,
+        window_opens_at,
     )
-    .bind(account_cooldown_account.gateway_account_id)
-    .bind(window_opens_at)
     .execute(&database.pool)
     .await?;
     insert_due_subscription_at(
@@ -841,7 +841,7 @@ async fn continuation_keeps_every_clock_dependent_gate_at_the_first_page_time()
     .await?;
 
     tokio::time::sleep(StdDuration::from_secs(2)).await;
-    let now = sqlx::query_scalar::<_, DateTime<Utc>>("SELECT clock_timestamp()")
+    let now = checked_query_scalar!(DateTime<Utc>, "SELECT clock_timestamp()")
         .fetch_one(&database.pool)
         .await?;
     assert!(now >= window_opens_at);
@@ -859,10 +859,10 @@ async fn period_state_counts_both_kinds_but_renewal_only_infrastructure()
     let database = TestDatabase::start("renew_state").await?;
     let account = create_gateway_account(&database.pool, "nmi").await?;
     let subscription_id = insert_due_subscription(&database.pool, account, "base-plan").await?;
-    let row = sqlx::query(
+    let row = checked_query!(
         "SELECT subscriber_id, payment_method_id, next_renewal_at, initial_transaction_id, status FROM billing_subscriptions WHERE id = $1",
+        subscription_id,
     )
-    .bind(subscription_id)
     .fetch_one(&database.pool)
     .await?;
     let subscriber_id: Uuid = row.try_get("subscriber_id")?;
@@ -885,7 +885,7 @@ async fn period_state_counts_both_kinds_but_renewal_only_infrastructure()
         ),
     ] {
         let attempt_id = Uuid::now_v7();
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO billing_payment_attempts (
                 required_gateway_account_mode,
@@ -905,23 +905,23 @@ async fn period_state_counts_both_kinds_but_renewal_only_infrastructure()
                 $5, $15, $16
             )
             "#,
+            attempt_id,
+            account.billing_scope_id,
+            subscriber_id,
+            subscription_id,
+            payment_method_id,
+            kind,
+            format!("attempt-{}", attempt_id.simple()),
+            format!("fingerprint-{}", attempt_id.simple()),
+            period_start_at,
+            period_start_at + Duration::days(28),
+            account.gateway_account_id,
+            account.gateway_configuration_id,
+            format!("order_{}", attempt_id.simple()),
+            resolution,
+            &initial_transaction_id,
+            &subscription_status,
         )
-        .bind(attempt_id)
-        .bind(account.billing_scope_id)
-        .bind(subscriber_id)
-        .bind(subscription_id)
-        .bind(payment_method_id)
-        .bind(kind)
-        .bind(format!("attempt-{}", attempt_id.simple()))
-        .bind(format!("fingerprint-{}", attempt_id.simple()))
-        .bind(period_start_at)
-        .bind(period_start_at + Duration::days(28))
-        .bind(account.gateway_account_id)
-        .bind(account.gateway_configuration_id)
-        .bind(format!("order_{}", attempt_id.simple()))
-        .bind(resolution)
-        .bind(&initial_transaction_id)
-        .bind(&subscription_status)
         .execute(&database.pool)
         .await?;
     }

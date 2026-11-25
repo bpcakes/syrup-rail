@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO billing_payment_methods (\n            id, billing_scope_id, subscriber_id, gateway_account_id,\n            gateway_payment_method_reference, status, card_brand, card_last4,\n            card_exp_month, card_exp_year\n        ) VALUES ($1, $2, $3, $4, $5, 'active', 'Visa', '4242', 12, 2032)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5364ce6e08e97893486f18ee85e1361e5ef595cae43513d6f48f8cc48497437c"
+}

@@ -230,7 +230,8 @@ impl SubscriptionBillingService {
         command: ChargeRenewal,
     ) -> Result<Option<RenewalGatewayAccountSnapshot>, SubscriptionBillingServiceError> {
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query_as::<_, (uuid::Uuid, uuid::Uuid, String, String)>(
+        let row = checked_query_as!(
+            (uuid::Uuid, uuid::Uuid, String, String),
             r#"
             SELECT accounts.id, accounts.gateway_configuration_id, accounts.provider_key,
                 subscriptions.required_gateway_account_mode
@@ -243,10 +244,10 @@ impl SubscriptionBillingService {
                 AND subscriptions.next_renewal_at = $3
                 AND subscriptions.next_payment_attempt_at <= clock_timestamp()
             "#,
+            command.billing_scope_id().into_uuid(),
+            command.subscription_id().into_uuid(),
+            command.period_start_at(),
         )
-        .bind(command.billing_scope_id().as_uuid())
-        .bind(command.subscription_id().as_uuid())
-        .bind(command.period_start_at())
         .fetch_optional(&mut *transaction)
         .await?;
         let Some((account_id, configuration_id, provider_key, required_mode)) = row else {
@@ -278,12 +279,12 @@ impl SubscriptionBillingService {
                 SubscriptionBillingServiceError::InvalidState(INVALID_SERVICE_STATE)
             }
         })?;
-        let now = sqlx::query_scalar("SELECT clock_timestamp()")
+        let now = checked_query_scalar!("SELECT clock_timestamp()")
             .fetch_one(&mut *transaction)
             .await?;
         let payment_method_update_policy =
             LocalAttemptPolicy::for_kind(PaymentAttemptKind::SubscriptionPaymentMethodUpdate);
-        let has_payment_method_update: bool = sqlx::query_scalar(
+        let has_payment_method_update: bool = checked_query_scalar!(
             r#"
             SELECT EXISTS (
                 SELECT 1 FROM billing_payment_attempts
@@ -297,10 +298,10 @@ impl SubscriptionBillingService {
                     )
             )
             "#,
+            command.subscription_id().into_uuid(),
+            LocalAttemptPolicy::expirable_status_values(),
+            payment_method_update_policy.stale_after_seconds(),
         )
-        .bind(command.subscription_id().as_uuid())
-        .bind(LocalAttemptPolicy::expirable_status_values())
-        .bind(payment_method_update_policy.stale_after_seconds())
         .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;

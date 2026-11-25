@@ -15,10 +15,12 @@ async fn recovery_persists_billing_address_and_rejects_changed_address_replay()
         )
         .await?;
         make_renewal_due(&fixture.database.pool, subscription_id).await?;
-        sqlx::query("UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1")
-            .bind(subscription_id.as_uuid())
-            .execute(&fixture.database.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE billing_subscriptions SET status = 'past_due' WHERE id = $1",
+            subscription_id.as_uuid(),
+        )
+        .execute(&fixture.database.pool)
+        .await?;
 
         let home = address("10 Recovery St");
         let command = |address| {

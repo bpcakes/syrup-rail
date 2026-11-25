@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT resolved_at\n        FROM billing_payment_attempts\n        WHERE subscription_id = $1\n            AND billing_period_start_at = $2\n            AND attempt_kind = 'subscription_recovery'\n            AND subscription_expected_status = 'active'\n            AND submitted_at IS NOT NULL\n            AND review_required_at IS NOT NULL\n            AND status = 'failed'\n            AND resolution_code IS NULL\n        ORDER BY resolved_at ASC NULLS FIRST, id ASC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "resolved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_payment_attempts",
+            "name": "resolved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "540a3ce864b70f57b44f0d2ed21258d6dbc219a05095afd4bc580f3a9f396ba8"
+}

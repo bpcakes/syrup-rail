@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "LOCK TABLE billing_payment_attempts IN ACCESS SHARE MODE",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "232d8ee59f906571e6c4e995dbde291c5103849a43b7edb72c76a6ea82c9f6c3"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM billing_gateway_provider_rate_limits WHERE provider_key = 'nmi'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "04dd45fef5dc062c07c519583ac6794f3adf0d31b1a79cd6453e8f7b1f622d9c"
+}

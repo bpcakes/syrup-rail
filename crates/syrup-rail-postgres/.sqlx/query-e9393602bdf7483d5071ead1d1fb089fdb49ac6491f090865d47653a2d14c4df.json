@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS (\n            SELECT 1 FROM billing_subscriptions\n            WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3\n                AND plan_key = $4\n                AND required_gateway_account_mode = $7\n                AND (\n                    (\n                        status IN ('active', 'past_due')\n                        AND next_renewal_at = $5\n                    )\n                    OR (\n                        $6 = 'approved'\n                        AND next_renewal_at > clock_timestamp()\n                        AND current_period_start_at = $5\n                    )\n                )\n        )\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e9393602bdf7483d5071ead1d1fb089fdb49ac6491f090865d47653a2d14c4df"
+}

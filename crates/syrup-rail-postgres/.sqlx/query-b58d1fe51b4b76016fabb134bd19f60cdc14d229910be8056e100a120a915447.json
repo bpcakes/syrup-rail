@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT gateway_payment_method_reference IS NOT DISTINCT FROM $3\n            AND gateway_response IS NOT DISTINCT FROM $4\n            AND gateway_response_code IS NOT DISTINCT FROM $5\n            AND gateway_response_text IS NOT DISTINCT FROM $6\n            AND gateway_condition IS NOT DISTINCT FROM $7\n            AND payment_type IS NOT DISTINCT FROM $8\n            AND card_brand IS NOT DISTINCT FROM $9\n            AND card_last4 IS NOT DISTINCT FROM $10\n            AND card_exp_month IS NOT DISTINCT FROM $11\n            AND card_exp_year IS NOT DISTINCT FROM $12\n        FROM billing_processor_charges\n        WHERE attempt_id = $1 AND gateway_transaction_id IS NOT DISTINCT FROM $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "?column?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int2",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b58d1fe51b4b76016fabb134bd19f60cdc14d229910be8056e100a120a915447"
+}

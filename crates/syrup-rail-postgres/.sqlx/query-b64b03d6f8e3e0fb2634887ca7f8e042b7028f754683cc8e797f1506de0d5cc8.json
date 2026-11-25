@@ -1,0 +1,223 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n    id, plan_key, status, payment_method_id, amount_cents, currency,\n    current_period_start_at, current_period_end_at, next_renewal_at,\n    phase, recurring_period_kind, recurring_period_count,\n    dunning_retry_delays_seconds, dunning_exhaustion, past_due_access,\n    next_payment_attempt_at, required_gateway_account_mode\n\n        FROM billing_subscriptions\n        WHERE id = $1 AND billing_scope_id = $2 AND subscriber_id = $3 AND plan_key = $4\n        FOR NO KEY UPDATE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "plan_key",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "plan_key"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "status",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "payment_method_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "payment_method_id"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "amount_cents",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "amount_cents"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "currency",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "currency"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "current_period_start_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "current_period_start_at"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "current_period_end_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "current_period_end_at"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "next_renewal_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_renewal_at"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "phase",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "phase"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "recurring_period_kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "recurring_period_kind"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "recurring_period_count",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "recurring_period_count"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
+        "name": "dunning_retry_delays_seconds",
+        "type_info": "Int8Array",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "dunning_retry_delays_seconds"
+          }
+        }
+      },
+      {
+        "ordinal": 13,
+        "name": "dunning_exhaustion",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "dunning_exhaustion"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "past_due_access",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "past_due_access"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "next_payment_attempt_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "next_payment_attempt_at"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "required_gateway_account_mode",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "billing_subscriptions",
+            "name": "required_gateway_account_mode"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "b64b03d6f8e3e0fb2634887ca7f8e042b7028f754683cc8e797f1506de0d5cc8"
+}
