@@ -83,25 +83,33 @@ fn map_subscription_persistence_error(
 ///
 /// The guard temporarily applies a 250 millisecond `lock_timeout` and restores
 /// the caller's prior transaction-local value before returning successfully.
-pub async fn require_entitlement_for_update(
+pub fn require_entitlement_for_update(
     transaction: EntitlementWriteTransaction,
     guard: &EntitlementGuard,
-) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
+) -> impl Future<Output = Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError>> {
     require_entitlement_for_update_with_lock_timeout(
         transaction,
         guard,
         ENTITLEMENT_GUARD_LOCK_TIMEOUT,
     )
-    .await
 }
 
-async fn require_entitlement_for_update_with_lock_timeout(
-    transaction: EntitlementWriteTransaction,
+fn require_entitlement_for_update_with_lock_timeout<'a>(
+    mut transaction: EntitlementWriteTransaction,
+    guard: &'a EntitlementGuard,
+    lock_timeout: &'a str,
+) -> impl Future<Output = Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError>> + 'a {
+    // Hand off ownership before the first poll. A caller can cancel a pending
+    // preparatory query and then drop the unpolled admission future.
+    transaction.close_on_drop();
+    admit(transaction.inner, guard, lock_timeout)
+}
+
+async fn admit(
+    mut transaction: GuardTransaction,
     guard: &EntitlementGuard,
     lock_timeout: &str,
 ) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
-    let mut transaction = transaction.inner;
-    transaction.on_drop = OnDrop::Close;
     let admission = async {
         let previous_lock_timeout: String =
             sqlx::query_scalar("SELECT current_setting('lock_timeout', true)")

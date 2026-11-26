@@ -34,6 +34,19 @@ async fn dropping_completed_host_work_rolls_back_and_reuses_the_checkout()
             assert_eq!(current, pid);
             assert_host_guard_probe_absent(&database.pool, id).await?;
         }
+        let mut tx = EntitlementWriteTransaction::begin(&database.pool).await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(tx.connection())
+            .await?;
+        let admission = guard(scope, subscriber)?;
+        drop(require_entitlement_for_update(tx, &admission));
+        let replacement: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&database.pool)
+            .await?;
+        assert_ne!(
+            replacement, pid,
+            "handing off ownership also covers an unpolled future"
+        );
         Ok::<_, Box<dyn Error>>(())
     }
     .await;
