@@ -1,6 +1,6 @@
 mod transaction;
-use transaction::GuardTransaction;
 pub use transaction::{AdmittedEntitlementWriteTransaction, EntitlementWriteTransaction};
+use transaction::{GuardTransaction, OnDrop};
 
 use chrono::{DateTime, Utc};
 use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, postgres::PgRow};
@@ -101,6 +101,7 @@ async fn require_entitlement_for_update_with_lock_timeout(
     lock_timeout: &str,
 ) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
     let mut transaction = transaction.inner;
+    transaction.on_drop = OnDrop::Close;
     let admission = async {
         let previous_lock_timeout: String =
             sqlx::query_scalar("SELECT current_setting('lock_timeout', true)")
@@ -131,6 +132,7 @@ async fn require_entitlement_for_update_with_lock_timeout(
                 return rollback_guard_failure(transaction, EntitlementGuardError::Sql(error))
                     .await;
             }
+            transaction.on_drop = OnDrop::Rollback;
             Ok(AdmittedEntitlementWriteTransaction { inner: transaction })
         }
         GuardAccess::PastDue => {

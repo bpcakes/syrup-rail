@@ -8,26 +8,35 @@ use std::ops::{Deref, DerefMut};
 /// including while SQLx is awaiting a row or advisory lock.
 pub(super) struct GuardTransaction {
     connection: PoolConnection<Postgres>,
-    finished: bool,
+    pub(super) on_drop: OnDrop,
+}
+
+pub(super) enum OnDrop {
+    Rollback,
+    Close,
+    Finished,
 }
 
 impl GuardTransaction {
     pub(super) async fn begin(pool: &PgPool) -> Result<Self, sqlx::Error> {
         let mut tx = Self {
             connection: pool.acquire().await?,
-            finished: false,
+            on_drop: OnDrop::Close,
         };
         PgTransactionManager::begin(&mut tx.connection, None).await?;
+        tx.on_drop = OnDrop::Rollback;
         Ok(tx)
     }
     pub(super) async fn commit(mut self) -> Result<(), sqlx::Error> {
+        self.on_drop = OnDrop::Close;
         PgTransactionManager::commit(&mut self.connection).await?;
-        self.finished = true;
+        self.on_drop = OnDrop::Finished;
         Ok(())
     }
     pub(super) async fn rollback(mut self) -> Result<(), sqlx::Error> {
+        self.on_drop = OnDrop::Close;
         PgTransactionManager::rollback(&mut self.connection).await?;
-        self.finished = true;
+        self.on_drop = OnDrop::Finished;
         Ok(())
     }
 }
@@ -45,8 +54,10 @@ impl DerefMut for GuardTransaction {
 }
 impl Drop for GuardTransaction {
     fn drop(&mut self) {
-        if !self.finished {
-            self.connection.close_on_drop();
+        match self.on_drop {
+            OnDrop::Rollback => PgTransactionManager::start_rollback(&mut self.connection),
+            OnDrop::Close => self.connection.close_on_drop(),
+            OnDrop::Finished => {}
         }
     }
 }
@@ -75,6 +86,13 @@ impl EntitlementWriteTransaction {
         Ok(Self {
             inner: GuardTransaction::begin(pool).await?,
         })
+    }
+
+    /// Discard the checkout if preparatory work is interrupted. Use this before
+    /// a potentially blocking host query. Completed admission restores ordinary
+    /// rollback-on-drop for the returned transaction.
+    pub fn close_on_drop(&mut self) {
+        self.inner.on_drop = OnDrop::Close;
     }
 
     /// Borrows the transaction connection for preparatory host database work.
@@ -110,6 +128,12 @@ impl fmt::Debug for AdmittedEntitlementWriteTransaction {
 }
 
 impl AdmittedEntitlementWriteTransaction {
+    /// Discard this checkout if the host abandons a protected write. Explicit
+    /// commit and rollback return a healthy checkout to the pool.
+    pub fn close_on_drop(&mut self) {
+        self.inner.on_drop = OnDrop::Close;
+    }
+
     /// Borrows the admitted transaction connection for the host-owned protected mutation.
     ///
     /// Callers must finish any nested savepoint before committing or rolling

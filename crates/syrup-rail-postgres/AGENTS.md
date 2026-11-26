@@ -484,7 +484,7 @@ and transaction orchestration.
   Return an `AdmittedEntitlementWriteTransaction` only on success, with
   accepted paid/grant locks held through the host mutation. Await rollback for
   every completed denial or SQL error. A canceled future must retain ownership
-  so dropping it queues a full rollback and cannot expose an unguarded
+  so dropping it discards the checkout and cannot expose an unguarded
   continuation. Restore the temporary `lock_timeout` before returning the
   admitted value.
 - Only provider-free subscriber mutations may promote pool acquisition
