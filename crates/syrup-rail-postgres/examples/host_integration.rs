@@ -144,11 +144,11 @@ pub async fn assert_host_runtime_schema_compatibility(
 /// rolls back the transaction when it detects the disconnect. Finish any nested
 /// savepoint opened through its connection before consuming the admitted value
 /// with `commit` or `rollback`.
-pub async fn admit_authorized_protected_write(
+pub fn admit_authorized_protected_write(
     transaction: EntitlementWriteTransaction,
     guard: &EntitlementGuard,
-) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
-    require_entitlement_for_update(transaction, guard).await
+) -> impl Future<Output = Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError>> {
+    require_entitlement_for_update(transaction, guard)
 }
 
 /// The host-specific half of Syrup Rail's transaction boundary.

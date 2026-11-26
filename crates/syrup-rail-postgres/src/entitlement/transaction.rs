@@ -88,9 +88,10 @@ impl EntitlementWriteTransaction {
         })
     }
 
-    /// Discard the checkout if preparatory work is interrupted. Use this before
-    /// a potentially blocking host query. Completed admission restores ordinary
-    /// rollback-on-drop for the returned transaction.
+    /// Discard the checkout if preparatory work is interrupted. Set a finite
+    /// PostgreSQL statement or transaction timeout before blocking work so the
+    /// server releases its locks even if disconnect detection is delayed.
+    /// Successful admission restores ordinary rollback-on-drop.
     pub fn close_on_drop(&mut self) {
         self.inner.on_drop = OnDrop::Close;
     }
@@ -128,8 +129,10 @@ impl fmt::Debug for AdmittedEntitlementWriteTransaction {
 }
 
 impl AdmittedEntitlementWriteTransaction {
-    /// Discard this checkout if the host abandons a protected write. Explicit
-    /// commit and rollback return a healthy checkout to the pool.
+    /// Discard this checkout if the host abandons a protected write. Bound that
+    /// write with a finite PostgreSQL statement or transaction timeout, since
+    /// the server can continue running it until it detects the disconnect.
+    /// Explicit commit and rollback return a healthy checkout to the pool.
     pub fn close_on_drop(&mut self) {
         self.inner.on_drop = OnDrop::Close;
     }
