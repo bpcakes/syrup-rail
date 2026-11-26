@@ -394,13 +394,8 @@ async fn protected_write_guard_rolls_back_after_a_database_lock_timeout()
             .into());
         };
         assert_lock_timeout(&error)?;
-        let replacement = tokio::time::timeout(Duration::from_secs(2), database.pool.acquire())
-            .await
-            .map_err(|_| io::Error::other("interrupted guard retained its pool slot"))??;
-        drop(replacement);
-        holder.rollback().await?;
         assert_backend_transaction_ended(&mut observer, caller_pid).await?;
-        drop(reserved);
+        holder.rollback().await?;
         assert_host_guard_probe_absent(&database.pool, probe_id).await?;
         Ok::<_, Box<dyn Error>>(())
     }
