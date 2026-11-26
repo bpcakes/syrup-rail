@@ -347,12 +347,10 @@ pub async fn entitlement(
     entitlement_on_executor(pool, query).await
 }
 
-/// Runs the canonical entitlement projection on a caller-owned connection.
+/// Runs the read-only [`entitlement`] projection on a caller-owned connection.
 ///
-/// This read-only query has the same snapshot semantics as [`entitlement`].
-/// For a host mutation that requires entitlement, use
-/// [`require_entitlement_for_update`] and perform the mutation on the returned
-/// [`AdmittedEntitlementWriteTransaction`].
+/// For protected writes, use [`require_entitlement_for_update`] and perform
+/// the mutation on the returned [`AdmittedEntitlementWriteTransaction`].
 pub async fn entitlement_on_connection(
     connection: &mut PgConnection,
     query: &EntitlementQuery,
