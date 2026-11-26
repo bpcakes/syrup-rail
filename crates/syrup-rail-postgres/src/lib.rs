@@ -101,7 +101,8 @@ pub use enrollment_application::{
 };
 pub use entitlement::{
     AdmittedEntitlementWriteTransaction, EntitlementGuardError, EntitlementQueryError,
-    EntitlementWriteTransaction, entitlement, require_entitlement_for_update,
+    EntitlementWriteTransaction, entitlement, entitlement_on_connection,
+    require_entitlement_for_update,
 };
 pub use gateway_accounts::{activate_gateway_configuration, register_gateway_account};
 pub use grants::{

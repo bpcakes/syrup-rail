@@ -349,9 +349,9 @@ pub async fn entitlement(
 
 /// Runs the canonical entitlement projection on a caller-owned connection.
 ///
-/// This is crate-visible so a composite read can retain the exact entitlement
-/// semantics while sharing one PostgreSQL snapshot with its other projections.
-pub(crate) async fn entitlement_on_connection(
+/// Uses the same projection as [`entitlement`] without acquiring a pool connection.
+/// The caller owns the transaction and any locks needed for a protected write.
+pub async fn entitlement_on_connection(
     connection: &mut PgConnection,
     query: &EntitlementQuery,
 ) -> Result<Entitlement, EntitlementQueryError> {
