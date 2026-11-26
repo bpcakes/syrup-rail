@@ -315,8 +315,8 @@ preparatory host writes; that pending value has no commit operation.
 `require_entitlement_for_update` returns an
 `AdmittedEntitlementWriteTransaction` only when current paid or granted access
 is admitted and keeps the relevant locks held for the host mutation. Completed
-denials and SQL failures await rollback, while cancellation queues rollback of
-the owned transaction, including any earlier host writes. Perform and commit
+denials and SQL failures await rollback. Canceling admission discards the checkout.
+PostgreSQL rolls back earlier writes and releases locks on detecting the disconnect. Perform and commit
 the host-owned protected mutation only through the admitted value, and finish
 any nested savepoint before consuming that value with `commit` or `rollback`.
 

@@ -74,7 +74,8 @@ make any preparatory host writes through its connection, and pass it by value
 to `require_entitlement_for_update`. The pending transaction cannot commit.
 Only successful admission returns an `AdmittedEntitlementWriteTransaction`
 with its entitlement locks held. Completed denial and database failure await a
-full rollback; cancellation queues the owned transaction's rollback. Perform
+full rollback. Canceling admission discards the checkout. PostgreSQL releases
+the transaction and its locks when it detects the disconnect. Perform
 and commit the host-owned protected mutation only with the admitted value, and
 finish any nested savepoint before consuming that value. The compiled
 [`host_integration` example](crates/syrup-rail-postgres/examples/host_integration.rs)

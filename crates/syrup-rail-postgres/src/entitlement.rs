@@ -1,7 +1,9 @@
-use std::fmt;
+mod transaction;
+pub use transaction::{AdmittedEntitlementWriteTransaction, EntitlementWriteTransaction};
+use transaction::{GuardTransaction, OnDrop};
 
 use chrono::{DateTime, Utc};
-use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, postgres::PgRow};
 use syrup_rail::{
     ActorId, AppliedSubscriptionDiscount, BillingPeriod, ChargeAmount, CurrencyCode,
     DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, GatewayAccountMode,
@@ -58,85 +60,6 @@ pub enum EntitlementGuardError {
     InvalidState(&'static str),
 }
 
-/// A top-level PostgreSQL transaction awaiting entitlement admission.
-///
-/// Create this transaction directly from a pool with [`Self::begin`]. It can
-/// carry host preparatory writes, but deliberately has no commit operation.
-/// Passing it to [`require_entitlement_for_update`] either rolls it back or
-/// transforms it into an [`AdmittedEntitlementWriteTransaction`].
-pub struct EntitlementWriteTransaction {
-    inner: Transaction<'static, Postgres>,
-}
-
-impl fmt::Debug for EntitlementWriteTransaction {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EntitlementWriteTransaction")
-            .finish_non_exhaustive()
-    }
-}
-
-impl EntitlementWriteTransaction {
-    /// Starts a top-level transaction reserved for an entitlement-protected write.
-    pub async fn begin(pool: &PgPool) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            inner: pool.begin().await?,
-        })
-    }
-
-    /// Borrows the transaction connection for preparatory host database work.
-    ///
-    /// Callers must finish any nested savepoint before returning this value to
-    /// Syrup Rail. Leaking a savepoint would violate SQLx's transaction
-    /// lifecycle contract.
-    pub fn connection(&mut self) -> &mut PgConnection {
-        &mut self.inner
-    }
-
-    /// Explicitly rolls back the pending transaction.
-    pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.inner.rollback().await
-    }
-}
-
-/// A top-level transaction that passed entitlement admission.
-///
-/// Its entitlement rows and aggregate advisory lock remain held until this
-/// value is committed or rolled back. The protected host mutation must use
-/// [`Self::connection`] on this value.
-pub struct AdmittedEntitlementWriteTransaction {
-    inner: Transaction<'static, Postgres>,
-}
-
-impl fmt::Debug for AdmittedEntitlementWriteTransaction {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AdmittedEntitlementWriteTransaction")
-            .finish_non_exhaustive()
-    }
-}
-
-impl AdmittedEntitlementWriteTransaction {
-    /// Borrows the admitted transaction connection for the host-owned protected mutation.
-    ///
-    /// Callers must finish any nested savepoint before committing or rolling
-    /// back this outer transaction. Leaking a savepoint would violate SQLx's
-    /// transaction lifecycle contract.
-    pub fn connection(&mut self) -> &mut PgConnection {
-        &mut self.inner
-    }
-
-    /// Commits the protected transaction and releases its entitlement locks.
-    pub async fn commit(self) -> Result<(), sqlx::Error> {
-        self.inner.commit().await
-    }
-
-    /// Rolls back the protected transaction and releases its entitlement locks.
-    pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.inner.rollback().await
-    }
-}
-
 fn map_subscription_persistence_error(
     error: SubscriptionPersistenceCodecError,
 ) -> EntitlementQueryError {
@@ -154,29 +77,39 @@ fn map_subscription_persistence_error(
 /// admission. The returned transaction retains the accepted paid or grant rows
 /// and their aggregate advisory domain until the caller commits or rolls back
 /// its protected mutation. Every completed denial or storage failure awaits a
-/// full rollback. Canceling the future drops the owned transaction and queues a
-/// full rollback, so a caller cannot continue an unguarded write.
+/// full rollback. Canceling the future closes the checkout. A query still waiting for a
+/// lock cannot delay returning pool capacity, and the server rolls back the
+/// transaction on disconnect.
 ///
 /// The guard temporarily applies a 250 millisecond `lock_timeout` and restores
 /// the caller's prior transaction-local value before returning successfully.
-pub async fn require_entitlement_for_update(
+pub fn require_entitlement_for_update(
     transaction: EntitlementWriteTransaction,
     guard: &EntitlementGuard,
-) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
+) -> impl Future<Output = Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError>> {
     require_entitlement_for_update_with_lock_timeout(
         transaction,
         guard,
         ENTITLEMENT_GUARD_LOCK_TIMEOUT,
     )
-    .await
 }
 
-async fn require_entitlement_for_update_with_lock_timeout(
-    transaction: EntitlementWriteTransaction,
+fn require_entitlement_for_update_with_lock_timeout<'a>(
+    mut transaction: EntitlementWriteTransaction,
+    guard: &'a EntitlementGuard,
+    lock_timeout: &'a str,
+) -> impl Future<Output = Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError>> + 'a {
+    // Hand off ownership before the first poll. A caller can cancel a pending
+    // preparatory query and then drop the unpolled admission future.
+    transaction.close_on_drop();
+    admit(transaction.inner, guard, lock_timeout)
+}
+
+async fn admit(
+    mut transaction: GuardTransaction,
     guard: &EntitlementGuard,
     lock_timeout: &str,
 ) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
-    let mut transaction = transaction.inner;
     let admission = async {
         let previous_lock_timeout: String =
             sqlx::query_scalar("SELECT current_setting('lock_timeout', true)")
@@ -207,6 +140,7 @@ async fn require_entitlement_for_update_with_lock_timeout(
                 return rollback_guard_failure(transaction, EntitlementGuardError::Sql(error))
                     .await;
             }
+            transaction.on_drop = OnDrop::Rollback;
             Ok(AdmittedEntitlementWriteTransaction { inner: transaction })
         }
         GuardAccess::PastDue => {
@@ -226,7 +160,7 @@ async fn require_entitlement_for_update_with_lock_timeout(
 }
 
 async fn rollback_guard_failure(
-    transaction: Transaction<'static, Postgres>,
+    transaction: GuardTransaction,
     error: EntitlementGuardError,
 ) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
     match transaction.rollback().await {
@@ -347,11 +281,11 @@ pub async fn entitlement(
     entitlement_on_executor(pool, query).await
 }
 
-/// Runs the canonical entitlement projection on a caller-owned connection.
+/// Runs the read-only [`entitlement`] projection on a caller-owned connection.
 ///
-/// This is crate-visible so a composite read can retain the exact entitlement
-/// semantics while sharing one PostgreSQL snapshot with its other projections.
-pub(crate) async fn entitlement_on_connection(
+/// For protected writes, use [`require_entitlement_for_update`] and perform
+/// the mutation on the returned [`AdmittedEntitlementWriteTransaction`].
+pub async fn entitlement_on_connection(
     connection: &mut PgConnection,
     query: &EntitlementQuery,
 ) -> Result<Entitlement, EntitlementQueryError> {

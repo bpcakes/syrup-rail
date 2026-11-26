@@ -14,6 +14,7 @@ use super::{
 };
 use crate::test_support::{TestDatabase, create_gateway_account};
 
+mod checkout;
 mod projection;
 mod stale_attempts;
 
@@ -427,6 +428,10 @@ async fn canceling_a_blocked_protected_write_guard_rolls_back_the_transaction()
             .fetch_one(caller.connection())
             .await?;
         let mut observer = database.pool.acquire().await?;
+        let mut reserved = Vec::new();
+        for _ in 3..database.pool.options().get_max_connections() {
+            reserved.push(database.pool.acquire().await?);
+        }
 
         let wait_until_blocked = async {
             loop {
@@ -462,8 +467,13 @@ async fn canceling_a_blocked_protected_write_guard_rolls_back_the_transaction()
         .await
         .map_err(|_| io::Error::other("guard did not reach its advisory-lock wait"))??;
         drop(guard_future);
+        let replacement = tokio::time::timeout(Duration::from_secs(2), database.pool.acquire())
+            .await
+            .map_err(|_| io::Error::other("interrupted guard retained its pool slot"))??;
+        drop(replacement);
         holder.rollback().await?;
         assert_backend_transaction_ended(&mut observer, caller_pid).await?;
+        drop(reserved);
 
         let mut contender = database.pool.begin().await?;
         let aggregate_unlocked: bool = sqlx::query_scalar(
