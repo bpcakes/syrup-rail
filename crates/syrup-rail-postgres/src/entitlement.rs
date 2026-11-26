@@ -1,7 +1,6 @@
-use std::fmt;
-
 mod transaction;
 use transaction::GuardTransaction;
+pub use transaction::{AdmittedEntitlementWriteTransaction, EntitlementWriteTransaction};
 
 use chrono::{DateTime, Utc};
 use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, postgres::PgRow};
@@ -59,85 +58,6 @@ pub enum EntitlementGuardError {
     PastDue,
     #[error("{0}")]
     InvalidState(&'static str),
-}
-
-/// A top-level PostgreSQL transaction awaiting entitlement admission.
-///
-/// Create this transaction directly from a pool with [`Self::begin`]. It can
-/// carry host preparatory writes, but deliberately has no commit operation.
-/// Passing it to [`require_entitlement_for_update`] either rolls it back or
-/// transforms it into an [`AdmittedEntitlementWriteTransaction`].
-pub struct EntitlementWriteTransaction {
-    inner: GuardTransaction,
-}
-
-impl fmt::Debug for EntitlementWriteTransaction {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("EntitlementWriteTransaction")
-            .finish_non_exhaustive()
-    }
-}
-
-impl EntitlementWriteTransaction {
-    /// Starts a top-level transaction reserved for an entitlement-protected write.
-    pub async fn begin(pool: &PgPool) -> Result<Self, sqlx::Error> {
-        Ok(Self {
-            inner: GuardTransaction::begin(pool).await?,
-        })
-    }
-
-    /// Borrows the transaction connection for preparatory host database work.
-    ///
-    /// Callers must finish any nested savepoint before returning this value to
-    /// Syrup Rail. Leaking a savepoint would violate SQLx's transaction
-    /// lifecycle contract.
-    pub fn connection(&mut self) -> &mut PgConnection {
-        &mut self.inner
-    }
-
-    /// Explicitly rolls back the pending transaction.
-    pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.inner.rollback().await
-    }
-}
-
-/// A top-level transaction that passed entitlement admission.
-///
-/// Its entitlement rows and aggregate advisory lock remain held until this
-/// value is committed or rolled back. The protected host mutation must use
-/// [`Self::connection`] on this value.
-pub struct AdmittedEntitlementWriteTransaction {
-    inner: GuardTransaction,
-}
-
-impl fmt::Debug for AdmittedEntitlementWriteTransaction {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("AdmittedEntitlementWriteTransaction")
-            .finish_non_exhaustive()
-    }
-}
-
-impl AdmittedEntitlementWriteTransaction {
-    /// Borrows the admitted transaction connection for the host-owned protected mutation.
-    ///
-    /// Callers must finish any nested savepoint before committing or rolling
-    /// back this outer transaction. Leaking a savepoint would violate SQLx's
-    /// transaction lifecycle contract.
-    pub fn connection(&mut self) -> &mut PgConnection {
-        &mut self.inner
-    }
-
-    /// Commits the protected transaction and releases its entitlement locks.
-    pub async fn commit(self) -> Result<(), sqlx::Error> {
-        self.inner.commit().await
-    }
-
-    /// Rolls back the protected transaction and releases its entitlement locks.
-    pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.inner.rollback().await
-    }
 }
 
 fn map_subscription_persistence_error(
