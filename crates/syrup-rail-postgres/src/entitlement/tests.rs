@@ -419,6 +419,9 @@ async fn canceling_a_blocked_protected_write_guard_rolls_back_the_transaction()
         lock_entitlement_aggregate(&mut holder, subscriber).await?;
 
         let mut caller = EntitlementWriteTransaction::begin(&database.pool).await?;
+        sqlx::query("SET LOCAL client_connection_check_interval = '50ms'")
+            .execute(caller.connection())
+            .await?;
         sqlx::query("INSERT INTO host_entitlement_guard_probes (id) VALUES ($1)")
             .bind(probe_id)
             .execute(caller.connection())
@@ -462,8 +465,8 @@ async fn canceling_a_blocked_protected_write_guard_rolls_back_the_transaction()
         .await
         .map_err(|_| io::Error::other("guard did not reach its advisory-lock wait"))??;
         drop(guard_future);
-        holder.rollback().await?;
         assert_backend_transaction_ended(&mut observer, caller_pid).await?;
+        holder.rollback().await?;
 
         let mut contender = database.pool.begin().await?;
         let aggregate_unlocked: bool = sqlx::query_scalar(

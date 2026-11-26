@@ -1,7 +1,10 @@
 use std::fmt;
 
+mod transaction;
+use transaction::GuardTransaction;
+
 use chrono::{DateTime, Utc};
-use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, Transaction, postgres::PgRow};
+use sqlx::{Executor, PgConnection, PgPool, Postgres, Row, postgres::PgRow};
 use syrup_rail::{
     ActorId, AppliedSubscriptionDiscount, BillingPeriod, ChargeAmount, CurrencyCode,
     DiscountClaimId, Entitlement, EntitlementGuard, EntitlementQuery, GatewayAccountMode,
@@ -65,7 +68,7 @@ pub enum EntitlementGuardError {
 /// Passing it to [`require_entitlement_for_update`] either rolls it back or
 /// transforms it into an [`AdmittedEntitlementWriteTransaction`].
 pub struct EntitlementWriteTransaction {
-    inner: Transaction<'static, Postgres>,
+    inner: GuardTransaction,
 }
 
 impl fmt::Debug for EntitlementWriteTransaction {
@@ -80,7 +83,7 @@ impl EntitlementWriteTransaction {
     /// Starts a top-level transaction reserved for an entitlement-protected write.
     pub async fn begin(pool: &PgPool) -> Result<Self, sqlx::Error> {
         Ok(Self {
-            inner: pool.begin().await?,
+            inner: GuardTransaction::begin(pool).await?,
         })
     }
 
@@ -105,7 +108,7 @@ impl EntitlementWriteTransaction {
 /// value is committed or rolled back. The protected host mutation must use
 /// [`Self::connection`] on this value.
 pub struct AdmittedEntitlementWriteTransaction {
-    inner: Transaction<'static, Postgres>,
+    inner: GuardTransaction,
 }
 
 impl fmt::Debug for AdmittedEntitlementWriteTransaction {
@@ -154,8 +157,9 @@ fn map_subscription_persistence_error(
 /// admission. The returned transaction retains the accepted paid or grant rows
 /// and their aggregate advisory domain until the caller commits or rolls back
 /// its protected mutation. Every completed denial or storage failure awaits a
-/// full rollback. Canceling the future drops the owned transaction and queues a
-/// full rollback, so a caller cannot continue an unguarded write.
+/// full rollback. Canceling the future closes the checkout. A query still waiting for a
+/// lock cannot delay returning pool capacity, and the server rolls back the
+/// transaction on disconnect.
 ///
 /// The guard temporarily applies a 250 millisecond `lock_timeout` and restores
 /// the caller's prior transaction-local value before returning successfully.
@@ -226,7 +230,7 @@ async fn require_entitlement_for_update_with_lock_timeout(
 }
 
 async fn rollback_guard_failure(
-    transaction: Transaction<'static, Postgres>,
+    transaction: GuardTransaction,
     error: EntitlementGuardError,
 ) -> Result<AdmittedEntitlementWriteTransaction, EntitlementGuardError> {
     match transaction.rollback().await {
